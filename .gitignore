@@ -1,0 +1,38 @@
+# Build artifacts
+build/
+cmake-build-*/
+
+# IDE & tool cache
+.cache/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Compiled binaries / firmware
+*.elf
+*.hex
+*.bin
+*.map
+
+# CMake / Ninja
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+compile_commands.json
+
+# STM32CubeMX generated (optional - uncomment if unwanted)
+# .mxproject
+# .cproject
+# .project
+# REF-STM32F4-fw.ioc
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Python scripts (if any are build scripts, keep; if local dev only, exclude)
+# *.py
