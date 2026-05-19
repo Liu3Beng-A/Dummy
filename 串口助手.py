@@ -5,7 +5,7 @@ import serial.tools.list_ports
 import threading
 import time
 import math
-
+#你好
 class RobotSerialAssistant:
     def __init__(self, root):
         self.root = root
