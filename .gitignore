@@ -2,6 +2,11 @@
 build/
 cmake-build-*/
 
+# Firmware folders
+dummy-ref-core-fw/
+dummy-motor-fw/
+esp32-iot/
+
 # IDE & tool cache
 .cache/
 .vscode/
