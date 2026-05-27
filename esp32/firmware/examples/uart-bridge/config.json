@@ -1,0 +1,1 @@
+{"tcp":{"url":"tcp://0.0.0.0:20","enable":true},"ws":{"url":"ws://0.0.0.0:4002","enable":true},"mqtt":{"url":"mqtt://broker.hivemq.com:1883?tx=dummy/tx&rx=dummy/rx","enable":true},"rx":27,"tx":26,"baud":115200}

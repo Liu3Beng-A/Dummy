@@ -264,9 +264,11 @@ class RobotSerialAssistant:
         torque_grid = ttk.Frame(torque_frame)
         torque_grid.pack(fill=tk.X, pady=(0, 6))
         self.ent_torques = []
-        for i in range(6):
-            r, c = divmod(i, 3) 
-            ttk.Label(torque_grid, text=f"J{i+1}(A):").grid(row=r, column=c*2, padx=(5, 2), pady=3, sticky="e")
+        for i in range(7):
+            r, c = divmod(i, 4) 
+            lbl_text = f"J{i+1}" if i < 6 else "J7(地轨)"
+            lbl_color = ("Arial", 9, "bold") if i < 6 else ("Arial", 9, "bold")
+            ttk.Label(torque_grid, text=f"{lbl_text}(A):").grid(row=r, column=c*2, padx=(5, 2), pady=3, sticky="e")
             ent = ttk.Entry(torque_grid, width=6)
             ent.insert(0, "0.0")
             ent.grid(row=r, column=c*2+1, padx=2, pady=3, sticky="w")
@@ -279,7 +281,7 @@ class RobotSerialAssistant:
         right_frame.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
 
         # 1. 关节运动 MoveJ
-        movej_frame = ttk.LabelFrame(right_frame, text="关节控制 (MoveJ: >j1,j2,j3,j4,j5,j6,speed)", padding=6)
+        movej_frame = ttk.LabelFrame(right_frame, text="关节控制 (MoveJ: >j1~j6, j7(地轨mm), speed)", padding=6)
         movej_frame.pack(fill=tk.X, pady=(0, 6))
         
         movej_grid = ttk.Frame(movej_frame)
@@ -336,6 +338,42 @@ class RobotSerialAssistant:
                     pass
             ent.bind("<Return>", update_joint_scl)
             ent.bind("<FocusOut>", update_joint_scl)
+        
+        # 地轨滑块 (J7, 单位: mm, 范围 0~500)
+        ttk.Label(movej_grid, text="J7(地轨):", font=("Arial", 9, "bold"), foreground="#007ACC").grid(row=6, column=0, padx=5, pady=1)
+        self.ent_j7 = ttk.Entry(movej_grid, width=6)
+        self.ent_j7.insert(0, "0")
+        self.ent_j7.grid(row=6, column=1, padx=5, pady=1)
+        
+        self.scl_j7 = ttk.Scale(movej_grid, from_=0, to=500, orient=tk.HORIZONTAL)
+        self.scl_j7.set(0)
+        self.scl_j7.grid(row=6, column=2, sticky="ew", padx=10, pady=1)
+        
+        self.lbl_j7 = ttk.Label(movej_grid, text="0.0 mm", width=8, anchor="e")
+        self.lbl_j7.grid(row=6, column=3, padx=5, pady=1)
+        
+        def update_j7_entry(val):
+            v = float(val)
+            self.lbl_j7.config(text=f"{v:.1f} mm")
+            current_val = f"{v:.1f}"
+            if self.ent_j7.get() != current_val:
+                self.ent_j7.delete(0, tk.END)
+                self.ent_j7.insert(0, current_val)
+            if self.movej_drag_enable.get():
+                now = time.time()
+                if now - self.last_movej_send_time > 0.1:
+                    self.last_movej_send_time = now
+                    self.root.after(1, self.send_movej)
+        self.scl_j7.config(command=update_j7_entry)
+        
+        def update_j7_scl(event):
+            try:
+                v = float(self.ent_j7.get())
+                self.scl_j7.set(v)
+            except ValueError:
+                pass
+        self.ent_j7.bind("<Return>", update_j7_scl)
+        self.ent_j7.bind("<FocusOut>", update_j7_scl)
         
         movej_ctrl = ttk.Frame(movej_frame)
         movej_ctrl.pack(fill=tk.X, pady=(5, 0))
@@ -576,8 +614,9 @@ class RobotSerialAssistant:
     def send_movej(self):
         try:
             joints = [float(ent.get()) for ent in self.ent_joints]
+            j7 = float(self.ent_j7.get())
             speed = float(self.ent_j_speed.get())
-            cmd = f">{joints[0]},{joints[1]},{joints[2]},{joints[3]},{joints[4]},{joints[5]},{speed}"
+            cmd = f">{joints[0]},{joints[1]},{joints[2]},{joints[3]},{joints[4]},{joints[5]},{j7},{speed}"
             self.send_cmd(cmd)
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
@@ -594,7 +633,8 @@ class RobotSerialAssistant:
     def send_torque(self):
         try:
             torques = [float(ent.get()) for ent in self.ent_torques]
-            cmd = f"${torques[0]:.2f},{torques[1]:.2f},{torques[2]:.2f},{torques[3]:.2f},{torques[4]:.2f},{torques[5]:.2f}"
+            # $c1,c2,c3,c4,c5,c6,c7(地轨)
+            cmd = f"${torques[0]:.2f},{torques[1]:.2f},{torques[2]:.2f},{torques[3]:.2f},{torques[4]:.2f},{torques[5]:.2f},{torques[6]:.2f}"
             self.send_cmd(cmd)
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
@@ -619,7 +659,7 @@ class RobotSerialAssistant:
 
     def servoj_test_loop(self):
         start_time = time.time()
-        base_joints = [0, -75, 180, 0, 0, 0]
+        base_joints = [0, -75, 180, 0, 0, 0, 0]  # 7个关节: J1-J6 + J7(地轨)
         
         kp = 0.5
         current_joint_cache = base_joints.copy()
@@ -631,7 +671,7 @@ class RobotSerialAssistant:
             error_j1 = target_j1 - current_joint_cache[0]
             current_joint_cache[0] += error_j1 * kp
             
-            cmd = f">{current_joint_cache[0]:.2f},{base_joints[1]},{base_joints[2]},{base_joints[3]},{base_joints[4]},{base_joints[5]}\n"
+            cmd = f">{current_joint_cache[0]:.2f},{base_joints[1]},{base_joints[2]},{base_joints[3]},{base_joints[4]},{base_joints[5]},{base_joints[6]:.2f}"
             try:
                 self.serial_port.write(cmd.encode('utf-8'))
                 if int(t * 50) % 20 == 0:
