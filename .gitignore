@@ -1,0 +1,25 @@
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln.docstates
+
+# Build outputs
+build/
+Debug/
+Release/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+
+# Cache
+.cache/
+.clangd/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
