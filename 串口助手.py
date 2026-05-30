@@ -113,6 +113,14 @@ class RobotSerialAssistant:
         ttk.Button(query_btn_frame, text="调试输出", command=lambda: self.send_cmd("!PRINTPOSE")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         
         ttk.Separator(query_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+        
+        # 标定按钮行
+        calib_frame = ttk.Frame(query_frame)
+        calib_frame.pack(fill=tk.X)
+        ttk.Button(calib_frame, text="标定零点 !CALIBRATION", command=self.send_calibration, 
+                   style="Accent.TButton").pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        
+        ttk.Separator(query_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
         ttk.Label(query_frame, text="关节置零 (Home Offset):", font=("Arial", 9, "bold")).pack(anchor="w", pady=(0, 3))
         
         offset_inner = ttk.Frame(query_frame)
@@ -131,6 +139,10 @@ class RobotSerialAssistant:
         ttk.Button(hand_top, text="失能", command=lambda: self.send_cmd("!HAND_DIS")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         ttk.Button(hand_top, text="张开", command=lambda: self.send_cmd("!HAND_O")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         ttk.Button(hand_top, text="闭合", command=lambda: self.send_cmd("!HAND_C")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        
+        hand_calib_frame = ttk.Frame(hand_frame)
+        hand_calib_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(hand_calib_frame, text="标定 !HAND_ZERO", command=self.send_hand_zero).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         
         hand_slider = ttk.Frame(hand_frame)
         hand_slider.pack(fill=tk.X)
@@ -211,6 +223,8 @@ class RobotSerialAssistant:
         
         ttk.Separator(rgb_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
         
+        ttk.Separator(rgb_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+        
         rgb_state = ttk.Frame(rgb_frame)
         rgb_state.pack(fill=tk.X)
         ttk.Label(rgb_state, text="状态绑定:").pack(side=tk.LEFT, padx=(0, 5))
@@ -219,19 +233,19 @@ class RobotSerialAssistant:
         self.cb_state_start.current(0)
         ttk.Label(rgb_state, text="开机:").pack(side=tk.LEFT)
         self.cb_state_start.pack(side=tk.LEFT, padx=2)
-        ttk.Button(rgb_state, text="设", width=3, command=lambda: self.send_cmd(f"!RGB_SET_ST {self.cb_state_start.get()}")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(rgb_state, text="设", width=3, command=self.set_rgb_state_start).pack(side=tk.LEFT, padx=(0, 5))
         
         self.cb_state_enable = ttk.Combobox(rgb_state, width=2, values=[str(i) for i in range(10)], state="readonly")
         self.cb_state_enable.current(1)
         ttk.Label(rgb_state, text="使能:").pack(side=tk.LEFT)
         self.cb_state_enable.pack(side=tk.LEFT, padx=2)
-        ttk.Button(rgb_state, text="设", width=3, command=lambda: self.send_cmd(f"!RGB_SET_EN {self.cb_state_enable.get()}")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(rgb_state, text="设", width=3, command=self.set_rgb_state_enable).pack(side=tk.LEFT, padx=(0, 5))
         
         self.cb_state_disable = ttk.Combobox(rgb_state, width=2, values=[str(i) for i in range(10)], state="readonly")
         self.cb_state_disable.current(2)
         ttk.Label(rgb_state, text="失能:").pack(side=tk.LEFT)
         self.cb_state_disable.pack(side=tk.LEFT, padx=2)
-        ttk.Button(rgb_state, text="设", width=3, command=lambda: self.send_cmd(f"!RGB_SET_DI {self.cb_state_disable.get()}")).pack(side=tk.LEFT)
+        ttk.Button(rgb_state, text="设", width=3, command=self.set_rgb_state_disable).pack(side=tk.LEFT)
 
         # 2. 电机配置
         acc_frame = ttk.LabelFrame(middle_frame, text="电机参数配置", padding=6)
@@ -241,21 +255,135 @@ class RobotSerialAssistant:
         acc_grid.pack(fill=tk.X)
         
         ttk.Label(acc_grid, text="节点(1-7):").grid(row=0, column=0, sticky="w", pady=3)
-        self.cb_acc_node = ttk.Combobox(acc_grid, width=5, values=[str(i) for i in range(1, 8)], state="readonly")
+        self.cb_acc_node = ttk.Combobox(acc_grid, width=5, values=[str(i) for i in range(0, 8)], state="readonly")
         self.cb_acc_node.current(0)
         self.cb_acc_node.grid(row=0, column=1, padx=5, pady=3, sticky="w")
-        
+
         ttk.Label(acc_grid, text="基础加速(1-2000):").grid(row=1, column=0, sticky="w", pady=3)
         self.ent_acc_val = ttk.Entry(acc_grid, width=8)
         self.ent_acc_val.insert(0, "150")
         self.ent_acc_val.grid(row=1, column=1, padx=5, pady=3, sticky="w")
         ttk.Button(acc_grid, text="设置加速", command=self.send_acc_base).grid(row=1, column=2, padx=10, pady=3)
-        
+
         ttk.Label(acc_grid, text="最大电流(A):").grid(row=2, column=0, sticky="w", pady=3)
         self.ent_i_limit = ttk.Entry(acc_grid, width=8)
         self.ent_i_limit.insert(0, "1.5")
         self.ent_i_limit.grid(row=2, column=1, padx=5, pady=3, sticky="w")
         ttk.Button(acc_grid, text="设置电流", command=self.send_i_limit).grid(row=2, column=2, padx=10, pady=3)
+
+        ttk.Separator(acc_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+
+        # 地轨速度设置
+        rail_speed_frame = ttk.LabelFrame(acc_frame, text="地轨速度设置 (#SPEED_RAIL)", padding=6)
+        rail_speed_frame.pack(fill=tk.X)
+
+        rail_speed_inner = ttk.Frame(rail_speed_frame)
+        rail_speed_inner.pack(fill=tk.X)
+
+        ttk.Label(rail_speed_inner, text="速度(mm/s):", font=("Arial", 9)).pack(side=tk.LEFT)
+        self.ent_rail_speed = ttk.Entry(rail_speed_inner, width=6, font=("Arial", 9))
+        self.ent_rail_speed.insert(0, "50")
+        self.ent_rail_speed.pack(side=tk.LEFT, padx=(5, 5))
+
+        self.scl_rail_speed = ttk.Scale(rail_speed_inner, from_=0.5, to=100, orient=tk.HORIZONTAL)
+        self.scl_rail_speed.set(50)
+        self.scl_rail_speed.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        self.lbl_rail_speed_val = ttk.Label(rail_speed_inner, text="50.0", width=6, font=("Arial", 9))
+        self.lbl_rail_speed_val.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(rail_speed_inner, text="查询", width=5,
+                   command=self.query_rail_speed).pack(side=tk.LEFT, padx=2)
+        ttk.Button(rail_speed_inner, text="应用", width=5,
+                   command=self.apply_rail_speed).pack(side=tk.LEFT, padx=2)
+        ttk.Button(rail_speed_inner, text="保存", width=5,
+                   command=self.save_rail_speed).pack(side=tk.LEFT, padx=2)
+
+        def update_rail_speed_from_scale(val):
+            v = float(val)
+            self.lbl_rail_speed_val.config(text=f"{v:.1f}")
+            if self.ent_rail_speed.get() != f"{v:.1f}":
+                self.ent_rail_speed.delete(0, tk.END)
+                self.ent_rail_speed.insert(0, f"{v:.1f}")
+
+        self.scl_rail_speed.config(command=update_rail_speed_from_scale)
+
+        def update_rail_speed_from_entry(event):
+            try:
+                v = float(self.ent_rail_speed.get())
+                if v < 0.5:
+                    v = 0.5
+                elif v > 100:
+                    v = 100
+                self.scl_rail_speed.set(v)
+                self.lbl_rail_speed_val.config(text=f"{v:.1f}")
+            except ValueError:
+                pass
+
+        self.ent_rail_speed.bind("<Return>", update_rail_speed_from_entry)
+        self.ent_rail_speed.bind("<FocusOut>", update_rail_speed_from_entry)
+
+        # 地轨加速度设置
+        rail_acc_inner_frame = ttk.Frame(acc_frame)
+        rail_acc_inner_frame.pack(fill=tk.X, pady=(6, 0))
+
+        rail_acc_frame = ttk.LabelFrame(rail_acc_inner_frame, text="地轨加速度设置 (#ACC_RAIL)", padding=6)
+        rail_acc_frame.pack(fill=tk.X)
+
+        rail_acc_control = ttk.Frame(rail_acc_frame)
+        rail_acc_control.pack(fill=tk.X)
+
+        ttk.Label(rail_acc_control, text="加速度(mm/s2):", font=("Arial", 9)).pack(side=tk.LEFT)
+        self.ent_rail_acc = ttk.Entry(rail_acc_control, width=7, font=("Arial", 9))
+        self.ent_rail_acc.insert(0, "500")
+        self.ent_rail_acc.pack(side=tk.LEFT, padx=(5, 5))
+
+        self.scl_rail_acc = ttk.Scale(rail_acc_control, from_=10, to=5000, orient=tk.HORIZONTAL)
+        self.scl_rail_acc.set(500)
+        self.scl_rail_acc.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        self.lbl_rail_acc_val = ttk.Label(rail_acc_control, text="500", width=6, font=("Arial", 9))
+        self.lbl_rail_acc_val.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(rail_acc_control, text="查询", width=5,
+                   command=self.query_rail_acc).pack(side=tk.LEFT, padx=2)
+        ttk.Button(rail_acc_control, text="应用", width=5,
+                   command=self.apply_rail_acc).pack(side=tk.LEFT, padx=2)
+        ttk.Button(rail_acc_control, text="保存", width=5,
+                   command=self.save_rail_acc).pack(side=tk.LEFT, padx=2)
+
+        def update_rail_acc_from_scale(val):
+            v = float(val)
+            self.lbl_rail_acc_val.config(text=f"{int(v)}")
+            if self.ent_rail_acc.get() != str(int(v)):
+                self.ent_rail_acc.delete(0, tk.END)
+                self.ent_rail_acc.insert(0, str(int(v)))
+
+        self.scl_rail_acc.config(command=update_rail_acc_from_scale)
+
+        def update_rail_acc_from_entry(event):
+            try:
+                v = float(self.ent_rail_acc.get())
+                if v < 10:
+                    v = 10
+                elif v > 5000:
+                    v = 5000
+                self.scl_rail_acc.set(v)
+                self.lbl_rail_acc_val.config(text=f"{int(v)}")
+            except ValueError:
+                pass
+
+        self.ent_rail_acc.bind("<Return>", update_rail_acc_from_entry)
+        self.ent_rail_acc.bind("<FocusOut>", update_rail_acc_from_entry)
+
+        # 地轨专用电流设置
+        rail_curr_frame = ttk.Frame(acc_frame)
+        rail_curr_frame.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(rail_curr_frame, text="地轨电流:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(rail_curr_frame, text="设置 2.8A", width=10,
+                   command=lambda: self.set_rail_current(2.8)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(rail_curr_frame, text="设置 1.5A", width=10,
+                   command=lambda: self.set_rail_current(1.5)).pack(side=tk.LEFT, padx=2)
 
         # 3. 力矩控制 (增加 expand=True, fill=tk.BOTH 保证底部对齐)
         torque_frame = ttk.LabelFrame(middle_frame, text="电流力矩控制 ($)", padding=6)
@@ -339,16 +467,16 @@ class RobotSerialAssistant:
             ent.bind("<Return>", update_joint_scl)
             ent.bind("<FocusOut>", update_joint_scl)
         
-        # 地轨滑块 (J7, 单位: mm, 范围 0~500)
+        # 地轨滑块 (J7, 单位: mm, 范围 -250~250，支持手动归位)
         ttk.Label(movej_grid, text="J7(地轨):", font=("Arial", 9, "bold"), foreground="#007ACC").grid(row=6, column=0, padx=5, pady=1)
         self.ent_j7 = ttk.Entry(movej_grid, width=6)
         self.ent_j7.insert(0, "0")
         self.ent_j7.grid(row=6, column=1, padx=5, pady=1)
-        
-        self.scl_j7 = ttk.Scale(movej_grid, from_=0, to=500, orient=tk.HORIZONTAL)
+
+        self.scl_j7 = ttk.Scale(movej_grid, from_=-250, to=250, orient=tk.HORIZONTAL)
         self.scl_j7.set(0)
         self.scl_j7.grid(row=6, column=2, sticky="ew", padx=10, pady=1)
-        
+
         self.lbl_j7 = ttk.Label(movej_grid, text="0.0 mm", width=8, anchor="e")
         self.lbl_j7.grid(row=6, column=3, padx=5, pady=1)
         
@@ -374,7 +502,22 @@ class RobotSerialAssistant:
                 pass
         self.ent_j7.bind("<Return>", update_j7_scl)
         self.ent_j7.bind("<FocusOut>", update_j7_scl)
-        
+
+        # 地轨手动左移右移按钮
+        rail_ctrl = ttk.Frame(movej_frame)
+        rail_ctrl.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(rail_ctrl, text="地轨手动:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(5, 5))
+
+        self.ent_rail_step = ttk.Entry(rail_ctrl, width=6, font=("Arial", 9))
+        self.ent_rail_step.insert(0, "10")
+        self.ent_rail_step.pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Label(rail_ctrl, text="mm/次", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Button(rail_ctrl, text="← 左移", width=8,
+                   command=self.rail_move_left).pack(side=tk.LEFT, padx=2)
+        ttk.Button(rail_ctrl, text="右移 →", width=8,
+                   command=self.rail_move_right).pack(side=tk.LEFT, padx=2)
+
         movej_ctrl = ttk.Frame(movej_frame)
         movej_ctrl.pack(fill=tk.X, pady=(5, 0))
         ttk.Label(movej_ctrl, text="Speed:").pack(side=tk.LEFT, padx=(5, 2))
@@ -556,6 +699,18 @@ class RobotSerialAssistant:
             self.send_cmd(cmd)
             self.ent_custom_cmd.delete(0, tk.END)
 
+    def set_rgb_state_start(self):
+        idx = int(self.cb_state_start.get())
+        self.send_cmd(f"!RGB_SET_START {idx}")
+
+    def set_rgb_state_enable(self):
+        idx = int(self.cb_state_enable.get())
+        self.send_cmd(f"!RGB_SET_ENABLE {idx}")
+
+    def set_rgb_state_disable(self):
+        idx = int(self.cb_state_disable.get())
+        self.send_cmd(f"!RGB_SET_DISABLE {idx}")
+
     def send_hand_pos(self):
         try:
             pos = int(self.ent_hand_pos.get())
@@ -565,6 +720,16 @@ class RobotSerialAssistant:
                 messagebox.showerror("错误", "夹爪开度必须在 0~100 之间")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
+
+    def send_calibration(self):
+        """发送 !CALIBRATION 命令，对所有6个关节应用当前电机位置作为零点偏移"""
+        self.send_cmd("!CALIBRATION")
+        self.log("已发送 !CALIBRATION（关节零点标定）", "INFO")
+
+    def send_hand_zero(self):
+        """发送 !HAND_ZERO 命令，将夹爪当前位置设为零点"""
+        self.send_cmd("!HAND_ZERO")
+        self.log("已发送 !HAND_ZERO（夹爪标定）", "INFO")
 
     def send_home_offset_all(self):
         if not self.is_connected or not self.serial_port:
@@ -604,10 +769,105 @@ class RobotSerialAssistant:
         try:
             node = int(self.cb_acc_node.get())
             i_limit = float(self.ent_i_limit.get())
-            if 1 <= node <= 7 and i_limit > 0:
+            if 0 <= node <= 7 and i_limit > 0:
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit}")
             else:
-                messagebox.showerror("错误", "节点必须为1-7，电流必须大于0")
+                messagebox.showerror("错误", "节点必须为0-7，电流必须大于0")
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字")
+
+    def send_rail_speed(self):
+        self.apply_rail_speed()
+
+    def apply_rail_speed(self):
+        try:
+            speed = float(self.ent_rail_speed.get())
+            if speed < 0.5:
+                speed = 0.5
+            elif speed > 100:
+                speed = 100
+            self.send_cmd(f"#SPEED_RAIL {speed:.1f}")
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字")
+
+    def save_rail_speed(self):
+        try:
+            speed = float(self.ent_rail_speed.get())
+            if speed < 0.5:
+                speed = 0.5
+            elif speed > 100:
+                speed = 100
+            self.send_cmd(f"#SPEED_RAIL {speed:.1f} &")
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字")
+
+    def query_rail_speed(self):
+        self.send_cmd("#SPEED_RAIL")
+
+    def send_rail_acc(self):
+        self.apply_rail_acc()
+
+    def apply_rail_acc(self):
+        try:
+            acc = float(self.ent_rail_acc.get())
+            if acc < 10:
+                acc = 10
+            elif acc > 5000:
+                acc = 5000
+            self.send_cmd(f"#ACC_RAIL {acc:.1f}")
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字")
+
+    def save_rail_acc(self):
+        try:
+            acc = float(self.ent_rail_acc.get())
+            if acc < 10:
+                acc = 10
+            elif acc > 5000:
+                acc = 5000
+            self.send_cmd(f"#ACC_RAIL {acc:.1f} &")
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字")
+
+    def query_rail_acc(self):
+        self.send_cmd("#ACC_RAIL")
+
+    def set_rail_current(self, current):
+        """设置地轨电机电流限制"""
+        self.send_cmd(f"#I_LIMIT_J 0 {current}")
+        self.log(f"已设置地轨电流限制为 {current}A", "INFO")
+
+    def rail_move_left(self):
+        if not self.is_connected:
+            self.log("未连接串口", "WARN")
+            return
+        try:
+            delta = float(self.ent_rail_step.get())
+            current_j7 = float(self.ent_j7.get())
+            new_j7 = current_j7 - delta
+            speed = float(self.ent_rail_speed.get())
+
+            # 读取当前 J1-J6 的值
+            joints = [float(ent.get()) for ent in self.ent_joints]
+            cmd = f">{joints[0]},{joints[1]},{joints[2]},{joints[3]},{joints[4]},{joints[5]},{new_j7},{speed}"
+            self.send_cmd(cmd)
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字")
+
+    def rail_move_right(self):
+        if not self.is_connected:
+            self.log("未连接串口", "WARN")
+            return
+        try:
+            delta = float(self.ent_rail_step.get())
+            current_j7 = float(self.ent_j7.get())
+            new_j7 = current_j7 + delta
+            speed = float(self.ent_rail_speed.get())
+
+            # 读取当前 J1-J6 的值
+            joints = [float(ent.get()) for ent in self.ent_joints]
+            cmd = f">{joints[0]},{joints[1]},{joints[2]},{joints[3]},{joints[4]},{joints[5]},{new_j7},{speed}"
+            self.send_cmd(cmd)
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 

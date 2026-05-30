@@ -1,3 +1,0 @@
-E:/Dummy-code/firmware/motor_fw_f103/build/CMakeFiles/Ctrl-Step-STM32-fw.elf.dir
-E:/Dummy-code/firmware/motor_fw_f103/build/CMakeFiles/edit_cache.dir
-E:/Dummy-code/firmware/motor_fw_f103/build/CMakeFiles/rebuild_cache.dir
