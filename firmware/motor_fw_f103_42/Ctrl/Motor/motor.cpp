@@ -259,6 +259,9 @@ void Motor::CloseLoopControlTick()
     /******************************** State Check ********************************/
     int32_t current = abs(controller->focCurrent);
 
+    // stallThreshold 需在 stallProtectSwitch 判断外层声明，供 overload 检测复用
+    const int32_t stallThreshold = (int32_t)(config.motionParams.ratedCurrent * 95 / 100);
+
     // Stall detect
     if (controller->config->stallProtectSwitch)
     {
@@ -266,8 +269,8 @@ void Motor::CloseLoopControlTick()
             ((controller->modeRunning == MODE_COMMAND_CURRENT ||
               controller->modeRunning == MODE_PWM_CURRENT) &&
              (current != 0))
-            || // Other Mode
-            current == config.motionParams.ratedCurrent)
+            || // Other Mode: current >= ratedCurrent * 0.95
+            current >= stallThreshold)
         {
             if (abs(controller->estVelocity) < MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 5)
             {
@@ -285,7 +288,7 @@ void Motor::CloseLoopControlTick()
     // Overload detect
     if ((controller->modeRunning != MODE_COMMAND_CURRENT) &&
         (controller->modeRunning != MODE_PWM_CURRENT) &&
-        (current == config.motionParams.ratedCurrent))
+        (current >= stallThreshold))
     {
         if (controller->overloadTime >= 1000 * 1000)
             controller->overloadFlag = true;

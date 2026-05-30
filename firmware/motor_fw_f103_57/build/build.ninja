@@ -12,7 +12,7 @@
 
 # =============================================================================
 # Project: Ctrl-Step-STM32-fw
-# Configurations: 
+# Configurations: Release
 # =============================================================================
 
 #############################################
@@ -20,6 +20,11 @@
 
 ninja_required_version = 1.5
 
+
+#############################################
+# Set configuration variable for custom commands.
+
+CONFIGURATION = Release
 # =============================================================================
 # Include auxiliary files.
 
@@ -44,554 +49,504 @@ cmake_ninja_workdir = E$:/Dummy-code/firmware/motor_fw_f103_57/build/
 
 build cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf: phony || .
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/adc.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/adc.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/adc.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/adc.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\adc.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/can.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/can.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/can.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/can.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\can.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/dma.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/dma.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/dma.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/dma.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\dma.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/gpio.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/gpio.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/gpio.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/gpio.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\gpio.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/main.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/main.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/main.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/main.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\main.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/spi.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/spi.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/spi.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/spi.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\spi.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/stm32f1xx_hal_msp.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/stm32f1xx_hal_msp.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/stm32f1xx_hal_msp.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/stm32f1xx_hal_msp.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\stm32f1xx_hal_msp.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/stm32f1xx_it.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/stm32f1xx_it.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/stm32f1xx_it.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/stm32f1xx_it.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\stm32f1xx_it.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/syscalls.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/syscalls.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/syscalls.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/syscalls.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\syscalls.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/system_stm32f1xx.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/system_stm32f1xx.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/system_stm32f1xx.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/system_stm32f1xx.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\system_stm32f1xx.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/tim.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/tim.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/tim.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/tim.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\tim.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/usart.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/usart.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/usart.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Core/Src/usart.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src\usart.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Core\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Driver/tb67h450_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Driver/tb67h450_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Driver/tb67h450_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Driver/tb67h450_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Driver\tb67h450_base.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Driver
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Motor/motion_planner.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Motor/motion_planner.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Motor/motion_planner.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Motor/motion_planner.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Motor\motion_planner.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Motor
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Motor/motor.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Motor/motor.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Motor/motor.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Motor/motor.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Motor\motor.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Motor
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Sensor/Encoder/encoder_calibrator_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor/Encoder/encoder_calibrator_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Sensor/Encoder/encoder_calibrator_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor/Encoder/encoder_calibrator_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Sensor\Encoder\encoder_calibrator_base.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Sensor\Encoder
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Sensor/Encoder/mt6816_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor/Encoder/mt6816_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Sensor/Encoder/mt6816_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor/Encoder/mt6816_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Sensor\Encoder\mt6816_base.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Sensor\Encoder
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Signal/button_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal/button_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Signal/button_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal/button_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Signal\button_base.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Signal
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Signal/led_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal/led_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Signal/led_base.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal/led_base.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Signal\led_base.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Ctrl\Signal
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_adc.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_adc_ex.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_can.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_can.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_can.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_can.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_can.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_cortex.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_dma.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_exti.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_flash.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_flash_ex.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_gpio.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_gpio_ex.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_pwr.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_rcc.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_rcc_ex.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_spi.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_tim.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim_ex.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim_ex.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_tim_ex.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_uart.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Drivers\STM32F1xx_HAL_Driver\Src
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Memory/emulated_eeprom.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Port/Platform/Memory/emulated_eeprom.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Memory/emulated_eeprom.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Port/Platform/Memory/emulated_eeprom.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\Platform\Memory\emulated_eeprom.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\Platform\Memory
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Memory/stockpile_f103cb.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Port/Platform/Memory/stockpile_f103cb.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Memory/stockpile_f103cb.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Port/Platform/Memory/stockpile_f103cb.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\Platform\Memory\stockpile_f103cb.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\Platform\Memory
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Utils/st_hardware.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Port/Platform/Utils/st_hardware.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Utils/st_hardware.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Port/Platform/Utils/st_hardware.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\Platform\Utils\st_hardware.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\Platform\Utils
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/retarget.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Port/Platform/retarget.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/retarget.c.obj: C_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Port/Platform/retarget.c || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\Platform\retarget.c.obj.d
-  FLAGS = -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\Platform
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/button_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Port/button_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/button_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Port/button_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\button_stm32.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/encoder_calibrator_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Port/encoder_calibrator_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/encoder_calibrator_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Port/encoder_calibrator_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\encoder_calibrator_stm32.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/led_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Port/led_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/led_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Port/led_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\led_stm32.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/mt6816_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Port/mt6816_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/mt6816_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Port/mt6816_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\mt6816_stm32.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/tb67h450_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/Port/tb67h450_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/tb67h450_stm32.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/Port/tb67h450_stm32.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port\tb67h450_stm32.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\Port
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/main.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/UserApp/main.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/main.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/UserApp/main.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\UserApp\main.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\UserApp
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/protocols/interface_can.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/UserApp/protocols/interface_can.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/protocols/interface_can.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/UserApp/protocols/interface_can.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\UserApp\protocols\interface_can.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\UserApp\protocols
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/protocols/interface_uart.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/UserApp/protocols/interface_uart.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/protocols/interface_uart.cpp.obj: CXX_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/UserApp/protocols/interface_uart.cpp || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\UserApp\protocols\interface_uart.cpp.obj.d
-  FLAGS = -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -std=gnu++17 -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\UserApp\protocols
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
-build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/startup/startup_stm32f103xb.s.obj: ASM_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_ E$:/Dummy-code/firmware/motor_fw_f103_57/startup/startup_stm32f103xb.s || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/startup/startup_stm32f103xb.s.obj: ASM_COMPILER__Ctrl-Step-STM32-fw.2eelf_unscanned_Release E$:/Dummy-code/firmware/motor_fw_f103_57/startup/startup_stm32f103xb.s || cmake_object_order_depends_target_Ctrl-Step-STM32-fw.elf
+  CONFIG = Release
   DEFINES = -DSTM32F1 -DSTM32F103xB -DSTM32F1xx -DUSE_HAL_DRIVER -D__MICROLIB
   DEP_FILE = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\startup\startup_stm32f103xb.s.obj.d
-  FLAGS = -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Og -g
+  FLAGS = -O3 -DNDEBUG -mcpu=cortex-m3 -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -Ofast
   INCLUDES = -IE:/Dummy-code/firmware/motor_fw_f103_57/Core/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Device/ST/STM32F1xx/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Drivers/CMSIS/Include -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Sensor -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/Signal -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/LowLevel -IE:/Dummy-code/firmware/motor_fw_f103_57/Ctrl/MotorControl -IE:/Dummy-code/firmware/motor_fw_f103_57/UserApp -IE:/Dummy-code/firmware/motor_fw_f103_57/Port
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   OBJECT_FILE_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\startup
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
 
@@ -602,14 +557,15 @@ build CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/startup/startup_stm32f103xb.s.obj: A
 #############################################
 # Link the executable Ctrl-Step-STM32-fw.elf
 
-build Ctrl-Step-STM32-fw.elf: CXX_EXECUTABLE_LINKER__Ctrl-Step-STM32-fw.2eelf_ CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/adc.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/can.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/dma.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/gpio.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/main.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/spi.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/stm32f1xx_hal_msp.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/stm32f1xx_it.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/syscalls.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/system_stm32f1xx.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/tim.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/usart.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Driver/tb67h450_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Motor/motion_planner.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Motor/motor.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Sensor/Encoder/encoder_calibrator_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Sensor/Encoder/mt6816_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Signal/button_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Signal/led_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_can.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Memory/emulated_eeprom.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Memory/stockpile_f103cb.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Utils/st_hardware.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/retarget.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/button_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/encoder_calibrator_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/led_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/mt6816_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/tb67h450_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/main.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/protocols/interface_can.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/protocols/interface_uart.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/startup/startup_stm32f103xb.s.obj
+build Ctrl-Step-STM32-fw.elf: CXX_EXECUTABLE_LINKER__Ctrl-Step-STM32-fw.2eelf_Release CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/adc.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/can.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/dma.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/gpio.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/main.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/spi.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/stm32f1xx_hal_msp.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/stm32f1xx_it.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/syscalls.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/system_stm32f1xx.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/tim.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Core/Src/usart.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Driver/tb67h450_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Motor/motion_planner.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Motor/motor.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Sensor/Encoder/encoder_calibrator_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Sensor/Encoder/mt6816_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Signal/button_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Signal/led_base.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_adc_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_can.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_exti.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_flash_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_gpio_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_pwr.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_spi.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim_ex.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_uart.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Memory/emulated_eeprom.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Memory/stockpile_f103cb.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/Utils/st_hardware.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/Platform/retarget.c.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/button_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/encoder_calibrator_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/led_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/mt6816_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Port/tb67h450_stm32.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/main.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/protocols/interface_can.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/protocols/interface_uart.cpp.obj CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/startup/startup_stm32f103xb.s.obj
+  CONFIG = Release
+  FLAGS = -O3 -DNDEBUG
   LINK_FLAGS = -Wl,-gc-sections,--print-memory-usage,-Map=E:/Dummy-code/firmware/motor_fw_f103_57/build/Ctrl-Step-STM32-fw.map -mcpu=cortex-m3 -mthumb -mthumb-interwork -T E:/Dummy-code/firmware/motor_fw_f103_57/STM32F103CBTx_FLASH.ld
   OBJECT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
   POST_BUILD = C:\WINDOWS\system32\cmd.exe /C "cd /D E:\Dummy-code\firmware\motor_fw_f103_57\build && arm-none-eabi-objcopy -Oihex E:/Dummy-code/firmware/motor_fw_f103_57/build/Ctrl-Step-STM32-fw.elf E:/Dummy-code/firmware/motor_fw_f103_57/build/Ctrl-Step-STM32-fw.hex && arm-none-eabi-objcopy -Obinary E:/Dummy-code/firmware/motor_fw_f103_57/build/Ctrl-Step-STM32-fw.elf E:/Dummy-code/firmware/motor_fw_f103_57/build/Ctrl-Step-STM32-fw.bin"
   PRE_LINK = cd .
-  TARGET_COMPILE_PDB = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir\
   TARGET_FILE = Ctrl-Step-STM32-fw.elf
-  TARGET_PDB = Ctrl-Step-STM32-fw.elf.pdb
+  TARGET_PDB = Ctrl-Step-STM32-fw.elf.dbg
   TARGET_SUPPORT_DIR = CMakeFiles\Ctrl-Step-STM32-fw.elf.dir
 
 
@@ -656,14 +612,14 @@ build all: phony Ctrl-Step-STM32-fw.elf
 #############################################
 # Re-run CMake if any of its inputs changed.
 
-build build.ninja E$:/Dummy-code/firmware/motor_fw_f103_57/build/cmake_install.cmake: RERUN_CMAKE | C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeASMCompiler.cmake.in C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeASMInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCCompiler.cmake.in C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCCompilerABI.c C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCXXCompiler.cmake.in C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCXXCompilerABI.cpp C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCXXInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCommonLanguageInclude.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCompilerIdDetection.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineASMCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCXXCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCompilerABI.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCompilerId.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCompilerSupport.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineSystem.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeFindBinUtils.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeGenericSystem.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeInitializeConfigs.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeLanguageInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeNinjaFindMake.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeParseImplicitIncludeInfo.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeParseImplicitLinkInfo.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeParseLibraryArchitecture.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystem.cmake.in C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInitialize.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeTestASMCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeTestCCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeTestCXXCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeTestCompilerCommon.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/ADSP-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/ARMCC-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/ARMClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/AppleClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Borland-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Bruce-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/CMakeCommonCompilerMacros.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Clang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Clang-DetermineCompilerInternal.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Compaq-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Cray-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/CrayClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Diab-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Embarcadero-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Fujitsu-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GHS-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-ASM.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-C.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-CXX-CXXImportStd.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-CXX.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-FindBinUtils.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/HP-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/HP-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IAR-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IBMCPP-C-DetermineVersionInternal.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IBMClang-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Intel-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/LCC-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/MSVC-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/NVHPC-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/NVIDIA-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/OrangeC-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/PGI-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/PathScale-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Renesas-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/SCO-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/SDCC-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/SunPro-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/TI-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/TIClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Tasking-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/TinyCC-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/VisualAge-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Watcom-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/XL-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/XL-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/XLClang-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/zOS-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeASMLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCXXLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCommonLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeDetermineLinkerId.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeInspectASMLinker.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeInspectCLinker.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeInspectCXXLinker.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/FeatureTesting.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Platform/Generic.cmake CMakeCache.txt CMakeFiles/4.2.3/CMakeASMCompiler.cmake CMakeFiles/4.2.3/CMakeCCompiler.cmake CMakeFiles/4.2.3/CMakeCXXCompiler.cmake CMakeFiles/4.2.3/CMakeSystem.cmake E$:/Dummy-code/firmware/motor_fw_f103_57/CMakeLists.txt
+build build.ninja E$:/Dummy-code/firmware/motor_fw_f103_57/build/cmake_install.cmake: RERUN_CMAKE | C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeASMInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCXXInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCommonLanguageInclude.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeGenericSystem.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeInitializeConfigs.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeLanguageInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInitialize.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/CMakeCommonCompilerMacros.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-ASM.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-C.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-CXX.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeASMLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCXXLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCommonLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Platform/Generic.cmake CMakeCache.txt CMakeFiles/4.2.3/CMakeASMCompiler.cmake CMakeFiles/4.2.3/CMakeCCompiler.cmake CMakeFiles/4.2.3/CMakeCXXCompiler.cmake CMakeFiles/4.2.3/CMakeSystem.cmake E$:/Dummy-code/firmware/motor_fw_f103_57/CMakeLists.txt
   pool = console
 
 
 #############################################
 # A missing CMake input file is not an error.
 
-build C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeASMCompiler.cmake.in C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeASMInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCCompiler.cmake.in C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCCompilerABI.c C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCXXCompiler.cmake.in C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCXXCompilerABI.cpp C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCXXInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCommonLanguageInclude.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCompilerIdDetection.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineASMCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCXXCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCompilerABI.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCompilerId.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineCompilerSupport.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeDetermineSystem.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeFindBinUtils.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeGenericSystem.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeInitializeConfigs.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeLanguageInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeNinjaFindMake.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeParseImplicitIncludeInfo.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeParseImplicitLinkInfo.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeParseLibraryArchitecture.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystem.cmake.in C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInitialize.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeTestASMCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeTestCCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeTestCXXCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeTestCompilerCommon.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/ADSP-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/ARMCC-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/ARMClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/AppleClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Borland-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Bruce-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/CMakeCommonCompilerMacros.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Clang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Clang-DetermineCompilerInternal.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Compaq-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Cray-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/CrayClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Diab-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Embarcadero-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Fujitsu-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GHS-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-ASM.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-C.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-CXX-CXXImportStd.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-CXX.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-FindBinUtils.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/HP-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/HP-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IAR-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IBMCPP-C-DetermineVersionInternal.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IBMClang-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Intel-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/LCC-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/MSVC-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/NVHPC-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/NVIDIA-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/OrangeC-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/PGI-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/PathScale-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Renesas-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/SCO-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/SDCC-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/SunPro-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/TI-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/TIClang-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Tasking-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/TinyCC-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/VisualAge-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/Watcom-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/XL-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/XL-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/XLClang-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/zOS-C-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeASMLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCXXLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCommonLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeDetermineLinkerId.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeInspectASMLinker.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeInspectCLinker.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeInspectCXXLinker.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/FeatureTesting.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Platform/Generic.cmake CMakeCache.txt CMakeFiles/4.2.3/CMakeASMCompiler.cmake CMakeFiles/4.2.3/CMakeCCompiler.cmake CMakeFiles/4.2.3/CMakeCXXCompiler.cmake CMakeFiles/4.2.3/CMakeSystem.cmake E$:/Dummy-code/firmware/motor_fw_f103_57/CMakeLists.txt: phony
+build C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeASMInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCXXInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeCommonLanguageInclude.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeGenericSystem.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeInitializeConfigs.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeLanguageInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInitialize.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/CMakeCommonCompilerMacros.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-ASM.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-C.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU-CXX.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Compiler/GNU.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeASMLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCXXLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Internal/CMakeCommonLinkerInformation.cmake C$:/EmbeddedToolchain/CMake/share/cmake-4.2/Modules/Platform/Generic.cmake CMakeCache.txt CMakeFiles/4.2.3/CMakeASMCompiler.cmake CMakeFiles/4.2.3/CMakeCCompiler.cmake CMakeFiles/4.2.3/CMakeCXXCompiler.cmake CMakeFiles/4.2.3/CMakeSystem.cmake E$:/Dummy-code/firmware/motor_fw_f103_57/CMakeLists.txt: phony
 
 
 #############################################

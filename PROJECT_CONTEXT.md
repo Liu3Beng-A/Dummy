@@ -1,14 +1,19 @@
-# PROJECT_CONTEXT - Dummy Robotics Arm
+# PROJECT_CONTEXT - Dummy 7轴机械臂控制系统
 
-> **自动生成时间**: 2026-05-23
+> **自动生成时间**: 2026-05-30
 > **项目根目录**: `e:/Dummy-code`
 > **生成方式**: 每次 new chat 时自动读取所有源码重新生成
+
+> **重要文档索引:**
+> - `README.md` — 项目主文档，包含完整功能说明和用户指南
+> - `ISSUES.md` — 问题追踪，P0/P1/P2/P3 共 61 个问题及修复状态
+> - `TODO.md` — 功能路线图，17 个计划开发功能及 6 个阶段规划
 
 ---
 
 ## 项目简介
 
-这是一个基于 **STM32F405 (主控) + 8×STM32F103 (电机驱动)** 的 **7轴机械臂 + 地轨 + 夹爪** 控制系统。
+这是一个基于 **STM32F405 (主控) + 8×STM32F103 (电机驱动)** 的 **7轴机械臂 + 地轨 + 夹爪** 控制系统，运行 FreeRTOS 实时操作系统，支持关节空间运动、笛卡尔空间运动、力矩控制和实时伺服模式。
 
 ### 系统组成
 
@@ -16,63 +21,113 @@
 |------|------|------|------|
 | 主控制器 | STM32F405RG | ×1 | Cortex-M4, 168MHz, FreeRTOS |
 | 电机驱动板 | STM32F103CBT6 | ×8 | Cortex-M3, 72MHz, FOC步进 |
-| 地轨电机 | 丝杆1605 | ×1 | 直连(1:1), 行程 -250~250mm, ID=0 |
+| 地轨电机 | 丝杆1605 | ×1 | 直连(1:1), 行程 -250~250mm, CAN ID=0 |
 | 臂关节电机 | 42/35步进 | ×6 | 50:1减速, CAN ID 1~6 |
 | 夹爪电机 | 35步进 | ×1 | 16:1减速, CAN ID=7 |
 | 通信总线 | CAN1 | 500kbps | 连接主控与所有电机 |
 | 调试串口 | UART4 | 115200bps | 主控命令接口 |
 | USB | USB_OTG_FS | CDC/VCP | 备用命令接口 |
 | OLED | SSD1306 | 128×64 | 板载显示 |
-| IMU | MPU6050 | ×1 | 板载惯性测量 |
+| IMU | MPU6050 | ×1 | 板载惯性测量单元 |
 
 ### 项目目标
 
-- [x] 7轴关节空间运动 (MoveJ)
-- [x] 笛卡尔空间运动 (MoveL via FK/IK)
-- [x] 力矩控制模式 ($ 命令)
-- [x] ServoJ 实时伺服模式
-- [x] 地轨线性滑轨控制
-- [x] 夹爪控制
-- [ ] ROS2 / MoveIt2 接入
-- [ ] 视觉抓取集成
-- [ ] EtherCAT 升级（规划中）
+**已实现:**
 
-### 代码仓库结构
+- [x] 7轴关节空间运动 (MoveJ, blocking / non-blocking)
+- [x] 笛卡尔空间运动 (MoveL via 6-DOF FK/IK)
+- [x] 力矩控制模式 ($ 命令, mA电流)
+- [x] ServoJ 实时伺服模式
+- [x] 地轨线性滑轨控制 (J7, mm单位)
+- [x] 夹爪控制 (开/闭/位置/力矩档位)
+- [x] 梯形速度规划
+- [x] 软限位保护 (每轴min/max)
+- [x] 双定时器FOC控制 (20kHz电流环)
+- [x] MT6816编码器自动校准 (16384-entry LUT)
+- [x] OLED状态显示 + RGB灯效
+- [x] Python调试工具 (串口助手.py)
+
+**规划中 (详见 `TODO.md`):**
+
+- [ ] ROS2 / MoveIt2 接入
+- [ ] 碰撞检测与保护
+- [ ] 示教编程与轨迹录制回放
+- [ ] 夹爪力矩反馈与软停止
+- [ ] 视觉抓取集成
+- [ ] 多机协作模式
+- [ ] 速度前瞻与S型速度曲线
+
+---
+
+## 代码仓库结构
 
 ```
 e:/Dummy-code/
-├── firmware/
-│   ├── ref_core_f405/         # 主控固件 (STM32F405, FreeRTOS)
-│   │   ├── UserApp/           # 应用层 (main.cpp, protocols/)
-│   │   ├── Robot/             # 机器人抽象层
-│   │   │   ├── instances/     # DummyRobot 7轴实现
-│   │   │   ├── algorithms/    # 运动学 (FK/IK), 轨迹规划
-│   │   │   └── actuators/     # 关节电机抽象 (CtrlStep)
-│   │   ├── Bsp/              # 板级驱动 (CAN/UART/USB/I2C/SPI)
-│   │   ├── 3rdParty/         # 第三方库 (Fibre, U8G2)
-│   │   └── Core/             # STM32 HAL 初始化
+├── firmware/                        # 所有固件代码
+│   ├── ref_core_f405/               # 主控制器固件 (STM32F405, FreeRTOS)
+│   │   ├── UserApp/                 # 应用层
+│   │   │   ├── main.cpp             # 入口, FreeRTOS任务创建
+│   │   │   ├── protocols/           # 协议层
+│   │   │   │   ├── ascii_protocol.cpp  # USB/UART4 ASCII命令解析
+│   │   │   │   ├── can_protocol.cpp   # CAN响应路由
+│   │   │   │   ├── cmd_protocol.cpp   # (预留)二进制协议
+│   │   │   │   └── comm_pose_uart.cpp # (预留)位姿UART发送
+│   │   │   ├── tasks/               # (预留)独立任务
+│   │   │   └── pose_sender_task.cpp  # (预留)位姿发送任务
+│   │   ├── Robot/                   # 机器人抽象层
+│   │   │   ├── instances/
+│   │   │   │   └── dummy_robot.cpp/.h  # 7轴机器人实现
+│   │   │   ├── algorithms/
+│   │   │   │   └── kinematic/
+│   │   │   │       └── 6dof_kinematic.cpp/.h  # FK/IK求解器
+│   │   │   └── actuators/
+│   │   │       └── ctrl_step.cpp/.h  # 关节电机CAN接口
+│   │   ├── Bsp/                     # 板级驱动
+│   │   │   ├── interface_can.cpp/.h  # CAN初始化和发送
+│   │   │   ├── interface_uart.cpp/.h # UART4/USB CDC
+│   │   │   ├── oled.cpp/.h          # SSD1306 OLED
+│   │   │   ├── imu/                 # MPU6050 IMU + Biquad滤波
+│   │   │   ├── pwm.cpp/.h           # PWM输出
+│   │   │   ├── rgb.cpp/.h           # WS2812 RGB LED
+│   │   │   ├── encoder.cpp/.h       # 编码器输入
+│   │   │   └── emulated_eeprom.cpp/.h # Flash EEPROM模拟
+│   │   ├── Core/                    # STM32 HAL初始化
+│   │   ├── 3rdParty/               # 第三方库 (Fibre, U8G2)
+│   │   └── doc/
+│   │       └── rail_sync_plan_B.md  # 地轨同步方案B设计文档
 │   │
-│   └── motor_fw_f103/         # 电机驱动固件 (STM32F103, 8板)
-│       ├── UserApp/           # main.cpp, CAN/UART 协议
-│       ├── Ctrl/             # 电机控制逻辑
-│       │   ├── Motor/        # 电机类 + 运动规划器
-│       │   ├── Driver/        # TB67H450 FOC 驱动基类
-│       │   ├── Sensor/        # MT6816 磁编 + 标定器
-│       │   └── Signal/        # 按钮 / LED
-│       ├── Port/             # STM32 硬件端口实现
-│       │   ├── tb67h450_stm32.cpp/h
-│       │   ├── mt6816_stm32.cpp/h
-│       │   ├── button_stm32.cpp/h
-│       │   ├── led_stm32.cpp/h
-│       │   ├── encoder_calibrator_stm32.cpp/h
-│       │   └── Platform/     # EEPROM, Flash, 硬件工具
-│       └── Core/             # STM32 HAL 初始化
+│   └── motor_fw_f103_*/              # 电机驱动固件 (STM32F103, 4种变体)
+│       ├── UserApp/                 # main.cpp, CAN协议
+│       │   └── protocols/
+│       │       └── interface_can.cpp  # CAN命令解析
+│       ├── Ctrl/                    # 电机控制逻辑
+│       │   ├── Motor/
+│       │   │   ├── motor.cpp/.h      # FOC电机控制核心
+│       │   │   └── motion_planner.cpp/.h  # 梯形/S型轨迹规划
+│       │   ├── Driver/
+│       │   │   └── tb67h450_base.cpp/.h  # TB67H450 H桥驱动抽象
+│       │   └── Sensor/Encoder/
+│       │       ├── mt6816_base.cpp/.h  # MT6816磁编驱动
+│       │       └── encoder_calibrator_base.cpp/.h  # 编码器校准
+│       ├── Port/                    # STM32硬件端口实现
+│       │   ├── tb67h450_stm32.cpp/.h # PWM输出到TB67H450
+│       │   ├── mt6816_stm32.cpp/.h  # SPI读取MT6816
+│       │   ├── button_stm32.cpp/.h  # 按键输入
+│       │   ├── led_stm32.cpp/.h     # LED输出
+│       │   └── encoder_calibrator_stm32.cpp/.h
+│       └── Core/                    # STM32 HAL初始化
 │
-├── tools/
-│   └── 串口助手.py             # Python 调试工具 (Tkinter GUI)
-├── 串口助手.py                 # 根目录副本
-└── review.md                  # 系统级代码审查报告 (C/H/M/L问题)
+├── esp32/                           # ESP32参考示例 (非生产代码)
+│   └── firmware/examples/           # 1995个Mongoose网络示例
+├── tools/                           # 工具脚本
+│   └── 串口助手.py                  # Python调试工具
+├── 串口助手.py                      # 根目录副本 (同tools/)
+├── README.md                        # 项目主文档
+├── ISSUES.md                        # 问题追踪 (61个问题)
+└── TODO.md                          # 功能路线图 (17个计划功能)
 ```
+
+> **电机固件变体说明:** `motor_fw_f103_35/` (35mm步进)、`motor_fw_f103_42/` (42mm步进)、`motor_fw_f103_57/` (57mm步进)、`motor_fw_f103_all/` (通用版, 推荐使用) 均共用同一套代码，通过 `configurations.h` 中的 `MOTOR_TYPE_42` 宏切换参数。
 
 ---
 
@@ -82,81 +137,78 @@ e:/Dummy-code/
 
 ```
  PC / Python串口助手
-       │
-       │ USB CDC / UART4 (115200bps)
-       ▼
+        │
+        │ USB CDC 或 UART4 (115200bps)
+        ▼
  ┌─────────────────────┐
  │   STM32F405 主控     │
- │   (FreeRTOS, 168MHz) │
+ │   (FreeRTOS, 168MHz)│
  │                      │
- │  CAN1 (500kbps) ─────┼──── CAN ─────► CAN收发器
- └─────────────────────┘                    │
-       ▲                                   │
-       │ CAN RX 中断                       │
-       │ (StdId = (id<<7) | cmd)           ▼
-       │                         ┌──────────────────────────┐
-       │                         │  STM32F103 电机驱动板 ×8  │
-       │                         │  (72MHz, FOC, 20kHz环)   │
-       │                         │                           │
-       │                         │  ID=0: 地轨 (0~500mm)     │
-       │                         │  ID=1~6: 臂关节 (J1~J6)  │
-       │                         │  ID=7: 夹爪              │
-       │                         └──────────────────────────┘
-       │
- OLED 128×64 (I2C软)
- MPU6050 (I2C硬)
- RGB WS2812 (TIM2 DMA)
+ │  CAN1 (500kbps) ─────┼──── CAN总线 ────► CAN收发器
+ └─────────────────────┘                     │
+        ▲                                   │
+        │ CAN RX 中断                       │
+        │ (StdId = id<<7 | cmd)            ▼
+        │                          ┌──────────────────────────┐
+        │                          │  STM32F103 电机驱动板 ×8  │
+        │                          │  (72MHz, FOC, 20kHz)    │
+        │                          │                          │
+ OLED   │                          │  CAN ID=0: 地轨 (mm)     │
+ MPU6050│                          │  CAN ID=1~6: 臂关节 (°) │
+ RGB WS │                          │  CAN ID=7: 夹爪         │
+        │                          └──────────────────────────┘
 ```
 
 ### 软件层次
 
 ```
-┌─────────────────────────────────────────────────┐
-│            PC / Python / ROS2                   │
-└──────────────────────┬──────────────────────────┘
-                       │ ASCII 协议 (>/@/$/#)
-┌──────────────────────▼──────────────────────────┐
-│           UserApp/main.cpp                      │
-│  命令解析 → 命令队列 → 命令处理器               │
-└──────────────────────┬──────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────┐
-│           DummyRobot (7轴机器人类)               │
-│                                                  │
-│  motorJ[0]: 地轨 (mm, 单独管理)                 │
-│  motorJ[1~6]: 臂关节 (° → step)                 │
-│  hand: 夹爪 (0~100%)                            │
-│  dof6Solver: 6-DOF FK/IK                        │
-└──────────────────────┬──────────────────────────┘
-                       │ CAN (StdId = id<<7 | cmd)
-┌──────────────────────▼──────────────────────────┐
-│           CtrlStepMotor (关节抽象层)             │
-│  SetAngle / SetVelocity / SetCurrent           │
-│  UpdateAngleCallback (CAN响应路由)               │
-└──────────────────────┬──────────────────────────┘
-                       │ CAN1 (500kbps)
-┌──────────────────────▼──────────────────────────┐
-│        STM32F103 电机固件 (×8独立运行)           │
-│                                                  │
-│  TIM1(100Hz): 按钮/LED/温度采集                  │
-│  TIM4(20kHz): 电机控制环 (FOC)                   │
-│                                                  │
-│  Motor(Tick20kHz)                               │
-│    ├── encoder->UpdateAngle()  [MT6816 SPI]     │
-│    ├── CloseLoopControlTick()                   │
-│    │     ├── 估算位置/速度                      │
-│    │     ├── DCE/PID/FOC 控制                  │
-│    │     └── driver->SetFocCurrent()           │
-│    │           └── [TB67H450 PWM+DMA]          │
-│    └── 状态机 / 堵转检测                         │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│           PC / Python 调试工具 / (未来: ROS2)          │
+└───────────────────────┬──────────────────────────────┘
+                        │ ASCII 协议 (>/@/$/#)
+┌───────────────────────▼──────────────────────────────┐
+│              UserApp/main.cpp                          │
+│  USB/UART4 DMA接收 → 命令解析 → 命令队列 → 命令执行     │
+└───────────────────────┬──────────────────────────────┘
+                        │
+┌───────────────────────▼──────────────────────────────┐
+│              DummyRobot (7轴机器人类)                   │
+│                                                        │
+│  motorJ[0]: 地轨 (mm, 单独管理)                        │
+│  motorJ[1~6]: 臂关节 (° → step换算)                   │
+│  hand: 夹爪 (0~100%)                                   │
+│  dof6Solver: 6-DOF FK/IK                              │
+│  CommandHandler: 命令队列管理                          │
+└───────────────────────┬──────────────────────────────┘
+                        │ CAN (StdId = id<<7 | cmd)
+┌───────────────────────▼──────────────────────────────┐
+│            CtrlStepMotor (关节CAN接口)                  │
+│  SetAngle / SetVelocity / SetCurrent                 │
+│  UpdateAngleCallback (CAN响应路由)                     │
+└───────────────────────┬──────────────────────────────┘
+                        │ CAN1 (500kbps)
+┌───────────────────────▼──────────────────────────────┐
+│         STM32F103 电机固件 (×8 独立运行)               │
+│                                                        │
+│  TIM1 (100Hz): 按钮/LED/温度采集                       │
+│  TIM4 (20kHz): 电机FOC控制环 / 编码器标定              │
+│                                                        │
+│  Motor(Tick20kHz)                                     │
+│    ├── encoder->UpdateAngle()  [MT6816 SPI]            │
+│    ├── CloseLoopControlTick()                          │
+│    │     ├── 估算位置/速度                            │
+│    │     ├── DCE/PID/FOC 控制                        │
+│    │     └── driver->SetFocCurrent()                  │
+│    │           └── [TB67H450 PWM+DAC]                │
+│    └── 状态机 / 堵转检测                               │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 主控固件 (ref_core_f405)
 
-### 线程架构
+### FreeRTOS线程架构
 
 | 线程名 | 优先级 | 栈大小 | 频率 | 职责 |
 |--------|--------|--------|------|------|
@@ -167,35 +219,18 @@ e:/Dummy-code/
 | `OledTask` | `osPriorityNormal` | 2000 | ~60Hz | OLED显示刷新 |
 | `RGBTask` | `osPriorityNormal` | 2000 | 33Hz | RGB LED灯效 |
 
-### 5kHz 实时环 (TIM7)
+### 控制模式
 
-TIM7 定时器 (周期200μs) 触发中断，唤醒 `ControlLoopFixUpdateTask`，根据当前控制模式执行：
+| 枚举值 | 名称 | 说明 | 5kHz环行为 |
+|--------|------|------|-----------|
+| `COMMAND_TARGET_POINT_SEQUENTIAL` = 1 | SEQ | 顺序点动 (阻塞) | 下发 targetJoints |
+| `COMMAND_TARGET_POINT_INTERRUPTABLE` = 2 | INT | 可打断点动 (默认) | 下发 targetJoints |
+| `COMMAND_CONTINUES_TRAJECTORY` = 3 | TRJ | 连续轨迹 | 下发 targetJoints |
+| `COMMAND_MOTOR_TUNING` = 4 | TUN | 电机扫频调谐 | 调用 tuningHelper.Tick() |
+| `COMMAND_TORQUE_CONTROL` = 5 | TRQ | 力矩/电流控制 | 下发 targetCurrents[] |
+| `COMMAND_SERVO_J` = 6 | SRV | 高频关节伺服 | 下发高频 targetJoints |
 
-**SEQ / INT / TRJ 模式：**
-```cpp
-dummy.MoveJoints(dummy.targetJoints);   // 臂关节下发 (°→step)
-dummy.MoveRail(dummy.targetRailPos);     // 地轨下发 (mm→step)
-```
-
-**Torque 模式 ($ 命令)：**
-```cpp
-for (int i = 1; i <= 6; i++)
-    dummy.motorJ[i]->SetCurrentSetPoint(dummy.targetCurrents[i-1]);
-dummy.motorJ[0]->SetCurrentSetPoint(dummy.targetRailCurrent);  // 地轨电流
-```
-
-**ServoJ 模式：**
-```cpp
-dummy.MoveJoints(dummy.targetJoints);     // 高频关节角度
-dummy.MoveRail(dummy.targetRailPos);
-```
-
-**Tuning 模式：**
-```cpp
-dummy.tuningHelper.Tick(10);            // 扫频调试
-```
-
-### 电机对象初始化 (DummyRobot 构造函数)
+### 电机对象初始化
 
 ```cpp
 motorJ[0] = new CtrlStepMotor(hcan, 0, false, 50, 0, 500);     // 地轨: 丝杆1605, 0~500mm
@@ -207,6 +242,8 @@ motorJ[5] = new CtrlStepMotor(hcan, 5, true,  50, -100, 100); // J5 腕部俯仰
 motorJ[6] = new CtrlStepMotor(hcan, 6, true,  30, -180, 180); // J6 腕部偏转 (减速比30)
 hand     = new StepHand(hcan, 7);                              // 夹爪 (减速比16)
 ```
+
+> `inverseDirection=true` 表示该关节电机方向反转。J2-J6 默认反转以匹配右手坐标系。
 
 ### 6-DOF 运动学参数 (DH参数)
 
@@ -221,32 +258,57 @@ dof6Solver = new DOF6Kinematic(
 );
 ```
 
-### 控制模式枚举
-
-| 枚举值 | 名称 | 说明 |
-|--------|------|------|
-| `COMMAND_TARGET_POINT_SEQUENTIAL` = 1 | SEQ | 顺序点动 (阻塞) |
-| `COMMAND_TARGET_POINT_INTERRUPTABLE` = 2 | INT | 可打断点动 (默认) |
-| `COMMAND_CONTINUES_TRAJECTORY` = 3 | TRJ | 连续轨迹 |
-| `COMMAND_MOTOR_TUNING` = 4 | TUN | 电机参数扫频调谐 |
-| `COMMAND_TORQUE_CONTROL` = 5 | TRQ | 力矩/电流控制 |
-| `COMMAND_SERVO_J` = 6 | SRV | 高频关节伺服 |
+**运动链:** `Link0 (Base) → J1 → J2 → J3 → J4 → J5 → J6 → Tool0`
 
 ### 关键常量
 
 | 常量 | 值 | 说明 |
 |------|-----|------|
-| `RAIL_STEPS_PER_MM` | 40960 | 地轨步数当量 (丝杆1605直连, 256微步) |
+| `RAIL_STEPS_PER_MM` | 40960 | 地轨步数当量 (丝杆1605直连, 200步×256微步/5mm导程) |
 | `RAIL_DEFAULT_SPEED_MM_S` | 20.0f | 地轨默认速度 mm/s |
-| `DEFAULT_JOINT_SPEED` | 80.0f | 关节默认速度 |
-| `DEFAULT_JOINT_ACCELERATION_LOW` | 5.0f | 低加速度 |
-| `DEFAULT_JOINT_ACCELERATION_HIGH` | 100.0f | 高加速度 |
-| `REST_POSE` | {0, -75, 180, 0, 0, 0} | 待机姿态 |
-| `HOME_POSE` | {0, 0, 90, 0, 0, 0} | 归零姿态 |
+| `DEFAULT_JOINT_SPEED` | 80.0f | 关节默认速度 (°/s) |
+| `DEFAULT_JOINT_ACCELERATION_LOW` | 5.0f | 低加速度 (°/s²) |
+| `DEFAULT_JOINT_ACCELERATION_HIGH` | 100.0f | 高加速度 (°/s²) |
+| `REST_POSE` | `{0, -75, 180, 0, 0, 0}` | 待机姿态 |
+| `HOME_POSE` | `{0, 0, 90, 0, 0, 0}` | 归零姿态 |
+
+### 5kHz 实时环 (TIM7)
+
+TIM7 定时器 (周期200μs) 触发中断，唤醒 `ControlLoopFixUpdateTask`，根据当前控制模式执行不同行为:
+
+**SEQ / INT / TRJ 模式:**
+
+```cpp
+dummy.MoveJoints(dummy.targetJoints);   // 臂关节下发 (°→step)
+dummy.MoveRail(dummy.targetRailPos);    // 地轨下发 (mm→step)
+```
+
+**Torque 模式 ($ 命令):**
+
+```cpp
+for (int i = 1; i <= 6; i++)
+    dummy.motorJ[i]->SetCurrentSetPoint(dummy.targetCurrents[i-1]);
+dummy.motorJ[0]->SetCurrentSetPoint(dummy.targetRailCurrent);  // 地轨电流
+```
+
+**ServoJ 模式:**
+
+```cpp
+dummy.MoveJoints(dummy.targetJoints);    // 高频关节角度
+dummy.MoveRail(dummy.targetRailPos);
+```
+
+**Tuning 模式:**
+
+```cpp
+dummy.tuningHelper.Tick(10);             // 扫频调试
+```
 
 ---
 
-## 电机固件 (motor_fw_f103)
+## 电机固件 (motor_fw_f103_*)
+
+> **推荐使用 `motor_fw_f103_all/` 通用版。** 35/42/57三种变体通过 `configurations.h` 中的 `MOTOR_TYPE_42` 宏切换。
 
 ### 双定时器架构
 
@@ -257,33 +319,33 @@ dof6Solver = new DOF6Kinematic(
 
 ### 电机控制模式
 
-| 模式 | CMD | 控制方法 | 备注 |
-|------|-----|----------|------|
-| `MODE_STOP` | - | 失能 | |
-| `MODE_COMMAND_POSITION` | 0x05/0x07 | DCE + 梯形规划 | 带速度限制 |
-| `MODE_COMMAND_VELOCITY` | 0x04 | PID 速度环 | |
-| `MODE_COMMAND_CURRENT` | 0x03 | 直接电流给定 | |
-| `MODE_COMMAND_Trajectory` | - | 轨迹跟踪 | 外部给轨迹点 |
-| `MODE_PWM_*` | - | PWM开环 | 调试用 |
-| `MODE_STEP_DIR` | - | STEP/DIR 模式 | |
+| 模式 | CMD | 控制方法 |
+|------|-----|---------|
+| `MODE_STOP` | - | 失能 |
+| `MODE_COMMAND_POSITION` | 0x05/0x07 | DCE + 梯形规划 |
+| `MODE_COMMAND_VELOCITY` | 0x04 | PID 速度环 |
+| `MODE_COMMAND_CURRENT` | 0x03 | 直接电流给定 |
+| `MODE_COMMAND_Trajectory` | - | 外部轨迹点跟踪 |
+| `MODE_PWM_*` | - | PWM开环 (调试) |
+| `MODE_STEP_DIR` | - | STEP/DIR 模式 |
 
 ### 电机状态
 
-| 状态 | 枚举值 | 说明 |
-|------|--------|------|
-| `STATE_STOP` | 0 | 停止 |
-| `STATE_FINISH` | 1 | 到位完成 |
-| `STATE_RUNNING` | 2 | 运动中 |
-| `STATE_OVERLOAD` | 3 | 过载 |
-| `STATE_STALL` | 4 | 堵转 |
-| `STATE_NO_CALIB` | 5 | 未标定 |
+| 状态 | 枚举值 |
+|------|--------|
+| `STATE_STOP` | 0 |
+| `STATE_FINISH` | 1 (到位完成) |
+| `STATE_RUNNING` | 2 (运动中) |
+| `STATE_OVERLOAD` | 3 (过载) |
+| `STATE_STALL` | 4 (堵转) |
+| `STATE_NO_CALIB` | 5 (未标定) |
 
 ### 全局错误码
 
 | 值 | 含义 | 触发条件 |
-|----|------|----------|
-| 0 | 正常 | |
-| 1 | 堵转 (Stall) | 堵转保护触发后标记 |
+|----|------|---------|
+| 0 | 正常 | - |
+| 1 | 堵转 (Stall) | 堵转保护触发 |
 | 4 | 急停 (EmergencyStop) | 收到0x89广播急停 |
 
 ### 步进参数
@@ -294,29 +356,29 @@ dof6Solver = new DOF6Kinematic(
 | `SOFT_DIVIDE_NUM` | 256 (微步细分) |
 | `MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS` | 51200 (200×256) |
 | FOC Sin表大小 | 1025 entries (sin[0] ~ sin[2π]) |
-| 编码器分辨率 | 14-bit (MT6816, 16384 cpr) |
+| 编码器分辨率 | 14-bit MT6816 (16384 cpr) |
 
 ### 堵转保护机制
 
-- 触发条件：电流饱和 (`|output| >= ratedCurrent`) 且速度极低 (`|estVelocity| < 1 step/s`) 持续 1 秒
-- 动作：保持使能，原地锁死 (`goalPosition = realPosition`)，errorCode=1
-- 恢复：按 KEY2 清除标志
+- **触发条件:** 电流饱和 (`|output| >= ratedCurrent`) 且速度极低 (`|estVelocity| < 1 step/s`) 持续1秒
+- **动作:** 保持使能，原地锁死 (`goalPosition = realPosition`)，`errorCode = 1`
+- **恢复:** 按 KEY2 清除标志
 
 ### 编码器标定流程
 
-1. **触发条件**：KEY1+KEY2同时长按，或CAN命令0x02
-2. **正向测量**：慢速转动1圈，16次采样/步，记录所有编码器值
-3. **反向测量**：反向转动，去除回差
-4. **数据处理**：对正向/反向数据取平均，生成16384项查找表
-5. **Flash存储**：烧录到 `0x08017C00` (32KB)，掉电不丢失
+1. **触发:** KEY1+KEY2同时长按，或CAN命令0x02
+2. **正向测量:** 慢速转动1圈，16次采样/步，记录所有编码器值
+3. **反向测量:** 反向转动，去除回差
+4. **数据处理:** 正向/反向数据取平均，生成16384项查找表
+5. **Flash存储:** 烧录到 `0x08017C00` (32KB)，掉电不丢失
 
-### 35/42电机切换
-
-编译前修改 `configurations.h`：
+### 35/42电机参数切换
 
 ```cpp
-// 默认: 35电机 (注释掉下一行)
-// #define MOTOR_TYPE_42
+// firmware/motor_fw_f103_all/UserApp/configurations.h
+// 默认: 35电机
+// #define MOTOR_TYPE_42  // 取消注释切换到42电机
+
 #ifdef MOTOR_TYPE_42
     #define DEFAULT_DCE_KP      200
     #define MAX_CURRENT_LIMIT   (2 * 1000)   // 42电机: 2000mA
@@ -328,30 +390,22 @@ dof6Solver = new DOF6Kinematic(
 
 ### 电机固件硬件引脚
 
-| 引脚 | 功能 | 说明 |
-|------|------|------|
-| PA8 | ID0 | 拨码开关 bit0 |
-| PA9 | ID1 | 拨码开关 bit1 |
-| PA10 | ID2 | 拨码开关 bit2 |
-| PA2 | HW_ELEC_BM | TB67H450 INBM |
-| PA3 | HW_ELEC_BP | TB67H450 INBP |
-| PA4 | HW_ELEC_AM | TB67H450 INAM |
-| PA5 | HW_ELEC_AP | TB67H450 INAP |
-| PA7 | SIGNAL_COUNT_DIR | 方向信号 |
-| PB0 | SIGNAL_COUNT_EN | 使能信号 |
-| PB1 | SIGNAL_ALERT | 报警信号 |
-| PB2 | BUTTON2 | 按键2 |
-| PB10 | HW_ELEC_BPWM | B相PWM |
-| PB11 | HW_ELEC_APWM | A相PWM |
-| PB12 | BUTTON1 | 按键1 |
-| PA15 | SPI1_CS | MT6816 片选 |
-| PC13 | LED1 | 状态灯1 |
-| PC14 | LED2 | 状态灯2 |
-| PB8 | CAN1_RX | CAN接收 |
-| PB9 | CAN1_TX | CAN发送 |
-| TIM2 CH3/CH4 | DAC输出 | TB67H450 VREF |
+| 引脚 | 功能 |
+|------|------|
+| PA8/PA9/PA10 | ID0/ID1/ID2 拨码开关 |
+| PA2/PA3/PA4/PA5 | TB67H450 INBM/INBP/INAM/INAP |
+| PA7 | SIGNAL_COUNT_DIR (方向信号) |
+| PB0 | SIGNAL_COUNT_EN (使能信号) |
+| PB1 | SIGNAL_ALERT (报警信号) |
+| PB2 | BUTTON2 |
+| PB10/PB11 | HW_ELEC_BPWM/APWM (A/B相PWM) |
+| PB12 | BUTTON1 |
+| PA15 | SPI1_CS (MT6816片选) |
+| PC13/PC14 | LED1/LED2 |
+| PB8/PB9 | CAN1_RX/CAN1_TX |
+| TIM2 CH3/CH4 | DAC输出 (TB67H450 VREF) |
 
-### Flash 存储布局 (STM32F103CBT6, 128KB)
+### Flash存储布局 (STM32F103CBT6, 128KB)
 
 | 地址 | 大小 | 用途 |
 |------|------|------|
@@ -368,9 +422,8 @@ dof6Solver = new DOF6Kinematic(
 
 ```
 StdId = (nodeID << 7) | cmdCode
-
-nodeID: 3 bits (0~7)
-cmdCode: 7 bits
+  nodeID: 3 bits (0~7)
+  cmdCode: 7 bits
 
 普通命令: cmdCode 0x00~0x7F (发往特定节点)
 广播命令: cmdCode 0x80~0xBF (所有节点无条件响应)
@@ -379,7 +432,7 @@ cmdCode: 7 bits
 ### 命令分类总表
 
 | 命令码 | 方向 | 功能 | 数据格式 |
-|--------|------|------|----------|
+|--------|------|------|---------|
 | **0x01** | TX | 使能/失能电机 | uint32_t (0/1) |
 | **0x02** | TX | 触发编码器标定 | - |
 | **0x03** | TX | 设置电流 (力矩模式) | float A |
@@ -421,28 +474,22 @@ Byte 7:    uint8_t isFinished // 0=运动中, 1=到位
 
 ### CAN 急停广播机制
 
-```
-主控发送: StdId = 0x89 (cmd=0x89, 节点ID任意)
-数据: 8字节全0
-结果: 所有电机驱动板同时执行急停
-  - requestMode = MODE_STOP
-  - velocity = 0, current = 0
-  - errorCode = 4
-```
+- 主控发送: `StdId = 0x89` (`cmd=0x89`, 节点ID任意)
+- 数据: 8字节全0
+- 结果: 所有电机驱动板同时执行急停 (`requestMode = MODE_STOP`, `velocity = 0`, `current = 0`, `errorCode = 4`)
 
-**急停条件判断 (motor_fw_f103/Core/Src/can.c)：**
-```cpp
-// StdId == 0x00: 立即急停，不进入协议解析
-if (RxHeader.StdId == 0x00) { EmergencyStopFromCan(); return; }
+### CAN ID 快速查表
 
-// cmd 0x80~0xBF: 广播命令，所有节点无条件响应
-if (cmd >= 0x80 && cmd <= 0xBF) { OnCanCmd(cmd, RxData, DLC); }
-else if (id == boardConfig.canNodeId) { OnCanCmd(cmd, RxData, DLC); }
-```
+| 电机 | CAN ID | 说明 |
+|------|--------|------|
+| 地轨 | 0 | 普通命令 |
+| J1~J6 | 1~6 | 普通命令 |
+| 夹爪 | 7 | 普通命令 |
+| 全部 | 广播 | 0x89急停, 0xA3查询 |
 
 ---
 
-## ASCII 命令协议 (主控 → 主控内部)
+## ASCII 命令协议
 
 ### 系统命令 (`!` 前缀)
 
@@ -451,8 +498,8 @@ else if (id == boardConfig.canNodeId) { OnCanCmd(cmd, RxData, DLC); }
 | `!START` | 使能机器人 |
 | `!DISABLE` | 失能机器人 |
 | `!STOP` | 广播急停 (StdId=0x89) |
-| `!HOME` | 归零姿态 |
-| `!RESET` | 待机姿态 |
+| `!HOME` | 归零姿态 `{0, 0, 90, 0, 0, 0}` |
+| `!RESET` | 待机姿态 `{0, -75, 180, 0, 0, 0}` |
 | `!CALIBRATION` | 标定零点偏移 |
 | `!HAND_O` | 打开夹爪 |
 | `!HAND_C` | 关闭夹爪 |
@@ -466,30 +513,25 @@ else if (id == boardConfig.canNodeId) { OnCanCmd(cmd, RxData, DLC); }
 
 | 命令 | 功能 |
 |------|------|
-| `#GETJPOS` | 获取关节角度 |
-| `#GETLPOS` | 获取末端位姿 |
-| `#SET_DCE_KV/KP/KI/KD <node> <val>` | 设置电机PID |
-| `#REBOOT <node>` | 重启电机 |
+| `#GETJPOS` | 获取7个关节角度 (°) |
+| `#GETLPOS` | 获取末端位姿 (x,y,z,a,b,c) |
+| `#SET_DCE_KV/KP/KI/KD <node> <val>` | 设置电机PID参数 |
+| `#REBOOT <node>` | 重启指定电机 |
 | `#CMDMODE <1-6>` | 设置控制模式 |
-| `#OFFSET_J <node>` | 应用零点 |
-| `#ACC_J <node> <val>` | 设置加速度 |
-| `#SPEED_J <node> <val>` | 设置速度 |
+| `#OFFSET_J <node>` | 应用零点偏移 |
+| `#ACC_J <node> <val>` | 设置关节加速度 |
+| `#SPEED_J <node> <val>` | 设置关节速度 |
 
 ### 运动命令
 
 | 格式 | 功能 | 说明 |
 |------|------|------|
-| `>j1,j2,j3,j4,j5,j6,j7,speed` | 阻塞MoveJ | 等待到位返回"ok" |
+| `>j1,j2,j3,j4,j5,j6,j7,speed` | 阻塞MoveJ | 等待到位后返回"ok" |
 | `&j1,j2,j3,j4,j5,j6,j7,speed` | 非阻塞MoveJ | 立即返回"ok" |
-| `@x,y,z,a,b,c,speed` | MoveL | 笛卡尔空间运动 |
-| `$c1,c2,c3,c4,c5,c6,c7` | 力矩控制 | 7轴电流(mA) |
+| `@x,y,z,a,b,c,speed` | MoveL | 笛卡尔空间运动 (IK求解) |
+| `$c1,c2,c3,c4,c5,c6,c7` | 力矩控制 | 7轴电流, **整数mA** |
 
-### 夹爪命令 (通过 `!` 和 `#`)
-
-夹爪通过 `StepHand` 类控制 (继承 `CtrlStepMotor`, ID=7)：
-- `HAND_O`: `SetAngleWithSpeedLimit(100.0f)` (全开)
-- `HAND_C`: `SetAngleWithSpeedLimit(0.0f)` (全闭)
-- `HAND_POS <0-100>`: 按比例设置角度
+> **注意:** `$` 命令中电流值为整数毫安(mA)，非安培。例如 `$0,0,0,0,0,0,200` 表示夹爪通电200mA。
 
 ---
 
@@ -529,77 +571,64 @@ FOC_current = DCE_Kp × position_error
 
 ---
 
-## 已知问题 (来自 review.md)
+## 已知问题
 
-系统级代码审查报告 `review.md` 记录了以下等级的问题：
+> 完整问题列表和修复状态见 `ISSUES.md`。
 
-### Critical (需立即修复)
+### P0 - 上电前必须修复 (共10个)
 
-- **C-1**: IK/FK 在 5kHz 实时环中执行 → 高计算负载可能超时
-- **C-2**: CAN 带宽不匹配 → 9条TX消息/200μs超过500kbps物理极限
-- **C-3**: `motorJ[ALL]` 仅查询地轨电机 → 臂关节状态监控缺失
+| ID | 问题 | 模块 |
+|----|------|------|
+| P0-1 | 失步检测使用`==`而非`>=`，堵转保护实际无效 | 电机驱动 |
+| P0-2 | 力矩模式Disable后电流未清零 | 主控制器 |
+| P0-3 | CAN中断回调与5kHz控制循环数据竞争 | 主控制器 |
+| P0-4 | Python工具力矩命令格式错误(float vs int mA) | Python工具 |
+| P0-5 | 急停不制动，电机滑行 | 电机驱动 |
+| P0-6 | sqrtf负数参数导致未定义行为 | 电机驱动 |
+| P0-7 | ApplyPositionAsHome未初始化CAN缓冲区 | 主控制器 |
+| P0-8 | SetEnable设置错误状态值 | 主控制器 |
+| P0-9 | 磁铁脱落检测到但无处理 | 电机驱动 |
+| P0-10 | Flash写入后无验证 | 电机驱动 |
 
-### High (高优先级)
-
-- **H-1**: 无超时保护 → ServoJ 丢帧后机器人继续运动
-- **H-2**: ServoJ 周期 ≤1ms 时性能下降
-- **H-3**: CAN 类型转换安全隐患
-- **H-4**: 电机使能逻辑错误
-- **H-5**: CAN 过滤器未配置
-- **H-6**: ServoJ 无到位判断
-
-### Medium (中优先级)
-
-- **M-1**: USB 栈溢出风险
-- **M-2**: 动态内存分配风险
-- **M-3**: MoveJ 速度规划不合理
-- **M-4**: CAN 过滤器配置
-- **M-5**: `std::abs` 歧义
-- **M-6**: 堵转保护无CAN上报
-- **M-7**: 地轨与MoveL联动
-- **M-8**: 命令队列阻塞
-- **M-9**: OLED线程安全
-
-### Low (低优先级)
-
-- **L-1**: YAML解析错误处理
-- **L-2**: PWM占空比限制
-- **L-3**: 主循环栈深度
-
-详见 `e:/Dummy-code/review.md`。
+详见 `ISSUES.md`。
 
 ---
 
-## 串口助手 (Python)
+## 串口助手 (Python调试工具)
 
-`tools/串口助手.py` / `串口助手.py` (根目录副本) 是一个 Tkinter GUI 工具：
+### 功能一览
 
-| 功能 | 说明 |
+| 分类 | 功能 |
 |------|------|
-| 串口连接 | 自动刷新、115200bps |
-| MoveJ | 7滑块控制 + 速度滑块 |
-| MoveL | XYZ + ABC + 速度 |
-| 力矩控制 | 7轴电流滑块 |
-| 系统命令 | !START/DISABLE/STOP/HOME/RESET |
-| 夹爪控制 | 开/关/位置 |
-| ServoJ测试 | 正弦波扫频 |
-| 模式切换 | SEQ/INT/TRJ/Torque/Servo |
-| 查询 | 关节角度、末端位姿 |
-| 波特率 | 9600 / 115200 / 1000000 |
+| **连接** | 串口选择、115200bps、自动刷新 |
+| **MoveJ** | 7滑块(°)+速度滑块、阻塞/非阻塞 |
+| **MoveL** | XYZ(直线mm)+ABC(旋转°)+速度 |
+| **力矩控制** | 7轴电流滑块 (mA) |
+| **系统命令** | !START/DISABLE/STOP/HOME/RESET |
+| **夹爪** | 开/闭/位置(0-100%) |
+| **ServoJ测试** | 正弦波扫频 (50Hz) |
+| **模式切换** | SEQ/INT/TRJ/Torque/Servo |
+| **RGB LED** | 10种灯效、自定义颜色 |
+| **查询** | 关节角度、末端位姿 |
+| **地轨控制** | J7速度/加速度/电流 |
+
+### 波特率支持
+
+9600 / 115200 / 1000000 (1M)
 
 ---
 
-## ROS2 / MoveIt2 接入路径 (规划中)
+## ESP32 模块说明
 
-当前协议为 ASCII 文本，ROS2 接入需要：
+`esp32/` 目录包含 **1995个** Mongoose 网络编程示例，非生产代码:
 
-1. **协议层**: 将 ASCII 协议替换为 Fibre/CAN 或自定义二进制协议
-2. **桥接节点**: Python/C++ 节点在 PC 端解析 ROS2 指令 → CAN 帧
-3. **MoveIt2 配置**: URDF + SRDF + 6-DOF 运动学插件
-4. **控制器**: JointTrajectoryController 替代当前直接位置控制
-5. **状态反馈**: 将 CAN 0x23 回读数据发布为 `/joint_states`
+- HTTP服务器/客户端、WebSocket
+- MQTT (AWS IoT等)
+- lwIP/Ethernet networking
+- STM32 baremetal/FreeRTOS示例
+- NXP/RP2040/Zephyr参考
 
-详见 `review.md` 第11节。
+> 如需WiFi监控或OTA升级，可参考 `esp32/firmware/examples/` 中相关示例。
 
 ---
 
@@ -615,15 +644,6 @@ FOC_current = DCE_Kp × position_error
 | `can.c` (F103) | cmd 0x80~0xBF 广播判断 |
 | `interface_can.cpp` (F103) | 0x89广播急停, 0xA3广播查询 |
 | `串口助手.py` | J7地轨滑块, 7轴力矩, ServoJ 7轴 |
-
-### CAN ID 快速查表
-
-| 电机 | CAN ID | 广播命令响应 |
-|------|--------|------------|
-| 地轨 | 0 | 普通命令 (cmd<0x80) |
-| J1~J6 | 1~6 | 普通命令 (cmd<0x80) |
-| 夹爪 | 7 | 普通命令 (cmd<0x80) |
-| 全部 | 任意 | 广播急停 0x89, 广播查询 0xA3 |
 
 ### 运动学末端链路
 

@@ -1,0 +1,117 @@
+---
+description: Dummy机械臂项目指南 - 必读项目上下文、问题追踪和功能路线图
+alwaysApply: true
+---
+
+# Dummy 7轴机械臂控制项目指南
+
+## 项目概述
+
+这是一个基于 **STM32F405 (主控) + 8×STM32F103 (电机驱动)** 的 **7轴机械臂 + 地轨 + 夹爪** 控制系统，运行 FreeRTOS 实时操作系统。
+
+### 关键文档索引
+
+| 文件 | 用途 |
+|------|------|
+| `README.md` | 项目主文档，包含完整功能说明和用户指南 |
+| `ISSUES.md` | 问题追踪，P0/P1/P2/P3 共 61 个问题及修复状态 |
+| `TODO.md` | 功能路线图，17 个计划开发功能及 6 个阶段规划 |
+| `PROJECT_CONTEXT.md` | 详细项目上下文（系统架构、CAN协议、命令格式、关键常量等） |
+
+## 系统组成速查
+
+| 组件 | 芯片 | CAN ID |
+|------|------|--------|
+| 主控制器 | STM32F405RG, 168MHz, FreeRTOS | - |
+| 电机驱动板 | STM32F103CBT6, 72MHz, FOC | - |
+| 地轨 | 丝杆1605, -250~250mm | ID=0 |
+| 臂关节 J1~J6 | 42/35步进, 50:1减速 | ID=1~6 |
+| 夹爪 | 35步进, 16:1减速 | ID=7 |
+| 通信 | CAN1 500kbps, UART4 115200bps | - |
+
+### 固件目录结构
+
+```
+firmware/
+├── ref_core_f405/          # 主控制器固件 (FreeRTOS)
+│   ├── UserApp/main.cpp    # 入口
+│   ├── UserApp/protocols/  # ASCII/CMD/CAN协议
+│   ├── Robot/instances/    # DummyRobot 7轴实现
+│   ├── Robot/algorithms/   # 6-DOF FK/IK
+│   ├── Robot/actuators/    # CtrlStepMotor CAN接口
+│   └── Bsp/                # CAN/UART/OLED/MPU6050/RGB
+└── motor_fw_f103_all/      # 电机驱动固件 (推荐使用)
+    ├── UserApp/protocols/  # CAN命令解析
+    ├── Ctrl/Motor/         # FOC+motion_planner
+    ├── Ctrl/Driver/         # TB67H450 H桥
+    └── Ctrl/Sensor/Encoder/ # MT6816+标定
+```
+
+## 关键开发约定
+
+### CAN ID 格式
+
+```
+StdId = (nodeID << 7) | cmdCode
+  nodeID: 3 bits (0~7)
+  cmdCode: 0x00~0x7F (普通命令), 0x80~0xBF (广播)
+```
+
+### 运动命令速查
+
+| 格式 | 功能 |
+|------|------|
+| `>j1,j2,j3,j4,j5,j6,j7,speed` | 阻塞MoveJ |
+| `&j1,j2,j3,j4,j5,j6,j7,speed` | 非阻塞MoveJ |
+| `@x,y,z,a,b,c,speed` | MoveL (笛卡尔) |
+| `$c1,c2,c3,c4,c5,c6,c7` | 力矩模式，**整数mA** |
+| `!START/DISABLE/STOP/HOME/RESET` | 系统命令 |
+| `#GETJPOS` / `#GETLPOS` | 查询 |
+
+### 地轨步数
+
+`1mm = 40960 步` (丝杆1605直连, 200步×256微步/5mm导程)
+
+## ⚠️ P0 关键问题 (上电前必读)
+
+以下问题均为 **Critical** 级别，修复前上电存在安全风险：
+
+### P0 关键问题 (上电前必读)
+
+> P0-1 ✅ 已修复 (2026-05-30)，其余待修复。详见 `ISSUES.md`。
+
+### P0-2 ~ P0-10 (待修复)
+
+| ID | 问题 | 文件 | 风险 |
+|----|------|------|------|
+| P0-2 | 力矩模式Disable后电流未清零 | ref_core_f405/dummy_robot.cpp | 电机持续通电 |
+| P0-3 | CAN中断与5kHz环数据竞争 | ref_core_f405/can_protocol.cpp | 数据损坏 |
+| P0-4 | Python力矩命令发float而非int mA | 串口助手.py L893 | 力矩只有1/1000 |
+| P0-5 | 急停只滑行不制动 | motor_fw/interface_can.cpp L250 | 无快速停止 |
+| P0-6 | sqrtf负数参数 (ARM CMSIS返回NaN) | motor_fw/motor.cpp L449 | 计算异常 |
+| P0-7 | ApplyPositionAsHome未初始化CAN缓冲区 | ref_core_f405/ctrl_step.cpp L178 | 垃圾数据上CAN |
+| P0-8 | SetEnable设置 `state=FINISH` 而非 `IDLE` | ref_core_f405/ctrl_step.cpp L22 | 状态语义错误 |
+| P0-9 | 磁铁脱落检测到但无处理 | motor_fw/mt6816_base.cpp L52 | 位置反馈错误 |
+| P0-10 | Flash写入后无读取验证 | motor_fw/encoder_calibrator_base.cpp L291 | 校准数据损坏 |
+
+详见 `ISSUES.md` 完整问题列表。
+
+## 功能路线图优先级
+
+开发新功能前先修复 P0/P1 问题。计划功能详见 `TODO.md`，按阶段分为：
+
+- **Phase 1**: 稳定性与安全加固 (ISSUES.md P0/P1)
+- **Phase 2**: 用户体验增强 (示教编程、夹爪力矩、Python工具改进)
+- **Phase 3**: 感知与安全 (碰撞检测、硬件限位)
+- **Phase 4**: 轨迹与运动规划 (S型曲线、多组队列)
+- **Phase 5**: 扩展接口 (ROS2、云端OTA)
+- **Phase 6**: 高级功能 (视觉抓取、多机协作)
+
+## 工作时行为指引
+
+1. **修改固件前**先确认目标文件属于哪个模块 (主控 ref_core_f405 / 电机驱动 motor_fw)
+2. **修改电机固件**记得通过 `configurations.h` 选择正确的电机类型 (35/42/57)
+3. **修改 CAN 协议**时注意 StdId 格式和广播命令范围
+4. **修改 Python 工具**注意线程安全 (Tkinter 非线程安全)
+5. **不要修改** `PROJECT_CONTEXT.md`，该文件由 AI 自动维护
+6. **不要修改** esp32/ 目录下的示例代码（非生产代码）
