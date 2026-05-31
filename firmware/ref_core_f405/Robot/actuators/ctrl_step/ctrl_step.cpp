@@ -274,6 +274,12 @@ void CtrlStepMotor::UpdateAngleCallback(float _pos, bool _isFinished)
 }
 
 
+void CtrlStepMotor::SetStallMode()
+{
+    state = STALL;
+}
+
+
 void CtrlStepMotor::SetDceKp(int32_t _val)
 {
     uint8_t mode = 0x17;

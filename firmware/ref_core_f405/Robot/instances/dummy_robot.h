@@ -211,12 +211,14 @@ public:
     void UpdateJointPose6D();
     void Reboot();
     void SetEnable(bool _enable);
+    void SetStallMode();
+    void SetStallMode(int motorIndex);
     void Homing();
     void Resting();
     bool IsMoving();
     bool IsEnabled();
     void SetCommandMode(uint32_t _mode);
-    void SetJointCurrents(float c1, float c2, float c3, float c4, float c5, float c6, float c7);
+    void SetJointCurrents(float c0, float c1, float c2, float c3, float c4, float c5, float c6, float c7);
 
     // 暴露出厂端网络可调用结点供调试软件(Reftool等)拉取调用
     auto MakeProtocolDefinitions()
@@ -233,6 +235,7 @@ public:
             make_protocol_object("hand",      hand->MakeProtocolDefinitions()),
             make_protocol_function("reboot",           *this, &DummyRobot::Reboot),
             make_protocol_function("set_enable",       *this, &DummyRobot::SetEnable,       "enable"),
+            make_protocol_function("set_stall_mode",   *this, &DummyRobot::SetStallMode),
             make_protocol_function("set_rgb_enable",   *this, &DummyRobot::SetRGBEnabled,   "enable"),
             make_protocol_function("set_rgb_mode",     *this, &DummyRobot::SetRGBMode,      "mode"),
             make_protocol_function("set_joint_speed",  *this, &DummyRobot::SetJointSpeed,       "speed"),

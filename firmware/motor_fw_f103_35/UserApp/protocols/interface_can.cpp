@@ -28,6 +28,9 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         case 0x01:  // Enable Motor
             motor.controller->requestMode = (*(uint32_t*) (RxData) == 1) ?
                                             Motor::MODE_COMMAND_VELOCITY : Motor::MODE_STOP;
+            // ENABLE 清除堵转标志
+            if (*(uint32_t*) (RxData) == 1)
+                motor.controller->ClearStallFlag();
             break;
         case 0x02:  // Do Calibration
             encoderCalibrator.isTriggered = true;

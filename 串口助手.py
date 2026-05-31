@@ -92,9 +92,18 @@ class RobotSerialAssistant:
         ttk.Button(sys_grid, text="急停 !STOP", command=lambda: self.send_cmd("!STOP")).grid(row=0, column=2, padx=2, pady=2, sticky="ew")
         ttk.Button(sys_grid, text="回零 !HOME", command=lambda: self.send_cmd("!HOME")).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
         ttk.Button(sys_grid, text="休息 !RESET", command=lambda: self.send_cmd("!RESET")).grid(row=1, column=1, padx=2, pady=2, sticky="ew")
-        
+        sys_grid.columnconfigure((0, 1, 2), weight=1)
+
         ttk.Separator(sys_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-        
+
+        ttk.Label(sys_frame, text="堵转检测:", font=("Arial", 9, "bold")).pack(anchor="w", pady=(0, 3))
+        stall_inner = ttk.Frame(sys_frame)
+        stall_inner.pack(fill=tk.X)
+        ttk.Button(stall_inner, text="开启 !STALL_EN", command=lambda: self.send_cmd("!STALL_EN")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        ttk.Button(stall_inner, text="关闭 !STALL_DIS", command=lambda: self.send_cmd("!STALL_DIS")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        ttk.Separator(sys_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+
         ttk.Label(sys_frame, text="模式切换:", font=("Arial", 9, "bold")).pack(anchor="w", pady=(0, 3))
         mode_inner = ttk.Frame(sys_frame)
         mode_inner.pack(fill=tk.X)
@@ -143,7 +152,39 @@ class RobotSerialAssistant:
         hand_calib_frame = ttk.Frame(hand_frame)
         hand_calib_frame.pack(fill=tk.X, pady=(0, 6))
         ttk.Button(hand_calib_frame, text="标定 !HAND_ZERO", command=self.send_hand_zero).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        
+
+        hand_current_frame = ttk.Frame(hand_frame)
+        hand_current_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(hand_current_frame, text="力矩(A):", font=("Arial", 9)).pack(side=tk.LEFT)
+        self.ent_hand_current = ttk.Entry(hand_current_frame, width=5, font=("Arial", 9))
+        self.ent_hand_current.insert(0, "1.2")
+        self.ent_hand_current.pack(side=tk.LEFT, padx=(5, 2))
+        self.scl_hand_current = ttk.Scale(hand_current_frame, from_=0.05, to=2.0, orient=tk.HORIZONTAL)
+        self.scl_hand_current.set(1.2)
+        self.scl_hand_current.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.lbl_hand_current_val = ttk.Label(hand_current_frame, text="1.2", width=4, font=("Arial", 9))
+        self.lbl_hand_current_val.pack(side=tk.LEFT, padx=2)
+        ttk.Button(hand_current_frame, text="发送", width=5, command=self.send_hand_current).pack(side=tk.LEFT, padx=(5, 0))
+
+        def update_hand_current_from_scale(val):
+            v = round(float(val), 1)
+            self.lbl_hand_current_val.config(text=f"{v:.1f}")
+            if self.ent_hand_current.get() != f"{v:.1f}":
+                self.ent_hand_current.delete(0, tk.END)
+                self.ent_hand_current.insert(0, f"{v:.1f}")
+        self.scl_hand_current.config(command=update_hand_current_from_scale)
+
+        def update_hand_current_from_entry(event):
+            try:
+                v = float(self.ent_hand_current.get())
+                if 0.05 <= v <= 2.0:
+                    self.scl_hand_current.set(v)
+                    self.lbl_hand_current_val.config(text=f"{v:.1f}")
+            except ValueError:
+                pass
+        self.ent_hand_current.bind("<Return>", update_hand_current_from_entry)
+        self.ent_hand_current.bind("<FocusOut>", update_hand_current_from_entry)
+
         hand_slider = ttk.Frame(hand_frame)
         hand_slider.pack(fill=tk.X)
         ttk.Label(hand_slider, text="开度:", font=("Arial", 9)).pack(side=tk.LEFT)
@@ -393,15 +434,14 @@ class RobotSerialAssistant:
         torque_grid.pack(fill=tk.X, pady=(0, 6))
         self.ent_torques = []
         for i in range(7):
-            r, c = divmod(i, 4) 
-            lbl_text = f"J{i+1}" if i < 6 else "J7(地轨)"
-            lbl_color = ("Arial", 9, "bold") if i < 6 else ("Arial", 9, "bold")
+            r, c = divmod(i, 4)
+            lbl_text = "J0(地轨)" if i == 0 else f"J{i+1}"
             ttk.Label(torque_grid, text=f"{lbl_text}(A):").grid(row=r, column=c*2, padx=(5, 2), pady=3, sticky="e")
             ent = ttk.Entry(torque_grid, width=6)
             ent.insert(0, "0.0")
             ent.grid(row=r, column=c*2+1, padx=2, pady=3, sticky="w")
             self.ent_torques.append(ent)
-        
+
         ttk.Button(torque_frame, text="发送全关节力矩指令", command=self.send_torque).pack(fill=tk.X)
 
         # ==================== 右栏：运动控制 ====================
@@ -409,7 +449,7 @@ class RobotSerialAssistant:
         right_frame.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
 
         # 1. 关节运动 MoveJ
-        movej_frame = ttk.LabelFrame(right_frame, text="关节控制 (MoveJ: >j1~j6, j7(地轨mm), speed)", padding=6)
+        movej_frame = ttk.LabelFrame(right_frame, text="关节控制 (MoveJ: >j0(地轨),j1~j6,speed)", padding=6)
         movej_frame.pack(fill=tk.X, pady=(0, 6))
         
         movej_grid = ttk.Frame(movej_frame)
@@ -467,8 +507,8 @@ class RobotSerialAssistant:
             ent.bind("<Return>", update_joint_scl)
             ent.bind("<FocusOut>", update_joint_scl)
         
-        # 地轨滑块 (J7, 单位: mm, 范围 -250~250，支持手动归位)
-        ttk.Label(movej_grid, text="J7(地轨):", font=("Arial", 9, "bold"), foreground="#007ACC").grid(row=6, column=0, padx=5, pady=1)
+        # 地轨滑块 (J0=地轨, 单位: mm, 范围 -250~250，支持手动归位)
+        ttk.Label(movej_grid, text="地轨(J0):", font=("Arial", 9, "bold"), foreground="#007ACC").grid(row=6, column=0, padx=5, pady=1)
         self.ent_j7 = ttk.Entry(movej_grid, width=6)
         self.ent_j7.insert(0, "0")
         self.ent_j7.grid(row=6, column=1, padx=5, pady=1)
@@ -721,6 +761,18 @@ class RobotSerialAssistant:
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
+    def send_hand_current(self):
+        """发送 #I_LIMIT_J 8 命令，设置夹爪电流限制"""
+        try:
+            current = float(self.ent_hand_current.get())
+            if 0.05 <= current <= 2.0:
+                self.send_cmd(f"#I_LIMIT_J 8 {current}")
+                self.log(f"已发送 #I_LIMIT_J 8 {current}（夹爪电流限制）", "INFO")
+            else:
+                messagebox.showerror("错误", "夹爪电流必须在 0.05~2.0A 之间")
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字")
+
     def send_calibration(self):
         """发送 !CALIBRATION 命令，对所有6个关节应用当前电机位置作为零点偏移"""
         self.send_cmd("!CALIBRATION")
@@ -893,7 +945,7 @@ class RobotSerialAssistant:
     def send_torque(self):
         try:
             torques = [float(ent.get()) for ent in self.ent_torques]
-            # $c1,c2,c3,c4,c5,c6,c7(地轨)
+            # $c0(地轨),c1~c6(关节) — 共7轴；夹爪由!HAND_O/!HAND_C/!HAND_I控制
             cmd = f"${torques[0]:.2f},{torques[1]:.2f},{torques[2]:.2f},{torques[3]:.2f},{torques[4]:.2f},{torques[5]:.2f},{torques[6]:.2f}"
             self.send_cmd(cmd)
         except ValueError:
@@ -919,7 +971,8 @@ class RobotSerialAssistant:
 
     def servoj_test_loop(self):
         start_time = time.time()
-        base_joints = [0, -75, 180, 0, 0, 0, 0]  # 7个关节: J1-J6 + J7(地轨)
+        # J0=地轨, J1~J6=关节
+        base_joints = [0, -75, 180, 0, 0, 0, 0]  # 7个轴: J0(地轨mm)~J6
         
         kp = 0.5
         current_joint_cache = base_joints.copy()

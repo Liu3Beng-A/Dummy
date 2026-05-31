@@ -23,7 +23,7 @@
 | 电机驱动板 | STM32F103CBT6 | ×8 | Cortex-M3, 72MHz, FOC步进 |
 | 地轨电机 | 丝杆1605 | ×1 | 直连(1:1), 行程 -250~250mm, CAN ID=0 |
 | 臂关节电机 | 42/35步进 | ×6 | 50:1减速, CAN ID 1~6 |
-| 夹爪电机 | 35步进 | ×1 | 16:1减速, CAN ID=7 |
+| 夹爪电机 | 35步进 | ×1 | 16:1减速, CAN ID=8 |
 | 通信总线 | CAN1 | 500kbps | 连接主控与所有电机 |
 | 调试串口 | UART4 | 115200bps | 主控命令接口 |
 | USB | USB_OTG_FS | CDC/VCP | 备用命令接口 |
@@ -155,7 +155,7 @@ e:/Dummy-code/
         │                          │                          │
  OLED   │                          │  CAN ID=0: 地轨 (mm)     │
  MPU6050│                          │  CAN ID=1~6: 臂关节 (°) │
- RGB WS │                          │  CAN ID=7: 夹爪         │
+ RGB WS │                          │  CAN ID=8: 夹爪         │
         │                          └──────────────────────────┘
 ```
 
@@ -422,7 +422,7 @@ dummy.tuningHelper.Tick(10);             // 扫频调试
 
 ```
 StdId = (nodeID << 7) | cmdCode
-  nodeID: 3 bits (0~7)
+  nodeID: 4 bits (0~8)
   cmdCode: 7 bits
 
 普通命令: cmdCode 0x00~0x7F (发往特定节点)
@@ -507,7 +507,6 @@ Byte 7:    uint8_t isFinished // 0=运动中, 1=到位
 | `!HAND_DIS` | 失能夹爪 |
 | `!HAND_ZERO` | 夹爪标定 |
 | `!HAND_POS <0-100>` | 夹爪位置控制 |
-| `!HAND_I <0-2>` | 夹爪电流档位 |
 
 ### 查询命令 (`#` 前缀)
 

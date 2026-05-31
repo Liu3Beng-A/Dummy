@@ -82,14 +82,40 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 case 0x25:
                     memcpy(&dummy.motorJ[0]->temperature, data, sizeof(uint32_t));
                     break;
+                case 0x7C:
+                    // 电机主动上报堵转
+                    if (data[1] == 1)
+                        dummy.SetStallMode(0);
+                    break;
                 default:
                     break;
             }
             dummy.UpdateJointAnglesCallback();
             return;
         }
-        // ── 夹爪电机 (nodeID=7) 的 CAN 回包处理 ──
-        else if (id == 7)
+        // ── 臂关节电机 (nodeID=1~6) 的 CAN 回包处理 ──
+        else if (id >= 1 && id <= 6)
+        {
+            switch (cmd)
+            {
+                case 0x23:
+                    dummy.motorJ[id]->UpdateAngleCallback(*(float*) (data), data[4]);
+                    break;
+                case 0x25:
+                     memcpy(&dummy.motorJ[id]->temperature, data, sizeof(uint32_t));
+                    break;
+                case 0x7C:
+                    // 电机主动上报堵转
+                    if (data[1] == 1)
+                        dummy.SetStallMode((int)id);
+                    break;
+                default:
+                    break;
+            }
+            dummy.UpdateJointAnglesCallback();
+        }
+        // ── 夹爪电机 (nodeID=8) 的 CAN 回包处理 ──
+        else if (id == 8)
         {
             switch (cmd)
             {
@@ -102,24 +128,6 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 default:
                     break;
             }
-            dummy.UpdateJointAnglesCallback();
-            return;
-        }
-        else if (id >= 1 && id <= 6)
-        {
-            /* ── 臂关节电机 (nodeID=1~6) 的 CAN 回包处理 ── */
-            switch (cmd)
-            {
-                case 0x23:
-                    dummy.motorJ[id]->UpdateAngleCallback(*(float*) (data), data[4]);
-                    break;
-                case 0x25:
-                     memcpy(&dummy.motorJ[id]->temperature, data, sizeof(uint32_t));
-                    break;
-                default:
-                    break;
-            }
-            dummy.UpdateJointAnglesCallback();
         }
 
     } else if (canCtx->handle->Instance == CAN2)

@@ -117,7 +117,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             }
         }
 
-        /* ── 夹爪控制指令（hand，节点ID=7）──
+        /* ── 夹爪控制指令（hand，节点ID=8）──
          *
          * 夹爪控制说明：
          *   !CALIBRATION      → 关节零点标定（6轴同时应用零点）
@@ -127,7 +127,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
          *   !HAND_EN          → 使能夹爪电机
          *   !HAND_DIS         → 失能夹爪电机
          *   !HAND_POS <0-100> → 位置模式：0=完全张开，100=完全闭合
-         *   !HAND_I  <0-2.0> → 设置电流幅值（A），影响 HAND_O/HAND_C 力度
          */
         else if (s.find("HAND_ZERO") != std::string::npos)
         {
@@ -147,7 +146,24 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             dummy.hand->SetAngleWithCurrentLimit(1);
             Respond(_responseChannel, "ok hand close");
         }
-        
+
+        /* ── 堵转检测控制指令 ──
+         * !STALL_EN  → 开启所有电机堵转检测（发 CAN 0x1B 到 J0~J6）
+         * !STALL_DIS → 关闭所有电机堵转检测
+         */
+        else if (s.find("STALL_EN") != std::string::npos)
+        {
+            for (int i = 0; i < 7; i++)
+                dummy.motorJ[i]->SetEnableStallProtect(true);
+            Respond(_responseChannel, "ok stall protect enabled");
+        }
+        else if (s.find("STALL_DIS") != std::string::npos)
+        {
+            for (int i = 0; i < 7; i++)
+                dummy.motorJ[i]->SetEnableStallProtect(false);
+            Respond(_responseChannel, "ok stall protect disabled");
+        }
+
         /* ── RGB 信仰灯控制指令 ──
          * !RGB_EN         → 开灯
          * !RGB_DIS        → 关灯
@@ -280,29 +296,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             {
                 Respond(_responseChannel,
                         "error hand position - Invalid format. Use !HAND_POS <0-100>");
-            }
-        }
-        else if (s.find("HAND_I") != std::string::npos)
-        {
-            /* 格式：!HAND_I <0-2.0>，设置电流控制时的幅值（A） */
-            float cu;
-            if (sscanf(_cmd, "!HAND_I %f", &cu) == 1)
-            {
-                if (cu > 0 && cu <= 2.0f)
-                {
-                    dummy.hand->current = cu;
-                    Respond(_responseChannel, "ok hand current %f", cu);
-                }
-                else
-                {
-                    Respond(_responseChannel,
-                            "error hand current %f - Value must be in range (0, 2.0]", cu);
-                }
-            }
-            else
-            {
-                Respond(_responseChannel,
-                        "error hand current - Invalid format. Use !HAND_I <0-2.0>");
             }
         }
         else if (s.find("PRINTPOSE") != std::string::npos)
@@ -546,6 +539,11 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 dummy.motorJ[node]->SetCurrentLimit(I);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f]", node, I);
             }
+            else if (node == 8)
+            {
+                dummy.hand->SetCurrentLimit(I);
+                Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪)", I);
+            }
             else
             {
                 Respond(_responseChannel,
@@ -732,26 +730,6 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 Respond(_responseChannel, "error hand position - Invalid format. Use !HAND_POS <0-100>");
             }
         }
-        else if (s.find("HAND_I") != std::string::npos)
-        {
-            float cu;
-            if (sscanf(_cmd, "!HAND_I %f", &cu) == 1)
-            {
-                if (cu > 0 && cu <= 2.0f)
-                {
-                    dummy.hand->current = cu;
-                    Respond(_responseChannel, "ok hand current %f", cu);
-                }
-                else
-                {
-                    Respond(_responseChannel, "error hand current %f - Value must be in range (0, 2.0]", cu);
-                }
-            }
-            else
-            {
-                Respond(_responseChannel, "error hand current - Invalid format. Use !HAND_I <0-2.0>");
-            }
-        }
         else if (s.find("HAND_O") != std::string::npos)
         {
             dummy.hand->SetAngleWithCurrentLimit(-1);
@@ -761,6 +739,18 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             dummy.hand->SetAngleWithCurrentLimit(1);
             Respond(_responseChannel, "ok hand close");
+        }
+        else if (s.find("STALL_EN") != std::string::npos)
+        {
+            for (int i = 0; i < 7; i++)
+                dummy.motorJ[i]->SetEnableStallProtect(true);
+            Respond(_responseChannel, "ok stall protect enabled");
+        }
+        else if (s.find("STALL_DIS") != std::string::npos)
+        {
+            for (int i = 0; i < 7; i++)
+                dummy.motorJ[i]->SetEnableStallProtect(false);
+            Respond(_responseChannel, "ok stall protect disabled");
         }
         else if (s.find("RGB_EN") != std::string::npos)
         {
@@ -1082,6 +1072,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             {
                 dummy.motorJ[node]->SetCurrentLimit(I);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f]", node, I);
+            }
+            else if (node == 8)
+            {
+                dummy.hand->SetCurrentLimit(I);
+                Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪)", I);
             }
             else
             {

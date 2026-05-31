@@ -30,7 +30,7 @@ inline float AbsMaxOf6(DOF6Kinematic::Joint6D_t _joints, uint8_t &_index)
 /**
  * @brief 主脑对象初始化部署程序
  * @param _hcan 通信层所强依赖的 CAN 指令下发数据流桥接通道句柄
- * @note 构建完备系统骨骼：motorJ[0]=地轨(ID=0), motorJ[1-6]=臂关节(ID=1-6), hand=夹爪(ID=7)
+ * @note 构建完备系统骨骼：motorJ[0]=地轨(ID=0), motorJ[1-6]=臂关节(ID=1-6), hand=夹爪(ID=8)
  */
 DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
     hcan(_hcan)
@@ -45,7 +45,7 @@ DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
     motorJ[5] = new CtrlStepMotor(_hcan, 5, true,  50, -100, 100);
     motorJ[6] = new CtrlStepMotor(_hcan, 6, true,  30, -180, 180);
 
-    hand = new StepHand(_hcan, 7);
+    hand = new StepHand(_hcan, 8);
 
     // 地轨位置初始化（mm）
     currentRailPos = 0.0f;
@@ -432,6 +432,22 @@ void DummyRobot::SetJointAcceleration(float _acc)
 /**
  * @brief 复归寻位归零标定启动策略流程
  */
+void DummyRobot::SetStallMode()
+{
+    SetStallMode(-1);  // 不指定电机，全部停住
+}
+
+void DummyRobot::SetStallMode(int motorIndex)
+{
+    // 切换 RGB 为红色心跳，视觉提示堵转
+    SetRGBMode(RGB::RED_HEARTBEAT);
+    // 停发新位置指令，保持当前位置
+    targetJoints = currentJoints;
+    // 清空指令队列，防止残留指令堆积
+    commandHandler.ClearFifo();
+    (void)motorIndex;  // 未来可用于区分哪个电机堵转并做针对性处理
+}
+
 void DummyRobot::Homing()
 {
     float lastSpeed = jointSpeed;
@@ -488,6 +504,8 @@ void DummyRobot::SetEnable(bool _enable)
 
     for (int i = 1; i <= 6; i++)
         motorJ[i]->SetEnable(_enable);
+    motorJ[0]->SetEnable(_enable);  // 地轨
+    hand->SetEnable(_enable);       // 夹爪
     isEnabled = _enable;
 }
 
@@ -643,7 +661,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
     // [分支拦截] $ 高频投递的力控透传包剥离拦截，规避无意义繁杂判决延宕
     if (_cmd[0] == '$')
     {
-        // $c1,c2,c3,c4,c5,c6,c7(地轨)
+        // $c0(地轨),c1~c6(关节),c7(夹爪)
         float cur[7];
         argNum = sscanf(_cmd.c_str(), "$%f,%f,%f,%f,%f,%f,%f",
                         &cur[0], &cur[1], &cur[2], &cur[3], &cur[4], &cur[5], &cur[6]);
@@ -653,7 +671,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
             if (context->commandMode != COMMAND_TORQUE_CONTROL)
                 context->SetCommandMode(COMMAND_TORQUE_CONTROL);
 
-            context->SetJointCurrents(cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6]);
+            context->SetJointCurrents(cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], 0.0f);
         }
         return osMessageQueueGetSpace(commandFifo);
     }
@@ -671,7 +689,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
         case COMMAND_TARGET_POINT_SEQUENTIAL:
             if (_cmd[0] == '>' || _cmd[0] == '&')
             {
-                // >j1,j2,j3,j4,j5,j6,j7(地轨),speed
+                // >j0(地轨),j1~j6(关节),j7(夹爪),speed
                 float joints[6];
                 float j7 = 0.0f;
                 float speed = 0.0f;
@@ -724,7 +742,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
         case COMMAND_CONTINUES_TRAJECTORY:
             if (_cmd[0] == '>' || _cmd[0] == '&')
             {
-                // >j1,j2,j3,j4,j5,j6,j7(地轨),speed
+                // >j0(地轨),j1~j6(关节),j7(夹爪),speed
                 float joints[6];
                 float j7 = 0.0f;
                 float speed = 0.0f;
@@ -773,7 +791,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
         case COMMAND_TARGET_POINT_INTERRUPTABLE:
             if (_cmd[0] == '>' || _cmd[0] == '&')
             {
-                // >j1,j2,j3,j4,j5,j6,j7(地轨),speed
+                // >j0(地轨),j1~j6(关节),j7(夹爪),speed
                 float joints[6];
                 float j7 = 0.0f;
                 float speed = 0.0f;
@@ -827,7 +845,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
         case COMMAND_SERVO_J:
             if (_cmd[0] == '>' || _cmd[0] == '&')
             {
-                // >j1,j2,j3,j4,j5,j6,j7(地轨)
+                // >j0(地轨),j1~j6(关节),j7(夹爪)
                 float joints[6];
                 float j7 = 0.0f;
                 argNum = sscanf(_cmd.c_str(), (_cmd[0] == '>') ?
@@ -895,9 +913,9 @@ void DummyRobot::TuningHelper::SetFreqAndAmp(float _freq, float _amp)
 
 /**
  * @brief 用于高速模式七维动力透传执行封装调用模块
- * @param c1~c6: 臂关节电流 (A), c7: 地轨电流 (mA)
+ * @param c0: 地轨电流 (A), c1~c6: 臂关节电流 (A), c7: 夹爪电流 (A, 由!HAND_I单独控制，此参数填0)
  */
-void DummyRobot::SetJointCurrents(float c1, float c2, float c3, float c4, float c5, float c6, float c7)
+void DummyRobot::SetJointCurrents(float c0, float c1, float c2, float c3, float c4, float c5, float c6, float c7)
 {
     targetCurrents[0] = c1;
     targetCurrents[1] = c2;
@@ -905,7 +923,7 @@ void DummyRobot::SetJointCurrents(float c1, float c2, float c3, float c4, float 
     targetCurrents[3] = c4;
     targetCurrents[4] = c5;
     targetCurrents[5] = c6;
-    targetRailCurrent = c7;
+    targetRailCurrent = c0;
 
     if (!isEnabled)
         SetEnable(true);

@@ -101,3 +101,6 @@
 495	881	8018311135804633	CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/main.cpp.obj	bce259624b234f98
 164	1180	8018311132479283	CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_tim.c.obj	c79353b586b233f4
 1180	1461	8018311142653553	Ctrl-Step-STM32-fw.elf	9f679f86f21b854c
+84	2148	8018936508794855	CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/UserApp/protocols/interface_can.cpp.obj	357cbc7d310f4476
+34	483	8018936831435694	CMakeFiles/Ctrl-Step-STM32-fw.elf.dir/Ctrl/Motor/motor.cpp.obj	57dd1aa8772b98fb
+484	886	8018936835935389	Ctrl-Step-STM32-fw.elf	9f679f86f21b854c

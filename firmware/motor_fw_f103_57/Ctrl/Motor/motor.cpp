@@ -1,5 +1,6 @@
 #include "configurations.h"
 #include "motor.h"
+#include <can.h>
 
 #include <cmath>
 
@@ -274,8 +275,17 @@ void Motor::CloseLoopControlTick()
         {
             if (abs(controller->estVelocity) < MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 5)
             {
-                if (controller->stalledTime >= 1000 * 1000)
+                if (controller->stalledTime >= 1000 * 1000) {
                     controller->isStalled = true;
+                    // 主动上报堵转: StdId = (nodeID << 7) | 0x7C, Data[0]=nodeID, Data[1]=1(stall)
+                    CAN_TxHeaderTypeDef txHdr = {};
+                    txHdr.StdId = (boardConfig.canNodeId << 7) | 0x7C;
+                    txHdr.IDE = CAN_ID_STD;
+                    txHdr.RTR = CAN_RTR_DATA;
+                    txHdr.DLC = 8;
+                    uint8_t txData[8] = { (uint8_t)boardConfig.canNodeId, 1, 0, 0, 0, 0, 0, 0 };
+                    CAN_Send(&txHdr, txData);
+                }
                 else
                     controller->stalledTime += motionPlanner.CONTROL_PERIOD;
             }

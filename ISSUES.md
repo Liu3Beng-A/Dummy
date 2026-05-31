@@ -1,7 +1,7 @@
 # Dummy 机械臂固件问题追踪与待办
 
 > 生成时间: 2026-05-30
-> 状态: P0-1 已修复 (2026-05-30)，其余待修复
+> 状态: P0-1, P0-11 已修复 (2026-05-30/31)，其余待修复
 
 ---
 
@@ -166,6 +166,24 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | **严重性** | Critical |
 | **问题** | 编码器校准数据写入Flash后未读取验证，写入失败时静默继续运行 |
 | **修复方案** | 写入后立即读取并逐字节比较，不匹配则报错重试 |
+
+---
+
+### P0-11: 电机堵转后无主动通知
+
+| 属性 | 值 |
+|------|-----|
+| **模块** | motor_fw_f103_35/42/57 + ref_core_f405 |
+| **文件** | `Ctrl/Motor/motor.cpp` / `UserApp/protocols/can_protocol.cpp` |
+| **位置** | `CloseLoopControlTick()` L278, `OnCanMessage()` 0x7C 处理 |
+| **严重性** | Critical |
+| **问题** | 电机堵转后仅切换STATE_STALL+LED闪烁，主控完全不知晓；errorCode字段虽存在但主控从未读取；且堵转后电机Sleep导致无锁力 |
+| **修复方案** | ✅ 已修复 (2026-05-31): |
+| | 1. 电机堵转时主动发送CAN帧 `(nodeID<<7)\|0x7C`，Data[0]=nodeID, Data[1]=1 |
+| | 2. 主控收到0x7C后调用 `SetStallMode()`，切换RGB为红色心跳、停发新指令、清空队列 |
+| | 3. ENABLE命令(0x01, data=1)清除电机isStalled标志，恢复正常 |
+| **修复日期** | 2026-05-31 |
+| **改动文件** | `motor_fw_f103_35/42/57/Ctrl/Motor/motor.cpp`, `motor_fw_f103_35/42/57/UserApp/protocols/interface_can.cpp`, `ref_core_f405/UserApp/protocols/can_protocol.cpp`, `ref_core_f405/Robot/actuators/ctrl_step.hpp/.cpp`, `ref_core_f405/Robot/instances/dummy_robot.hpp/.cpp` |
 
 ---
 
@@ -509,6 +527,20 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 
 ---
 
+### P1-27: 主控制器 SetEnable 漏掉地轨和夹爪
+
+| 属性 | 值 |
+|------|-----|
+| **模块** | ref_core_f405 |
+| **文件** | Robot/instances/dummy_robot.cpp |
+| **位置** | SetEnable() 函数 |
+| **严重性** | Critical |
+| **问题** | 循环只处理 motorJ[1-6]，漏掉了 motorJ[0](地轨) 和 hand(夹爪)；导致 !ENABLE 无法使能夹爪，!DISABLE 无法失能地轨；!HAND_EN 直接调用 hand 所以正常 |
+| **修复方案** | 已修复 (2026-05-31): 在循环后单独调用 motorJ[0]->SetEnable() 和 hand->SetEnable() |
+| **修复日期** | 2026-05-31 |
+
+---
+
 ## P2 - 计划中版本
 
 ### P2-1: 合并USB和UART4 ASCII命令解析器
@@ -795,11 +827,11 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 
 | 优先级 | Critical | High | Medium | Low | 合计 |
 |--------|---------|------|--------|-----|------|
-| P0 | 9 | 0 | 0 | 0 | **9** |
-| P1 | 1 | 18 | 6 | 1 | **26** |
+| P0 | 10 | 0 | 0 | 0 | **10** |
+| P1 | 2 | 18 | 6 | 1 | **27** |
 | P2 | 0 | 0 | 9 | 6 | **15** |
 | P3 | 0 | 0 | 3 | 7 | **10** |
-| **合计** | **11** | **18** | **18** | **14** | **61** |
+| **合计** | **12** | **18** | **18** | **14** | **61** |
 
 ---
 
@@ -817,6 +849,7 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | P0-8 | SetEnable状态语义错误 | [ ] | | |
 | P0-9 | 无磁检测无处理 | [ ] | | |
 | P0-10 | Flash写入无验证 | [ ] | | |
+| P0-11 | 电机堵转主动通知+ENABLE清除 | [x] | 2026-05-31 | motor_fw_f103_35/42/57 motor.cpp+interface_can.cpp, ref_core_f405 can_protocol.cpp+ctrl_step+dummy_robot |
 | P1-1 | IK永远返回true | [ ] | | |
 | P1-2 | 命令队列满返回255 | [ ] | | |
 | P1-3 | 地轨单位混淆 | [ ] | | |
@@ -842,4 +875,5 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | P1-23 | 关节角度无验证 | [ ] | | |
 | P1-24 | ServoJ停止不干净 | [ ] | | |
 | P1-25 | MPU6050过滤器状态不重置 | [ ] | | |
-| P1-26 | IsMoving地轨位检查含混 | [ ] | | |
+| P1-26 | IsMoving地轨位检查含混 | [ ] |
+| P1-27 | SetEnable漏掉地轨夹爪 | [x] | 2026-05-31 | dummy_robot.cpp SetEnable() | | |

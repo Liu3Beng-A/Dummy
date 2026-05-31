@@ -11,7 +11,8 @@ public:
     {
         RUNNING,
         FINISH,
-        STOP
+        STOP,
+        STALL
     };
 
 
@@ -55,6 +56,7 @@ public:
 
     void UpdateAngle();
     void UpdateAngleCallback(float _pos, bool _isFinished);
+    void SetStallMode();
 
 
     // Communication protocol definitions
