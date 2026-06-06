@@ -254,6 +254,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         {
             extern Motor motor;
             motor.controller->requestMode = Motor::MODE_STOP;
+            motor.controller->SetBrake(true);  // P0-5: brake instead of coast
             motor.controller->SetVelocitySetPoint(0);
             motor.controller->SetCurrentSetPoint(0);
             printf("[CAN BROADCAST] Emergency Stop Received!\r\n");

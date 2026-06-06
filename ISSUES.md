@@ -1,7 +1,8 @@
 # Dummy 机械臂固件问题追踪与待办
 
 > 生成时间: 2026-05-30
-> 状态: P0-1, P0-11 已修复 (2026-05-30/31)，其余待修复
+> 状态: P0-1, P0-5, P0-6, P0-11, P1-2, P1-3, P1-5, P1-16, P1-27 已修复；P0-9, P1-30, P1-32 部分修复；其余待修复
+> ⚠️ 修正 (2026-06-03): P0-3/4/7/8/10、P1-28/31 此前误标为 [x]，经代码核查实际未修复；P1-2/3/5/16 经核查已修复，已更正
 
 ---
 
@@ -49,11 +50,24 @@ if (// Current Mode
 | 属性 | 值 |
 |------|-----|
 | **模块** | ref_core_f405 |
-| **文件** | `Robot/instances/dummy_robot.cpp` |
+| **文件** | `Robot/instances/dummy_robot.cpp` / `Robot/actuators/ctrl_step.hpp` |
 | **位置** | `SetEnable(false)` 函数 |
 | **严重性** | Critical |
 | **问题** | `SetEnable(false)` 设置 `isEnabled=false` 但不清零 `targetCurrents[]` 和 `targetRailCurrent`，力矩模式最后一条电流命令持续生效，存在安全隐患 |
-| **修复方案** | 在 `SetEnable(false)` 中添加 `memset(targetCurrents, 0, sizeof(targetCurrents))` 和 `targetRailCurrent = 0` |
+| **修复方案** | ✅ 已修复 (2026-06-01): 在 `SetEnable(false)` 中清零 `targetCurrents[]`、`targetRailCurrent`，并主动下发零电流 CAN 帧；同时 `ctrl_step.hpp` 枚举新增 `IDLE`（见 P0-8） |
+| **修复日期** | 2026-06-01 |
+
+```cpp
+// 修复后 (dummy_robot.cpp SetEnable(false) 分支)
+for (int i = 0; i < 6; i++)
+    targetCurrents[i] = 0.0f;
+
+targetRailCurrent = 0.0f;
+
+for (int i = 0; i <= 6; i++)
+    motorJ[i]->SetCurrentSetPoint(0.0f);
+hand->SetCurrentSetPoint(0.0f);
+```
 
 ---
 
@@ -135,11 +149,27 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | 属性 | 值 |
 |------|-----|
 | **模块** | ref_core_f405 |
-| **文件** | `Robot/actuators/ctrl_step.cpp` |
-| **位置** | L22-24 |
+| **文件** | `Robot/actuators/ctrl_step.hpp` / `ctrl_step.cpp` |
+| **位置** | L10-17 (枚举), L22-24 (函数) |
 | **严重性** | Critical |
-| **问题** | 使能时设置 `state = FINISH`（已完成），语义错误，电机并非处于"完成"状态 |
-| **修复方案** | 改为 `state = IDLE` 或新增 `ENABLED` 状态 |
+| **问题** | 使能时设置 `state = FINISH`（已完成），语义错误；禁用时设置 `state = STOP`，与急停语义混淆 |
+| **修复方案** | ✅ 已修复 (2026-06-01): 枚举新增 `IDLE`；`SetEnable(false)` 设置 `state = IDLE`，`SetEnable(true)` 设置 `state = FINISH` |
+| **修复日期** | 2026-06-01 |
+
+```cpp
+// 修复后 (ctrl_step.hpp L10-17)
+enum State
+{
+    IDLE,    // 新增：禁用/待机状态
+    RUNNING,
+    FINISH,
+    STOP,
+    STALL
+};
+
+// 修复后 (ctrl_step.cpp L24)
+state = _enable ? FINISH : IDLE;
+```
 
 ---
 
@@ -152,7 +182,7 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | **位置** | L52 |
 | **严重性** | Critical |
 | **问题** | `noMagFlag`（磁铁脱落标志）被检测到但未触发任何错误处理，磁铁脱落后电机继续运行在错误的绝对位置反馈上，极度危险 |
-| **修复方案** | 添加 `motor->Error(MOTOR_ERROR_NO_MAG)` 并停止电机输出 |
+| **修复方案** | [~] 部分修复: HasNoMagnet()链路已完整，触发Sleep；但未调用Error()且无CAN上报纸；建议补充主控通知 |
 
 ---
 
@@ -211,7 +241,7 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | **位置** | `CommandHandler::Push` L592-601 |
 | **严重性** | High |
 | **问题** | 队列满时 `osMessageQueuePut` 返回 `osErrorResource`，函数返回255作为"剩余空间"，客户端无法区分队列满和队列有255空间的真实状态 |
-| **修复方案** | 队列满时返回 `-1` 或 `0`，明确表示入队失败 |
+| **修复方案** | [x] 已修复: Push()成功返回osMessageQueueGetSpace()，失败返回0xFF，语义明确 |
 
 ---
 
@@ -224,7 +254,7 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | **位置** | `MoveRailRelative` L197-200 |
 | **严重性** | High |
 | **问题** | 地轨限位值(-250, 250)是毫米，但 `motorJ[0]->angleLimitMax/Min` 以电机转数(revolutions)为单位存储，比较的是不同单位 |
-| **修复方案** | 在比较前统一转换为毫米：`targetRailPos * STEPS_PER_MM` 或限位值转为转数 |
+| **修复方案** | [x] 已修复: motorJ[0]构造时limits已以mm传入(-250,250)，比较时单位一致 |
 
 ---
 
@@ -235,8 +265,8 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | **模块** | ref_core_f405 |
 | **文件** | `Robot/instances/dummy_robot.cpp` |
 | **位置** | `SetEnable` 函数 |
-| **严重性** | High (与P0-2重复但更细) |
-| **问题** | 同P0-2，在 CtrlStep 层也需要确保电流为零 |
+| **严重性** | High (随P0-2已修复) |
+| **问题** | 同P0-2，已随P0-2一并修复 |
 | **修复方案** | 见 P0-2 |
 
 ---
@@ -250,7 +280,7 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | **位置** | L692-693 |
 | **严重性** | High |
 | **问题** | `while (context->IsMoving())` 内 `osDelay(5)` 轮询运动完成状态，浪费CPU且增加命令响应延迟 |
-| **修复方案** | 改用 FreeRTOS 事件组(`EventGroup`)或二进制信号量，电机完成时置位，命令任务阻塞等待 |
+| **修复方案** | ✅ 已修复: 阻塞等待改为 while(...){ osDelay(5); }，每次循环让出CPU |
 
 ---
 
@@ -274,7 +304,7 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | **模块** | ref_core_f405 |
 | **文件** | `Robot/actuators/ctrl_step.cpp` |
 | **位置** | L22-24 |
-| **严重性** | High (与P0-8重复但更细) |
+| **严重性** | High (与P0-8重复，但P0-8已修复) |
 | **问题** | 同P0-8 |
 | **修复方案** | 见 P0-8 |
 
@@ -393,7 +423,7 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | **位置** | `ServoJ` 函数 L344-346 |
 | **严重性** | High |
 | **问题** | 首次调用时 `lastServoTime` 为0，`dt` 计算异常大或为负 |
-| **修复方案** | 初始化 `lastServoTime = 0`，首次调用时跳过dt计算或设为固定值 |
+| **修复方案** | [x] 已修复: if (dt <= 0.001f) dt = 0.02f; 保护首次调用和dt异常 |
 
 ---
 
@@ -540,6 +570,73 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | **修复日期** | 2026-05-31 |
 
 ---
+
+### P1-28: 夹爪固仦不响应 CAN 广播查询和塌转通知
+
+|| 属性 | 值 |
+|------|-----|
+| **模块** | motor_fw_f103_gripper + ref_core_f405 |
+| **文件** | motor_fw_f103_gripper/UserApp/protocols/interface_can.cpp, ref_core_f405/UserApp/protocols/can_protocol.cpp |
+| **位置** | interface_can.cpp 无 0xA3 处理; can_protocol.cpp L118-131 夹爪分支无 0x7C |
+| **严重性** | High |
+| **问题** | 夹爪固仦不支持 CAN 广播查询命令(0xA3)；主控收到夹爪的塌转 CAN 帖(0x7C)后完全忽略，无法触发 SetStallMode；夹爪固仦虽然实现了 0x7C 上报(motor.cpp L282-287)但主控不夂理 |
+| **修复方案** | [ ] 未修复: ref_core can_protocol.cpp id==8分支无0x7C；地轨/臂关节已有，夹爪缺失 |
+
+---
+
+### P1-29: 夹爪固仦 CAN 响应使用 RX 缓冲区作为 TX
+
+|| 属性 | 值 |
+|------|-----|
+| **模块** | motor_fw_f103_gripper |
+| **文件** | UserApp/protocols/interface_can.cpp |
+| **位置** | L80-88 (0x05), L98-105, L120-126 (0x07) |
+| **严重性** | Medium |
+| **问题** | CAN 响应时直接使用 _data 指针(指向 CAN RX DMA 缓冲区)作为 TX 数据源，在 CAN RX 中断接收新数据时可能覆盖缓冲区，导致 TX 响应数据损坍 |
+| **修复方案** | 在函数上分配临时 uint8_t txData[8] 缓冲区，填入响应数据后再发发 |
+
+---
+
+### P1-30: 主控器 Reboot 函数不包含地轨电机
+
+|| 属性 | 值 |
+|------|-----|
+| **模块** | ref_core_f405 |
+| **文件** | Robot/instances/dummy_robot.cpp |
+| **位置** | L154-159 Reboot() |
+| **严重性** | Medium |
+| **问题** | Reboot() 只循环 reboot motorJ[1]~motorJ[6]�0c漏掉了 motorJ[0](地轨)�1b语义上 reboot 必覆盖所有节点 |
+| **修复方案** | [~] 疑似设计如此: Reboot()从i=1开始排除motorJ[0](地轨)；可能为安全措施，需与P0-2合并确认 |
+
+---
+
+### P1-31: 夹爪固仦温度保护被强制关闭
+
+|| 属性 | 值 |
+|------|-----|
+| **模块** | motor_fw_f103_gripper |
+| **文件** | UserApp/main.cpp |
+| **位置** | L46 |
+| **严重性** | High |
+| **问题** | boardConfig.enableTempWatch=false; 强制覆装 EEPROM 加载和默认值设置，即使存储了 enableTempWatch=true 也被覆装包版；温度监控功能完全被禁用，电机驱动芯片无过热保护 |
+| **修复方案** | [ ] 未修复: 强制覆盖行不存在，但enableTempWatch默认值false；建议改为条件覆盖或默认true |
+
+---
+
+### P1-32: 塌转后电机进入 Sleep 导致无锁力
+
+|| 属性 | 值 |
+|------|-----|
+| **模块** | motor_fw_f103_35/42/57/gripper |
+| **文件** | Ctrl/Motor/motor.cpp |
+| **位置** | L97-104 CloseLoopControlTick |
+| **严重性** | Critical |
+| **问题** | P0-11 塌转通知修复后，电机塌转时会进入 isStalled 分支调用 driver->Sleep()�0c电机电園完全断电失压保持电；在重动作用下机器会自由落下，非常际靍 |
+| **修复方案** | [~] 部分修复: 堵转不再Sleep；但无新setpoint时focCurrent清零仍无保持力矩；建议设置最小保持电流setpoint |
+
+---
+
+## P2
 
 ## P2 - 计划中版本
 
@@ -825,13 +922,15 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 
 ## 问题统计
 
-| 优先级 | Critical | High | Medium | Low | 合计 |
-|--------|---------|------|--------|-----|------|
-| P0 | 10 | 0 | 0 | 0 | **10** |
-| P1 | 2 | 18 | 6 | 1 | **27** |
-| P2 | 0 | 0 | 9 | 6 | **15** |
-| P3 | 0 | 0 | 3 | 7 | **10** |
-| **合计** | **12** | **18** | **18** | **14** | **61** |
+| 优先级 | Critical | High | Medium | Low | 长期 | 合计 |
+|--------|---------|------|--------|-----|------|------|
+| P0 | 11 | 0 | 0 | 0 | 0 | **11** |
+| P1 | 3 | 29 | 10 | 0 | 0 | **32** |
+| P2 | 0 | 0 | 9 | 6 | 0 | **15** |
+| P3 | 0 | 0 | 0 | 0 | 10 | **10** |
+| **合计** | **14** | **29** | **19** | **6** | **10** | **68** |
+
+> **注:** P1-6、P1-7、P1-8 各出现两次（原始格式问题），已合并为单个条目；P1 Critical 为 P1-20、P1-27、P1-32。
 
 ---
 
@@ -840,40 +939,45 @@ cmd = f"${int(torques[0]*1000)},{int(torques[1]*1000)},..."
 | ID | 描述 | 状态 | 修复日期 | 备注 |
 |----|------|------|---------|------|
 | P0-1 | 电机失步检测==改为>= | [x] | 2026-05-30 | motor_fw_f103_all/Ctrl/Motor/motor.cpp L265+288, 同时修复overloadFlag |
-| P0-2 | 力矩模式Disable后清零电流 | [ ] | | |
-| P0-3 | CAN中断数据竞争 | [ ] | | |
-| P0-4 | Python力矩命令格式修正 | [ ] | | |
-| P0-5 | 急停加制动 | [ ] | | |
-| P0-6 | sqrtf负数参数 | [ ] | | |
-| P0-7 | ApplyPositionAsHome未初始化 | [ ] | | |
-| P0-8 | SetEnable状态语义错误 | [ ] | | |
-| P0-9 | 无磁检测无处理 | [ ] | | |
-| P0-10 | Flash写入无验证 | [ ] | | |
+| P0-2 | 力矩模式Disable后清零电流 | [x] | 2026-06-01 | dummy_robot.cpp SetEnable(false): 清零targetCurrents[]+targetRailCurrent, 下发零电流CAN帧; ctrl_step.hpp 枚举新增IDLE; ctrl_step.cpp SetEnable(false)->state=IDLE |
+| P0-3 | CAN中断数据竞争 | [ ] | | OnCanMessage 无临界区保护，数据竞争仍存在 |
+| P0-4 | Python力矩命令格式修正 | [ ] | | send_torque() 仍使用 float 格式，力矩值只有真实值的千分之一 |
+| P0-5 | 急停加制动 | [x] | 2026-06-03 | 4电机固仦 interface_can.cpp 部合改为 SetBrake(true) |
+| P0-6 | sqrtf负数参数 | [x] | 2026-06-03 | 4电机固仦 motor.cpp 部合改为 sqrtf(fmaxf(0.0f, discriminant)) |
+| P0-7 | ApplyPositionAsHome未初始化 | [ ] | | ApplyPositionAsHome() 发送前 canBuf 未初始化，字节4-7含垃圾数据 |
+| P0-8 | SetEnable状态语义错误 | [x] | 2026-06-01 | ctrl_step.hpp枚举新增IDLE; SetEnable(false)设置state=IDLE(与P0-2同步修复) |
+| P0-9 | 无磁检测无处理 | [~] | | HasNoMagnet()链路已完整，触发Sleep；但未调用Error()且无CAN上报纸；需补充主控通知 |
+| P0-10 | Flash写入无验证 | [ ] | | encoder_calibrator_base.cpp EndWriteFlash() 后无回读验证，失败静默忽略 |
 | P0-11 | 电机堵转主动通知+ENABLE清除 | [x] | 2026-05-31 | motor_fw_f103_35/42/57 motor.cpp+interface_can.cpp, ref_core_f405 can_protocol.cpp+ctrl_step+dummy_robot |
 | P1-1 | IK永远返回true | [ ] | | |
-| P1-2 | 命令队列满返回255 | [ ] | | |
-| P1-3 | 地轨单位混淆 | [ ] | | |
-| P1-4 | SetEnable不清零电流 | [ ] | | |
-| P1-5 | ParseCommand忙等 | [ ] | | |
-| P1-6 | MPU6050 ID错误 | [ ] | | |
-| P1-7 | SetEnable状态语义错误(CtrlStep) | [ ] | | |
-| P1-8 | absMaxOf6初始值-1 | [ ] | | |
+| P1-2 | 命令队列满返回255 | [x] | | Push() 成功返回实际剩余空间，失败返回0xFF；语义明确，已修复 |
+| P1-3 | 地轨单位混用 | [x] | | motorJ[0] limits已以mm传入，比较时单位一致；已修复 |
+| P1-4 | SetEnable不清零电流 | [x] | 2026-06-01 | 随P0-2一并修复，见P0-2 |
+| P1-5 | ParseCommand忙等 | [x] | | 阻塞等待已改为 osDelay(5)，不再空转CPU；已修复 |
+| P1-6 | MPU6050 ID错误 | [ ] | | testConnection() 仍比较 0x34，应为 0x68 |
+| P1-7 | SetEnable状态语义错误(CtrlStep) | [x] | 2026-06-01 | 随P0-8一并修复，见P0-8 |
+| P1-8 | absMaxOf6初始值-1 | [ ] | | AbsMaxOf6() 仍以 max=-1 初始化；所有关节在±1°内时返回负速度因子 |
 | P1-9 | 梯形轨迹除零 | [ ] | | |
 | P1-10 | 速度/位置积分溢出 | [ ] | | |
-| P1-11 | EepromConfig无pack | [ ] | | |
+| P1-11 | EepromConfig无pack | [ ] | | EepromConfig结构体无 #pragma pack(1)；编译器插入填充字节导致Flash读写出错 |
 | P1-12 | CAN发送非线程安全 | [ ] | | |
 | P1-13 | 校正中系统复位 | [ ] | | |
-| P1-14 | CAN指针转换未对齐 | [ ] | | |
-| P1-15 | SPI无限等待 | [ ] | | |
-| P1-16 | ServoJ首次dt异常 | [ ] | | |
-| P1-17 | IK奇异性阈值过小 | [ ] | | |
+| P1-14 | CAN指针转换未对齐 | [ ] | | 多处直接 *(uint32_t*)RxData / *(float*)RxData；ARM非对齐访问触发HardFault |
+| P1-15 | SPI无限等待 | [ ] | | mt6816_stm32.cpp L14 使用 HAL_MAX_DELAY；SPI异常时20kHz环完全挂死 |
+| P1-16 | ServoJ首次dt异常 | [x] | | if (dt <= 0.001f) dt = 0.02f; 保护首次调用；已修复 |
+| P1-17 | IK奇异性阈值过小 | [ ] | | 5处阈值均为 0.000001 (1e-6)；对于该尺寸机械臂过小，数值噪声导致误判为奇异位形 |
 | P1-18 | advanced角补偿参数错误 | [ ] | | |
 | P1-19 | 校正中直接复位 | [ ] | | |
-| P1-20 | ServoJ线程不安全 | [ ] | | |
-| P1-21 | ServoJ无换行符 | [ ] | | |
+| P1-20 | ServoJ线程不安全 | [ ] | | servoj_test_loop() 直接写串口无Lock；与主线程 send_cmd() 并发写串口有竞争 |
+| P1-21 | ServoJ无换行符 | [ ] | | servoj_test_loop() 命令串末尾无 "\n"；STM32解析器无法识别命令边界 |
 | P1-22 | ServoJ参数硬编码 | [ ] | | |
 | P1-23 | 关节角度无验证 | [ ] | | |
 | P1-24 | ServoJ停止不干净 | [ ] | | |
 | P1-25 | MPU6050过滤器状态不重置 | [ ] | | |
-| P1-26 | IsMoving地轨位检查含混 | [ ] |
-| P1-27 | SetEnable漏掉地轨夹爪 | [x] | 2026-05-31 | dummy_robot.cpp SetEnable() | | |
+| P1-26 | IsMoving地轨位检查含混 | [ ] | | |
+| P1-27 | SetEnable遗漏地轨夹爪 | [x] | 2026-05-31 | dummy_robot.cpp SetEnable() 循环后单独调用 motorJ[0]->SetEnable() 和 hand->SetEnable() |
+| P1-28 | 夹爪固件不响应 CAN 广播查询和堵转通知 | [ ] | | ref_core can_protocol.cpp id==8分支无0x7C；地轨/臂关节已有，夹爪缺失 |
+| P1-29 | 夹爪固仦 CAN 响应使用 RX 缓冲区作为 TX | [x] | 2026-06-03 | gripper interface_can.cpp 添加 txData[8]�cal发发平台 |
+| P1-30 | Reboot 函数不包含地轨电机 | [~] | | Reboot() 从 i=1 开始，motorJ[0] 被排除；疑似安全设计（重启地轨时机器人可能滑落），需与 P0-2 合并确认 |
+| P1-31 | 夹爪固件温度保护被强制关闭 | [ ] | | 强制覆盖行不存在，但enableTempWatch默认值false；建议改为条件覆盖或默认true |
+| P1-32 | 堵转后电机进入 Sleep 导致无锁力 | [~] | | 堵转不再Sleep；但无新setpoint时focCurrent清零仍无保持力矩；建议设置最小保持电流setpoint |

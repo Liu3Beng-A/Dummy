@@ -17,6 +17,7 @@ public:
     bool Init() override;
     uint16_t UpdateAngle() override;  // Get current rawAngle (rad)
     bool IsCalibrated() override;
+    bool HasNoMagnet() override { return angleData.noMagFlag; }
 
 
 private:

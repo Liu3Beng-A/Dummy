@@ -12,6 +12,7 @@ public:
         uint16_t rawAngle;          // raw data
         uint16_t rectifiedAngle;    // calibrated rawAngle data
         bool rectifyValid;
+        bool noMagFlag;             // P0-9: magnet detachment detected
     } AngleData_t;
     AngleData_t angleData{0};
 
@@ -28,6 +29,9 @@ public:
     virtual uint16_t UpdateAngle() = 0;
 
     virtual bool IsCalibrated() = 0;
+
+    // P0-9: magnet detachment detection
+    virtual bool HasNoMagnet() { return false; }
 
 
 private:

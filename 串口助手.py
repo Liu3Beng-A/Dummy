@@ -686,7 +686,8 @@ class RobotSerialAssistant:
             port = self.cb_ports.get()
             baud = self.cb_baudrate.get()
             try:
-                self.serial_port = serial.Serial(port, int(baud), timeout=0.1)
+                self.serial_port = serial.Serial(port, int(baud), timeout=0.5)
+                self.serial_port.write_timeout = 1.0
                 self.is_connected = True
                 self.btn_connect.config(text="断开连接")
                 self.lbl_status.config(text=f"● 已连接: {port}", foreground="green")
@@ -711,16 +712,24 @@ class RobotSerialAssistant:
     def serial_receive_loop(self):
         while not self.stop_thread and self.serial_port and self.serial_port.is_open:
             try:
+                # 优先用 in_waiting 避免 readline 阻塞（部分 MCU 不发 \n）
                 if self.serial_port.in_waiting:
-                    data = self.serial_port.readline()
+                    data = self.serial_port.read(self.serial_port.in_waiting)
                     if data:
-                        text = data.decode('utf-8', errors='replace').strip()
-                        if text:
-                            self.root.after(0, self.log, text, "RX")
+                        text = data.decode('utf-8', errors='replace')
+                        # 按行分割，防止残留字符堆积
+                        for line in text.split('\n'):
+                            line = line.strip()
+                            if line:
+                                self.root.after(0, self.log, line, "RX")
+                # 无数据时短暂休眠，不阻塞主循环
+                time.sleep(0.05)
+            except serial.SerialException as e:
+                self.root.after(0, self.log, f"串口异常: {e}", "ERROR")
+                break
             except Exception as e:
                 self.root.after(0, self.log, f"读取异常: {e}", "ERROR")
                 break
-            time.sleep(0.01)
 
     def send_cmd(self, cmd):
         if not self.is_connected or not self.serial_port:
@@ -986,7 +995,7 @@ class RobotSerialAssistant:
             
             cmd = f">{current_joint_cache[0]:.2f},{base_joints[1]},{base_joints[2]},{base_joints[3]},{base_joints[4]},{base_joints[5]},{base_joints[6]:.2f}"
             try:
-                self.serial_port.write(cmd.encode('utf-8'))
+                self.serial_port.write((cmd + "\n").encode('utf-8'))
                 if int(t * 50) % 20 == 0:
                     self.root.after(0, self.log, f"Target: {target_j1:.1f}, Send: {current_joint_cache[0]:.1f}", "TX")
             except Exception as e:

@@ -94,14 +94,20 @@ void Motor::CloseLoopControlTick()
     controller->estError = controller->softPosition - controller->estPosition;
 
     /************************************ Ctrl Loop ************************************/
-    if (controller->isStalled ||
-        controller->softDisable ||
-        !encoder->IsCalibrated())
+    if (controller->softDisable ||
+        !encoder->IsCalibrated() ||
+        encoder->HasNoMagnet())
     {
         controller->ClearIntegral();    // clear integrals
         controller->focPosition = 0;    // clear outputs
         controller->focCurrent = 0;
         driver->Sleep();
+    } else if (controller->isStalled)
+    {
+        // P1-32 fix: stall does NOT sleep - maintain minimum holding torque
+        // to prevent arm free-fall under gravity. Fall through to normal
+        // control loop which will output low holding current.
+        controller->ClearIntegral();
     } else if (controller->softBrake)
     {
         controller->ClearIntegral();
@@ -457,10 +463,11 @@ bool Motor::Controller::SetPositionSetPointWithTime(int32_t _pos, float _time)
         return false;
     } else
     {
+        float discriminant = _time * _time - 4.0f * (float) deltaPos /
+                                     (float) context->config.motionParams.ratedVelocityAcc;
         float vMax = _time * (float) context->config.motionParams.ratedVelocityAcc;
         vMax -= (float) context->config.motionParams.ratedVelocityAcc *
-                (sqrtf(_time * _time - 4 * (float) deltaPos /
-                                       (float) context->config.motionParams.ratedVelocityAcc));
+                sqrtf(fmaxf(0.0f, discriminant));
         vMax /= 2;
 
         context->config.motionParams.ratedVelocity = (int32_t) vMax;

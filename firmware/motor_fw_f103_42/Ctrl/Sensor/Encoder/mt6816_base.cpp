@@ -52,6 +52,9 @@ uint16_t MT6816Base::UpdateAngle()
         spiRawData.noMagFlag = (bool) (spiRawData.rawData & (0x0001 << 1));
     }
 
+    // P0-9: propagate noMagFlag to angleData so motor control loop can react
+    angleData.noMagFlag = spiRawData.noMagFlag;
+
     angleData.rawAngle = spiRawData.rawAngle;
     angleData.rectifiedAngle = quickCaliDataPtr[angleData.rawAngle];
 
