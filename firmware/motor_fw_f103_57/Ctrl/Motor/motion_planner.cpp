@@ -330,6 +330,151 @@ void MotionPlanner::PositionTracker::CalcSoftGoal(int32_t _goalPosition)
 }
 
 
+void MotionPlanner::PositionTracker::CalcSoftGoalWithRealPos(int32_t _goalPosition, int32_t _realPosition)
+{
+    // Use real encoder position for distance calculation (step loss compensation)
+    // but keep trackPosition for smooth motion output
+    int32_t deltaPosition = _goalPosition - _realPosition;
+
+    if (deltaPosition == 0)
+    {
+        if ((trackVelocity >= -speedLockingBrake) && (trackVelocity <= speedLockingBrake))
+        {
+            velocityIntegral = 0;
+            trackVelocity = 0;
+            positionIntegral = 0;
+        } else if (trackVelocity > 0)
+        {
+            CalcVelocityIntegral(-velocityDownAcc);
+            if (trackVelocity <= 0)
+            {
+                velocityIntegral = 0;
+                trackVelocity = 0;
+            }
+        } else if (trackVelocity < 0)
+        {
+            CalcVelocityIntegral(velocityDownAcc);
+            if (trackVelocity >= 0)
+            {
+                velocityIntegral = 0;
+                trackVelocity = 0;
+            }
+        }
+    } else
+    {
+        if (trackVelocity == 0)
+        {
+            if (deltaPosition > 0)
+            {
+                CalcVelocityIntegral(velocityUpAcc);
+            } else
+            {
+                CalcVelocityIntegral(-velocityUpAcc);
+            }
+        } else if ((deltaPosition > 0) && (trackVelocity > 0))
+        {
+            if (trackVelocity <= context->config->ratedVelocity)
+            {
+                auto need_down_location = (int32_t) ((float) trackVelocity *
+                                                     (float) trackVelocity *
+                                                     (float) quickVelocityDownAcc);
+                if (abs(deltaPosition) > need_down_location)
+                {
+                    if (trackVelocity < context->config->ratedVelocity)
+                    {
+                        CalcVelocityIntegral(velocityUpAcc);
+                        if (trackVelocity >= context->config->ratedVelocity)
+                        {
+                            velocityIntegral = 0;
+                            trackVelocity = context->config->ratedVelocity;
+                        }
+                    } else if (trackVelocity > context->config->ratedVelocity)
+                    {
+                        CalcVelocityIntegral(-velocityDownAcc);
+                    }
+                } else
+                {
+                    CalcVelocityIntegral(-velocityDownAcc);
+                    if (trackVelocity <= 0)
+                    {
+                        velocityIntegral = 0;
+                        trackVelocity = 0;
+                    }
+                }
+            } else
+            {
+                CalcVelocityIntegral(-velocityDownAcc);
+                if (trackVelocity <= 0)
+                {
+                    velocityIntegral = 0;
+                    trackVelocity = 0;
+                }
+            }
+        } else if ((deltaPosition < 0) && (trackVelocity < 0))
+        {
+            if (trackVelocity >= -context->config->ratedVelocity)
+            {
+                auto need_down_location = (int32_t) ((float) trackVelocity *
+                                                     (float) trackVelocity *
+                                                     (float) quickVelocityDownAcc);
+                if (abs(deltaPosition) > need_down_location)
+                {
+                    if (trackVelocity > -context->config->ratedVelocity)
+                    {
+                        CalcVelocityIntegral(-velocityUpAcc);
+                        if (trackVelocity <= -context->config->ratedVelocity)
+                        {
+                            velocityIntegral = 0;
+                            trackVelocity = -context->config->ratedVelocity;
+                        }
+                    } else if (trackVelocity < -context->config->ratedVelocity)
+                    {
+                        CalcVelocityIntegral(velocityDownAcc);
+                    }
+                } else
+                {
+                    CalcVelocityIntegral(velocityDownAcc);
+                    if (trackVelocity >= 0)
+                    {
+                        velocityIntegral = 0;
+                        trackVelocity = 0;
+                    }
+                }
+            } else
+            {
+                CalcVelocityIntegral(velocityDownAcc);
+                if (trackVelocity >= 0)
+                {
+                    velocityIntegral = 0;
+                    trackVelocity = 0;
+                }
+            }
+        } else if ((deltaPosition < 0) && (trackVelocity > 0))
+        {
+            CalcVelocityIntegral(-velocityDownAcc);
+            if (trackVelocity <= 0)
+            {
+                velocityIntegral = 0;
+                trackVelocity = 0;
+            }
+        } else if (((deltaPosition > 0) && (trackVelocity < 0)))
+        {
+            CalcVelocityIntegral(velocityDownAcc);
+            if (trackVelocity >= 0)
+            {
+                velocityIntegral = 0;
+                trackVelocity = 0;
+            }
+        }
+    }
+
+    CalcPositionIntegral(trackVelocity);
+
+    go_location = (int32_t) trackPosition;
+    go_velocity = (int32_t) trackVelocity;
+}
+
+
 void MotionPlanner::PositionTracker::CalcPositionIntegral(int32_t value)
 {
     positionIntegral += value;

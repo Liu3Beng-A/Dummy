@@ -21,9 +21,9 @@
 |------|------|------|------|
 | 主控制器 | STM32F405RG | ×1 | Cortex-M4, 168MHz, FreeRTOS |
 | 电机驱动板 | STM32F103CBT6 | ×8 | Cortex-M3, 72MHz, FOC步进 |
-| 地轨电机 | 丝杆1605 | ×1 | 直连(1:1), 行程 -250~250mm, CAN ID=0 |
+| 地轨电机 | 丝杆1605 | ×1 | 直连(1:1), 行程 -250~250mm, CAN ID=9 (固定) |
 | 臂关节电机 | 42/35步进 | ×6 | 50:1减速, CAN ID 1~6 |
-| 夹爪电机 | 35步进 | ×1 | 16:1减速, CAN ID=8 |
+| 夹爪电机 | 35步进 | ×1 | 16:1减速, CAN ID=8 (固定) |
 | 通信总线 | CAN1 | 500kbps | 连接主控与所有电机 |
 | 调试串口 | UART4 | 115200bps | 主控命令接口 |
 | USB | USB_OTG_FS | CDC/VCP | 备用命令接口 |
@@ -153,7 +153,7 @@ e:/Dummy-code/
         │                          │  STM32F103 电机驱动板 ×8  │
         │                          │  (72MHz, FOC, 20kHz)    │
         │                          │                          │
- OLED   │                          │  CAN ID=0: 地轨 (mm)     │
+ OLED   │                          │  CAN ID=9: 地轨 (mm)     │
  MPU6050│                          │  CAN ID=1~6: 臂关节 (°) │
  RGB WS │                          │  CAN ID=8: 夹爪         │
         │                          └──────────────────────────┘
@@ -233,14 +233,14 @@ e:/Dummy-code/
 ### 电机对象初始化
 
 ```cpp
-motorJ[0] = new CtrlStepMotor(hcan, 0, false, 50, 0, 500);     // 地轨: 丝杆1605, 0~500mm
+motorJ[0] = new CtrlStepMotor(hcan, 9, false, 1, -250, 250);     // 地轨: 丝杆1605, 直连, -250~250mm, CAN ID=9（固定）
 motorJ[1] = new CtrlStepMotor(hcan, 1, false, 50, -175, 175); // J1 底座
 motorJ[2] = new CtrlStepMotor(hcan, 2, true,  50,  -75,  90); // J2 肩部
 motorJ[3] = new CtrlStepMotor(hcan, 3, true,  50,    0, 180); // J3 肘部
 motorJ[4] = new CtrlStepMotor(hcan, 4, true,  50, -270, 270); // J4 腕部旋转
 motorJ[5] = new CtrlStepMotor(hcan, 5, true,  50, -100, 100); // J5 腕部俯仰
 motorJ[6] = new CtrlStepMotor(hcan, 6, true,  30, -180, 180); // J6 腕部偏转 (减速比30)
-hand     = new StepHand(hcan, 7);                              // 夹爪 (减速比16)
+hand     = new StepHand(hcan, 8);                              // 夹爪 (减速比16), CAN ID=8（固定）
 ```
 
 > `inverseDirection=true` 表示该关节电机方向反转。J2-J6 默认反转以匹配右手坐标系。
@@ -422,7 +422,7 @@ dummy.tuningHelper.Tick(10);             // 扫频调试
 
 ```
 StdId = (nodeID << 7) | cmdCode
-  nodeID: 4 bits (0~8)
+  nodeID: 7 bits (0~127，实际使用 1~6, 8, 9)
   cmdCode: 7 bits
 
 普通命令: cmdCode 0x00~0x7F (发往特定节点)
@@ -482,9 +482,9 @@ Byte 7:    uint8_t isFinished // 0=运动中, 1=到位
 
 | 电机 | CAN ID | 说明 |
 |------|--------|------|
-| 地轨 | 0 | 普通命令 |
+| 地轨 | 9 | 普通命令（固定） |
 | J1~J6 | 1~6 | 普通命令 |
-| 夹爪 | 7 | 普通命令 |
+| 夹爪 | 8 | 普通命令（固定） |
 | 全部 | 广播 | 0x89急停, 0xA3查询 |
 
 ---

@@ -22,6 +22,8 @@ CtrlStepMotor::CtrlStepMotor(CAN_HandleTypeDef* _hcan, uint8_t _id, bool _invers
 void CtrlStepMotor::SetEnable(bool _enable)
 {
     state = _enable ? FINISH : STOP;
+    if (!_enable)
+        targetAngle = 0;   // 禁用时清目标，避免残留导致误判
 
     uint8_t mode = 0x01;
     txHeader.StdId = nodeID << 7 | mode;
@@ -333,4 +335,37 @@ void CtrlStepMotor::SetDceKd(int32_t _val)
     canBuf[4] = 1; // Need save to EEPROM or not
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+
+void CtrlStepMotor::QueryDceKp()
+{
+    uint8_t mode = 0x28;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::QueryDceKv()
+{
+    uint8_t mode = 0x29;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::QueryDceKi()
+{
+    uint8_t mode = 0x2A;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::QueryDceKd()
+{
+    uint8_t mode = 0x2B;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
 }

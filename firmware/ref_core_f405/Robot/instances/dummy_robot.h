@@ -20,6 +20,7 @@ struct EepromConfig {
     uint8_t static_r[3];      // RGB 灯效 R 分量 (索引 0~2 对应不同模式)
     uint8_t static_g[3];      // RGB 灯效 G 分量
     uint8_t static_b[3];      // RGB 灯效 B 分量
+    uint8_t rgbBrightness;    // RGB 亮度 0~100 (掉电保持)
     uint32_t rgbStateStart;   // 设备开机启动时的默认灯效模式
     uint32_t rgbStateEnable;  // 机械臂激活/使能状态下的灯效模式
     uint32_t rgbStateDisable; // 机械臂断电/失能状态下的灯效模式
@@ -108,6 +109,12 @@ public:
 
     float targetCurrents[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
+    // CAN 回传的电机 PID 参数缓存（用于查询）
+    int32_t motorDceKps[8] = {0};
+    int32_t motorDceKvs[8] = {0};
+    int32_t motorDceKis[8] = {0};
+    int32_t motorDceKds[8] = {0};
+
 public:
     explicit DummyRobot(CAN_HandleTypeDef* _hcan);
     ~DummyRobot();
@@ -116,9 +123,7 @@ public:
     uint32_t rgbStateEnable  = RGB::PURE_COLOR_1;
     uint32_t rgbStateDisable = RGB::PURE_COLOR_2;
 
-    bool     GetRGBEnabled() const;
     uint32_t GetRGBMode()    const;
-    void     SetRGBEnabled(bool enable);
     void     SetRGBMode(uint32_t mode);
     
     void     LoadConfig();
@@ -144,30 +149,28 @@ public:
     {
     public:
         explicit TuningHelper(DummyRobot* _context) : context(_context) {}
-
-        void SetTuningFlag(uint8_t _flag);
-        void Tick(uint32_t _timeMillis);
-        void SetFreqAndAmp(float _freq, float _amp);
-
+        void StartSweep();
+        void Stop();
+        bool IsRunning() const;
         auto MakeProtocolDefinitions()
         {
             return make_protocol_member_list(
-                make_protocol_function("set_tuning_freq_amp", *this,
-                                       &TuningHelper::SetFreqAndAmp, "freq", "amp"),
-                make_protocol_function("set_tuning_flag", *this,
-                                       &TuningHelper::SetTuningFlag, "flag")
+                make_protocol_function("set_tuning_freq_amp", context->tuningHelper,
+                                      &DummyRobot::TuningHelper::SetFreqAndAmp, "freq", "amp"),
+                make_protocol_function("set_tuning_flag", context->tuningHelper,
+                                      &DummyRobot::TuningHelper::SetTuningFlag, "flag")
             );
         }
-
+        void SetTuningFlag(uint8_t _flag);
+        void Tick(uint32_t _timeMillis);
+        void SetFreqAndAmp(float _freq, float _amp);
     private:
         DummyRobot* context;
+        friend class DummyRobot;
         float   time      = 0;
         uint8_t tuningFlag = 0;
         float   frequency  = 1;
         float   amplitude  = 1;
-
-        bool    rgbEnabled = false;
-        uint8_t rgbMode    = RGB::ALL_OFF;
     };
     TuningHelper tuningHelper = TuningHelper(this);
 
@@ -177,7 +180,7 @@ public:
     DOF6Kinematic::Joint6D_t jointAccBases = {150, 100, 200, 200, 200, 200}; 
     const float DEFAULT_JOINT_ACCELERATION_LOW  = 5;     
     const float DEFAULT_JOINT_ACCELERATION_HIGH = 100;   
-    const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_INTERRUPTABLE;
+    const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_SEQUENTIAL;
 
     // 系统位姿记忆变量与实时状态寄存层
     DOF6Kinematic::Joint6D_t currentJoints  = REST_POSE;  // 当前各关节角度读取缓存 (度)
@@ -236,7 +239,6 @@ public:
             make_protocol_function("reboot",           *this, &DummyRobot::Reboot),
             make_protocol_function("set_enable",       *this, &DummyRobot::SetEnable,       "enable"),
             make_protocol_function("set_stall_mode",   *this, &DummyRobot::SetStallMode),
-            make_protocol_function("set_rgb_enable",   *this, &DummyRobot::SetRGBEnabled,   "enable"),
             make_protocol_function("set_rgb_mode",     *this, &DummyRobot::SetRGBMode,      "mode"),
             make_protocol_function("set_joint_speed",  *this, &DummyRobot::SetJointSpeed,       "speed"),
             make_protocol_function("set_joint_acc",    *this, &DummyRobot::SetJointAcceleration, "acc"),
@@ -281,7 +283,6 @@ private:
     DOF6Kinematic::Joint6D_t dynamicJointSpeeds = {0.5f, 0.5f, 0.5f, 1.5f, 1.5f, 1.5f};
     DOF6Kinematic* dof6Solver;
     bool     isEnabled    = false;
-    bool     isRGBEnabled = false;
     uint32_t rgbMode      = 0;
 };
 

@@ -30,13 +30,13 @@ inline float AbsMaxOf6(DOF6Kinematic::Joint6D_t _joints, uint8_t &_index)
 /**
  * @brief 主脑对象初始化部署程序
  * @param _hcan 通信层所强依赖的 CAN 指令下发数据流桥接通道句柄
- * @note 构建完备系统骨骼：motorJ[0]=地轨(ID=0), motorJ[1-6]=臂关节(ID=1-6), hand=夹爪(ID=8)
+ * @note 构建完备系统骨骼：motorJ[0]=地轨(ID=9, 固定), motorJ[1-6]=臂关节(ID=1-6), hand=夹爪(ID=8, 固定)
  */
 DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
     hcan(_hcan)
 {
     // motorJ[0]: 地轨（线性滑轨，直连丝杆1605，转1圈=5mm，行程 -250~250mm）
-    motorJ[0] = new CtrlStepMotor(_hcan, 0, false, 1, -250, 250);
+    motorJ[0] = new CtrlStepMotor(_hcan, 9, false, 1, -250, 250);
 
     motorJ[1] = new CtrlStepMotor(_hcan, 1, false, 50, -175, 175);
     motorJ[2] = new CtrlStepMotor(_hcan, 2, true,  50,  -75,  90);
@@ -84,7 +84,12 @@ void DummyRobot::LoadConfig()
             rgb.static_g[i] = config.static_g[i];
             rgb.static_b[i] = config.static_b[i];
         }
-        
+
+        if (config.rgbBrightness <= 100) {
+            rgb.brightness = (float)config.rgbBrightness / 100.0f;
+            rgb.targetBrightness = rgb.brightness;
+        }
+
         if (config.rgbStateStart <= 9)   rgbStateStart = config.rgbStateStart;
         if (config.rgbStateEnable <= 9)  rgbStateEnable = config.rgbStateEnable;
         if (config.rgbStateDisable <= 9) rgbStateDisable = config.rgbStateDisable;
@@ -99,10 +104,6 @@ void DummyRobot::LoadConfig()
             railSpeed_mm_s = config.railSpeed_mm_s;
         if (config.railAcc_mm_s2 >= 10.0f && config.railAcc_mm_s2 <= 5000.0f)
             railAcc_mm_s2 = config.railAcc_mm_s2;
-    }
-    else
-    {
-        SaveConfig();
     }
 }
 
@@ -119,6 +120,7 @@ void DummyRobot::SaveConfig()
         config.static_g[i] = rgb.static_g[i];
         config.static_b[i] = rgb.static_b[i];
     }
+    config.rgbBrightness = (uint8_t)(rgb.targetBrightness * 100.0f + 0.5f);
     config.rgbStateStart = rgbStateStart;
     config.rgbStateEnable = rgbStateEnable;
     config.rgbStateDisable = rgbStateDisable;
@@ -142,7 +144,6 @@ void DummyRobot::Init()
     commandHandler.Init();
     LoadConfig();
 
-    SetRGBEnabled(true);
     SetRGBMode(rgbStateStart);
     SetCommandMode(DEFAULT_COMMAND_MODE);
     SetJointSpeed(DEFAULT_JOINT_SPEED);
@@ -153,10 +154,12 @@ void DummyRobot::Init()
  */
 void DummyRobot::Reboot()
 {
+    motorJ[0]->Reboot();
     for (int i = 1; i <= 6; i++)
         motorJ[i]->Reboot();
-    osDelay(500);           
-    HAL_NVIC_SystemReset(); 
+    hand->Reboot();
+    osDelay(500);
+    HAL_NVIC_SystemReset();
 }
 
 /**
@@ -316,11 +319,15 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, fl
 
     targetJoints = targetJointsTmp;
     targetRailPos = _j7_mm;  // 存储地轨目标位置
-    jointsStateFlag = 0;
+
+    // 写入目标角度（纯位置误差判定用，不再依赖 jointsStateFlag）
+    for (int j = 1; j <= 6; j++) {
+        motorJ[j]->targetAngle = targetJointsTmp.a[j - 1] - initPose.a[j - 1];
+    }
 
     return true;
 }
- 
+
 /**
  * @brief 无阻塞高通量前馈跟随驱动随动策略
  * @param _j1~_j6: 臂关节角度 (°), _j7_mm: 地轨位置 (mm)
@@ -357,7 +364,11 @@ bool DummyRobot::ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, f
 
     targetJoints = targetJointsTmp;
     targetRailPos = _j7_mm;  // 存储地轨目标位置
-    jointsStateFlag = 0;
+
+    // 写入目标角度（ServoJ 也用纯位置误差判定）
+    for (int j = 1; j <= 6; j++) {
+        motorJ[j]->targetAngle = targetJointsTmp.a[j - 1] - initPose.a[j - 1];
+    }
 
     return true;
 }
@@ -398,11 +409,7 @@ void DummyRobot::UpdateJointAnglesCallback()
     for (int i = 1; i <= 6; i++)
     {
         currentJoints.a[i - 1] = motorJ[i]->angle + initPose.a[i - 1];
-
-        if (motorJ[i]->state == CtrlStepMotor::FINISH)
-            jointsStateFlag |= (1 << i);
-        else
-            jointsStateFlag &= ~(1 << i);
+        // jointsStateFlag 不再操作，IsMoving() 直接用位置误差判定
     }
 }
 
@@ -441,8 +448,11 @@ void DummyRobot::SetStallMode(int motorIndex)
 {
     // 切换 RGB 为红色心跳，视觉提示堵转
     SetRGBMode(RGB::RED_HEARTBEAT);
-    // 停发新位置指令，保持当前位置
+    // 停发新位置指令，保持当前位置（同步 targetAngle 避免误判）
     targetJoints = currentJoints;
+    for (int j = 1; j <= 6; j++) {
+        motorJ[j]->targetAngle = currentJoints.a[j - 1] - initPose.a[j - 1];
+    }
     // 清空指令队列，防止残留指令堆积
     commandHandler.ClearFifo();
     (void)motorIndex;  // 未来可用于区分哪个电机堵转并做针对性处理
@@ -485,8 +495,6 @@ void DummyRobot::Resting()
  */
 void DummyRobot::SetEnable(bool _enable)
 {
-    SetRGBEnabled(true);
-
     if (_enable)
     {
         SetRGBMode(rgbStateEnable);
@@ -510,14 +518,6 @@ void DummyRobot::SetEnable(bool _enable)
 }
 
 /**
- * @brief 确认灯效外设启用状态
- */
-bool DummyRobot::GetRGBEnabled() const
-{
-    return isRGBEnabled;
-}
-
-/**
  * @brief 获取映射渲染花式编号
  */
 uint32_t DummyRobot::GetRGBMode() const
@@ -526,15 +526,7 @@ uint32_t DummyRobot::GetRGBMode() const
 }
 
 /**
- * @brief 允许控制或强裁下层灯光管脚功能运转
- */
-void DummyRobot::SetRGBEnabled(bool enable)
-{
-    isRGBEnabled = enable;
-}
-
-/**
- * @brief 转场切换工作气氛及提示预设闪灯灯位色彩逻辑
+ * @brief 设定映射渲染花式编号
  */
 void DummyRobot::SetRGBMode(uint32_t mode)
 {
@@ -553,11 +545,20 @@ void DummyRobot::UpdateJointPose6D()
 }
 
 /**
- * @brief 利用并验核位标志位侦测判定是否各级机组完成定位收敛平息抖动
+ * @brief 利用纯位置误差判定所有关节是否已完成收敛
+ * @note 废弃 jointsStateFlag 和电机 state 字段的双层判定。
+ *       直接比较 motorJ[i]->angle（实测）和 motorJ[i]->targetAngle（目标）。
+ *       当 |实测 - 目标| <= 1.0° 时认为该轴到位。
  */
 bool DummyRobot::IsMoving()
 {
-    return jointsStateFlag != 0b1111110;
+    static constexpr float EPSILON_DEG = 1.0f;
+    for (int i = 1; i <= 6; i++)
+    {
+        if (fabsf(motorJ[i]->angle - motorJ[i]->targetAngle) > EPSILON_DEG)
+            return true;   // 有轴未到位，还在动
+    }
+    return false;          // 所有轴都到位
 }
 
 /**
@@ -728,7 +729,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 {
                     if (context->MoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]))
                     {
-                        while (context->IsMoving() && context->IsEnabled()) osDelay(5); 
+                        while (context->IsMoving() && context->IsEnabled()) osDelay(5);
                         Respond(*usbStreamOutputPtr,  "ok"); Respond(*uart4StreamOutputPtr, "ok");
                     }
                     else

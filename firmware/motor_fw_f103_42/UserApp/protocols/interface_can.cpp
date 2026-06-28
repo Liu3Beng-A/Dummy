@@ -98,16 +98,11 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
                 (int32_t) (*(float*) (RxData + 4) * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
             motor.controller->SetPositionSetPoint(
                 (int32_t) (*(float*) RxData * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
-            // Always Need Position & Finished ACK
-            tmpF = motor.controller->GetPosition();
-            auto* b = (unsigned char*) &tmpF;
-            for (int i = 0; i < 4; i++)
-                _data[i] = *(b + i);
-            _data[4] = motor.controller->state == Motor::STATE_FINISH ? 1 : 0;
-            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x23;
-            CAN_Send(&txHeader, _data);
-        }
+            // 不再立即应答 FINISH ACK：应答时 5kHz 控制循环尚未跑到，
+            // controller->state 是上次的 stale 值，主控拿到后会立即误判到位、
+            // SEQ 阻塞循环提前退出。状态由主控 100Hz 主动查 0x23 拿真实值。
             break;
+        }
 
             // 0x10~0x1F CMDs with Memory
         case 0x11:  // Set Node-ID and Store to EEPROM
@@ -241,6 +236,47 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             _data[6] = 0;
             _data[7] = 0;
             txHeader.StdId = (boardConfig.canNodeId << 7) | 0x25;
+            CAN_Send(&txHeader, _data);
+        }
+            break;
+
+        case 0x28: // Get DCE Kp
+        {
+            tmpI = boardConfig.dce_kp;
+            auto* b = (unsigned char*) &tmpI;
+            for (int i = 0; i < 4; i++)
+                _data[i] = *(b + i);
+            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x28;
+            CAN_Send(&txHeader, _data);
+        }
+            break;
+        case 0x29: // Get DCE Kv
+        {
+            tmpI = boardConfig.dce_kv;
+            auto* b = (unsigned char*) &tmpI;
+            for (int i = 0; i < 4; i++)
+                _data[i] = *(b + i);
+            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x29;
+            CAN_Send(&txHeader, _data);
+        }
+            break;
+        case 0x2A: // Get DCE Ki
+        {
+            tmpI = boardConfig.dce_ki;
+            auto* b = (unsigned char*) &tmpI;
+            for (int i = 0; i < 4; i++)
+                _data[i] = *(b + i);
+            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x2A;
+            CAN_Send(&txHeader, _data);
+        }
+            break;
+        case 0x2B: // Get DCE Kd
+        {
+            tmpI = boardConfig.dce_kd;
+            auto* b = (unsigned char*) &tmpI;
+            for (int i = 0; i < 4; i++)
+                _data[i] = *(b + i);
+            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x2B;
             CAN_Send(&txHeader, _data);
         }
             break;

@@ -97,6 +97,7 @@ public:
         void SetVelocityAcc(int32_t value);
         void NewTask(int32_t real_location, int32_t real_speed);
         void CalcSoftGoal(int32_t _goalPosition);
+        void CalcSoftGoalWithRealPos(int32_t _goalPosition, int32_t _realPosition);
 
 
     private:

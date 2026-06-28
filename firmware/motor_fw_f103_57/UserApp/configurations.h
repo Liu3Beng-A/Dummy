@@ -8,6 +8,9 @@ extern "C" {
 #include <stdbool.h>
 #include "stdint-gcc.h"
 
+/* 地轨电机固定 CAN ID=9（不依赖 DIP 开关拨码） */
+#define RAIL_FIXED_NODE_ID 9
+
 typedef enum configStatus_t
 {
     CONFIG_RESTORE = 0,

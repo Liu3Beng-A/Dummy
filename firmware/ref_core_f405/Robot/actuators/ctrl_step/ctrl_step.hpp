@@ -3,6 +3,7 @@
 
 #include "fibre/protocol.hpp"
 #include "can.h"
+#include <cmath>
 
 class CtrlStepMotor
 {
@@ -22,13 +23,19 @@ public:
                   float _angleLimitMin = -180, float _angleLimitMax = 180);
 
     uint8_t nodeID;
-    float angle = 0;
+    float angle = 0;              // 实测角度（从电机 CAN 0x23 回包更新）
+    float targetAngle = 0;        // 目标角度（MoveJ/ServoJ 时写入，禁用时清 0）
     float angleLimitMax;
     float angleLimitMin;
     uint32_t temperature = 0.0;
     bool inverseDirection;
     uint8_t reduction;
     State state = STOP;
+
+    // 判定实测角度是否已收敛到目标容差内（单位：度）
+    bool AllAtTarget(float epsilon_deg = 1.0f) const {
+        return fabsf(angle - targetAngle) <= epsilon_deg;
+    }
 
     void SetAngle(float _angle);
     void SetAngleWithVelocityLimit(float _angle, float _vel);
@@ -47,6 +54,10 @@ public:
     void SetDceKv(int32_t _val);
     void SetDceKi(int32_t _val);
     void SetDceKd(int32_t _val);
+    void QueryDceKp();
+    void QueryDceKv();
+    void QueryDceKi();
+    void QueryDceKd();
     void ApplyPositionAsHome();
     void SetEnableOnBoot(bool _enable);
     void SetEnableStallProtect(bool _enable);

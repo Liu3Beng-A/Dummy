@@ -18,14 +18,8 @@ Led statusLed;
 void Main()
 {
     uint64_t serialNum = GetSerialNumber();
-    uint16_t defaultNodeID = 0;
-    //ID0 is PA8 -->  Switch 4
-    //ID1 is PA9 -->  Switch 3
-    //ID2 is PA10 --> Switch 2
-    uint16_t nodeID = !HAL_GPIO_ReadPin(GPIOA, ID0_Pin);
-    nodeID |= !HAL_GPIO_ReadPin(GPIOA, ID1_Pin) << 1;
-    nodeID |= !HAL_GPIO_ReadPin(GPIOA, ID2_Pin) << 2;
-    defaultNodeID = nodeID;
+    // 地轨电机 CAN ID 固定为 RAIL_FIXED_NODE_ID，不依赖 DIP 拨码
+    boardConfig.canNodeId = RAIL_FIXED_NODE_ID;
 
     /*---------- Apply EEPROM Settings ----------*/
     // Setting priority is EEPROM > Motor.h
@@ -44,8 +38,8 @@ void Main()
             .calibrationCurrent=2000,
             .dce_kp = 300,
             .dce_kv = 120,
-            .dce_ki = 600,
-            .dce_kd = 200,
+            .dce_ki = 150,
+            .dce_kd = 50,
             .motor_temperature = 0.0,
             .enableMotorOnBoot=false,
             .enableStallProtect=false,
@@ -54,8 +48,7 @@ void Main()
         eeprom.put(0, boardConfig);
     }
     boardConfig.enableTempWatch=false;
-    //depends on 3 bits switch now
-    boardConfig.canNodeId = defaultNodeID;
+    boardConfig.canNodeId = RAIL_FIXED_NODE_ID;
     motor.config.motionParams.encoderHomeOffset = boardConfig.encoderHomeOffset;
     motor.config.motionParams.ratedCurrent = boardConfig.currentLimit;
     motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;

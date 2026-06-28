@@ -39,12 +39,20 @@ public:
     uint8_t static_g[3] = {0, 255, 255};
     uint8_t static_b[3] = {255, 0, 255};
 
+    // 全局亮度渐变控制（不影响灯效模式本身）
+    float brightness = 1.0f;        // 当前亮度 0.0~1.0
+    float targetBrightness = 1.0f;  // 目标亮度，渐变到此值
+    float fadeSpeed = 0.015f;      // 每步渐变步进量（约2秒完成全范围 0↔100%）
+    float savedBrightness = 1.0f;  // 保存上次亮度，关灯后再开渐变到此值
+
 
     RGB(uint8_t mode=0);
 
     void Run(Rgb_style_t _mode = RAINBOW);
 
     void Interrupt(uint8_t flag);
+
+    void FadeStep();
 
     //functions
     void Set_LED (uint8_t LEDs, uint8_t Red, uint8_t Green, uint8_t Blue)
@@ -83,11 +91,12 @@ public:
 
         for (int i= 0; i<MAX_LED; i++)
         {
-#if USE_BRIGHTNESS
-            color = ((LED_Mod[i][1]<<16) | (LED_Mod[i][2]<<8) | (LED_Mod[i][3]));
-#else
-            color = ((LED_Data[i][1]<<16) | (LED_Data[i][2]<<8) | (LED_Data[i][3]));
-#endif
+            uint8_t r = LED_Data[i][1];
+            uint8_t g = LED_Data[i][2];
+            uint8_t b = LED_Data[i][3];
+            color = (((uint32_t)(r * brightness) << 16)
+                  | ((uint32_t)(g * brightness) << 8)
+                  |  (uint32_t)(b * brightness));
             for (int i=23; i>=0; i--)
             {
                 //1 timing

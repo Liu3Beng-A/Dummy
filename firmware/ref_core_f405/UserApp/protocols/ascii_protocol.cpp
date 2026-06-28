@@ -165,23 +165,33 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
 
         /* ── RGB 信仰灯控制指令 ──
-         * !RGB_EN         → 开灯
-         * !RGB_DIS        → 关灯
-         * !RGB_MODE <0-9> → 切换当前灯效
-         * !RGB_COLOR <idx> <r> <g> <b> → 设置静态纯色(0/1/2)的颜色，0-255
+         * !RGB_BRIGHT [<0-100>] [&] → 查询亮度 / 设置亮度 / 设置并保存亮度
+         * !RGB_MODE <0-9>      → 切换灯效模式
+         * !RGB_COLOR <idx> <r> <g> <b> → 设置静态纯色的颜色，0-255
          * !RGB_SET_START <0-9>  → 设置开机默认灯效
          * !RGB_SET_ENABLE <0-9> → 设置使能时灯效
          * !RGB_SET_DISABLE <0-9>→ 设置失能时灯效
          */
-        else if (s.find("RGB_EN") != std::string::npos)
+        else if (s.find("RGB_BRIGHT") != std::string::npos)
         {
-            dummy.SetRGBEnabled(true);
-            Respond(_responseChannel, "ok rgb enable");
-        }
-        else if (s.find("RGB_DIS") != std::string::npos)
-        {
-            dummy.SetRGBEnabled(false);
-            Respond(_responseChannel, "ok rgb disable");
+            uint32_t val;
+            char saveFlag;
+            if (sscanf(_cmd, "!RGB_BRIGHT %lu %c", &val, &saveFlag) == 2 && val <= 100)
+            {
+                rgb.targetBrightness = (float)val / 100.0f;
+                if (saveFlag == '&')
+                    dummy.SaveConfig();
+                Respond(_responseChannel, "ok rgb bright %lu", val);
+            }
+            else if (sscanf(_cmd, "!RGB_BRIGHT %lu", &val) == 1 && val <= 100)
+            {
+                rgb.targetBrightness = (float)val / 100.0f;
+                Respond(_responseChannel, "ok rgb bright %lu", val);
+            }
+            else
+            {
+                Respond(_responseChannel, "%.0f", rgb.targetBrightness * 100.0f);
+            }
         }
         else if (s.find("RGB_MODE") != std::string::npos)
         {
@@ -338,7 +348,8 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             uint32_t kv, node;
             sscanf(_cmd, "#SET_DCE_KV %lu %lu", &node, &kv);
             /* 修复：使用 && 替代 & （原代码误用位与运算符） */
-            if (node >= 1 && node <= 6)
+            /* 2026-06-25: 放开 node=0 限制，允许通过 ASCII 命令调整地轨电机 DCE 参数 */
+            if (node >= 0 && node <= 6)
             {
                 dummy.motorJ[node]->SetDceKv(kv);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KV [%lu]", node, kv);
@@ -352,7 +363,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             uint32_t kp, node;
             sscanf(_cmd, "#SET_DCE_KP %lu %lu", &node, &kp);
-            if (node >= 1 && node <= 6)
+            if (node >= 0 && node <= 6)
             {
                 dummy.motorJ[node]->SetDceKp(kp);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KP [%lu]", node, kp);
@@ -366,7 +377,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             uint32_t ki, node;
             sscanf(_cmd, "#SET_DCE_KI %lu %lu", &node, &ki);
-            if (node >= 1 && node <= 6)
+            if (node >= 0 && node <= 6)
             {
                 dummy.motorJ[node]->SetDceKi(ki);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KI [%lu]", node, ki);
@@ -380,7 +391,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             uint32_t kd, node;
             sscanf(_cmd, "#SET_DCE_KD %lu %lu", &node, &kd);
-            if (node >= 1 && node <= 6)
+            if (node >= 0 && node <= 6)
             {
                 dummy.motorJ[node]->SetDceKd(kd);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KD [%lu]", node, kd);
@@ -390,11 +401,41 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD [%lu] is wrong", node, kd);
             }
         }
+        else if (s.find("GET_PID") != std::string::npos)
+        {
+            uint32_t node;
+            sscanf(_cmd, "#GET_PID %lu", &node);
+            if (node == 9)
+            {
+                dummy.motorJ[0]->QueryDceKp();
+                dummy.motorJ[0]->QueryDceKv();
+                dummy.motorJ[0]->QueryDceKi();
+                dummy.motorJ[0]->QueryDceKd();
+                Respond(_responseChannel, "ok QUERY PID RAIL [9]");
+            }
+            else if (node >= 1 && node <= 6)
+            {
+                dummy.motorJ[node]->QueryDceKp();
+                dummy.motorJ[node]->QueryDceKv();
+                dummy.motorJ[node]->QueryDceKi();
+                dummy.motorJ[node]->QueryDceKd();
+                Respond(_responseChannel, "ok QUERY PID MOTOR [%lu]", node);
+            }
+            else
+            {
+                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 9 for rail, 1~6 for joints)", node);
+            }
+        }
         else if (s.find("REBOOT") != std::string::npos)
         {
             uint32_t node;
             sscanf(_cmd, "#REBOOT %lu", &node);
-            if (node >= 1 && node <= 6)
+            if (node == 9)
+            {
+                dummy.motorJ[0]->Reboot();
+                Respond(_responseChannel, "ok REBOOT RAIL [9]");
+            }
+            else if (node >= 1 && node <= 6)
             {
                 dummy.motorJ[node]->Reboot();
                 Respond(_responseChannel, "ok REBOOT MOTOR [%lu]", node);
@@ -528,11 +569,11 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             float I;
             uint32_t node;
             sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &I);
-            if (node == 0)
+            if (node == 9)
             {
-                // 节点 0: 地轨电机
+                // 节点 9: 地轨电机（motorJ[0] 对应 CAN ID=9）
                 dummy.motorJ[0]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [0] CURRENT_LIMIT [%f] (地轨)", I);
+                Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
             }
             else if (node >= 1 && node <= 6)
             {
@@ -752,15 +793,26 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 dummy.motorJ[i]->SetEnableStallProtect(false);
             Respond(_responseChannel, "ok stall protect disabled");
         }
-        else if (s.find("RGB_EN") != std::string::npos)
+        else if (s.find("RGB_BRIGHT") != std::string::npos)
         {
-            dummy.SetRGBEnabled(true);
-            Respond(_responseChannel, "ok rgb enable");
-        }
-        else if (s.find("RGB_DIS") != std::string::npos)
-        {
-            dummy.SetRGBEnabled(false);
-            Respond(_responseChannel, "ok rgb disable");
+            uint32_t val;
+            char saveFlag;
+            if (sscanf(_cmd, "!RGB_BRIGHT %lu %c", &val, &saveFlag) == 2 && val <= 100)
+            {
+                rgb.targetBrightness = (float)val / 100.0f;
+                if (saveFlag == '&')
+                    dummy.SaveConfig();
+                Respond(_responseChannel, "ok rgb bright %lu", val);
+            }
+            else if (sscanf(_cmd, "!RGB_BRIGHT %lu", &val) == 1 && val <= 100)
+            {
+                rgb.targetBrightness = (float)val / 100.0f;
+                Respond(_responseChannel, "ok rgb bright %lu", val);
+            }
+            else
+            {
+                Respond(_responseChannel, "%.0f", rgb.targetBrightness * 100.0f);
+            }
         }
         else if (s.find("RGB_MODE") != std::string::npos)
         {
@@ -948,7 +1000,8 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             uint32_t kv, node;
             sscanf(_cmd, "#SET_DCE_KV %lu %lu", &node, &kv);
-            if (node >= 1 && node <= 6)
+            /* 2026-06-25: 放开 node=0 限制，允许通过 ASCII 命令调整地轨电机 DCE 参数 */
+            if (node >= 0 && node <= 6)
             {
                 dummy.motorJ[node]->SetDceKv(kv);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KV [%lu]", node, kv);
@@ -962,7 +1015,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             uint32_t kp, node;
             sscanf(_cmd, "#SET_DCE_KP %lu %lu", &node, &kp);
-            if (node >= 1 && node <= 6)
+            if (node >= 0 && node <= 6)
             {
                 dummy.motorJ[node]->SetDceKp(kp);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KP [%lu]", node, kp);
@@ -976,7 +1029,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             uint32_t ki, node;
             sscanf(_cmd, "#SET_DCE_KI %lu %lu", &node, &ki);
-            if (node >= 1 && node <= 6)
+            if (node >= 0 && node <= 6)
             {
                 dummy.motorJ[node]->SetDceKi(ki);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KI [%lu]", node, ki);
@@ -990,7 +1043,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             uint32_t kd, node;
             sscanf(_cmd, "#SET_DCE_KD %lu %lu", &node, &kd);
-            if (node >= 1 && node <= 6)
+            if (node >= 0 && node <= 6)
             {
                 dummy.motorJ[node]->SetDceKd(kd);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KD [%lu]", node, kd);
@@ -1000,11 +1053,41 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD [%lu] is wrong", node, kd);
             }
         }
+        else if (s.find("GET_PID") != std::string::npos)
+        {
+            uint32_t node;
+            sscanf(_cmd, "#GET_PID %lu", &node);
+            if (node == 9)
+            {
+                dummy.motorJ[0]->QueryDceKp();
+                dummy.motorJ[0]->QueryDceKv();
+                dummy.motorJ[0]->QueryDceKi();
+                dummy.motorJ[0]->QueryDceKd();
+                Respond(_responseChannel, "ok QUERY PID RAIL [9]");
+            }
+            else if (node >= 1 && node <= 6)
+            {
+                dummy.motorJ[node]->QueryDceKp();
+                dummy.motorJ[node]->QueryDceKv();
+                dummy.motorJ[node]->QueryDceKi();
+                dummy.motorJ[node]->QueryDceKd();
+                Respond(_responseChannel, "ok QUERY PID MOTOR [%lu]", node);
+            }
+            else
+            {
+                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 9 for rail, 1~6 for joints)", node);
+            }
+        }
         else if (s.find("REBOOT") != std::string::npos)
         {
             uint32_t node;
             sscanf(_cmd, "#REBOOT %lu", &node);
-            if (node >= 1 && node <= 6)
+            if (node == 9)
+            {
+                dummy.motorJ[0]->Reboot();
+                Respond(_responseChannel, "ok REBOOT RAIL [9]");
+            }
+            else if (node >= 1 && node <= 6)
             {
                 dummy.motorJ[node]->Reboot();
                 Respond(_responseChannel, "ok REBOOT MOTOR [%lu]", node);
@@ -1063,10 +1146,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             float I;
             uint32_t node;
             sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &I);
-            if (node == 0)
+            if (node == 9)
             {
+                // 节点 9: 地轨电机（motorJ[0] 对应 CAN ID=9）
                 dummy.motorJ[0]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [0] CURRENT_LIMIT [%f] (地轨)", I);
+                Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
             }
             else if (node >= 1 && node <= 6)
             {

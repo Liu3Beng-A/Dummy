@@ -221,7 +221,8 @@ void Motor::CloseLoopControlTick()
         case MODE_STOP:
             break;
         case MODE_COMMAND_POSITION:
-            motionPlanner.positionTracker.CalcSoftGoal(controller->goalPosition);
+            // Use encoder-based position for distance calculation (step loss compensation)
+            motionPlanner.positionTracker.CalcSoftGoalWithRealPos(controller->goalPosition, controller->realPosition);
             controller->softPosition = motionPlanner.positionTracker.go_location;
             controller->softVelocity = motionPlanner.positionTracker.go_velocity;
             break;
@@ -239,7 +240,8 @@ void Motor::CloseLoopControlTick()
             controller->softVelocity = motionPlanner.trajectoryTracker.goVelocity;
             break;
         case MODE_PWM_POSITION:
-            motionPlanner.positionTracker.CalcSoftGoal(controller->goalPosition);
+            // Use encoder-based position for distance calculation (step loss compensation)
+            motionPlanner.positionTracker.CalcSoftGoalWithRealPos(controller->goalPosition, controller->realPosition);
             controller->softPosition = motionPlanner.positionTracker.go_location;
             controller->softVelocity = motionPlanner.positionTracker.go_velocity;
             break;
@@ -404,8 +406,16 @@ void Motor::Controller::CalcDceToOutput(int32_t _location, int32_t _speed)
     if (config->dce.pError > (3200)) config->dce.pError = (3200);   // limited pError to 1/16r (51200/16)
     if (config->dce.pError < (-3200)) config->dce.pError = (-3200);
     config->dce.vError = (_speed - estVelocity) >> 7;
-    if (config->dce.vError > (4000)) config->dce.vError = (4000);   // limited vError
-    if (config->dce.vError < (-4000)) config->dce.vError = (-4000);
+    if (config->dce.vError > (8000)) config->dce.vError = (8000);   // limited vError
+    if (config->dce.vError < (-8000)) config->dce.vError = (-8000);
+
+    // Anti-reset: clear integral when at target and nearly stopped
+    if ((_speed == 0) && (abs(config->dce.pError) < 200))
+    {
+        config->dce.outputKi = 0;
+        config->dce.integralRound = 0;
+        config->dce.integralRemainder = 0;
+    }
 
     config->dce.outputKp = config->dce.kp * config->dce.pError;
 

@@ -1,6 +1,16 @@
 # 地轨扩展与 CAN 广播协议修改说明
 
 > 本次修改为项目添加了地轨（线性滑轨）支持，并将 CAN 广播地址从 ID=0 改为命令码区间广播，彻底解决了 ID=0 无法同时作为地轨电机地址和广播地址的冲突问题。
+>
+> **后续更新（v3，2026-06-25）**：地轨电机 CAN ID 从 DIP 拨码 ID=0 改为固定 ID=9，夹爪 CAN ID 实际为 8（非 7），请以本项目当前 CAN ID 布局为准：
+>
+> | 设备 | CAN ID | 设置方式 |
+> |------|--------|----------|
+> | 地轨 | **9** | 固件硬编码，不依赖拨码开关 |
+> | J1~J6 | 1~6 | 拨码开关 |
+> | 夹爪 | **8** | 固件硬编码（GRIPPER_FIXED_NODE_ID） |
+>
+> 以下正文反映 v2 历史协议设计（广播机制变更），ID 分配已按 v3 更新。
 
 **文档版本：v2（2026-05-22，反映项目重构后状态）**
 
@@ -46,14 +56,14 @@
 
 | ID    | 类型     | 名称  | 说明                               |
 | ----- | ------ | --- | -------------------------------- |
-| **0** | **地轨** | J7  | 丝杆 1605，1圈=5mm，减速比 50，行程 0~500mm |
-| 1     | 42 电机  | J1  | 底座旋转，±175°                       |
-| 2     | 42 电机  | J2  | 肩部，-75°~90°                      |
-| 3     | 42 电机  | J3  | 肘部，0°~180°                       |
-| 4     | 42 电机  | J4  | 腕部旋转，±270°                       |
-| 5     | 42 电机  | J5  | 腕部俯仰，±100°                       |
-| 6     | 42 电机  | J6  | 腕部偏转，±180°，减速比 30                |
-| 7     | 35 电机  | 夹爪  | 减速比 16                           |
+| **9** | **地轨** | J7  | 丝杆1605，直连，1圈=5mm，行程 -250~250mm，CAN ID 固定 |
+| 1     | 42/35 电机 | J1  | 底座旋转，±175°，拨码开关设置 |
+| 2     | 42/35 电机 | J2  | 肩部，-75°~90° |
+| 3     | 42/35 电机 | J3  | 肘部，0°~180° |
+| 4     | 42/35 电机 | J4  | 腕部旋转，±270° |
+| 5     | 42/35 电机 | J5  | 腕部俯仰，±100° |
+| 6     | 42/35 电机 | J6  | 腕部偏转，±180°，减速比 30 |
+| **8** | **夹爪** | 夹爪 | 35步进，16:1减速，CAN ID 固定 |
 
 
 ### 2.2 地轨管理策略
@@ -88,11 +98,11 @@ UpdateJointAnglesCallback() → 读回实际位置，更新 jointsStateFlag
 ### 2.3 地轨步进当量
 
 ```
-减速比: 50:1
+减速比: 1:1 (直连)
 丝杆: 1605 → 1圈 = 5mm
 微步细分: 256 (1/256 步进)
 
-1mm = 50/5 × 200 × 256 = 50 × 51200 / 5 = 512000 步
+1mm = 1/5 × 200 × 256 = 1 × 51200 / 5 = 10240 步
 ```
 
 ---
@@ -105,7 +115,7 @@ UpdateJointAnglesCallback() → 读回实际位置，更新 jointsStateFlag
 | 文件                                | 修改内容                                                                                                                                                                                                                                                      |
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Robot\instances\dummy_robot.h`   | 新增 `targetRailCurrent`、`currentRailPos`/`targetRailPos`；`MoveJ`/`ServoJ`/`SetJointCurrents` 改为 7 参数；新增 `COMMAND_TORQUE_CONTROL`(=5) 和 `COMMAND_SERVO_J`(=6) 模式；`MoveRail()` 声明                                                                            |
-| `Robot\instances\dummy_robot.cpp` | `motorJ[0]` 改为地轨电机(ID=0, reduction=50, 0~500mm)；`MoveJ`/`ServoJ` 新增 j7 参数和地轨控制；`MoveRail()` 下发地轨(mm→step)；`ParseCommand` sscanf 全部改为 7 参数；`SetJointCurrents` 支持 7 轴；`Homing()`/`Resting()` 传递 7 参数(地轨=0mm)；`UpdateJointAnglesCallback` 更新地轨位置和bits[0]状态标志 |
+| `Robot\instances\dummy_robot.cpp` | `motorJ[0]` 改为地轨电机(ID=9, reduction=1, -250~250mm)；`MoveJ`/`ServoJ` 新增 j7 参数和地轨控制；`MoveRail()` 下发地轨(mm→step)；`ParseCommand` sscanf 全部改为 7 参数；`SetJointCurrents` 支持 7 轴；`Homing()`/`Resting()` 传递 7 参数(地轨=0mm)；`UpdateJointAnglesCallback` 更新地轨位置和bits[0]状态标志 |
 | `UserApp\main.cpp`                | 控制环(5kHz)：`$` 力矩模式和 ServoJ 模式支持 7 轴（地轨+臂关节）；OLED 显示地轨位置和 7 轴状态                                                                                                                                                                                            |
 
 
@@ -142,8 +152,8 @@ UpdateJointAnglesCallback() → 读回实际位置，更新 jointsStateFlag
 DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) : hcan(_hcan)
 {
     // motorJ[0]: 地轨（线性滑轨）
-    // 丝杆1605，转1圈=5mm，减速比50，行程0~500mm
-    motorJ[0] = new CtrlStepMotor(_hcan, 0, false, 50, 0, 500);
+    // 丝杆1605，直连(1:1)，转1圈=5mm，行程 -250~250mm，CAN ID=9（固定）
+    motorJ[0] = new CtrlStepMotor(_hcan, 9, false, 1, -250, 250);
 
     // motorJ[1-6]: 臂关节
     motorJ[1] = new CtrlStepMotor(_hcan, 1, false, 50, -175, 175);
@@ -153,7 +163,7 @@ DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) : hcan(_hcan)
     motorJ[5] = new CtrlStepMotor(_hcan, 5, true,  50, -100, 100);
     motorJ[6] = new CtrlStepMotor(_hcan, 6, true,  30, -180, 180);
 
-    hand = new StepHand(_hcan, 7);
+    hand = new StepHand(_hcan, 8);  // 夹爪 CAN ID=8（固定）
 
     // 地轨位置初始化（mm）
     currentRailPos = 0.0f;
@@ -368,11 +378,11 @@ case 0x89:  // 广播急停命令码
 
 ### 6.2 地轨硬件配置
 
-- **拨码开关**：设置为 `000`（ID = 0）
+- **地轨电机**：固件固定 CAN ID=9（不依赖拨码开关）
 - **丝杆型号**：1605（转 1 圈 = 5mm）
-- **减速比**：50:1
-- **行程**：0 ~ 500mm
-- **步进当量**：`1mm = 512000 步`
+- **减速比**：直连 1:1
+- **行程**：-250 ~ 250mm
+- **步进当量**：`1mm = 40960 步`
 
 ### 6.3 急停功能验证
 
@@ -443,7 +453,7 @@ dummy-ref-core-fw/
 │   └── COMMAND_TORQUE_CONTROL(=5) / COMMAND_SERVO_J(=6) 模式枚举
 │
 ├── Robot\instances\dummy_robot.cpp
-│   ├── motorJ[0] → 地轨电机 (ID=0, reduction=50, 0~500mm)
+│   ├── motorJ[0] → 地轨电机 (ID=9, reduction=1, -250~250mm)
 │   ├── MoveRail() → 下发地轨 (mm→step)
 │   ├── MoveJ → 7参数，计算各轴速度（保证同时到达）
 │   ├── ServoJ → 7参数，地轨+臂关节同步控制
@@ -495,11 +505,11 @@ dummy-motor-fw/
     ▼
 CAN 总线广播（所有电机均接收）
     │
-    ├── 电机 ID=0（地轨）：cmd = 0x89 → >= 0x80 → 执行急停 ✓
+    ├── 电机 ID=9（地轨）：cmd = 0x89 → >= 0x80 → 执行急停 ✓
     ├── 电机 ID=1（J1）  ：cmd = 0x89 → >= 0x80 → 执行急停 ✓
     ├── 电机 ID=2（J2）  ：cmd = 0x89 → >= 0x80 → 执行急停 ✓
     ├── ...
-    └── 电机 ID=7（夹爪） ：cmd = 0x89 → >= 0x80 → 执行急停 ✓
+    └── 电机 ID=8（夹爪） ：cmd = 0x89 → >= 0x80 → 执行急停 ✓
 ```
 
 ### 地轨 MoveJ 控制流程
@@ -527,7 +537,7 @@ CAN → 电机固件内部执行速度/加速度规划 → 各轴到位
 ### 地轨位置回传流程
 
 ```
-电机 ID=0（地轨）发送: StdId = (0 << 7) | 0x23 = 0x23
+电机 ID=9（地轨）发送: StdId = (9 << 7) | 0x23 = 0x2E3
     │
     ▼
 主控接收: id = 0x23 >> 7 = 0, cmd = 0x23

@@ -241,14 +241,7 @@ void ThreadRGBUpdate(void* argument)
 {
     for (;;)
     {
-        if (dummy.GetRGBEnabled())
-        {
-            rgb.Run((RGB::Rgb_style_t)dummy.GetRGBMode());
-        }
-        else
-        {
-            rgb.Run(RGB::ALL_OFF);
-        }
+        rgb.Run((RGB::Rgb_style_t)dummy.GetRGBMode());
         osDelay(30);
     }
 }

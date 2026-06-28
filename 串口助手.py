@@ -5,19 +5,80 @@ import serial.tools.list_ports
 import threading
 import time
 import math
+import configparser
+import os
+from pathlib import Path
 #你好
 class RobotSerialAssistant:
     def __init__(self, root):
         self.root = root
         self.root.title("Dummy Robot 串口助手")
-        self.root.geometry("1400x1150")
-        self.root.minsize(1200, 800)
-        
-        # 尝试使用更现代的 ttk 主题
+        self.root.geometry("1720x1020")
+        self.root.minsize(1580, 950)
+
+        # 同步滑块状态
+        self._sync_waiting = False
+        self._sync_data = None
+        self.stored_positions = []  # 点位列表 [(name, [j1..j6, rail])]
+        self._pos_queue_running = False  # 顺序发送运行标志
+        self._pos_queue_pending = []     # 待发送队列
+        self._pos_queue_idx = 0          # 当前发送索引
+        self._pos_queue_speed = 50       # 顺序发送速度
+        # 主题与配色
         try:
             style = ttk.Style()
             if 'clam' in style.theme_names():
                 style.theme_use('clam')
+
+            style.configure("TNotebook", background="#e8edf5", borderwidth=0)
+            style.configure("TNotebook.Tab", font=("Arial", 10, "bold"), padding=[14, 6])
+            style.map("TNotebook.Tab",
+                background=[("selected", "#3b5bdb"), ("!selected", "#c5cfd8")],
+                foreground=[("selected", "white"), ("!selected", "#343a40")])
+
+            # 基础色板（浅色主题 + 蓝紫强调色）
+            bg = "#f4f6fb"
+            panel = "#ffffff"
+            border = "#d8dce8"
+            primary = "#3b5bdb"
+            primary_hover = "#4263eb"
+            danger = "#e03131"
+            danger_hover = "#c92a2a"
+            warning = "#f76707"
+            success = "#2b8a3e"
+            text_main = "#1f2937"
+            text_sub = "#4b5563"
+            accent_soft = "#eef2ff"
+
+            self.root.configure(background=bg)
+
+            style.configure(".", background=bg, foreground=text_main, font=("Arial", 10))
+            style.configure("TFrame", background=bg)
+            style.configure("TLabelframe", background=panel, foreground=text_main, bordercolor=border, borderwidth=1)
+            style.configure("TLabelframe.Label", background=panel, foreground=text_main, font=("Arial", 10, "bold"))
+            style.configure("TLabel", background=bg, foreground=text_main)
+            style.configure("TCheckbutton", background=bg)
+            style.configure("TRadiobutton", background=bg)
+
+            style.configure("TButton", font=("Arial", 10), padding=6)
+            style.map("TButton", background=[("active", "#e5e7eb")])
+
+            style.configure("Accent.TButton", foreground="#ffffff", background=primary)
+            style.map("Accent.TButton", background=[("active", primary_hover)])
+
+            style.configure("Danger.TButton", foreground="#ffffff", background=danger)
+            style.map("Danger.TButton", background=[("active", danger_hover)])
+
+            style.configure("Warning.TButton", foreground="#ffffff", background=warning)
+            style.map("Warning.TButton", background=[("pressed", "#e8590c")])
+
+            style.configure("Success.TButton", foreground="#ffffff", background=success)
+            style.map("Success.TButton", background=[("active", "#2f9e44")])
+
+            style.configure("TEntry", fieldbackground=panel, bordercolor=border, lightcolor=border, darkcolor=border)
+            style.configure("TCombobox", fieldbackground=panel, bordercolor=border, lightcolor=border, darkcolor=border)
+            style.configure("Horizontal.TScale", background=bg, troughcolor=border)
+
         except Exception:
             pass
 
@@ -31,140 +92,1083 @@ class RobotSerialAssistant:
             
         self.serial_port = None
         self.is_connected = False
-        
+
+        # RGB 亮度配置（掉电保持），必须在 create_widgets 之前加载
+        self.rgb_brightness = 100
+        self._load_config()
+
         self.create_widgets()
         self.refresh_ports()
-        
+
         self.receive_thread = None
         self.stop_thread = False
 
     def create_widgets(self):
-        # ========== 顶部：连接控制 ==========
-        top_frame = ttk.Frame(self.root)
-        top_frame.pack(fill=tk.X, padx=10, pady=(8, 4))
-        
-        conn_frame = ttk.LabelFrame(top_frame, text="通信设置", padding=5)
-        conn_frame.pack(fill=tk.X)
-        
-        ttk.Label(conn_frame, text="端口:", font=("Arial", 10)).pack(side=tk.LEFT, padx=(5, 5))
-        self.cb_ports = ttk.Combobox(conn_frame, width=15, font=("Arial", 10))
-        self.cb_ports.pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(conn_frame, text="刷新", command=self.refresh_ports, width=6).pack(side=tk.LEFT, padx=(0, 20))
-        
-        ttk.Label(conn_frame, text="波特率:", font=("Arial", 10)).pack(side=tk.LEFT, padx=(0, 5))
-        self.cb_baudrate = ttk.Combobox(conn_frame, width=12, font=("Arial", 10), values=["9600", "115200", "1000000"])
-        self.cb_baudrate.current(1)
-        self.cb_baudrate.pack(side=tk.LEFT, padx=(0, 20))
-        
-        self.btn_connect = ttk.Button(conn_frame, text="连接串口", command=self.toggle_connection, width=12)
-        self.btn_connect.pack(side=tk.LEFT, padx=(0, 15))
-        
-        self.lbl_status = ttk.Label(conn_frame, text="● 未连接", foreground="red", font=("Arial", 10, "bold"))
-        self.lbl_status.pack(side=tk.LEFT, padx=(10, 0))
+        # ==============================================
+        # 顶部状态栏（始终可见，急停最醒目）
+        # ==============================================
+        top_bar = tk.Frame(self.root, bg="#2d2d2d", height=56)
+        top_bar.pack(fill=tk.X)
+        top_bar.pack_propagate(False)
 
-        # ========== 引入 PanedWindow 实现上下分栏 ==========
+        # 左侧：连接控制区
+        left_top = tk.Frame(top_bar, bg="#2d2d2d")
+        left_top.pack(side=tk.LEFT, padx=12, pady=8)
+
+        tk.Label(left_top, text="端口:", bg="#2d2d2d", fg="#cccccc", font=("Arial", 10)).pack(side=tk.LEFT)
+        self.cb_ports = ttk.Combobox(left_top, width=14, font=("Arial", 10))
+        self.cb_ports.pack(side=tk.LEFT, padx=(4, 8))
+
+        tk.Label(left_top, text="波特率:", bg="#2d2d2d", fg="#cccccc", font=("Arial", 10)).pack(side=tk.LEFT, padx=(6, 0))
+        self.cb_baudrate = ttk.Combobox(left_top, width=10, font=("Arial", 10),
+                                        values=["9600", "57600", "115200", "230400", "460800", "1000000"],
+                                        state="readonly")
+        self.cb_baudrate.current(2)
+        self.cb_baudrate.pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(left_top, text="刷新", command=self.refresh_ports, width=5).pack(side=tk.LEFT, padx=6)
+
+        self.btn_connect = tk.Button(left_top, text="连接", font=("Arial", 10, "bold"),
+                                     bg="#2b8a3e", fg="white", activebackground="#2f9e44",
+                                     relief=tk.FLAT, padx=14, command=self.toggle_connection)
+        self.btn_connect.pack(side=tk.LEFT, padx=(4, 0))
+
+        # 中间：连接状态 LED
+        status_frame = tk.Frame(top_bar, bg="#2d2d2d")
+        status_frame.pack(side=tk.LEFT, padx=20, pady=8)
+
+        self.led_canvas = tk.Canvas(status_frame, width=16, height=16, bg="#2d2d2d",
+                                     highlightthickness=0)
+        self.led_canvas.pack(side=tk.LEFT)
+        self._draw_led(False)
+        self.lbl_status = tk.Label(status_frame, text="未连接", bg="#2d2d2d",
+                                    fg="#ff6b6b", font=("Arial", 10, "bold"))
+        self.lbl_status.pack(side=tk.LEFT, padx=6)
+
+        # 右侧：急停按钮（最醒目）
+        self.btn_emergency = tk.Button(top_bar, text="[ !STOP 急停 ]", font=("Arial", 12, "bold"),
+                                       bg="#c92a2a", fg="white", activebackground="#a02222",
+                                       relief=tk.RAISED, padx=20, pady=8,
+                                       command=lambda: self.send_cmd("!STOP"))
+        self.btn_emergency.pack(side=tk.RIGHT, padx=16, pady=8)
+
+        # ==============================================
+        # 主区域：控制台 + 终端（上下分栏）
+        # ==============================================
         main_paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 6))
 
-        # --- 上半部分：控制区 ---
-        controls_frame = ttk.Frame(main_paned)
-        main_paned.add(controls_frame, weight=3) 
+        # 控制台（weight=2，给终端更多空间）
+        control_area = ttk.Frame(main_paned)
+        main_paned.add(control_area, weight=2)
 
-        controls_frame.columnconfigure(0, weight=1)  # 左栏：系统控制
-        controls_frame.columnconfigure(1, weight=1)  # 中栏：配置
-        controls_frame.columnconfigure(2, weight=2)  # 右栏：运动控制
-        controls_frame.rowconfigure(0, weight=1)
+        # 左栏（系统+查询）| 中栏（Notebook标签页）| 右栏（关节控制Notebook）
+        # 左栏有权重，在窗口够大时自动占更多宽度
+        control_area.columnconfigure(0, weight=1)  # 左栏
+        control_area.columnconfigure(1, weight=1)  # 中栏自动扩展
+        control_area.columnconfigure(2, weight=2)  # 右栏2倍宽度（主要工作区）
+        control_area.rowconfigure(0, weight=1)
 
-        # ==================== 左栏：系统控制 ====================
-        left_frame = ttk.Frame(controls_frame)
-        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        
-        # 1. 系统控制
-        sys_frame = ttk.LabelFrame(left_frame, text="系统控制", padding=6)
-        sys_frame.pack(fill=tk.X, pady=(0, 6))
-        
-        sys_grid = ttk.Frame(sys_frame)
-        sys_grid.pack(fill=tk.X)
-        sys_grid.columnconfigure((0, 1, 2), weight=1)
-        
-        ttk.Button(sys_grid, text="启动 !START", command=lambda: self.send_cmd("!START")).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
-        ttk.Button(sys_grid, text="失能 !DISABLE", command=lambda: self.send_cmd("!DISABLE")).grid(row=0, column=1, padx=2, pady=2, sticky="ew")
-        ttk.Button(sys_grid, text="急停 !STOP", command=lambda: self.send_cmd("!STOP")).grid(row=0, column=2, padx=2, pady=2, sticky="ew")
-        ttk.Button(sys_grid, text="回零 !HOME", command=lambda: self.send_cmd("!HOME")).grid(row=1, column=0, padx=2, pady=2, sticky="ew")
-        ttk.Button(sys_grid, text="休息 !RESET", command=lambda: self.send_cmd("!RESET")).grid(row=1, column=1, padx=2, pady=2, sticky="ew")
-        sys_grid.columnconfigure((0, 1, 2), weight=1)
+        # ==============================================
+        # 左栏：系统控制 + 查询校准 + 夹爪
+        # ==============================================
+        left_col = ttk.Frame(control_area)
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left_col.columnconfigure(0, minsize=320)
 
-        ttk.Separator(sys_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+        # --- 系统控制 ---
+        sys_f = ttk.LabelFrame(left_col, text="系统控制", padding=6)
+        sys_f.pack(fill=tk.X, pady=(0, 6))
 
-        ttk.Label(sys_frame, text="堵转检测:", font=("Arial", 9, "bold")).pack(anchor="w", pady=(0, 3))
-        stall_inner = ttk.Frame(sys_frame)
-        stall_inner.pack(fill=tk.X)
-        ttk.Button(stall_inner, text="开启 !STALL_EN", command=lambda: self.send_cmd("!STALL_EN")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
-        ttk.Button(stall_inner, text="关闭 !STALL_DIS", command=lambda: self.send_cmd("!STALL_DIS")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        sys_row1 = ttk.Frame(sys_f)
+        sys_row1.pack(fill=tk.X)
+        tk.Button(sys_row1, text="启动", font=("Arial", 10, "bold"), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!START")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
+        tk.Button(sys_row1, text="失能", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!DISABLE")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
+        tk.Button(sys_row1, text="回零", font=("Arial", 10), bg="#5c7cfa", fg="white",
+                  relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!HOME")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
+        tk.Button(sys_row1, text="休息", font=("Arial", 10), bg="#868e96", fg="white",
+                  relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!RESET")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
 
-        ttk.Separator(sys_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+        ttk.Separator(sys_f, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
 
-        ttk.Label(sys_frame, text="模式切换:", font=("Arial", 9, "bold")).pack(anchor="w", pady=(0, 3))
-        mode_inner = ttk.Frame(sys_frame)
-        mode_inner.pack(fill=tk.X)
-        modes = [("1:顺序", 1), ("2:打断", 2), ("3:连续", 3), ("5:力矩", 5), ("6:伺服", 6)]
-        for i, (text, val) in enumerate(modes):
-            ttk.Button(mode_inner, text=text, width=7, command=lambda v=val: self.send_cmd(f"#CMDMODE {v}")).grid(row=0, column=i, padx=2, pady=2)
+        ttk.Label(sys_f, text="模式:", font=("Arial", 10, "bold")).pack(anchor="w")
+        mode_f = ttk.Frame(sys_f)
+        mode_f.pack(fill=tk.X)
+        for label, val in [("1:顺序", 1), ("2:打断", 2), ("3:连续", 3), ("5:力矩", 5), ("6:伺服", 6)]:
+            tk.Button(mode_f, text=label, font=("Arial", 10), bg="#495057", fg="white",
+                      relief=tk.FLAT, pady=4, command=lambda v=val: self.send_cmd(f"#CMDMODE {v}")
+                      ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1)
 
-        # 2. 查询与校准
-        query_frame = ttk.LabelFrame(left_frame, text="查询与校准", padding=6)
-        query_frame.pack(fill=tk.X, pady=(0, 6))
-        
-        query_btn_frame = ttk.Frame(query_frame)
-        query_btn_frame.pack(fill=tk.X)
-        ttk.Button(query_btn_frame, text="获取关节角", command=lambda: self.send_cmd("#GETJPOS")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(query_btn_frame, text="获取位姿", command=lambda: self.send_cmd("#GETLPOS")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(query_btn_frame, text="调试输出", command=lambda: self.send_cmd("!PRINTPOSE")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        
-        ttk.Separator(query_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-        
-        # 标定按钮行
-        calib_frame = ttk.Frame(query_frame)
-        calib_frame.pack(fill=tk.X)
-        ttk.Button(calib_frame, text="标定零点 !CALIBRATION", command=self.send_calibration, 
-                   style="Accent.TButton").pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        
-        ttk.Separator(query_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-        ttk.Label(query_frame, text="关节置零 (Home Offset):", font=("Arial", 9, "bold")).pack(anchor="w", pady=(0, 3))
-        
-        offset_inner = ttk.Frame(query_frame)
-        offset_inner.pack(fill=tk.X)
-        for i in range(1, 7):
-            ttk.Button(offset_inner, text=f"J{i}", width=4, command=lambda j=i: self.send_cmd(f"#OFFSET_J {j}")).grid(row=0, column=i-1, padx=1, pady=2)
-        ttk.Button(offset_inner, text="全部置零", command=self.send_home_offset_all).grid(row=0, column=6, padx=(5, 0), pady=2, sticky="ew")
+        # --- 查询与校准 ---
+        query_f = ttk.LabelFrame(left_col, text="查询与置零", padding=6)
+        query_f.pack(fill=tk.X, pady=(0, 6))
 
-        # 3. 夹爪控制 (增加 expand=True, fill=tk.BOTH 保证底部对齐)
-        hand_frame = ttk.LabelFrame(left_frame, text="夹爪控制", padding=6)
-        hand_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6)) 
-        
-        hand_top = ttk.Frame(hand_frame)
-        hand_top.pack(fill=tk.X, pady=(0, 6))
-        ttk.Button(hand_top, text="使能", command=lambda: self.send_cmd("!HAND_EN")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(hand_top, text="失能", command=lambda: self.send_cmd("!HAND_DIS")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(hand_top, text="张开", command=lambda: self.send_cmd("!HAND_O")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(hand_top, text="闭合", command=lambda: self.send_cmd("!HAND_C")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        
-        hand_calib_frame = ttk.Frame(hand_frame)
-        hand_calib_frame.pack(fill=tk.X, pady=(0, 6))
-        ttk.Button(hand_calib_frame, text="标定 !HAND_ZERO", command=self.send_hand_zero).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        q_row1 = ttk.Frame(query_f)
+        q_row1.pack(fill=tk.X)
+        tk.Button(q_row1, text="获取关节角", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, pady=4, command=lambda: self.send_cmd("#GETJPOS")
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1)
+        tk.Button(q_row1, text="获取位姿", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, pady=4, command=lambda: self.send_cmd("#GETLPOS")
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1)
 
-        hand_current_frame = ttk.Frame(hand_frame)
-        hand_current_frame.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(hand_current_frame, text="力矩(A):", font=("Arial", 9)).pack(side=tk.LEFT)
-        self.ent_hand_current = ttk.Entry(hand_current_frame, width=5, font=("Arial", 9))
+        ttk.Separator(query_f, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+
+        ttk.Label(query_f, text="置零:", font=("Arial", 10, "bold")).pack(anchor="w")
+        offset_j_row = ttk.Frame(query_f)
+        offset_j_row.pack(fill=tk.X)
+        for j in range(1, 7):
+            tk.Button(offset_j_row, text=f"J{j}", font=("Arial", 10), bg="#343a40", fg="white",
+                     relief=tk.FLAT, pady=4, command=lambda j=j: self.send_cmd(f"#OFFSET_J {j}")
+                     ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1, pady=1)
+        tk.Button(query_f, text="全部置零", font=("Arial", 10), bg="#e03131", fg="white",
+                  relief=tk.FLAT, pady=4, command=self.send_home_offset_all).pack(fill=tk.X, pady=(4, 0))
+
+        # ==============================================
+        # 中栏：Notebook 标签页（RGB / 电机 / 力矩 / PID）
+        # ==============================================
+        self.notebook = ttk.Notebook(control_area)
+        self.notebook.grid(row=0, column=1, sticky="nsew", padx=(0, 6))
+
+        # --- 标签1：RGB 彩灯 ---
+        rgb_page = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(rgb_page, text=" RGB ")
+        self._build_rgb_tab(rgb_page)
+
+        # --- 标签2：电机参数 ---
+        motor_page = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(motor_page, text=" 电机参数 ")
+        self._build_motor_tab(motor_page)
+
+        # --- 标签3：力矩控制 ---
+        torque_page = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(torque_page, text=" 力矩 ")
+        self._build_torque_tab(torque_page)
+
+        # --- 标签4：PID 调节 ---
+        pid_page = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(pid_page, text=" PID ")
+        self._build_pid_tab(pid_page)
+
+        # ==============================================
+        # 右栏：Notebook（关节控制+夹爪 / MoveL / ServoJ / 地轨）
+        # ==============================================
+        right_col = ttk.Frame(control_area)
+        right_col.grid(row=0, column=2, sticky="nsew", padx=(0, 0))
+        right_col.rowconfigure(0, weight=1)
+        right_col.columnconfigure(0, weight=1)
+
+        self.joint_nb = ttk.Notebook(right_col, height=440)
+        self.joint_nb.pack(fill=tk.BOTH, expand=True)
+
+        # --- 页1：关节控制 MoveJ ---
+        movej_page = ttk.Frame(self.joint_nb, padding=5)
+        self.joint_nb.add(movej_page, text=" 关节控制 ")
+        self._build_movej_page(movej_page)
+
+        # --- 页2：夹爪 ---
+        gripper_page = ttk.Frame(self.joint_nb, padding=5)
+        self.joint_nb.add(gripper_page, text=" 夹爪 ")
+        self._build_gripper_tab(gripper_page)
+
+        # --- 页3：笛卡尔 MoveL ---
+        movel_page = ttk.Frame(self.joint_nb, padding=5)
+        self.joint_nb.add(movel_page, text=" MoveL ")
+        self._build_movel_page(movel_page)
+
+        # --- 页4：ServoJ ---
+        servoj_page = ttk.Frame(self.joint_nb, padding=5)
+        self.joint_nb.add(servoj_page, text=" ServoJ ")
+        self._build_servoj_page(servoj_page)
+
+        # ==============================================
+        # 底部终端（更大的占比）
+        # ==============================================
+        log_f = ttk.LabelFrame(main_paned, text="终端日志", padding=6)
+        main_paned.add(log_f, weight=1)
+
+        cmd_row = ttk.Frame(log_f)
+        cmd_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
+
+        self.cmd_history = []
+        self.cmd_history_idx = [-1]
+
+        self.ent_custom_cmd = ttk.Entry(cmd_row, font=("Consolas", 10))
+        self.ent_custom_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.ent_custom_cmd.bind("<Return>", lambda e: self._send_with_history())
+        self.ent_custom_cmd.bind("<Up>", self._history_up)
+        self.ent_custom_cmd.bind("<Down>", self._history_down)
+        tk.Button(cmd_row, text="发送", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self._send_with_history).pack(side=tk.LEFT, padx=4)
+        tk.Button(cmd_row, text="清空", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=lambda: self.txt_log.delete(1.0, tk.END)).pack(side=tk.LEFT)
+
+        # 终端文本（彩色 tag）
+        self.txt_log = scrolledtext.ScrolledText(log_f, wrap=tk.WORD, font=("Consolas", 10),
+                                                  bg="#1e1e1e", fg="#d4d4d4", insertbackground="white")
+        self.txt_log.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.txt_log.tag_config("TX", foreground="#4ec9b0")
+        self.txt_log.tag_config("RX", foreground="#9cdcfe")
+        self.txt_log.tag_config("ERROR", foreground="#f48771")
+        self.txt_log.tag_config("WARN", foreground="#dcdcaa")
+        self.txt_log.tag_config("INFO", foreground="#6a9955")
+
+    def _get_config_path(self):
+        cfg_dir = Path.home() / ".dummy_robot"
+        cfg_dir.mkdir(exist_ok=True)
+        return cfg_dir / "settings.ini"
+
+    def _load_config(self):
+        path = self._get_config_path()
+        if path.exists():
+            try:
+                cp = configparser.ConfigParser()
+                cp.read(str(path), encoding="utf-8")
+                self.rgb_brightness = cp.getint("rgb", "brightness", fallback=100)
+                self.rgb_brightness = max(0, min(100, self.rgb_brightness))
+            except Exception:
+                self.rgb_brightness = 100
+
+    def _save_config(self):
+        path = self._get_config_path()
+        try:
+            cp = configparser.ConfigParser()
+            cp.read(str(path), encoding="utf-8")
+            if not cp.has_section("rgb"):
+                cp.add_section("rgb")
+            cp.set("rgb", "brightness", str(self.rgb_brightness))
+            with open(str(path), "w", encoding="utf-8") as f:
+                cp.write(f)
+        except Exception:
+            pass
+
+    # ==============================================
+    # Notebook 子标签页构建
+    # ==============================================
+
+    def _build_rgb_tab(self, parent):
+        # 开关灯
+        onoff_f = ttk.Frame(parent)
+        onoff_f.pack(fill=tk.X, pady=(0, 6))
+        tk.Button(onoff_f, text="开灯", font=("Arial", 10, "bold"), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=self._rgb_light_on
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 3))
+        tk.Button(onoff_f, text="关灯", font=("Arial", 10, "bold"), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=self._rgb_light_off
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(3, 0))
+
+        # 亮度：Entry 输入 + Scale 同步 + 查询/应用/保存三按钮
+        bright_f = ttk.Frame(parent)
+        bright_f.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(bright_f, text="亮度:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        self.ent_bright = ttk.Entry(bright_f, width=5, font=("Arial", 10))
+        self.ent_bright.insert(0, str(self.rgb_brightness))
+        self.ent_bright.pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Label(bright_f, text="%").pack(side=tk.LEFT)
+
+        self._bright_dragging = False
+        self.scl_bright = tk.Scale(bright_f, from_=0, to=100, orient=tk.HORIZONTAL,
+                                   length=200, showvalue=False, sliderrelief=tk.FLAT,
+                                   bg=self.root.cget("bg"), fg="#3b5bdb", highlightthickness=0,
+                                   font=("Arial", 9), troughcolor="#495057",
+                                   activebackground="#3b5bdb")
+        self.scl_bright.set(self.rgb_brightness)
+        self.scl_bright.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+        def _sync_bright_to_scale(val):
+            self._bright_dragging = True
+            v = int(float(val))
+            if self.ent_bright.get() != str(v):
+                self.ent_bright.delete(0, tk.END)
+                self.ent_bright.insert(0, str(v))
+        def _sync_bright_from_entry():
+            if self.ent_bright.get():
+                try:
+                    v = int(float(self.ent_bright.get()))
+                    v = max(0, min(100, v))
+                    self.scl_bright.set(v)
+                except ValueError:
+                    pass
+
+        self.scl_bright.config(command=_sync_bright_to_scale)
+        self.scl_bright.bind("<ButtonRelease-1>", lambda e: setattr(self, "_bright_dragging", False))
+        self.ent_bright.bind("<Return>", lambda e: (_sync_bright_from_entry(), self.ent_bright.select_clear()))
+        self.ent_bright.bind("<FocusOut>", lambda e: _sync_bright_from_entry())
+        self.scl_bright.bind("<ButtonRelease-1>", lambda e: setattr(self, "_bright_dragging", False))
+
+        bright_btns = ttk.Frame(parent)
+        bright_btns.pack(fill=tk.X, pady=(0, 6))
+        tk.Button(bright_btns, text="查询", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=self._rgb_bright_query
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(bright_btns, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self._rgb_bright_apply
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(bright_btns, text="保存", font=("Arial", 10, "bold"), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=self._rgb_bright_save
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        # 模式选择 2×5 网格
+        ttk.Label(parent, text="模式:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        mode_f = ttk.Frame(parent)
+        mode_f.pack(fill=tk.X, pady=(0, 6))
+
+        modes = [
+            ("单色0", 0), ("单色1", 1), ("单色2", 2), ("流光", 3), ("潮汐", 4),
+            ("白色",  5), ("赛博", 6), ("心跳", 7), ("旋转", 8), ("闪烁", 9),
+        ]
+        for idx, (text, val) in enumerate(modes):
+            row = idx // 5
+            col = idx % 5
+            mode_f.columnconfigure(col, weight=1)
+            tk.Button(mode_f, text=text, font=("Arial", 10), bg="#495057", fg="white",
+                      relief=tk.FLAT, command=lambda v=val: self.send_cmd(f"!RGB_MODE {v}")
+                      ).grid(row=row, column=col, sticky="ew", padx=2, pady=2)
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+
+        # 自定义颜色
+        ttk.Label(parent, text="自定义颜色:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        color_f = ttk.Frame(parent)
+        color_f.pack(fill=tk.X, pady=(0, 6))
+        self.cb_color_idx = ttk.Combobox(color_f, width=3, values=["0", "1", "2"], state="readonly", font=("Arial", 10))
+        self.cb_color_idx.current(0)
+        self.cb_color_idx.pack(side=tk.LEFT, padx=(0, 4))
+        for lbl, var, default in [("R:", "ent_r", "0"), ("G:", "ent_g", "100"), ("B:", "ent_b", "0")]:
+            ttk.Label(color_f, text=lbl, font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+            ent = ttk.Entry(color_f, width=4, font=("Arial", 10))
+            ent.insert(0, default)
+            ent.pack(side=tk.LEFT, padx=2)
+            setattr(self, var, ent)
+        tk.Button(color_f, text="发送", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.send_rgb_color).pack(side=tk.LEFT, padx=(4, 0))
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+
+        # 状态绑定
+        ttk.Label(parent, text="状态绑定:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        state_f = ttk.Frame(parent)
+        state_f.pack(fill=tk.X)
+        for lbl_txt, cb_attr, cmd in [
+            ("启动→模式", "cb_state_start", self.set_rgb_state_start),
+            ("使能→模式", "cb_state_enable", self.set_rgb_state_enable),
+            ("失能→模式", "cb_state_disable", self.set_rgb_state_disable),
+        ]:
+            state_row = ttk.Frame(state_f)
+            state_row.pack(fill=tk.X, pady=2)
+            ttk.Label(state_row, text=lbl_txt, font=("Arial", 10)).pack(side=tk.LEFT)
+            cb = ttk.Combobox(state_row, width=3, values=[str(i) for i in range(10)], state="readonly", font=("Arial", 10))
+            cb.pack(side=tk.LEFT, padx=4)
+            setattr(self, cb_attr, cb)
+            tk.Button(state_row, text="设置", font=("Arial", 10), bg="#3b5bdb", fg="white",
+                      relief=tk.FLAT, command=cmd).pack(side=tk.LEFT)
+
+    def _build_motor_tab(self, parent):
+        # 节点选择 + 加速度 + 电流
+        node_f = ttk.Frame(parent)
+        node_f.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(node_f, text="节点:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        self.cb_acc_node = ttk.Combobox(node_f, width=6,
+                                         values=[str(i) for i in [1, 2, 3, 4, 5, 6, 8, 9]],
+                                         state="readonly")
+        self.cb_acc_node.current(0)
+        self.cb_acc_node.pack(side=tk.LEFT, padx=4)
+        tk.Button(node_f, text="查加速度", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=lambda: self.send_cmd(f"#ACC_BASE_J {self.cb_acc_node.get()}")
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(node_f, text="查电流", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=lambda: self.send_cmd(f"#I_LIMIT_J {self.cb_acc_node.get()}")
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        acc_f = ttk.Frame(parent)
+        acc_f.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(acc_f, text="加速度:", font=("Arial", 10)).pack(side=tk.LEFT)
+        self.ent_acc_val = ttk.Entry(acc_f, width=7, font=("Arial", 10))
+        self.ent_acc_val.insert(0, "150")
+        self.ent_acc_val.pack(side=tk.LEFT, padx=4)
+        tk.Button(acc_f, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.send_acc_base).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        cur_f = ttk.Frame(parent)
+        cur_f.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(cur_f, text="电流(A):", font=("Arial", 10)).pack(side=tk.LEFT)
+        self.ent_i_limit = ttk.Entry(cur_f, width=7, font=("Arial", 10))
+        self.ent_i_limit.insert(0, "1.5")
+        self.ent_i_limit.pack(side=tk.LEFT, padx=4)
+        tk.Button(cur_f, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.send_i_limit).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+
+        # 地轨速度
+        tk.Label(parent, text="地轨速度 (#SPEED_RAIL)", font=("Arial", 10, "bold")).pack(anchor="w")
+        rsf = ttk.Frame(parent)
+        rsf.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(rsf, text="mm/s:", font=("Arial", 10)).pack(side=tk.LEFT)
+        self.ent_rail_speed = ttk.Entry(rsf, width=6, font=("Arial", 10))
+        self.ent_rail_speed.insert(0, "50")
+        self.ent_rail_speed.pack(side=tk.LEFT, padx=4)
+        self.scl_rail_speed = ttk.Scale(rsf, from_=0.5, to=100, orient=tk.HORIZONTAL)
+        self.scl_rail_speed.set(50)
+        self.scl_rail_speed.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.lbl_rail_speed_val = ttk.Label(rsf, text="50.0", width=6, font=("Arial", 10))
+        self.lbl_rail_speed_val.pack(side=tk.LEFT)
+
+        rs_btns = ttk.Frame(parent)
+        rs_btns.pack(fill=tk.X, pady=(0, 6))
+        tk.Button(rs_btns, text="查询", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=self.query_rail_speed).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(rs_btns, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.apply_rail_speed).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(rs_btns, text="保存", font=("Arial", 10), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=self.save_rail_speed).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        def urss(val):
+            v = float(val)
+            self.lbl_rail_speed_val.config(text=f"{v:.1f}")
+            if self.ent_rail_speed.get() != f"{v:.1f}":
+                self.ent_rail_speed.delete(0, tk.END)
+                self.ent_rail_speed.insert(0, f"{v:.1f}")
+        self.scl_rail_speed.config(command=urss)
+        self.ent_rail_speed.bind("<Return>",
+            lambda e: self.scl_rail_speed.set(float(self.ent_rail_speed.get())))
+        self.ent_rail_speed.bind("<FocusOut>",
+            lambda e: self.scl_rail_speed.set(float(self.ent_rail_speed.get())))
+
+        # 地轨加速度
+        tk.Label(parent, text="地轨加速度 (#ACC_RAIL)", font=("Arial", 10, "bold")).pack(anchor="w")
+        raf = ttk.Frame(parent)
+        raf.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(raf, text="mm/s2:", font=("Arial", 10)).pack(side=tk.LEFT)
+        self.ent_rail_acc = ttk.Entry(raf, width=7, font=("Arial", 10))
+        self.ent_rail_acc.insert(0, "500")
+        self.ent_rail_acc.pack(side=tk.LEFT, padx=4)
+        self.scl_rail_acc = ttk.Scale(raf, from_=10, to=5000, orient=tk.HORIZONTAL)
+        self.scl_rail_acc.set(500)
+        self.scl_rail_acc.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.lbl_rail_acc_val = ttk.Label(raf, text="500", width=6, font=("Arial", 10))
+        self.lbl_rail_acc_val.pack(side=tk.LEFT)
+
+        ra_btns = ttk.Frame(parent)
+        ra_btns.pack(fill=tk.X, pady=(0, 6))
+        tk.Button(ra_btns, text="查询", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=self.query_rail_acc).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(ra_btns, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.apply_rail_acc).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(ra_btns, text="保存", font=("Arial", 10), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=self.save_rail_acc).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        def ursa(val):
+            v = int(float(val))
+            self.lbl_rail_acc_val.config(text=str(v))
+            if self.ent_rail_acc.get() != str(v):
+                self.ent_rail_acc.delete(0, tk.END)
+                self.ent_rail_acc.insert(0, str(v))
+        self.scl_rail_acc.config(command=ursa)
+        self.ent_rail_acc.bind("<Return>",
+            lambda e: self.scl_rail_acc.set(float(self.ent_rail_acc.get())))
+        self.ent_rail_acc.bind("<FocusOut>",
+            lambda e: self.scl_rail_acc.set(float(self.ent_rail_acc.get())))
+
+        # 地轨电流 (#I_LIMIT_J 9)
+        tk.Label(parent, text="地轨电流 (#I_LIMIT_J 9)", font=("Arial", 10, "bold")).pack(anchor="w")
+        rcf = ttk.Frame(parent)
+        rcf.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(rcf, text="A:", font=("Arial", 10)).pack(side=tk.LEFT)
+        self.ent_rail_current = ttk.Entry(rcf, width=6, font=("Arial", 10))
+        self.ent_rail_current.insert(0, "2.8")
+        self.ent_rail_current.pack(side=tk.LEFT, padx=4)
+        self.scl_rail_current = ttk.Scale(rcf, from_=0.1, to=3.0, orient=tk.HORIZONTAL)
+        self.scl_rail_current.set(2.8)
+        self.scl_rail_current.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.lbl_rail_current_val = ttk.Label(rcf, text="2.8", width=4, font=("Arial", 10))
+        self.lbl_rail_current_val.pack(side=tk.LEFT)
+
+        rc_btns = ttk.Frame(parent)
+        rc_btns.pack(fill=tk.X, pady=(0, 0))
+        tk.Button(rc_btns, text="查询", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=self.query_rail_current).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(rc_btns, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.apply_rail_current).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(rc_btns, text="保存", font=("Arial", 10), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=self.save_rail_current).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        def ursc(val):
+            v = float(val)
+            self.lbl_rail_current_val.config(text=f"{v:.1f}")
+            if self.ent_rail_current.get() != f"{v:.1f}":
+                self.ent_rail_current.delete(0, tk.END)
+                self.ent_rail_current.insert(0, f"{v:.1f}")
+        self.scl_rail_current.config(command=ursc)
+        self.ent_rail_current.bind("<Return>",
+            lambda e: self.scl_rail_current.set(float(self.ent_rail_current.get())))
+        self.ent_rail_current.bind("<FocusOut>",
+            lambda e: self.scl_rail_current.set(float(self.ent_rail_current.get())))
+
+    def _build_torque_tab(self, parent):
+        ttk.Label(parent, text="电流力矩控制（单位：A）",
+                  font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
+
+        grid = ttk.Frame(parent)
+        grid.pack(fill=tk.X)
+        grid.columnconfigure(1, weight=1)
+
+        # Rail + Gripper 第一行
+        ttk.Label(grid, text="Rail:", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="e", padx=4, pady=2)
+        self.ent_rail_torque = ttk.Entry(grid, width=8, font=("Arial", 10))
+        self.ent_rail_torque.insert(0, "0.0")
+        self.ent_rail_torque.grid(row=0, column=1, sticky="w", padx=4, pady=2)
+        ttk.Label(grid, text="A", font=("Arial", 10)).grid(row=0, column=2, sticky="w", padx=2, pady=2)
+
+        ttk.Label(grid, text="Gripper:", font=("Arial", 10, "bold")).grid(row=0, column=3, sticky="e", padx=(12, 4), pady=2)
+        self.ent_gripper_torque = ttk.Entry(grid, width=8, font=("Arial", 10))
+        self.ent_gripper_torque.insert(0, "0.0")
+        self.ent_gripper_torque.grid(row=0, column=4, sticky="w", padx=4, pady=2)
+        ttk.Label(grid, text="A", font=("Arial", 10)).grid(row=0, column=5, sticky="w", padx=2, pady=2)
+
+        # J1~J6
+        self.ent_torques = []
+        for i, jid in enumerate([1, 2, 3, 4, 5, 6]):
+            r = 1 + i // 3
+            c = (i % 3) * 3
+            ttk.Label(grid, text=f"J{jid}:", font=("Arial", 10)).grid(row=r, column=c, sticky="e", padx=4, pady=2)
+            ent = ttk.Entry(grid, width=8, font=("Arial", 10))
+            ent.insert(0, "0.0")
+            ent.grid(row=r, column=c+1, sticky="w", padx=4, pady=2)
+            ttk.Label(grid, text="A", font=("Arial", 10)).grid(row=r, column=c+2, sticky="w", padx=2, pady=2)
+            self.ent_torques.append(ent)
+
+        tk.Button(parent, text="发送力矩指令", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.send_torque).pack(fill=tk.X, pady=(8, 0))
+
+    def _build_pid_tab(self, parent):
+        node_f = ttk.Frame(parent)
+        node_f.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(node_f, text="节点:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        self.cb_pid_node = ttk.Combobox(node_f, width=5,
+                                        values=[str(i) for i in [9, 1, 2, 3, 4, 5, 6, 8]],
+                                        state="readonly")
+        self.cb_pid_node.current(0)
+        self.cb_pid_node.pack(side=tk.LEFT, padx=4)
+        tk.Button(node_f, text="查询", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=self.query_pid).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        pid_grid = ttk.Frame(parent)
+        pid_grid.pack(fill=tk.X)
+        pid_grid.columnconfigure(1, weight=1)
+
+        self.ent_pid, self.scl_pid, self.lbl_pid_val = {}, {}, {}
+        pid_defaults = {"kp": 500, "kv": 200, "ki": 50, "kd": 100}
+        pid_ranges = {"kp": (0, 5000), "kv": (0, 5000), "ki": (0, 1000), "kd": (0, 2000)}
+
+        for idx, (label, key) in enumerate([("Kp", "kp"), ("Kv", "kv"), ("Ki", "ki"), ("Kd", "kd")]):
+            ttk.Label(pid_grid, text=f"{label}:", font=("Arial", 10, "bold")).grid(
+                row=0, column=idx*3, sticky="e", padx=2, pady=2)
+            ent = ttk.Entry(pid_grid, width=6, font=("Arial", 10))
+            ent.insert(0, str(pid_defaults[key]))
+            ent.grid(row=0, column=idx*3+1, padx=2, pady=2)
+            self.ent_pid[key] = ent
+            scl = ttk.Scale(pid_grid, from_=pid_ranges[key][0], to=pid_ranges[key][1], orient=tk.HORIZONTAL)
+            scl.set(pid_defaults[key])
+            scl.grid(row=0, column=idx*3+2, sticky="ew", padx=2, pady=2)
+            self.scl_pid[key] = scl
+            lbl = ttk.Label(pid_grid, text=str(pid_defaults[key]), width=5, font=("Arial", 10))
+            lbl.grid(row=0, column=idx*3+3, padx=(0, 4), pady=2)
+            self.lbl_pid_val[key] = lbl
+
+            rng = pid_ranges[key]
+
+            def mk_scb(k, r):
+                def cb(val):
+                    v = int(float(val))
+                    self.lbl_pid_val[k].config(text=str(v))
+                    if self.ent_pid[k].get() != str(v):
+                        self.ent_pid[k].delete(0, tk.END)
+                        self.ent_pid[k].insert(0, str(v))
+                return cb
+            scl.config(command=mk_scb(key, rng))
+
+            def mk_ecb(k, r):
+                def cb(event):
+                    try:
+                        v = int(float(self.ent_pid[k].get()))
+                        v = max(r[0], min(r[1], v))
+                        self.scl_pid[k].set(v)
+                        self.lbl_pid_val[k].config(text=str(v))
+                    except ValueError:
+                        pass
+                return cb
+            ent.bind("<Return>", mk_ecb(key, rng))
+            ent.bind("<FocusOut>", mk_ecb(key, rng))
+
+        pid_btns = ttk.Frame(parent)
+        pid_btns.pack(fill=tk.X, pady=(6, 0))
+        tk.Button(pid_btns, text="应用", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.apply_pid).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(pid_btns, text="保存", font=("Arial", 10, "bold"), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=self.save_pid).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+    # ==============================================
+    # 关节/MoveL/ServoJ 页构建（移动到右栏）
+    # ==============================================
+
+    def _build_movej_page(self, parent):
+        jgrid = ttk.Frame(parent)
+        jgrid.pack(fill=tk.X)
+        jgrid.columnconfigure(2, weight=1)
+        
+        self.ent_joints = []
+        self.scl_joints = []
+        self.lbl_joints = []
+        joint_ranges = [(-175, 175), (-75, 90), (0, 180), (-270, 270), (-100, 100), (-180, 180)]
+        joint_defaults = [0, -75, 180, 0, 0, 0]
+        self.movej_drag_enable = tk.BooleanVar(value=False)
+        self.last_movej_send_time = 0
+        
+        for i in range(6):
+            rng, df = joint_ranges[i], joint_defaults[i]
+            ttk.Label(jgrid, text=f"J{i+1}:", font=("Arial", 10, "bold")
+                      ).grid(row=i, column=0, padx=4, pady=2, sticky="e")
+            ent = ttk.Entry(jgrid, width=6, font=("Arial", 10))
+            ent.insert(0, str(df))
+            ent.grid(row=i, column=1, padx=4, pady=2)
+            self.ent_joints.append(ent)
+            scl = ttk.Scale(jgrid, from_=rng[0], to=rng[1], orient=tk.HORIZONTAL)
+            scl.set(df)
+            scl.grid(row=i, column=2, sticky="ew", padx=8, pady=2)
+            self.scl_joints.append(scl)
+            lbl = ttk.Label(jgrid, text=f"{df:.1f}", width=6, font=("Arial", 9))
+            lbl.grid(row=i, column=3, padx=4, pady=2)
+            self.lbl_joints.append(lbl)
+
+            def make_jcb(idx, lbl, ent, scl):
+                def cb(val):
+                    v = float(val)
+                    lbl.config(text=f"{v:.1f}")
+                    s = f"{v:.1f}"
+                    if ent.get() != s:
+                        ent.delete(0, tk.END)
+                        ent.insert(0, s)
+                    if self.movej_drag_enable.get():
+                        now = time.time()
+                        if now - self.last_movej_send_time > 0.1:
+                            self.last_movej_send_time = now
+                            self.root.after(1, self.send_movej)
+                return cb
+            scl.config(command=make_jcb(i, lbl, ent, scl))
+            
+            def make_jentrycb(idx, scl):
+                def cb(event):
+                    try:
+                        scl.set(float(self.ent_joints[idx].get()))
+                    except ValueError:
+                        pass
+                return cb
+            ent.bind("<Return>", make_jentrycb(i, scl))
+            ent.bind("<FocusOut>", make_jentrycb(i, scl))
+
+        # Rail
+        ttk.Label(jgrid, text="Rail:", font=("Arial", 10, "bold"), foreground="#007ACC"
+                  ).grid(row=6, column=0, padx=4, pady=2, sticky="e")
+        self.ent_j7 = ttk.Entry(jgrid, width=6, font=("Arial", 10))
+        self.ent_j7.insert(0, "0")
+        self.ent_j7.grid(row=6, column=1, padx=4, pady=2)
+        self.scl_j7 = ttk.Scale(jgrid, from_=-250, to=250, orient=tk.HORIZONTAL)
+        self.scl_j7.set(0)
+        self.scl_j7.grid(row=6, column=2, sticky="ew", padx=8, pady=2)
+        self.lbl_j7 = ttk.Label(jgrid, text="0.0 mm", width=8, font=("Arial", 9))
+        self.lbl_j7.grid(row=6, column=3, padx=4, pady=2)
+
+        def j7_scl_cb(val):
+            v = float(val)
+            self.lbl_j7.config(text=f"{v:.1f} mm")
+            s = f"{v:.1f}"
+            if self.ent_j7.get() != s:
+                self.ent_j7.delete(0, tk.END)
+                self.ent_j7.insert(0, s)
+            if self.movej_drag_enable.get():
+                now = time.time()
+                if now - self.last_movej_send_time > 0.1:
+                    self.last_movej_send_time = now
+                    self.root.after(1, self.send_movej)
+        self.scl_j7.config(command=j7_scl_cb)
+        
+        def j7_entry_cb(event):
+            try:
+                self.scl_j7.set(float(self.ent_j7.get()))
+            except ValueError:
+                pass
+        self.ent_j7.bind("<Return>", j7_entry_cb)
+        self.ent_j7.bind("<FocusOut>", j7_entry_cb)
+
+        # 控制行
+        rail_ctrl = ttk.Frame(parent)
+        rail_ctrl.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(rail_ctrl, text="Rail:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
+        self.ent_rail_step = ttk.Entry(rail_ctrl, width=5, font=("Arial", 9))
+        self.ent_rail_step.insert(0, "10")
+        self.ent_rail_step.pack(side=tk.LEFT)
+        ttk.Label(rail_ctrl, text="mm", font=("Arial", 9)).pack(side=tk.LEFT, padx=(2, 8))
+        tk.Button(rail_ctrl, text="←", font=("Arial", 9, "bold"), bg="#495057", fg="white",
+                  relief=tk.FLAT, width=3, command=self.rail_move_left).pack(side=tk.LEFT, padx=2)
+        tk.Button(rail_ctrl, text="→", font=("Arial", 9, "bold"), bg="#495057", fg="white",
+                  relief=tk.FLAT, width=3, command=self.rail_move_right).pack(side=tk.LEFT, padx=2)
+        ttk.Label(rail_ctrl, text="Speed:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(8, 2))
+        self.ent_j_speed = ttk.Entry(rail_ctrl, width=5, font=("Arial", 9))
+        self.ent_j_speed.insert(0, "50")
+        self.ent_j_speed.pack(side=tk.LEFT)
+        tk.Checkbutton(rail_ctrl, text="拖发", variable=self.movej_drag_enable,
+                       bg=None, font=("Arial", 9)).pack(side=tk.LEFT, padx=6)
+        tk.Button(rail_ctrl, text="发送 MoveJ", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.send_movej).pack(side=tk.RIGHT, padx=2)
+
+        # --- 点位存储 ---
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(8, 6))
+
+        # 读取/存储按钮行
+        pos_top = ttk.Frame(parent)
+        pos_top.pack(fill=tk.X, pady=(0, 4))
+        tk.Button(pos_top, text="读取机械臂位置→滑块", font=("Arial", 10), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.read_and_sync_from_robot
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(pos_top, text="存储当前滑块", font=("Arial", 10), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=self.save_current_position
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(pos_top, text="读取滑块值", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=self.read_current_position
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        # 点位列表（带滚动条）
+        ttk.Label(parent, text="已存储的点位:", font=("Arial", 9, "bold")).pack(anchor="w")
+        lb_frame = ttk.Frame(parent)
+        lb_frame.pack(fill=tk.X, pady=2)
+        scroll_y = ttk.Scrollbar(lb_frame, orient=tk.VERTICAL)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self._pos_listbox = tk.Listbox(lb_frame, font=("Arial", 9), height=5, yscrollcommand=scroll_y.set)
+        self._pos_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        scroll_y.config(command=self._pos_listbox.yview)
+        self._pos_listbox.bind("<Double-Button-1>", lambda e: self._on_select_position())
+        self._pos_listbox.bind("<Delete>", lambda e: self._delete_position())
+
+        # 操作按钮行
+        pos_ops = ttk.Frame(parent)
+        pos_ops.pack(fill=tk.X, pady=(0, 4))
+        tk.Button(pos_ops, text="发送选中", font=("Arial", 10), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.send_selected_position
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(pos_ops, text="删除", font=("Arial", 10), bg="#c92a2a", fg="white",
+                  relief=tk.FLAT, command=self._delete_position
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(pos_ops, text="清空", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=self.clear_all_positions
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        # 速度 + 顺序发送
+        pos_bot = ttk.Frame(parent)
+        pos_bot.pack(fill=tk.X)
+        ttk.Label(pos_bot, text="速度:", font=("Arial", 10)).pack(side=tk.LEFT)
+        self.ent_pos_speed = ttk.Entry(pos_bot, width=6, font=("Arial", 10))
+        self.ent_pos_speed.insert(0, "50")
+        self.ent_pos_speed.pack(side=tk.LEFT, padx=4)
+        tk.Button(pos_bot, text="顺序发送全部→机械臂", font=("Arial", 10, "bold"), bg="#495057", fg="white",
+                  relief=tk.FLAT, command=self.send_all_positions
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(8, 0))
+
+    def _build_movel_page(self, parent):
+        pgrid = ttk.Frame(parent)
+        pgrid.pack(fill=tk.X)
+        pgrid.columnconfigure(2, weight=1)
+
+        self.ent_pose, self.scl_pose, self.lbl_pose = [], [], []
+        labels = ['X', 'Y', 'Z', 'R', 'P', 'Yw']
+        defaults = [0, 0, 150, 0, 180, 0]
+        ranges = [(-250, 250), (-200, 200), (-50, 450), (-180, 180), (0, 360), (-180, 180)]
+        self.movel_drag_enable = tk.BooleanVar(value=False)
+        self.last_movel_send_time = 0
+        
+        for i, (lbl, df, rng) in enumerate(zip(labels, defaults, ranges)):
+            ttk.Label(pgrid, text=f"{lbl}:", font=("Arial", 10, "bold")
+                      ).grid(row=i, column=0, padx=4, pady=2, sticky="e")
+            ent = ttk.Entry(pgrid, width=6, font=("Arial", 10))
+            ent.insert(0, str(df))
+            ent.grid(row=i, column=1, padx=4, pady=2)
+            self.ent_pose.append(ent)
+            scl = ttk.Scale(pgrid, from_=rng[0], to=rng[1], orient=tk.HORIZONTAL)
+            scl.set(df)
+            scl.grid(row=i, column=2, sticky="ew", padx=8, pady=2)
+            self.scl_pose.append(scl)
+            lbl = ttk.Label(pgrid, text=f"{df:.1f}", width=6, font=("Arial", 9))
+            lbl.grid(row=i, column=3, padx=4, pady=2)
+            self.lbl_pose.append(lbl)
+
+            def make_pcb(idx, lbl, ent):
+                def cb(val):
+                    v = float(val)
+                    lbl.config(text=f"{v:.1f}")
+                    s = f"{v:.1f}"
+                    if ent.get() != s:
+                        ent.delete(0, tk.END)
+                        ent.insert(0, s)
+                    if self.movel_drag_enable.get():
+                        now = time.time()
+                        if now - self.last_movel_send_time > 0.05:
+                            self.last_movel_send_time = now
+                            self.root.after(1, self.send_movel)
+                return cb
+            scl.config(command=make_pcb(i, lbl, ent))
+            
+            def make_pentrycb(idx, scl):
+                def cb(event):
+                    try:
+                        scl.set(float(self.ent_pose[idx].get()))
+                    except ValueError:
+                        pass
+                return cb
+            ent.bind("<Return>", make_pentrycb(i, scl))
+            ent.bind("<FocusOut>", make_pentrycb(i, scl))
+
+        movel_ctrl = ttk.Frame(parent)
+        movel_ctrl.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(movel_ctrl, text="Speed:", font=("Arial", 10)).pack(side=tk.LEFT, padx=(0, 2))
+        self.ent_l_speed = ttk.Entry(movel_ctrl, width=5, font=("Arial", 10))
+        self.ent_l_speed.insert(0, "50")
+        self.ent_l_speed.pack(side=tk.LEFT)
+        tk.Checkbutton(movel_ctrl, text="拖发", variable=self.movel_drag_enable,
+                       bg=None, font=("Arial", 10)).pack(side=tk.LEFT, padx=6)
+        tk.Button(movel_ctrl, text="发送 MoveL", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
+                  relief=tk.FLAT, command=self.send_movel).pack(side=tk.RIGHT, padx=2)
+
+    def _build_servoj_page(self, parent):
+        tk.Label(parent, text="基准: [0,-75,180,0,0,0]  激励: J1 ±20° 正弦 0.5Hz",
+                 font=("Arial", 10), foreground="#666").pack(anchor="w")
+        self.btn_servoj_start = tk.Button(parent, text="▶ 开始正弦轨迹", font=("Arial", 11),
+                                          bg="#495057", fg="white", relief=tk.FLAT,
+                                          command=self.toggle_servoj_test)
+        self.btn_servoj_start.pack(fill=tk.X, pady=(8, 0))
+        self.is_servoj_testing = False
+        self.servoj_thread = None
+
+    # ==============================================
+    # 点位存储（示教）
+    # ==============================================
+
+    def _build_position_page(self, parent):
+        pass  # UI已嵌入_movej_page，此处仅保留空实现
+
+    def read_and_sync_from_robot(self):
+        """发送 #GETJPOS 并将返回结果同步到滑块"""
+        if not self.is_connected:
+            self.log("未连接串口", "WARN")
+            return
+        self._sync_waiting = True
+        self.send_cmd("#GETJPOS")
+        self.log("已发送 #GETJPOS，等待响应...", "INFO")
+        self.root.after(500, self._check_sync_response)
+
+    def _check_sync_response(self):
+        if getattr(self, "_sync_data", None):
+            self._apply_sync_data(self._sync_data)
+            self._sync_data = None
+        else:
+            self.log("同步超时，请确认机械臂已使能并处于模式1", "ERROR")
+        self._sync_waiting = False
+
+    def _apply_sync_data(self, data):
+        if len(data) < 6:
+            self.log(f"数据长度不足: {len(data)}", "ERROR")
+            return
+        for i in range(min(6, len(data))):
+            try:
+                v = float(data[i])
+                self.scl_joints[i].set(v)
+                self.ent_joints[i].delete(0, tk.END)
+                self.ent_joints[i].insert(0, f"{v:.2f}")
+                self.lbl_joints[i].config(text=f"{v:.2f}")
+            except (ValueError, IndexError):
+                pass
+        self.log("已同步机械臂当前位置到滑块", "INFO")
+
+    def read_current_position(self):
+        """读取当前滑块位置并显示"""
+        jvals = [float(e.get()) for e in self.ent_joints]
+        rval = float(self.ent_j7.get())
+        pos = [round(v, 2) for v in jvals + [rval]]
+        names = ["J1", "J2", "J3", "J4", "J5", "J6", "Rail"]
+        msg = ", ".join(f"{n}={v}" for n, v in zip(names, pos))
+        self.log(f"当前滑块: {msg}", "INFO")
+
+    def save_current_position(self):
+        """保存当前滑块位置为一个点位"""
+        jvals = [float(e.get()) for e in self.ent_joints]
+        rval = float(self.ent_j7.get())
+        pos = [round(v, 2) for v in jvals + [rval]]
+        idx = len(self.stored_positions) + 1
+        name = f"#{idx} [{','.join(str(v) for v in pos[:3])}...]"
+        self.stored_positions.append((name, pos))
+        self._pos_listbox.insert(tk.END, name)
+        self.log(f"已存储: {name}", "INFO")
+
+    def _delete_position(self):
+        idx = self._pos_listbox.curselection()
+        if not idx:
+            idx = self._pos_listbox.size() - 1
+        if idx:
+            idx = idx[0] if isinstance(idx, tuple) else idx
+            self._pos_listbox.delete(idx)
+            del self.stored_positions[idx]
+            self.log(f"已删除第 {idx+1} 个点位", "INFO")
+
+    def clear_all_positions(self):
+        self.stored_positions.clear()
+        self._pos_listbox.delete(0, tk.END)
+        self.log("已清空所有存储点位", "INFO")
+
+    def _on_select_position(self):
+        idx = self._pos_listbox.curselection()
+        if not idx:
+            return
+        idx = idx[0]
+        name, pos = self.stored_positions[idx]
+        # 同步到滑块
+        for i in range(6):
+            try:
+                self.scl_joints[i].set(pos[i])
+                self.ent_joints[i].delete(0, tk.END)
+                self.ent_joints[i].insert(0, f"{pos[i]:.2f}")
+                self.lbl_joints[i].config(text=f"{pos[i]:.2f}")
+            except (ValueError, IndexError):
+                pass
+        try:
+            self.scl_j7.set(pos[6])
+            self.ent_j7.delete(0, tk.END)
+            self.ent_j7.insert(0, f"{pos[6]:.2f}")
+            self.lbl_j7.config(text=f"{pos[6]:.2f} mm")
+        except (ValueError, IndexError):
+            pass
+        self.log(f"已加载: {name}", "INFO")
+
+    def send_selected_position(self):
+        """发送列表中选中的点位到机械臂"""
+        idx = self._pos_listbox.curselection()
+        if not idx:
+            self.log("请先选择一个点位", "WARN")
+            return
+        idx = idx[0]
+        name, pos = self.stored_positions[idx]
+        try:
+            speed = float(self.ent_pos_speed.get())
+        except ValueError:
+            speed = 50
+        cmd = ">" + ",".join(str(v) for v in pos[:7]) + f",{speed}"
+        self.send_cmd(cmd)
+        self.log(f"已发送: {name} → {cmd}", "INFO")
+
+    def send_all_positions(self):
+        """按顺序发送所有点位（等上一个到达后再发下一个）"""
+        if not self.stored_positions:
+            self.log("没有存储的点位", "WARN")
+            return
+        if self._pos_queue_running:
+            self.log("顺序发送正在进行中，请等待完成", "WARN")
+            return
+        try:
+            speed = float(self.ent_pos_speed.get())
+        except ValueError:
+            speed = 50
+        self._pos_queue_running = True
+        self._pos_queue_pending = list(self.stored_positions)
+        self._pos_queue_idx = 0
+        self._pos_queue_speed = speed
+        self.log(f"开始顺序发送 {len(self._pos_queue_pending)} 个点位（等待ok）...", "INFO")
+        self._send_next_position()
+
+    def _send_next_position(self):
+        """内部方法：发送下一个点位（由 ok 触发或由 send_all_positions 启动）"""
+        if self._pos_queue_idx >= len(self._pos_queue_pending):
+            return
+        total = len(self._pos_queue_pending)
+        i = self._pos_queue_idx
+        name, pos = self._pos_queue_pending[i]
+        cmd = ">" + ",".join(str(v) for v in pos[:7]) + f",{self._pos_queue_speed}"
+        self.send_cmd(cmd)
+        self.log(f"  [{i+1}/{total}] {name}", "INFO")
+
+    # ==============================================
+    # 夹爪控制（移动到右栏关节控制区）
+    # ==============================================
+
+    def _build_gripper_tab(self, parent):
+        # 夹爪使能/失能
+        hg_f = ttk.Frame(parent)
+        hg_f.pack(fill=tk.X, pady=(0, 4))
+        tk.Button(hg_f, text="使能", font=("Arial", 10), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=lambda: self.send_cmd("!HAND_EN")
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(hg_f, text="失能", font=("Arial", 10), bg="#868e96", fg="white",
+                  relief=tk.FLAT, command=lambda: self.send_cmd("!HAND_DIS")
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        # 开度滑块
+        ttk.Label(parent, text="开度:", font=("Arial", 10)).pack(anchor="w")
+        hp_f = ttk.Frame(parent)
+        hp_f.pack(fill=tk.X, pady=(0, 4))
+        self.ent_hand_pos = ttk.Entry(hp_f, width=6, font=("Arial", 10))
+        self.ent_hand_pos.insert(0, "50")
+        self.ent_hand_pos.pack(side=tk.LEFT)
+        self.scl_hand = ttk.Scale(hp_f, from_=0, to=100, orient=tk.HORIZONTAL)
+        self.scl_hand.set(50)
+        self.scl_hand.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.lbl_hand_val = ttk.Label(hp_f, text="50", width=3, font=("Arial", 10))
+        self.lbl_hand_val.pack(side=tk.LEFT)
+        tk.Button(hp_f, text="发送", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, width=5, command=self.send_hand_pos).pack(side=tk.LEFT, padx=(4, 0))
+
+        # 力矩滑块
+        ttk.Label(parent, text="力矩:", font=("Arial", 10)).pack(anchor="w")
+        hc_f = ttk.Frame(parent)
+        hc_f.pack(fill=tk.X, pady=(0, 4))
+        self.ent_hand_current = ttk.Entry(hc_f, width=6, font=("Arial", 10))
         self.ent_hand_current.insert(0, "1.2")
-        self.ent_hand_current.pack(side=tk.LEFT, padx=(5, 2))
-        self.scl_hand_current = ttk.Scale(hand_current_frame, from_=0.05, to=2.0, orient=tk.HORIZONTAL)
+        self.ent_hand_current.pack(side=tk.LEFT)
+        self.scl_hand_current = ttk.Scale(hc_f, from_=0.05, to=2.0, orient=tk.HORIZONTAL)
         self.scl_hand_current.set(1.2)
-        self.scl_hand_current.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.lbl_hand_current_val = ttk.Label(hand_current_frame, text="1.2", width=4, font=("Arial", 9))
-        self.lbl_hand_current_val.pack(side=tk.LEFT, padx=2)
-        ttk.Button(hand_current_frame, text="发送", width=5, command=self.send_hand_current).pack(side=tk.LEFT, padx=(5, 0))
+        self.scl_hand_current.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.lbl_hand_current_val = ttk.Label(hc_f, text="1.2", width=4, font=("Arial", 10))
+        self.lbl_hand_current_val.pack(side=tk.LEFT)
+        tk.Button(hc_f, text="发送", font=("Arial", 10), bg="#495057", fg="white",
+                  relief=tk.FLAT, width=5, command=self.send_hand_current).pack(side=tk.LEFT, padx=(4, 0))
+
+        # 标定 + 张开/闭合
+        tk.Button(parent, text="标定零点", font=("Arial", 10), bg="#343a40", fg="white",
+                  relief=tk.FLAT, command=self.send_hand_zero).pack(fill=tk.X, pady=(0, 4))
+
+        hg2_f = ttk.Frame(parent)
+        hg2_f.pack(fill=tk.X, pady=(0, 0))
+        tk.Button(hg2_f, text="张开", font=("Arial", 10), bg="#5c7cfa", fg="white",
+                  relief=tk.FLAT, command=lambda: self.send_cmd("!HAND_O")
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(hg2_f, text="闭合", font=("Arial", 10), bg="#fa5252", fg="white",
+                  relief=tk.FLAT, command=lambda: self.send_cmd("!HAND_C")
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        # 绑定夹爪滑块回调
+        def update_hand_from_scale(val):
+            v = int(float(val))
+            self.lbl_hand_val.config(text=str(v))
+            if self.ent_hand_pos.get() != str(v):
+                self.ent_hand_pos.delete(0, tk.END)
+                self.ent_hand_pos.insert(0, str(v))
+        self.scl_hand.config(command=update_hand_from_scale)
+
+        def update_hand_from_entry(event):
+            try:
+                self.scl_hand.set(int(self.ent_hand_pos.get()))
+            except ValueError:
+                pass
+        self.ent_hand_pos.bind("<Return>", update_hand_from_entry)
+        self.ent_hand_pos.bind("<FocusOut>", update_hand_from_entry)
 
         def update_hand_current_from_scale(val):
             v = round(float(val), 1)
@@ -185,489 +1189,50 @@ class RobotSerialAssistant:
         self.ent_hand_current.bind("<Return>", update_hand_current_from_entry)
         self.ent_hand_current.bind("<FocusOut>", update_hand_current_from_entry)
 
-        hand_slider = ttk.Frame(hand_frame)
-        hand_slider.pack(fill=tk.X)
-        ttk.Label(hand_slider, text="开度:", font=("Arial", 9)).pack(side=tk.LEFT)
-        self.ent_hand_pos = ttk.Entry(hand_slider, width=5, font=("Arial", 9))
-        self.ent_hand_pos.insert(0, "50")
-        self.ent_hand_pos.pack(side=tk.LEFT, padx=(5, 5))
-        
-        self.scl_hand = ttk.Scale(hand_slider, from_=0, to=100, orient=tk.HORIZONTAL)
-        self.scl_hand.set(50)
-        self.scl_hand.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        
-        self.lbl_hand_val = ttk.Label(hand_slider, text="50", width=3, font=("Arial", 9))
-        self.lbl_hand_val.pack(side=tk.LEFT, padx=5)
-        
-        self.hand_drag_enable = tk.BooleanVar(value=False)
-        ttk.Checkbutton(hand_slider, text="拖发", variable=self.hand_drag_enable).pack(side=tk.LEFT, padx=5)
-        ttk.Button(hand_slider, text="发送", width=6, command=self.send_hand_pos).pack(side=tk.LEFT)
-        
-        def update_hand_from_scale(val):
-            v = int(float(val))
-            self.lbl_hand_val.config(text=str(v))
-            if self.ent_hand_pos.get() != str(v):
-                self.ent_hand_pos.delete(0, tk.END)
-                self.ent_hand_pos.insert(0, str(v))
-            if self.hand_drag_enable.get():
-                self.send_cmd(f"!HAND_POS {v}")
-        self.scl_hand.config(command=update_hand_from_scale)
-        
-        def update_hand_from_entry(event):
-            try:
-                v = int(self.ent_hand_pos.get())
-                self.scl_hand.set(v)
-            except ValueError:
-                pass
-        self.ent_hand_pos.bind("<Return>", update_hand_from_entry)
-        self.ent_hand_pos.bind("<FocusOut>", update_hand_from_entry)
+    # ==============================================
+    # LED 绘制
+    # ==============================================
 
-        # ==================== 中栏：配置 ====================
-        middle_frame = ttk.Frame(controls_frame)
-        middle_frame.grid(row=0, column=1, sticky="nsew", padx=5)
-        
-        # 1. RGB控制
-        rgb_frame = ttk.LabelFrame(middle_frame, text="RGB 彩灯控制", padding=6)
-        rgb_frame.pack(fill=tk.X, pady=(0, 6))
-        
-        rgb_top = ttk.Frame(rgb_frame)
-        rgb_top.pack(fill=tk.X, pady=(0, 6))
-        ttk.Button(rgb_top, text="开灯", command=lambda: self.send_cmd("!RGB_EN")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        ttk.Button(rgb_top, text="关灯", command=lambda: self.send_cmd("!RGB_DIS")).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        
-        rgb_modes_grid = ttk.Frame(rgb_frame)
-        rgb_modes_grid.pack(fill=tk.X)
-        rgb_modes_grid.columnconfigure((0,1,2,3,4), weight=1)
-        rgb_modes1 = [("单色0", 0), ("单色1", 1), ("单色2", 2), ("流光", 3), ("潮汐", 4)]
-        rgb_modes2 = [("白色", 5), ("赛博", 6), ("心跳", 7), ("旋转", 8), ("闪烁", 9)]
-        for i, (text, val) in enumerate(rgb_modes1):
-            ttk.Button(rgb_modes_grid, text=f"{val}:{text}", command=lambda v=val: self.send_cmd(f"!RGB_MODE {v}")).grid(row=0, column=i, padx=2, pady=2, sticky="ew")
-        for i, (text, val) in enumerate(rgb_modes2):
-            ttk.Button(rgb_modes_grid, text=f"{val}:{text}", command=lambda v=val: self.send_cmd(f"!RGB_MODE {v}")).grid(row=1, column=i, padx=2, pady=2, sticky="ew")
-        
-        ttk.Separator(rgb_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-        
-        rgb_color = ttk.Frame(rgb_frame)
-        rgb_color.pack(fill=tk.X, pady=(0, 3))
-        ttk.Label(rgb_color, text="自定义颜色(Idx/R/G/B):").pack(side=tk.LEFT, padx=(0, 5))
-        self.cb_color_idx = ttk.Combobox(rgb_color, width=2, values=["0", "1", "2"], state="readonly")
-        self.cb_color_idx.current(0)
-        self.cb_color_idx.pack(side=tk.LEFT, padx=(0, 5))
-        
-        for lbl, var in [("R:", "ent_r"), ("G:", "ent_g"), ("B:", "ent_b")]:
-            ttk.Label(rgb_color, text=lbl).pack(side=tk.LEFT)
-            ent = ttk.Entry(rgb_color, width=4)
-            ent.insert(0, "0" if lbl != "G:" else "100")
-            ent.pack(side=tk.LEFT, padx=2)
-            setattr(self, var, ent)
-        ttk.Button(rgb_color, text="发送颜色", command=self.send_rgb_color).pack(side=tk.RIGHT)
-        
-        ttk.Separator(rgb_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-        
-        ttk.Separator(rgb_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-        
-        rgb_state = ttk.Frame(rgb_frame)
-        rgb_state.pack(fill=tk.X)
-        ttk.Label(rgb_state, text="状态绑定:").pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.cb_state_start = ttk.Combobox(rgb_state, width=2, values=[str(i) for i in range(10)], state="readonly")
-        self.cb_state_start.current(0)
-        ttk.Label(rgb_state, text="开机:").pack(side=tk.LEFT)
-        self.cb_state_start.pack(side=tk.LEFT, padx=2)
-        ttk.Button(rgb_state, text="设", width=3, command=self.set_rgb_state_start).pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.cb_state_enable = ttk.Combobox(rgb_state, width=2, values=[str(i) for i in range(10)], state="readonly")
-        self.cb_state_enable.current(1)
-        ttk.Label(rgb_state, text="使能:").pack(side=tk.LEFT)
-        self.cb_state_enable.pack(side=tk.LEFT, padx=2)
-        ttk.Button(rgb_state, text="设", width=3, command=self.set_rgb_state_enable).pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.cb_state_disable = ttk.Combobox(rgb_state, width=2, values=[str(i) for i in range(10)], state="readonly")
-        self.cb_state_disable.current(2)
-        ttk.Label(rgb_state, text="失能:").pack(side=tk.LEFT)
-        self.cb_state_disable.pack(side=tk.LEFT, padx=2)
-        ttk.Button(rgb_state, text="设", width=3, command=self.set_rgb_state_disable).pack(side=tk.LEFT)
+    def _draw_led(self, on):
+        self.led_canvas.delete("all")
+        color = "#4ade80" if on else "#6b7280"
+        self.led_canvas.create_oval(2, 2, 14, 14, fill=color, outline="")
 
-        # 2. 电机配置
-        acc_frame = ttk.LabelFrame(middle_frame, text="电机参数配置", padding=6)
-        acc_frame.pack(fill=tk.X, pady=(0, 6))
-        
-        acc_grid = ttk.Frame(acc_frame)
-        acc_grid.pack(fill=tk.X)
-        
-        ttk.Label(acc_grid, text="节点(1-7):").grid(row=0, column=0, sticky="w", pady=3)
-        self.cb_acc_node = ttk.Combobox(acc_grid, width=5, values=[str(i) for i in range(0, 8)], state="readonly")
-        self.cb_acc_node.current(0)
-        self.cb_acc_node.grid(row=0, column=1, padx=5, pady=3, sticky="w")
+    # ==============================================
+    # 命令历史
+    # ==============================================
 
-        ttk.Label(acc_grid, text="基础加速(1-2000):").grid(row=1, column=0, sticky="w", pady=3)
-        self.ent_acc_val = ttk.Entry(acc_grid, width=8)
-        self.ent_acc_val.insert(0, "150")
-        self.ent_acc_val.grid(row=1, column=1, padx=5, pady=3, sticky="w")
-        ttk.Button(acc_grid, text="设置加速", command=self.send_acc_base).grid(row=1, column=2, padx=10, pady=3)
+    def _send_with_history(self):
+        cmd = self.ent_custom_cmd.get().strip()
+        if cmd:
+            if not self.cmd_history or self.cmd_history[-1] != cmd:
+                self.cmd_history.append(cmd)
+            self.cmd_history_idx[-1] = len(self.cmd_history) - 1
+            self.send_cmd(cmd)
+            self.ent_custom_cmd.delete(0, tk.END)
 
-        ttk.Label(acc_grid, text="最大电流(A):").grid(row=2, column=0, sticky="w", pady=3)
-        self.ent_i_limit = ttk.Entry(acc_grid, width=8)
-        self.ent_i_limit.insert(0, "1.5")
-        self.ent_i_limit.grid(row=2, column=1, padx=5, pady=3, sticky="w")
-        ttk.Button(acc_grid, text="设置电流", command=self.send_i_limit).grid(row=2, column=2, padx=10, pady=3)
+    def _history_up(self, event):
+        if not self.cmd_history:
+            return
+        idx = self.cmd_history_idx[-1]
+        if idx > 0:
+            idx -= 1
+            self.cmd_history_idx[-1] = idx
+            self.ent_custom_cmd.delete(0, tk.END)
+            self.ent_custom_cmd.insert(0, self.cmd_history[idx])
 
-        ttk.Separator(acc_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-
-        # 地轨速度设置
-        rail_speed_frame = ttk.LabelFrame(acc_frame, text="地轨速度设置 (#SPEED_RAIL)", padding=6)
-        rail_speed_frame.pack(fill=tk.X)
-
-        rail_speed_inner = ttk.Frame(rail_speed_frame)
-        rail_speed_inner.pack(fill=tk.X)
-
-        ttk.Label(rail_speed_inner, text="速度(mm/s):", font=("Arial", 9)).pack(side=tk.LEFT)
-        self.ent_rail_speed = ttk.Entry(rail_speed_inner, width=6, font=("Arial", 9))
-        self.ent_rail_speed.insert(0, "50")
-        self.ent_rail_speed.pack(side=tk.LEFT, padx=(5, 5))
-
-        self.scl_rail_speed = ttk.Scale(rail_speed_inner, from_=0.5, to=100, orient=tk.HORIZONTAL)
-        self.scl_rail_speed.set(50)
-        self.scl_rail_speed.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
-        self.lbl_rail_speed_val = ttk.Label(rail_speed_inner, text="50.0", width=6, font=("Arial", 9))
-        self.lbl_rail_speed_val.pack(side=tk.LEFT, padx=5)
-
-        ttk.Button(rail_speed_inner, text="查询", width=5,
-                   command=self.query_rail_speed).pack(side=tk.LEFT, padx=2)
-        ttk.Button(rail_speed_inner, text="应用", width=5,
-                   command=self.apply_rail_speed).pack(side=tk.LEFT, padx=2)
-        ttk.Button(rail_speed_inner, text="保存", width=5,
-                   command=self.save_rail_speed).pack(side=tk.LEFT, padx=2)
-
-        def update_rail_speed_from_scale(val):
-            v = float(val)
-            self.lbl_rail_speed_val.config(text=f"{v:.1f}")
-            if self.ent_rail_speed.get() != f"{v:.1f}":
-                self.ent_rail_speed.delete(0, tk.END)
-                self.ent_rail_speed.insert(0, f"{v:.1f}")
-
-        self.scl_rail_speed.config(command=update_rail_speed_from_scale)
-
-        def update_rail_speed_from_entry(event):
-            try:
-                v = float(self.ent_rail_speed.get())
-                if v < 0.5:
-                    v = 0.5
-                elif v > 100:
-                    v = 100
-                self.scl_rail_speed.set(v)
-                self.lbl_rail_speed_val.config(text=f"{v:.1f}")
-            except ValueError:
-                pass
-
-        self.ent_rail_speed.bind("<Return>", update_rail_speed_from_entry)
-        self.ent_rail_speed.bind("<FocusOut>", update_rail_speed_from_entry)
-
-        # 地轨加速度设置
-        rail_acc_inner_frame = ttk.Frame(acc_frame)
-        rail_acc_inner_frame.pack(fill=tk.X, pady=(6, 0))
-
-        rail_acc_frame = ttk.LabelFrame(rail_acc_inner_frame, text="地轨加速度设置 (#ACC_RAIL)", padding=6)
-        rail_acc_frame.pack(fill=tk.X)
-
-        rail_acc_control = ttk.Frame(rail_acc_frame)
-        rail_acc_control.pack(fill=tk.X)
-
-        ttk.Label(rail_acc_control, text="加速度(mm/s2):", font=("Arial", 9)).pack(side=tk.LEFT)
-        self.ent_rail_acc = ttk.Entry(rail_acc_control, width=7, font=("Arial", 9))
-        self.ent_rail_acc.insert(0, "500")
-        self.ent_rail_acc.pack(side=tk.LEFT, padx=(5, 5))
-
-        self.scl_rail_acc = ttk.Scale(rail_acc_control, from_=10, to=5000, orient=tk.HORIZONTAL)
-        self.scl_rail_acc.set(500)
-        self.scl_rail_acc.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
-        self.lbl_rail_acc_val = ttk.Label(rail_acc_control, text="500", width=6, font=("Arial", 9))
-        self.lbl_rail_acc_val.pack(side=tk.LEFT, padx=5)
-
-        ttk.Button(rail_acc_control, text="查询", width=5,
-                   command=self.query_rail_acc).pack(side=tk.LEFT, padx=2)
-        ttk.Button(rail_acc_control, text="应用", width=5,
-                   command=self.apply_rail_acc).pack(side=tk.LEFT, padx=2)
-        ttk.Button(rail_acc_control, text="保存", width=5,
-                   command=self.save_rail_acc).pack(side=tk.LEFT, padx=2)
-
-        def update_rail_acc_from_scale(val):
-            v = float(val)
-            self.lbl_rail_acc_val.config(text=f"{int(v)}")
-            if self.ent_rail_acc.get() != str(int(v)):
-                self.ent_rail_acc.delete(0, tk.END)
-                self.ent_rail_acc.insert(0, str(int(v)))
-
-        self.scl_rail_acc.config(command=update_rail_acc_from_scale)
-
-        def update_rail_acc_from_entry(event):
-            try:
-                v = float(self.ent_rail_acc.get())
-                if v < 10:
-                    v = 10
-                elif v > 5000:
-                    v = 5000
-                self.scl_rail_acc.set(v)
-                self.lbl_rail_acc_val.config(text=f"{int(v)}")
-            except ValueError:
-                pass
-
-        self.ent_rail_acc.bind("<Return>", update_rail_acc_from_entry)
-        self.ent_rail_acc.bind("<FocusOut>", update_rail_acc_from_entry)
-
-        # 地轨专用电流设置
-        rail_curr_frame = ttk.Frame(acc_frame)
-        rail_curr_frame.pack(fill=tk.X, pady=(6, 0))
-        ttk.Label(rail_curr_frame, text="地轨电流:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(rail_curr_frame, text="设置 2.8A", width=10,
-                   command=lambda: self.set_rail_current(2.8)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(rail_curr_frame, text="设置 1.5A", width=10,
-                   command=lambda: self.set_rail_current(1.5)).pack(side=tk.LEFT, padx=2)
-
-        # 3. 力矩控制 (增加 expand=True, fill=tk.BOTH 保证底部对齐)
-        torque_frame = ttk.LabelFrame(middle_frame, text="电流力矩控制 ($)", padding=6)
-        torque_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
-        
-        torque_grid = ttk.Frame(torque_frame)
-        torque_grid.pack(fill=tk.X, pady=(0, 6))
-        self.ent_torques = []
-        for i in range(7):
-            r, c = divmod(i, 4)
-            lbl_text = "J0(地轨)" if i == 0 else f"J{i+1}"
-            ttk.Label(torque_grid, text=f"{lbl_text}(A):").grid(row=r, column=c*2, padx=(5, 2), pady=3, sticky="e")
-            ent = ttk.Entry(torque_grid, width=6)
-            ent.insert(0, "0.0")
-            ent.grid(row=r, column=c*2+1, padx=2, pady=3, sticky="w")
-            self.ent_torques.append(ent)
-
-        ttk.Button(torque_frame, text="发送全关节力矩指令", command=self.send_torque).pack(fill=tk.X)
-
-        # ==================== 右栏：运动控制 ====================
-        right_frame = ttk.Frame(controls_frame)
-        right_frame.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
-
-        # 1. 关节运动 MoveJ
-        movej_frame = ttk.LabelFrame(right_frame, text="关节控制 (MoveJ: >j0(地轨),j1~j6,speed)", padding=6)
-        movej_frame.pack(fill=tk.X, pady=(0, 6))
-        
-        movej_grid = ttk.Frame(movej_frame)
-        movej_grid.pack(fill=tk.X)
-        movej_grid.columnconfigure(2, weight=1) 
-        
-        self.ent_joints = []
-        self.scl_joints = []
-        self.lbl_joints = []
-        joint_ranges = [(-175, 175), (-75, 90), (0, 180), (-270, 270), (-100, 100), (-180, 180)]
-        joint_defaults = [0, -75, 180, 0, 0, 0]
-        
-        self.movej_drag_enable = tk.BooleanVar(value=False)
-        self.last_movej_send_time = 0
-        
-        for i in range(6):
-            rng = joint_ranges[i]
-            df = joint_defaults[i]
-            
-            ttk.Label(movej_grid, text=f"J{i+1}:", font=("Arial", 9, "bold")).grid(row=i, column=0, padx=5, pady=1)
-            ent = ttk.Entry(movej_grid, width=6)
-            ent.insert(0, str(df))
-            ent.grid(row=i, column=1, padx=5, pady=1)
-            self.ent_joints.append(ent)
-            
-            scl = ttk.Scale(movej_grid, from_=rng[0], to=rng[1], orient=tk.HORIZONTAL)
-            scl.set(df)
-            scl.grid(row=i, column=2, sticky="ew", padx=10, pady=1)
-            self.scl_joints.append(scl)
-            
-            val_lbl = ttk.Label(movej_grid, text=f"{df}.0", width=6, anchor="e")
-            val_lbl.grid(row=i, column=3, padx=5, pady=1)
-            self.lbl_joints.append(val_lbl)
-            
-            def update_joint_entry(val, i=i, l=val_lbl, s=scl, e=ent):
-                v = float(val)
-                l.config(text=f"{v:.1f}")
-                current_val = f"{v:.1f}"
-                if e.get() != current_val:
-                    e.delete(0, tk.END)
-                    e.insert(0, current_val)
-                if self.movej_drag_enable.get():
-                    now = time.time()
-                    if now - self.last_movej_send_time > 0.1:
-                        self.last_movej_send_time = now
-                        self.root.after(1, self.send_movej)
-            scl.config(command=update_joint_entry)
-            
-            def update_joint_scl(event, i=i, s=scl):
-                try:
-                    v = float(self.ent_joints[i].get())
-                    s.set(v)
-                except ValueError:
-                    pass
-            ent.bind("<Return>", update_joint_scl)
-            ent.bind("<FocusOut>", update_joint_scl)
-        
-        # 地轨滑块 (J0=地轨, 单位: mm, 范围 -250~250，支持手动归位)
-        ttk.Label(movej_grid, text="地轨(J0):", font=("Arial", 9, "bold"), foreground="#007ACC").grid(row=6, column=0, padx=5, pady=1)
-        self.ent_j7 = ttk.Entry(movej_grid, width=6)
-        self.ent_j7.insert(0, "0")
-        self.ent_j7.grid(row=6, column=1, padx=5, pady=1)
-
-        self.scl_j7 = ttk.Scale(movej_grid, from_=-250, to=250, orient=tk.HORIZONTAL)
-        self.scl_j7.set(0)
-        self.scl_j7.grid(row=6, column=2, sticky="ew", padx=10, pady=1)
-
-        self.lbl_j7 = ttk.Label(movej_grid, text="0.0 mm", width=8, anchor="e")
-        self.lbl_j7.grid(row=6, column=3, padx=5, pady=1)
-        
-        def update_j7_entry(val):
-            v = float(val)
-            self.lbl_j7.config(text=f"{v:.1f} mm")
-            current_val = f"{v:.1f}"
-            if self.ent_j7.get() != current_val:
-                self.ent_j7.delete(0, tk.END)
-                self.ent_j7.insert(0, current_val)
-            if self.movej_drag_enable.get():
-                now = time.time()
-                if now - self.last_movej_send_time > 0.1:
-                    self.last_movej_send_time = now
-                    self.root.after(1, self.send_movej)
-        self.scl_j7.config(command=update_j7_entry)
-        
-        def update_j7_scl(event):
-            try:
-                v = float(self.ent_j7.get())
-                self.scl_j7.set(v)
-            except ValueError:
-                pass
-        self.ent_j7.bind("<Return>", update_j7_scl)
-        self.ent_j7.bind("<FocusOut>", update_j7_scl)
-
-        # 地轨手动左移右移按钮
-        rail_ctrl = ttk.Frame(movej_frame)
-        rail_ctrl.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(rail_ctrl, text="地轨手动:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(5, 5))
-
-        self.ent_rail_step = ttk.Entry(rail_ctrl, width=6, font=("Arial", 9))
-        self.ent_rail_step.insert(0, "10")
-        self.ent_rail_step.pack(side=tk.LEFT, padx=(0, 3))
-        ttk.Label(rail_ctrl, text="mm/次", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 10))
-
-        ttk.Button(rail_ctrl, text="← 左移", width=8,
-                   command=self.rail_move_left).pack(side=tk.LEFT, padx=2)
-        ttk.Button(rail_ctrl, text="右移 →", width=8,
-                   command=self.rail_move_right).pack(side=tk.LEFT, padx=2)
-
-        movej_ctrl = ttk.Frame(movej_frame)
-        movej_ctrl.pack(fill=tk.X, pady=(5, 0))
-        ttk.Label(movej_ctrl, text="Speed:").pack(side=tk.LEFT, padx=(5, 2))
-        self.ent_j_speed = ttk.Entry(movej_ctrl, width=6)
-        self.ent_j_speed.insert(0, "50")
-        self.ent_j_speed.pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(movej_ctrl, text="拖动实时发送", variable=self.movej_drag_enable).pack(side=tk.LEFT, padx=10)
-        ttk.Button(movej_ctrl, text="发送 MoveJ", command=self.send_movej).pack(side=tk.RIGHT, padx=5)
-
-        # 2. 笛卡尔运动 MoveL
-        movel_frame = ttk.LabelFrame(right_frame, text="笛卡尔控制 (MoveL: @x,y,z,r,p,yw,speed)", padding=6)
-        movel_frame.pack(fill=tk.X, pady=(0, 6))
-        
-        movel_grid = ttk.Frame(movel_frame)
-        movel_grid.pack(fill=tk.X)
-        movel_grid.columnconfigure(2, weight=1)
-        
-        self.ent_pose = []
-        self.scl_pose = []
-        self.lbl_pose = []
-        labels = ['X', 'Y', 'Z', 'R', 'P', 'Yw']
-        defaults = [0, 0, 150, 0, 180, 0]
-        ranges = [(-250, 250), (-200, 200), (-50, 450), (-180, 180), (0, 360), (-180, 180)]
-        
-        self.movel_drag_enable = tk.BooleanVar(value=False)
-        self.last_movel_send_time = 0
-        
-        for i, (lbl, df, rng) in enumerate(zip(labels, defaults, ranges)):
-            ttk.Label(movel_grid, text=f"{lbl}:", font=("Arial", 9, "bold")).grid(row=i, column=0, padx=5, pady=1)
-            ent = ttk.Entry(movel_grid, width=6)
-            ent.insert(0, str(df))
-            ent.grid(row=i, column=1, padx=5, pady=1)
-            self.ent_pose.append(ent)
-            
-            scl = ttk.Scale(movel_grid, from_=rng[0], to=rng[1], orient=tk.HORIZONTAL)
-            scl.set(df)
-            scl.grid(row=i, column=2, sticky="ew", padx=10, pady=1)
-            self.scl_pose.append(scl)
-            
-            val_lbl = ttk.Label(movel_grid, text=f"{df}.0", width=6, anchor="e")
-            val_lbl.grid(row=i, column=3, padx=5, pady=1)
-            self.lbl_pose.append(val_lbl)
-            
-            def update_pose_entry(val, i=i, l=val_lbl, e=ent):
-                v = float(val)
-                l.config(text=f"{v:.1f}")
-                current_val = f"{v:.1f}"
-                if e.get() != current_val:
-                    e.delete(0, tk.END)
-                    e.insert(0, current_val)
-                if self.movel_drag_enable.get():
-                    now = time.time()
-                    if now - self.last_movel_send_time > 0.05:
-                        self.last_movel_send_time = now
-                        self.root.after(1, self.send_movel)
-            scl.config(command=update_pose_entry)
-            
-            def update_pose_scl(event, i=i, s=scl):
-                try:
-                    v = float(self.ent_pose[i].get())
-                    scl.set(v)
-                except ValueError:
-                    pass
-            ent.bind("<Return>", update_pose_scl)
-            ent.bind("<FocusOut>", update_pose_scl)
-        
-        movel_ctrl = ttk.Frame(movel_frame)
-        movel_ctrl.pack(fill=tk.X, pady=(5, 0))
-        ttk.Label(movel_ctrl, text="Speed:").pack(side=tk.LEFT, padx=(5, 2))
-        self.ent_l_speed = ttk.Entry(movel_ctrl, width=6)
-        self.ent_l_speed.insert(0, "50")
-        self.ent_l_speed.pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(movel_ctrl, text="拖动实时发送", variable=self.movel_drag_enable).pack(side=tk.LEFT, padx=10)
-        ttk.Button(movel_ctrl, text="发送 MoveL", command=self.send_movel).pack(side=tk.RIGHT, padx=5)
-
-        # 3. ServoJ 测试 (增加 expand=True, fill=tk.BOTH 保证底部对齐)
-        servoj_frame = ttk.LabelFrame(right_frame, text="ServoJ 连续通信测试", padding=6)
-        servoj_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
-        
-        ttk.Label(servoj_frame, text="* 需切换到模式6 (高频伺服)", foreground="gray").pack(anchor="w", pady=(0, 3))
-        
-        servoj_info = ttk.Frame(servoj_frame)
-        servoj_info.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(servoj_info, text="基准位姿: [0, -75, 180, 0, 0, 0]").pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(servoj_info, text="激励: J1 ±20° 正弦, 0.5Hz").pack(side=tk.LEFT)
-        
-        self.btn_servoj_start = ttk.Button(servoj_frame, text="▶ 开始发送正弦轨迹", command=self.toggle_servoj_test)
-        self.btn_servoj_start.pack(fill=tk.X)
-        
-        self.is_servoj_testing = False
-        self.servoj_thread = None
-
-        # --- 下半部分：终端日志区 ---
-        log_frame = ttk.LabelFrame(main_paned, text="终端日志与自定义指令", padding=8)
-        main_paned.add(log_frame, weight=1) 
-
-        # ！！核心修复点：优先将发送指令栏 pack 在底部 (side=tk.BOTTOM)，这样它就永远不会被日志框挤掉！！
-        cmd_frame = ttk.Frame(log_frame)
-        cmd_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
-        
-        ttk.Label(cmd_frame, text="快捷指令:", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(0, 10))
-        self.ent_custom_cmd = ttk.Entry(cmd_frame, font=("Consolas", 10))
-        self.ent_custom_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
-        self.ent_custom_cmd.bind("<Return>", lambda e: self.send_custom_cmd())
-        ttk.Button(cmd_frame, text="发送 (Enter)", command=self.send_custom_cmd, width=12).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(cmd_frame, text="清空日志", command=lambda: self.txt_log.delete(1.0, tk.END), width=10).pack(side=tk.LEFT)
-
-        # ！！然后再将文本框 pack 填充剩下的上方空间 (side=tk.TOP)！！
-        self.txt_log = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, font=("Consolas", 10), bg="#1e1e1e", fg="#d4d4d4")
-        self.txt_log.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    def _history_down(self, event):
+        if not self.cmd_history:
+            return
+        idx = self.cmd_history_idx[-1]
+        if idx < len(self.cmd_history) - 1:
+            idx += 1
+            self.cmd_history_idx[-1] = idx
+            self.ent_custom_cmd.delete(0, tk.END)
+            self.ent_custom_cmd.insert(0, self.cmd_history[idx])
+        else:
+            self.cmd_history_idx[-1] = len(self.cmd_history)
+            self.ent_custom_cmd.delete(0, tk.END)
         
     # ========== 核心逻辑功能方法（完全保持不变） ==========
     def refresh_ports(self):
@@ -678,7 +1243,8 @@ class RobotSerialAssistant:
 
     def log(self, msg, tag="INFO"):
         time_str = time.strftime("%H:%M:%S")
-        self.txt_log.insert(tk.END, f"[{time_str}] [{tag}] {msg}\n")
+        tag_color = {"TX": "TX", "RX": "RX", "ERROR": "ERROR", "WARN": "WARN"}.get(tag, "INFO")
+        self.txt_log.insert(tk.END, f"[{time_str}] [{tag}] {msg}\n", tag_color)
         self.txt_log.see(tk.END)
 
     def toggle_connection(self):
@@ -689,9 +1255,10 @@ class RobotSerialAssistant:
                 self.serial_port = serial.Serial(port, int(baud), timeout=0.5)
                 self.serial_port.write_timeout = 1.0
                 self.is_connected = True
-                self.btn_connect.config(text="断开连接")
-                self.lbl_status.config(text=f"● 已连接: {port}", foreground="green")
-                self.log(f"成功连接串口 {port} @ {baud}")
+                self.btn_connect.config(text="断开", bg="#c92a2a", activebackground="#a02222")
+                self._draw_led(True)
+                self.lbl_status.config(text=f"已连接 {port}  {baud}", fg="#4ade80")
+                self.log(f"成功连接 {port} @ {baud}")
                 
                 self.stop_thread = False
                 self.receive_thread = threading.Thread(target=self.serial_receive_loop, daemon=True)
@@ -705,8 +1272,9 @@ class RobotSerialAssistant:
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
             self.is_connected = False
-            self.btn_connect.config(text="连接串口")
-            self.lbl_status.config(text="● 未连接", foreground="red")
+            self.btn_connect.config(text="连接", bg="#2b8a3e", activebackground="#2f9e44")
+            self._draw_led(False)
+            self.lbl_status.config(text="未连接", fg="#ff6b6b")
             self.log("已断开串口")
 
     def serial_receive_loop(self):
@@ -720,8 +1288,41 @@ class RobotSerialAssistant:
                         # 按行分割，防止残留字符堆积
                         for line in text.split('\n'):
                             line = line.strip()
-                            if line:
-                                self.root.after(0, self.log, line, "RX")
+                            if not line:
+                                continue
+                            # 过滤固件入队回执的纯数字行（如"15"=队列剩余空间），避免污染日志
+                            if line.isdigit():
+                                continue
+                            self.root.after(0, self.log, line, "RX")
+                            # 拦截 #GETJPOS 响应并同步滑块
+                            if getattr(self, "_sync_waiting", False):
+                                if line.startswith("ok") or line.startswith(">"):
+                                    tokens = line.lstrip(">ok").split()
+                                    nums = []
+                                    for t in tokens:
+                                        t = t.strip().rstrip(",")
+                                        if not t:
+                                            continue
+                                        try:
+                                            nums.append(str(float(t)))
+                                        except ValueError:
+                                            pass
+                                    if len(nums) >= 6:
+                                        # GETJPOS 只返回6个关节，Rail 用当前滑块值
+                                        self._sync_data = nums[:6]
+                                        self._sync_waiting = False
+                                        self.root.after(0, lambda n=len(nums): self.log(f"收到{n}个关节数据，已同步（Rail使用滑块当前值）", "INFO"))
+                                    else:
+                                        self.root.after(0, lambda: self.log(f"数据不足: {nums}", "WARN"))
+                            # 拦截 ok 触发下一条顺序发送（SEQ 模式下固件阻塞到位后回单字 ok）
+                            if getattr(self, "_pos_queue_running", False) and line == "ok":
+                                self._pos_queue_running = False
+                                self._pos_queue_idx += 1
+                                total = len(self._pos_queue_pending)
+                                if self._pos_queue_idx < total:
+                                    self.root.after(0, self._send_next_position)
+                                else:
+                                    self.root.after(0, lambda: self.log(f"顺序发送完成，共{total}个点位", "INFO"))
                 # 无数据时短暂休眠，不阻塞主循环
                 time.sleep(0.05)
             except serial.SerialException as e:
@@ -782,11 +1383,6 @@ class RobotSerialAssistant:
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
-    def send_calibration(self):
-        """发送 !CALIBRATION 命令，对所有6个关节应用当前电机位置作为零点偏移"""
-        self.send_cmd("!CALIBRATION")
-        self.log("已发送 !CALIBRATION（关节零点标定）", "INFO")
-
     def send_hand_zero(self):
         """发送 !HAND_ZERO 命令，将夹爪当前位置设为零点"""
         self.send_cmd("!HAND_ZERO")
@@ -800,6 +1396,51 @@ class RobotSerialAssistant:
             self.send_cmd(f"#OFFSET_J {j}")
             time.sleep(0.15)
         self.log("已发送 #OFFSET_J 1~6（全部关节设为零点）", "INFO")
+
+    def _rgb_light_on(self):
+        """开灯：读取 Entry 当前值，应用亮度（不自动保存）"""
+        try:
+            val = int(self.ent_bright.get())
+            val = max(0, min(100, val))
+            self.send_cmd(f"!RGB_BRIGHT {val}")
+            self.scl_bright.set(val)
+            self.log(f"开灯: 亮度 {val}%", "INFO")
+        except ValueError:
+            messagebox.showerror("错误", "请输入 0~100 的整数")
+
+    def _rgb_light_off(self):
+        """关灯：发送亮度 0"""
+        self.send_cmd("!RGB_BRIGHT 0")
+        self.log("关灯: 亮度 0%", "INFO")
+
+    def _rgb_bright_query(self):
+        """查询固件当前亮度值"""
+        self.send_cmd("!RGB_BRIGHT")
+        self.log("已发送 !RGB_BRIGHT (查询)", "INFO")
+
+    def _rgb_bright_apply(self):
+        """应用亮度（临时，不保存）"""
+        try:
+            val = int(self.ent_bright.get())
+            val = max(0, min(100, val))
+            self.send_cmd(f"!RGB_BRIGHT {val}")
+            self.scl_bright.set(val)
+            self.log(f"亮度已应用: {val}%", "INFO")
+        except ValueError:
+            messagebox.showerror("错误", "请输入 0~100 的整数")
+
+    def _rgb_bright_save(self):
+        """应用亮度并保存到 EEPROM"""
+        try:
+            val = int(self.ent_bright.get())
+            val = max(0, min(100, val))
+            self.send_cmd(f"!RGB_BRIGHT {val} &")
+            self.scl_bright.set(val)
+            self.rgb_brightness = val
+            self._save_config()
+            self.log(f"亮度已保存: {val}%", "INFO")
+        except ValueError:
+            messagebox.showerror("错误", "请输入 0~100 的整数")
 
     def send_rgb_color(self):
         try:
@@ -830,10 +1471,14 @@ class RobotSerialAssistant:
         try:
             node = int(self.cb_acc_node.get())
             i_limit = float(self.ent_i_limit.get())
-            if 0 <= node <= 7 and i_limit > 0:
+            if 1 <= node <= 6 and i_limit > 0:
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit}")
+            elif node == 8 and i_limit > 0:
+                self.send_cmd(f"#I_LIMIT_J 8 {i_limit}")
+            elif node == 9 and i_limit > 0:
+                self.send_cmd(f"#I_LIMIT_J 9 {i_limit}")
             else:
-                messagebox.showerror("错误", "节点必须为0-7，电流必须大于0")
+                messagebox.showerror("错误", "节点必须为1-6或8或9，电流必须大于0")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
@@ -895,8 +1540,26 @@ class RobotSerialAssistant:
 
     def set_rail_current(self, current):
         """设置地轨电机电流限制"""
-        self.send_cmd(f"#I_LIMIT_J 0 {current}")
+        self.send_cmd(f"#I_LIMIT_J 9 {current}")
         self.log(f"已设置地轨电流限制为 {current}A", "INFO")
+
+    def query_rail_current(self):
+        self.send_cmd("#I_LIMIT_J 9")
+
+    def apply_rail_current(self):
+        try:
+            current = float(self.ent_rail_current.get())
+            if current < 0.1:
+                current = 0.1
+            elif current > 3.0:
+                current = 3.0
+            self.send_cmd(f"#I_LIMIT_J 9 {current}")
+        except ValueError:
+            self.log("地轨电流值无效", "ERROR")
+
+    def save_rail_current(self):
+        self.apply_rail_current()
+        self.log("地轨电流已应用（需固件支持Flash保存）", "INFO")
 
     def rail_move_left(self):
         if not self.is_connected:
@@ -953,10 +1616,18 @@ class RobotSerialAssistant:
 
     def send_torque(self):
         try:
-            torques = [float(ent.get()) for ent in self.ent_torques]
-            # $c0(地轨),c1~c6(关节) — 共7轴；夹爪由!HAND_O/!HAND_C/!HAND_I控制
-            cmd = f"${torques[0]:.2f},{torques[1]:.2f},{torques[2]:.2f},{torques[3]:.2f},{torques[4]:.2f},{torques[5]:.2f},{torques[6]:.2f}"
+            rail_current = float(self.ent_rail_torque.get())
+            torques = [float(ent.get()) for ent in self.ent_torques]  # J1~J6
+            gripper_current = float(self.ent_gripper_torque.get())
+            # $c0(地轨),c1~c6(关节) — 夹爪用 !HAND_I 单独控制
+            cmd = f"${rail_current:.2f},{torques[0]:.2f},{torques[1]:.2f},{torques[2]:.2f},{torques[3]:.2f},{torques[4]:.2f},{torques[5]:.2f}"
             self.send_cmd(cmd)
+            self.log(f"已发送力矩: Rail={rail_current}A, J1~J6={torques[0]:.2f}~{torques[5]:.2f}A, Gripper={gripper_current}A (!HAND_I)", "INFO")
+            # 夹爪力矩单独发 !HAND_I
+            if gripper_current > 0:
+                self.send_cmd(f"!HAND_I {gripper_current:.2f}")
+            else:
+                self.send_cmd("!HAND_I 0")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
@@ -980,29 +1651,62 @@ class RobotSerialAssistant:
 
     def servoj_test_loop(self):
         start_time = time.time()
-        # J0=地轨, J1~J6=关节
-        base_joints = [0, -75, 180, 0, 0, 0, 0]  # 7个轴: J0(地轨mm)~J6
-        
+        # Rail(地轨), J1~J6, speed
+        rail_pos = 0.0  # 地轨保持不动
+        base_joints = [-75, 180, 0, 0, 0, 0]  # J1~J6 静止
+        speed = 50.0
+
         kp = 0.5
-        current_joint_cache = base_joints.copy()
-        
+        current_j1_pos = 0.0  # 测试只动 J1
+
         while self.is_servoj_testing and self.is_connected:
             t = time.time() - start_time
-            target_j1 = base_joints[0] + 20 * math.sin(2 * math.pi * 0.5 * t)
-            
-            error_j1 = target_j1 - current_joint_cache[0]
-            current_joint_cache[0] += error_j1 * kp
-            
-            cmd = f">{current_joint_cache[0]:.2f},{base_joints[1]},{base_joints[2]},{base_joints[3]},{base_joints[4]},{base_joints[5]},{base_joints[6]:.2f}"
+            target_j1 = 20 * math.sin(2 * math.pi * 0.5 * t)
+
+            error_j1 = target_j1 - current_j1_pos
+            current_j1_pos += error_j1 * kp
+
+            # MoveJ: >Rail,j1~j6,speed  (7个值)
+            cmd = f">{rail_pos:.2f},{current_j1_pos:.2f},{base_joints[0]},{base_joints[1]},{base_joints[2]},{base_joints[3]},{speed}"
             try:
                 self.serial_port.write((cmd + "\n").encode('utf-8'))
                 if int(t * 50) % 20 == 0:
-                    self.root.after(0, self.log, f"Target: {target_j1:.1f}, Send: {current_joint_cache[0]:.1f}", "TX")
+                    self.root.after(0, self.log, f"Target: {target_j1:.1f}, J1: {current_j1_pos:.1f}", "TX")
             except Exception as e:
                 self.root.after(0, self.log, f"发送失败: {e}", "ERROR")
                 break
-                
+
             time.sleep(0.02)
+
+    # ── PID 调节 ──
+    def query_pid(self):
+        """查询选中节点的 Kp/Kv/Ki/Kd（通过 CAN 回读）"""
+        node = int(self.cb_pid_node.get())
+        self.send_cmd(f"#GET_PID {node}")
+        self.log(f"已发送 #GET_PID {node}，等待电机 CAN 回传...", "INFO")
+
+    def apply_pid(self):
+        """应用（临时写入，不保存 EEPROM）"""
+        try:
+            node = int(self.cb_pid_node.get())
+            kp = int(self.ent_pid["kp"].get())
+            kv = int(self.ent_pid["kv"].get())
+            ki = int(self.ent_pid["ki"].get())
+            kd = int(self.ent_pid["kd"].get())
+            self.send_cmd(f"#SET_DCE_KP {node} {kp}")
+            self.send_cmd(f"#SET_DCE_KV {node} {kv}")
+            self.send_cmd(f"#SET_DCE_KI {node} {ki}")
+            self.send_cmd(f"#SET_DCE_KD {node} {kd}")
+            self.log(f"已应用 PID (节点{node}): Kp={kp} Kv={kv} Ki={ki} Kd={kd}", "INFO")
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的 PID 数值")
+
+    def save_pid(self):
+        """保存到 EEPROM（通过 canBuf[4]=1 触发固件自动保存）"""
+        node = int(self.cb_pid_node.get())
+        self.apply_pid()
+        self.log(f"PID 参数已保存到节点 {node} EEPROM", "INFO")
+
 
 if __name__ == "__main__":
     root = tk.Tk()

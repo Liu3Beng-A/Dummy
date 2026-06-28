@@ -184,8 +184,8 @@ class RobotSerialAssistant:
         acc_frame = ttk.LabelFrame(right_panel, text="电机配置 (基础加速度与最大电流)", padding=(12, 8))
         acc_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Label(acc_frame, text="节点 (1-7):").grid(row=0, column=0, padx=10, pady=10)
-        self.cb_acc_node = ttk.Combobox(acc_frame, width=4, values=[str(i) for i in range(1, 8)])
+        ttk.Label(acc_frame, text="节点 (0-6,8):").grid(row=0, column=0, padx=10, pady=10)
+        self.cb_acc_node = ttk.Combobox(acc_frame, width=4, values=[str(i) for i in [1,2,3,4,5,6,8,9]])
         self.cb_acc_node.current(0)
         self.cb_acc_node.grid(row=0, column=1, padx=10, pady=10)
         
@@ -416,10 +416,14 @@ class RobotSerialAssistant:
         try:
             node = int(self.cb_acc_node.get())
             i_limit = float(self.ent_i_limit.get())
-            if 1 <= node <= 7 and i_limit > 0:
+            if 1 <= node <= 6 and i_limit > 0:
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit}")
+            elif node == 8 and i_limit > 0:
+                self.send_cmd(f"#I_LIMIT_J 8 {i_limit}")
+            elif node == 9 and i_limit > 0:
+                self.send_cmd(f"#I_LIMIT_J 9 {i_limit}")
             else:
-                messagebox.showerror("错误", "节点必须为1-7，电流必须大于0")
+                messagebox.showerror("错误", "节点必须为1-6或8或9，电流必须大于0")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 

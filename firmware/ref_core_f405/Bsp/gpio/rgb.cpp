@@ -56,6 +56,21 @@ void RGB::Run(RGB::Rgb_style_t mode) {
         default:
             break;
     }
+    FadeStep();
+}
+
+void RGB::FadeStep() {
+    if (fabsf(brightness - targetBrightness) < 0.01f) {
+        brightness = targetBrightness;
+    } else {
+        if (targetBrightness > brightness) {
+            brightness += fadeSpeed;
+            if (brightness > targetBrightness) brightness = targetBrightness;
+        } else {
+            brightness -= fadeSpeed;
+            if (brightness < targetBrightness) brightness = targetBrightness;
+        }
+    }
 }
 
 void RGB::Interrupt(uint8_t flag) {

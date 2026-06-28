@@ -240,8 +240,8 @@ class RobotSerialAssistant:
         acc_grid = ttk.Frame(acc_frame)
         acc_grid.pack(fill=tk.X)
         
-        ttk.Label(acc_grid, text="节点(1-7):").grid(row=0, column=0, sticky="w", pady=3)
-        self.cb_acc_node = ttk.Combobox(acc_grid, width=5, values=[str(i) for i in range(1, 8)], state="readonly")
+        ttk.Label(acc_grid, text="节点(0-6,8):").grid(row=0, column=0, sticky="w", pady=3)
+        self.cb_acc_node = ttk.Combobox(acc_grid, width=5, values=[str(i) for i in [1,2,3,4,5,6,8,9]], state="readonly")
         self.cb_acc_node.current(0)
         self.cb_acc_node.grid(row=0, column=1, padx=5, pady=3, sticky="w")
         
@@ -266,7 +266,7 @@ class RobotSerialAssistant:
         self.ent_torques = []
         for i in range(7):
             r, c = divmod(i, 4) 
-            lbl_text = f"J{i+1}" if i < 6 else "J7(地轨)"
+            lbl_text = "J7" if i < 6 else "Rail"
             lbl_color = ("Arial", 9, "bold") if i < 6 else ("Arial", 9, "bold")
             ttk.Label(torque_grid, text=f"{lbl_text}(A):").grid(row=r, column=c*2, padx=(5, 2), pady=3, sticky="e")
             ent = ttk.Entry(torque_grid, width=6)
@@ -339,8 +339,8 @@ class RobotSerialAssistant:
             ent.bind("<Return>", update_joint_scl)
             ent.bind("<FocusOut>", update_joint_scl)
         
-        # 地轨滑块 (J7, 单位: mm, 范围 0~500)
-        ttk.Label(movej_grid, text="J7(地轨):", font=("Arial", 9, "bold"), foreground="#007ACC").grid(row=6, column=0, padx=5, pady=1)
+        # 地轨滑块 (Rail, 单位: mm, 范围 0~500)
+        ttk.Label(movej_grid, text="Rail:", font=("Arial", 9, "bold"), foreground="#007ACC").grid(row=6, column=0, padx=5, pady=1)
         self.ent_j7 = ttk.Entry(movej_grid, width=6)
         self.ent_j7.insert(0, "0")
         self.ent_j7.grid(row=6, column=1, padx=5, pady=1)
@@ -604,10 +604,14 @@ class RobotSerialAssistant:
         try:
             node = int(self.cb_acc_node.get())
             i_limit = float(self.ent_i_limit.get())
-            if 1 <= node <= 7 and i_limit > 0:
+            if 1 <= node <= 6 and i_limit > 0:
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit}")
+            elif node == 8 and i_limit > 0:
+                self.send_cmd(f"#I_LIMIT_J 8 {i_limit}")
+            elif node == 9 and i_limit > 0:
+                self.send_cmd(f"#I_LIMIT_J 9 {i_limit}")
             else:
-                messagebox.showerror("错误", "节点必须为1-7，电流必须大于0")
+                messagebox.showerror("错误", "节点必须为1-6或8或9，电流必须大于0")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
@@ -659,23 +663,27 @@ class RobotSerialAssistant:
 
     def servoj_test_loop(self):
         start_time = time.time()
-        base_joints = [0, -75, 180, 0, 0, 0, 0]  # 7个关节: J1-J6 + J7(地轨)
-        
+        # Rail(地轨), J1~J6, speed
+        rail_pos = 0.0
+        base_joints = [-75, 180, 0, 0, 0, 0]  # J1~J6 静止
+        speed = 50.0
+
         kp = 0.5
-        current_joint_cache = base_joints.copy()
-        
+        current_j1_pos = 0.0  # 测试只动 J1
+
         while self.is_servoj_testing and self.is_connected:
             t = time.time() - start_time
-            target_j1 = base_joints[0] + 20 * math.sin(2 * math.pi * 0.5 * t)
-            
-            error_j1 = target_j1 - current_joint_cache[0]
-            current_joint_cache[0] += error_j1 * kp
-            
-            cmd = f">{current_joint_cache[0]:.2f},{base_joints[1]},{base_joints[2]},{base_joints[3]},{base_joints[4]},{base_joints[5]},{base_joints[6]:.2f}\n"
+            target_j1 = 20 * math.sin(2 * math.pi * 0.5 * t)
+
+            error_j1 = target_j1 - current_j1_pos
+            current_j1_pos += error_j1 * kp
+
+            # MoveJ: >Rail,j1~j6,speed
+            cmd = f">{rail_pos:.2f},{current_j1_pos:.2f},{base_joints[0]},{base_joints[1]},{base_joints[2]},{base_joints[3]},{speed}\n"
             try:
                 self.serial_port.write(cmd.encode('utf-8'))
                 if int(t * 50) % 20 == 0:
-                    self.root.after(0, self.log, f"Target: {target_j1:.1f}, Send: {current_joint_cache[0]:.1f}", "TX")
+                    self.root.after(0, self.log, f"Target: {target_j1:.1f}, J1: {current_j1_pos:.1f}", "TX")
             except Exception as e:
                 self.root.after(0, self.log, f"发送失败: {e}", "ERROR")
                 break
