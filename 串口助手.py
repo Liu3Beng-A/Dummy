@@ -24,6 +24,9 @@ class RobotSerialAssistant:
         self._pos_queue_pending = []     # 待发送队列
         self._pos_queue_idx = 0          # 当前发送索引
         self._pos_queue_speed = 50       # 顺序发送速度
+        # 入队命令回执抑制（> / @ / & / $ 入队后 1s 内的纯数字行视为队列剩余空间，过滤掉）
+        self._expect_queue_reply = False
+        self._queue_reply_deadline_ms = 0
         # 主题与配色
         try:
             style = ttk.Style()
@@ -1291,8 +1294,13 @@ class RobotSerialAssistant:
                             if not line:
                                 continue
                             # 过滤固件入队回执的纯数字行（如"15"=队列剩余空间），避免污染日志
+                            # 仅在入队命令（> / @ / & / $）刚发出去 1 秒内抑制；
+                            # 其他查询（如 !RGB_BRIGHT 返回 "100"）正常显示。
                             if line.isdigit():
-                                continue
+                                if self._expect_queue_reply and time.time() * 1000.0 < self._queue_reply_deadline_ms:
+                                    self._expect_queue_reply = False
+                                    continue
+                                # 超出时间窗或非入队命令的纯数字响应：放行显示
                             self.root.after(0, self.log, line, "RX")
                             # 拦截 #GETJPOS 响应并同步滑块
                             if getattr(self, "_sync_waiting", False):
@@ -1340,6 +1348,13 @@ class RobotSerialAssistant:
             full_cmd = f"{cmd}\n"
             self.serial_port.write(full_cmd.encode('utf-8'))
             self.log(cmd, "TX")
+            # 入队类命令（> / @ / & / $）的响应是队列剩余空间（纯数字），
+            # 在 1 秒窗口内抑制该纯数字行，避免污染日志；
+            # 其他查询（如 !RGB_BRIGHT 返回 "100"）不会被误抑制。
+            stripped = cmd.lstrip()
+            if stripped and stripped[0] in ('>', '@', '&', '$'):
+                self._expect_queue_reply = True
+                self._queue_reply_deadline_ms = time.time() * 1000.0 + 1000.0
         except Exception as e:
             self.log(f"发送失败: {e}", "ERROR")
 
