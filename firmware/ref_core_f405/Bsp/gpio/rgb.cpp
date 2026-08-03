@@ -2,6 +2,36 @@
 
 RGB::RGB(uint8_t m) {
     //init here
+    dmaEvent = nullptr;
+    dmaBusy = false;
+    firstSend = true;
+}
+
+void RGB::InitSync()
+{
+    if (dmaEvent == nullptr)
+    {
+        dmaEvent = osEventFlagsNew(nullptr);
+        dmaBusy = false;
+        firstSend = true;
+    }
+}
+
+bool RGB::UpdateLoop()
+{
+    if (dmaEvent == nullptr) return true;  // 未初始化（兼容旧调用）
+    if (firstSend) { firstSend = false; return true; }
+
+    // 非阻塞等待 0 ms，仅查询
+    uint32_t flags = osEventFlagsWait(dmaEvent, 0x01, osFlagsNoClear, 0);
+    if (flags & 0x01)
+    {
+        osEventFlagsClear(dmaEvent, 0x01);
+        dmaBusy = false;
+        return true;
+    }
+    // DMA 未完成：保持 dmaBusy = true，Run() 会跳过 WS2812_Send()
+    return false;
 }
 
 void RGB::Run(RGB::Rgb_style_t mode) {
@@ -74,7 +104,14 @@ void RGB::FadeStep() {
 }
 
 void RGB::Interrupt(uint8_t flag) {
-    data_sentflag = flag;
-}
+        data_sentflag = flag;
+        // 由 DMA 完成中断回调：
+        // 释放 dmaBusy，并通过事件标志唤醒等待 UpdateLoop() 的任务
+        dmaBusy = false;
+        if (dmaEvent != nullptr)
+        {
+            osEventFlagsSet(dmaEvent, 0x01);
+        }
+    }
 
 

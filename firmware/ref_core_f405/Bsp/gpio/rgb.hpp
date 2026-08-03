@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <tim.h>
 #include <math.h>
+#include "cmsis_os.h"
 
 #define MAX_LED 24
 #define USE_BRIGHTNESS 0
@@ -16,8 +17,14 @@ private:
     uint8_t LED_Mod[MAX_LED][4];  // for brightness
     uint32_t pwmData[(24*MAX_LED)+50];
     uint16_t  effStep = 0;
+
+    // FreeRTOS 事件标志：DMA 传输完成时由中断置位，UpdateLoop 消费后清零
+    osEventFlagsId_t dmaEvent = nullptr;
+    bool dmaBusy = false;        // 是否有 DMA 正在传输
+    bool firstSend = true;       // 启动后首次发送标志（无需等待 DMA）
+
 public:
-    uint8_t  data_sentflag = 0;
+    uint8_t  data_sentflag = 0;  // 兼容旧 Interrupt(1) 的回调接口
 
     enum Rgb_style_t
     {
@@ -48,11 +55,17 @@ public:
 
     RGB(uint8_t mode=0);
 
+    void InitSync();        // 初始化事件标志（必须在启动 RTOS 任务前调用）
     void Run(Rgb_style_t _mode = RAINBOW);
 
     void Interrupt(uint8_t flag);
 
     void FadeStep();
+
+    // 非阻塞检查：DMA 是否已完成上一次发送。
+    // 必须在调用 Run() 前先调用本函数，否则不会启动新的 WS2812_Send()。
+    // 返回 true 表示 DMA 空闲可以发送新数据。
+    bool UpdateLoop();
 
     //functions
     void Set_LED (uint8_t LEDs, uint8_t Red, uint8_t Green, uint8_t Blue)
@@ -89,6 +102,12 @@ public:
         uint32_t color;
         HAL_StatusTypeDef ret;
 
+        // 保护：上一次 DMA 还没完成则跳过本帧，绝不阻塞
+        if (dmaBusy)
+        {
+            return;
+        }
+
         for (int i= 0; i<MAX_LED; i++)
         {
             uint8_t r = LED_Data[i][1];
@@ -121,10 +140,14 @@ public:
         ret = HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_4, pwmData, indx);
         if (ret != HAL_OK) {
             data_sentflag = 0;
+            // 失败也视作空闲，唤醒 UpdateLoop
+            if (dmaEvent != nullptr)
+                osEventFlagsSet(dmaEvent, 0x01);
             return;
         }
-        while (!data_sentflag){};
-        data_sentflag = 0;
+        // 标记 DMA 正在传输
+        dmaBusy = true;
+        // 不再阻塞等待：DMA 完成中断会通过 Interrupt(1) 释放 dmaBusy 并置事件标志
     }
 
     // 辅助函数：色轮生成 (0-255 输入 -> R,G,B 输出)
@@ -168,41 +191,32 @@ public:
     {
         uint8_t e,r,g,b;
         if(effStep < 44) {
+            // 所有灯一起设黑，一次性发送（之前每灯一次共 24 次）
             for(uint16_t j=0;j<MAX_LED;j++)
             {
                 Set_LED(j, 0, 0, 0);
-                WS2812_Send();
             }
+            WS2812_Send();
         }
         else if(effStep  < 46) {
             e = (effStep * 5) - 220;
             r = 255 * ( e / 10 ) + 0 * ( 1.0 - e / 10 );
             g = 255 * ( e / 10 ) + 0 * ( 1.0 - e / 10 );
             b = 255 * ( e / 10 ) + 0 * ( 1.0 - e / 10 );
+            // (j%1)==0 永远为真，等效于全部灯点亮 → 一次发送即可
             for(uint16_t j=0;j<MAX_LED;j++)
-                if((j%1)==0)
-                {
-                    Set_LED(j, r, g, b);
-                    WS2812_Send();
-                }
-                else
-                {
-                    Set_LED(j, 0, 0, 0);
-                    WS2812_Send();
-                }
+            {
+                Set_LED(j, r, g, b);
+            }
+            WS2812_Send();
         }
         else if(effStep < 53.6) {
+            // 同上：所有灯全亮，批量发送
             for(uint16_t j=0;j<MAX_LED;j++)
-                if((j%1)==0)
-                {
-                    Set_LED(j, 255, 255, 255);
-                    WS2812_Send();
-                }
-                else
-                {
-                    Set_LED(j, 0, 0, 0);
-                    WS2812_Send();
-                }
+            {
+                Set_LED(j, 255, 255, 255);
+            }
+            WS2812_Send();
         }
         else if(effStep < 55.6) {
             e = (effStep * 5) - 268;
@@ -210,23 +224,17 @@ public:
             g = 0 * ( e / 10 ) + 255 * ( 1.0 - e / 10 );
             b = 0 * ( e / 10 ) + 255 * ( 1.0 - e / 10 );
             for(uint16_t j=0;j<MAX_LED;j++)
-                if((j%1)==0)
-                {
-                    Set_LED(j, r, g, b);
-                    WS2812_Send();
-                }
-                else
-                {
-                    Set_LED(j, 0, 0, 0);
-                    WS2812_Send();
-                }
+            {
+                Set_LED(j, r, g, b);
+            }
+            WS2812_Send();
         }
         else {
             for(uint16_t j=0;j<MAX_LED;j++)
             {
                 Set_LED(j, 0, 0, 0);
-                WS2812_Send();
             }
+            WS2812_Send();
         }
         if(effStep >= 75.6) {effStep = 0; }
         else effStep++;

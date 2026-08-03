@@ -236,12 +236,21 @@ void OnTimer7Callback()
 
 /**
  * @brief 系统炫彩指示光效动态播放管家
+ * @note  rgb.Run() 内部使用 WS2812_Send() 启动 DMA 传输；
+ *        UpdateLoop() 在每次 Run() 前非阻塞检查 DMA 是否空闲，
+ *        避免上一次 DMA 未完成时被自旋锁阻塞整个系统。
  */
 void ThreadRGBUpdate(void* argument)
 {
+    rgb.InitSync();  // 初始化事件标志（一次性）
+
     for (;;)
     {
-        rgb.Run((RGB::Rgb_style_t)dummy.GetRGBMode());
+        // 先检查 DMA 状态：DMA 空闲才执行灯效；DMA 忙则跳过本帧
+        if (rgb.UpdateLoop())
+        {
+            rgb.Run((RGB::Rgb_style_t)dummy.GetRGBMode());
+        }
         osDelay(30);
     }
 }
