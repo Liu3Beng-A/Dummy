@@ -1,0 +1,63 @@
+---
+description: User behavior preferences - must confirm before making changes
+alwaysApply: true
+---
+
+# User Behavior Preferences
+
+## Modification Policy
+
+**NEVER modify any code, configuration, or project files without the user's explicit consent.**
+
+Before making any changes:
+1. Clearly state what file(s) will be modified
+2. Explain what the change will do
+3. Wait for the user to confirm before applying
+
+## Scope
+
+This rule applies to all files in the project, including:
+- Source code (`.cpp`, `.c`, `.h`, `.py`, etc.)
+- Build configurations (`CMakeLists.txt`, `ninja`, etc.)
+- Documentation files (`.md`, `.mdc`, etc.)
+- Any other project files
+
+## 项目环境与工具链
+
+- **Windows + PowerShell**：版本 5.1，`&&` 不支持，命令串接用分号 `;`
+- **Ninja 构建**：所有固件均用 Ninja，在 `build/` 目录下运行 `ninja`
+- **STM32 固件目录结构**：
+  - `firmware/ref_core_f405/` — 主控固件（STM32F405RG）
+  - `firmware/motor_fw_f103_57/` — 地轨电机固件（57 电机，CAN ID=9）
+  - `firmware/motor_fw_f103_42/` — J1~J3 关节电机固件（42 电机，CAN ID=1~3）
+  - `firmware/motor_fw_f103_35/` — J4~J6 关节电机固件（35 电机，CAN ID=4~6）
+  - `firmware/motor_fw_f103_gripper/` — 夹爪独立固件（35 电机，CAN ID=8）
+
+## CAN ID 系统（关键约定，禁止混淆）
+
+| 物理轴 | MoveJ 参数位 | CAN ID | 在代码中的命名 |
+|---|---|---|---|
+| 地轨 | `>xxx,` 第1位 | **9** | `motorJ[0]`, `StepRail`, `node==9` |
+| 关节 J1~J3 | `>...,xxx,` 第2~4位 | **1~3** | `motorJ[1]~[3]` |
+| 关节 J4~J6 | `>...,xxx,` 第5~7位 | **4~6** | `motorJ[4]~[6]` |
+| 夹爪 | 单独 `!HAND_*` 命令 | **8** | `StepHand`, `node==8` |
+
+- **MoveJ 格式**：`>Rail,j1,j2,j3,j4,j5,j6,speed`（共 7 个值，不含夹爪）
+- **力矩格式**：`$c0(地轨),c1~c6(关节)` — 7 个 float；夹爪用 `!HAND_I` 单独控制
+- **严禁**：将地轨称为 "J0"、将夹爪称为 "J7"、将 CAN ID 0/7 当作有效节点
+
+## 修改代码前的习惯
+
+- **修改固件前**：先确认目标文件属于哪个模块（主控 / 电机驱动 / 夹爪独立固件）
+- **修改电机固件**：确认 `configurations.h` 选中的电机类型（35/42/57）
+- **修改 CAN 协议**：注意 StdId 格式 `(nodeID << 7) | cmdCode`
+- **修改 Python 工具**：注意 Tkinter 非线程安全，UI 更新用 `root.after()`
+- **修改 UI 布局**：改 grid 布局后必须读取实际文件验证，因为 AI 看到的和实际可能有偏差
+
+## 编译检查清单
+
+每次修改固件后：
+1. 在对应 `build/` 目录运行 `ninja`（确认 0 errors）
+2. 检查 RAM/Flash 使用率是否合理
+3. 提醒用户提供 `.bin` 和 `.hex` 路径
+4. 确认是否需要同步烧录相关电机固件（地轨/关节/夹爪独立固件）

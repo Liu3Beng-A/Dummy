@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"E:/Dummy-code/firmware/motor_fw_f103_42/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
