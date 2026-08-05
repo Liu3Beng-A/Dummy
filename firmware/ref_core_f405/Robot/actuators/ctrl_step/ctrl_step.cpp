@@ -193,9 +193,33 @@ void CtrlStepMotor::SetAcceleration(float _val)
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 0; // Need save to EEPROM or not
+    canBuf[4] = 1; // Need save to EEPROM or not  (1=保存，与电流方案一致)
 
+    accBaseResponsePending = true;   // 等待电机 0x94 响应
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+
+void CtrlStepMotor::GetAcceleration()
+{
+    uint8_t mode = 0x33;
+    txHeader.StdId = nodeID << 7 | mode;
+
+    // 查询命令不需要参数，只需要发送空数据
+    for (int i = 0; i < 8; i++)
+        canBuf[i] = 0;
+
+    accBaseResponsePending = true;   // 等待电机 0x33 响应
+    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+
+void CtrlStepMotor::UpdateAccelerationCallback(float _acc, bool _success)
+{
+    accBaseResponsePending = false;  // 清除等待标志
+    accBase = _acc;                   // 更新缓存值
+    // _success 决定是否通知串口
+    // 通知机制由外部通过轮询 accBaseResponsePending 或其他方式处理
 }
 
 

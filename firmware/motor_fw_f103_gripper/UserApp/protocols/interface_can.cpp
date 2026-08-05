@@ -169,14 +169,30 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
         case 0x14:  // Set Acceleration （and Store to EEPROM）
+        {
             tmpF = *(float*) RxData * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+            int32_t newAcc = (int32_t) tmpF;
 
-            motor.config.motionParams.ratedVelocityAcc = (int32_t) tmpF;
-            motor.motionPlanner.velocityTracker.SetVelocityAcc((int32_t) tmpF);
-            motor.motionPlanner.positionTracker.SetVelocityAcc((int32_t) tmpF);
+            // 无最大值校验，按用户要求"发什么就保存什么"
+            motor.config.motionParams.ratedVelocityAcc = newAcc;
+            motor.motionPlanner.velocityTracker.SetVelocityAcc(newAcc);
+            motor.motionPlanner.positionTracker.SetVelocityAcc(newAcc);
             boardConfig.velocityAcc = motor.config.motionParams.ratedVelocityAcc;
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
+
+            // 发送响应：0x94=成功
+            uint8_t respData[8] = {0};
+            respData[0] = 1;  // 1=OK
+            float respAcc = (float)motor.config.motionParams.ratedVelocityAcc
+                            / (float)motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+            auto* br = (unsigned char*)&respAcc;
+            for (int i = 0; i < 4; i++)
+                respData[4 + i] = *(br + i);
+
+            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x94;
+            CAN_Send(&txHeader, respData);
+        }
             break;
         case 0x15:  // Apply Home-Position and Store to EEPROM
             motor.controller->ApplyPosAsHomeOffset();
@@ -332,6 +348,17 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             for (int i = 0; i < 4; i++)
                 txData[i] = *(b + i);
             txHeader.StdId = (boardConfig.canNodeId << 7) | 0x31;
+            CAN_Send(&txHeader, txData);
+        }
+            break;
+        case 0x33:  // Get Acceleration
+        {
+            tmpF = (float)motor.config.motionParams.ratedVelocityAcc
+                   / (float)motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+            auto* b = (unsigned char*) &tmpF;
+            for (int i = 0; i < 4; i++)
+                txData[i] = *(b + i);
+            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x33;
             CAN_Send(&txHeader, txData);
         }
             break;

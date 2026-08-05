@@ -213,16 +213,15 @@ openocd -f interface/stlink.cfg -f target/stm32f1x.cfg \
 编译前修改 `motor_fw_f103/Ctrl/Config/configurations.h`：
 
 ```cpp
-// 默认: 35电机
-// 如需使用42电机，取消注释下一行：
-// #define MOTOR_TYPE_42
+// firmware/motor_fw_f103_42/UserApp/configurations.h
+// 42电机固件专用配置：额定电流上限 2300mA = 2.3A
 
 #ifdef MOTOR_TYPE_42
     #define DEFAULT_DCE_KP      200
-    #define MAX_CURRENT_LIMIT   (2 * 1000)   // 42电机: 2000mA
+    #define MAX_CURRENT_LIMIT   (2.3f * 1000)   // 42电机: 2300mA
 #else
     #define DEFAULT_DCE_KP      195
-    #define MAX_CURRENT_LIMIT   (int32_t)(1.2f * 1000)  // 35电机: 1200mA
+    #define MAX_CURRENT_LIMIT   (2.0f * 1000)   // 35电机: 2000mA
 #endif
 ```
 

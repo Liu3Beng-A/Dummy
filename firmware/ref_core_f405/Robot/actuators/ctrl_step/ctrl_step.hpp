@@ -33,6 +33,8 @@ public:
     State state = STOP;
     float currentLimit = 0;      // 当前设置的电流限制（A），从电机固件查询获得
     bool currentLimitResponsePending = false;  // 等待电机响应标志
+    float accBase = 0;                       // 缓存加速度（r/s² 或 mm/s²），从电机固件查询获得
+    bool accBaseResponsePending = false;     // 等待电机响应标志
 
     // 判定实测角度是否已收敛到目标容差内（单位：度）
     bool AllAtTarget(float epsilon_deg = 1.0f) const {
@@ -53,6 +55,7 @@ public:
     void GetCurrentLimit();  // 查询电机固件的真实电流限制值
     void SetVelocityLimit(float _val);
     void SetAcceleration(float _val);
+    void GetAcceleration();  // 查询电机固件的真实加速度值
     void SetDceKp(int32_t _val);
     void SetDceKv(int32_t _val);
     void SetDceKi(int32_t _val);
@@ -71,6 +74,7 @@ public:
     void UpdateAngle();
     void UpdateAngleCallback(float _pos, bool _isFinished);
     void UpdateCurrentLimitCallback(float _currentLimit, bool _success);  // 处理 0x92/0x93/0x31 响应
+    void UpdateAccelerationCallback(float _acc, bool _success);           // 处理 0x94/0x33 响应
     void SetStallMode();
 
 

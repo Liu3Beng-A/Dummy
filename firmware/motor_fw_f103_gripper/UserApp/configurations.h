@@ -12,7 +12,7 @@ extern "C" {
 #define GRIPPER_FIXED_NODE_ID 8  /* 夹爪固定 CAN 节点 ID=8 */
 
 /* 电机额定电流上限 (mA)，设置时不能超过此值 */
-#define MOTOR_RATED_CURRENT_MAX  1500  /* 夹爪35电机: 1.5A */
+#define MOTOR_RATED_CURRENT_MAX  2000  /* 夹爪35电机: 2.0A (与35关节电机统一) */
 
 typedef enum configStatus_t
 {

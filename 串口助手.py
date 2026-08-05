@@ -9,16 +9,21 @@ import configparser
 import os
 from pathlib import Path
 
-# 电机额定电流上限配置 (A)，与电机固件中的 MOTOR_RATED_CURRENT_MAX 一致
+# 电机额定电流上限配置 (A)，与电机固件 configurations.h 中 MOTOR_RATED_CURRENT_MAX 一致
+# CAN ID 对应电机型号：
+#   1~3 = 42电机 (J1~J3 关节)  → 2.3A
+#   4~6 = 35电机 (J4~J6 关节)  → 2.0A
+#   8   = 35电机 (夹爪)        → 2.0A
+#   9   = 57电机 (地轨)        → 3.0A
 # 设置电流时不能超过此值（串口助手侧的第一重保护）
 MOTOR_RATED_CURRENT_MAX = {
-    1: 2.0,   # 35电机 J1: 2.0A
-    2: 2.0,   # 35电机 J2: 2.0A
-    3: 2.0,   # 35电机 J3: 2.0A
+    1: 2.3,   # 42电机 J1: 2.3A
+    2: 2.3,   # 42电机 J2: 2.3A
+    3: 2.3,   # 42电机 J3: 2.3A
     4: 2.0,   # 35电机 J4: 2.0A
     5: 2.0,   # 35电机 J5: 2.0A
     6: 2.0,   # 35电机 J6: 2.0A
-    8: 1.5,   # 夹爪 35电机: 1.5A
+    8: 2.0,   # 夹爪 35电机: 2.0A (与35关节电机统一)
     9: 3.0,   # 地轨 57电机: 3.0A
 }
 
@@ -1164,12 +1169,12 @@ class RobotSerialAssistant:
         hc_f = ttk.Frame(parent)
         hc_f.pack(fill=tk.X, pady=(0, 4))
         self.ent_hand_current = ttk.Entry(hc_f, width=6, font=("Arial", 10))
-        self.ent_hand_current.insert(0, "1.2")
+        self.ent_hand_current.insert(0, "1.5")
         self.ent_hand_current.pack(side=tk.LEFT)
         self.scl_hand_current = ttk.Scale(hc_f, from_=0.05, to=2.0, orient=tk.HORIZONTAL)
-        self.scl_hand_current.set(1.2)
+        self.scl_hand_current.set(1.5)
         self.scl_hand_current.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.lbl_hand_current_val = ttk.Label(hc_f, text="1.2", width=4, font=("Arial", 10))
+        self.lbl_hand_current_val = ttk.Label(hc_f, text="1.5", width=4, font=("Arial", 10))
         self.lbl_hand_current_val.pack(side=tk.LEFT)
         tk.Button(hc_f, text="发送", font=("Arial", 10), bg="#495057", fg="white",
                   relief=tk.FLAT, width=5, command=self.send_hand_current).pack(side=tk.LEFT, padx=(4, 0))
@@ -1532,13 +1537,16 @@ class RobotSerialAssistant:
             messagebox.showerror("错误", "请输入有效的数字")
 
     def send_acc_base(self):
+        """发送 #ACC_BASE_J 命令，逻辑与 I_LIMIT_J 一致：不限制最大值，发什么就保存什么"""
         try:
             node = int(self.cb_acc_node.get())
             acc = float(self.ent_acc_val.get())
-            if 1 <= node <= 6 and 1.0 <= acc <= 2000.0:
+            # 不做最大值校验，按用户要求"发什么就设置保存什么"
+            if 1 <= node <= 6:
                 self.send_cmd(f"#ACC_BASE_J {node} {acc}")
+                self.log(f"已发送 #ACC_BASE_J {node} {acc}", "INFO")
             else:
-                messagebox.showerror("错误", "节点必须为1-6，加速度必须在1-2000之间")
+                messagebox.showerror("错误", "节点必须为 1-6")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 

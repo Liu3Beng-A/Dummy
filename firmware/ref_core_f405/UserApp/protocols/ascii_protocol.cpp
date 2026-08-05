@@ -468,31 +468,50 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s.find("ACC_BASE_J") != std::string::npos)
         {
-            float S;
-            uint32_t node;
-            sscanf(_cmd, "#ACC_BASE_J %lu %f", &node, &S);
-            if (node >= 1 && node <= 6)
+            // 修复 sscanf 问题：通过返回值判断是设置(2个参数)还是查询(1个参数)
+            uint32_t node = 0;
+            float S = 0;
+            int args = sscanf(_cmd, "#ACC_BASE_J %lu %f", &node, &S);
+
+            if (args == 2)
             {
-                if (S >= 1.0f && S <= 2000.0f)
+                // 设置模式：有2个参数（node + S）
+                if (node >= 1 && node <= 6)
                 {
+                    // 不做最大值校验，按用户要求"发什么就保存什么"
                     dummy.jointAccBases.a[node - 1] = S;
                     dummy.SaveConfig();
-                    
-                    // 立即按当前模式重新应用加速度
-                    uint32_t currentMode = static_cast<uint32_t>(dummy.commandMode);
-                    dummy.SetCommandMode(currentMode); 
 
-                    Respond(_responseChannel, "ok SET MOTOR [%lu] BASE ACCELERATION [%f] AND SAVED", node, S);
+                    // 立即按当前模式重新应用加速度，下发到电机固件
+                    uint32_t currentMode = static_cast<uint32_t>(dummy.commandMode);
+                    dummy.SetCommandMode(currentMode);
+
+                    Respond(_responseChannel,
+                            "ok SET MOTOR [%lu] BASE ACCELERATION [%f] - 等待电机保存...",
+                            node, S);
                 }
                 else
                 {
-                    Respond(_responseChannel, "error ACC_BASE_J value must be in [1.0, 2000.0]");
+                    Respond(_responseChannel, "error: invalid node %lu", node);
+                }
+            }
+            else if (args == 1)
+            {
+                // 查询模式：只有1个参数（node），需要从电机固件获取真实值
+                if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->GetAcceleration();
+                    Respond(_responseChannel,
+                            "ok QUERY MOTOR [%lu] BASE ACCELERATION - 等待电机响应...", node);
+                }
+                else
+                {
+                    Respond(_responseChannel, "error: invalid node %lu", node);
                 }
             }
             else
             {
-                Respond(_responseChannel,
-                        "error SET MOTOR [%lu] BASE ACCELERATION [%f] is wrong", node, S);
+                Respond(_responseChannel, "error: invalid ACC_BASE_J command format");
             }
         }
         else if (s.find("ACC_J") != std::string::npos)
@@ -964,30 +983,50 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("ACC_BASE_J") != std::string::npos)
         {
-            float S;
-            uint32_t node;
-            sscanf(_cmd, "#ACC_BASE_J %lu %f", &node, &S);
-            if (node >= 1 && node <= 6)
+            // 修复 sscanf 问题：通过返回值判断是设置(2个参数)还是查询(1个参数)
+            uint32_t node = 0;
+            float S = 0;
+            int args = sscanf(_cmd, "#ACC_BASE_J %lu %f", &node, &S);
+
+            if (args == 2)
             {
-                if (S >= 1.0f && S <= 2000.0f)
+                // 设置模式：有2个参数（node + S）
+                if (node >= 1 && node <= 6)
                 {
+                    // 不做最大值校验，按用户要求"发什么就保存什么"
                     dummy.jointAccBases.a[node - 1] = S;
                     dummy.SaveConfig();
 
+                    // 立即按当前模式重新应用加速度，下发到电机固件
                     uint32_t currentMode = static_cast<uint32_t>(dummy.commandMode);
                     dummy.SetCommandMode(currentMode);
 
-                    Respond(_responseChannel, "ok SET MOTOR [%lu] BASE ACCELERATION [%f] AND SAVED", node, S);
+                    Respond(_responseChannel,
+                            "ok SET MOTOR [%lu] BASE ACCELERATION [%f] - 等待电机保存...",
+                            node, S);
                 }
                 else
                 {
-                    Respond(_responseChannel, "error ACC_BASE_J value must be in [1.0, 2000.0]");
+                    Respond(_responseChannel, "error: invalid node %lu", node);
+                }
+            }
+            else if (args == 1)
+            {
+                // 查询模式：只有1个参数（node），需要从电机固件获取真实值
+                if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->GetAcceleration();
+                    Respond(_responseChannel,
+                            "ok QUERY MOTOR [%lu] BASE ACCELERATION - 等待电机响应...", node);
+                }
+                else
+                {
+                    Respond(_responseChannel, "error: invalid node %lu", node);
                 }
             }
             else
             {
-                Respond(_responseChannel,
-                        "error SET MOTOR [%lu] BASE ACCELERATION [%f] is wrong", node, S);
+                Respond(_responseChannel, "error: invalid ACC_BASE_J command format");
             }
         }
         else if (s.find("SPEED_RAIL") != std::string::npos)

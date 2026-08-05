@@ -125,6 +125,21 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     dummy.motorJ[0]->UpdateCurrentLimitCallback(*(float*)(data + 4), false);
                     printf("[I_LIMIT] RAIL [9] SET FAIL - value exceeds motor max current!\r\n");
                     break;
+                case 0x33:
+                    // 电机响应：查询加速度 (0x33)
+                    dummy.motorJ[0]->UpdateAccelerationCallback(*(float*)(data), true);
+                    printf("[ACC] RAIL [9] = %f r/s^2 (received)\r\n", (double)*(float*)(data));
+                    break;
+                case 0x94:
+                    // 电机响应：设置加速度成功 (0x94)
+                    dummy.motorJ[0]->UpdateAccelerationCallback(*(float*)(data + 4), true);
+                    printf("[ACC] RAIL [9] SET OK = %f r/s^2 (saved to EEPROM)\r\n", (double)*(float*)(data + 4));
+                    break;
+                case 0x95:
+                    // 电机响应：设置加速度失败 (0x95，预留，目前永不触发)
+                    dummy.motorJ[0]->UpdateAccelerationCallback(*(float*)(data + 4), false);
+                    printf("[ACC] RAIL [9] SET FAIL\r\n");
+                    break;
                 default:
                     break;
             }
@@ -184,6 +199,21 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     dummy.motorJ[id]->UpdateCurrentLimitCallback(*(float*)(data + 4), false);
                     printf("[I_LIMIT] J%d [%d] SET FAIL - value exceeds motor max current!\r\n", id, id);
                     break;
+                case 0x33:
+                    // 电机响应：查询加速度 (0x33)
+                    dummy.motorJ[id]->UpdateAccelerationCallback(*(float*)(data), true);
+                    printf("[ACC] J%d [%d] = %f r/s^2\r\n", id, id, (double)*(float*)(data));
+                    break;
+                case 0x94:
+                    // 电机响应：设置加速度成功 (0x94)
+                    dummy.motorJ[id]->UpdateAccelerationCallback(*(float*)(data + 4), true);
+                    printf("[ACC] J%d [%d] SET OK = %f r/s^2 (saved to EEPROM)\r\n", id, id, (double)*(float*)(data + 4));
+                    break;
+                case 0x95:
+                    // 电机响应：设置加速度失败 (0x95，预留，目前永不触发)
+                    dummy.motorJ[id]->UpdateAccelerationCallback(*(float*)(data + 4), false);
+                    printf("[ACC] J%d [%d] SET FAIL\r\n", id, id);
+                    break;
                 default:
                     break;
             }
@@ -214,6 +244,21 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     // 电机响应：设置电流限制失败 (0x93)
                     dummy.hand->UpdateCurrentLimitCallback(*(float*)(data + 4), false);
                     printf("[I_LIMIT] HAND [8] SET FAIL - value exceeds motor max current!\r\n");
+                    break;
+                case 0x33:
+                    // 电机响应：查询加速度 (0x33)
+                    dummy.hand->UpdateAccelerationCallback(*(float*)(data), true);
+                    printf("[ACC] HAND [8] = %f r/s^2\r\n", (double)*(float*)(data));
+                    break;
+                case 0x94:
+                    // 电机响应：设置加速度成功 (0x94)
+                    dummy.hand->UpdateAccelerationCallback(*(float*)(data + 4), true);
+                    printf("[ACC] HAND [8] SET OK = %f r/s^2 (saved to EEPROM)\r\n", (double)*(float*)(data + 4));
+                    break;
+                case 0x95:
+                    // 电机响应：设置加速度失败 (0x95，预留，目前永不触发)
+                    dummy.hand->UpdateAccelerationCallback(*(float*)(data + 4), false);
+                    printf("[ACC] HAND [8] SET FAIL\r\n");
                     break;
                 default:
                     break;
