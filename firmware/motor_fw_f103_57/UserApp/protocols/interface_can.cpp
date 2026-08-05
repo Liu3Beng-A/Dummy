@@ -111,10 +111,35 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
         case 0x12:  // Set Current-Limit and Store to EEPROM
-            motor.config.motionParams.ratedCurrent = (int32_t) (*(float*) RxData * 1000);
-            boardConfig.currentLimit = motor.config.motionParams.ratedCurrent;
-            if (_data[4])
-                boardConfig.configStatus = CONFIG_COMMIT;
+        {
+            int32_t newCurrent = (int32_t)(*(float*)RxData * 1000); // mA
+            bool success = true;
+
+            // 双重保护：检查是否超过额定最大值
+            if (newCurrent > MOTOR_RATED_CURRENT_MAX) {
+                success = false;
+                printf("[CAN] ERROR: Current %ld mA exceeds max %d mA!\r\n",
+                       newCurrent, MOTOR_RATED_CURRENT_MAX);
+            }
+
+            if (success) {
+                motor.config.motionParams.ratedCurrent = newCurrent;
+                boardConfig.currentLimit = newCurrent;
+                if (_data[4])
+                    boardConfig.configStatus = CONFIG_COMMIT;
+            }
+
+            // 发送响应：0x92=成功, 0x93=失败
+            uint8_t respData[8] = {0};
+            respData[0] = success ? 1 : 0;  // 1=OK, 0=FAIL
+            float respCurrent = (float)motor.config.motionParams.ratedCurrent / 1000.0f;
+            auto* b = (unsigned char*)&respCurrent;
+            for (int i = 0; i < 4; i++)
+                respData[4 + i] = *(b + i);
+
+            txHeader.StdId = (boardConfig.canNodeId << 7) | (success ? 0x92 : 0x93);
+            CAN_Send(&txHeader, respData);
+        }
             break;
         case 0x13:  // Set Velocity-Limit and Store to EEPROM
             motor.config.motionParams.ratedVelocity =
@@ -277,6 +302,17 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             for (int i = 0; i < 4; i++)
                 _data[i] = *(b + i);
             txHeader.StdId = (boardConfig.canNodeId << 7) | 0x2B;
+            CAN_Send(&txHeader, _data);
+        }
+            break;
+
+        case 0x31:  // Get Current-Limit
+        {
+            tmpF = (float)motor.config.motionParams.ratedCurrent / 1000.0f;
+            auto* b = (unsigned char*) &tmpF;
+            for (int i = 0; i < 4; i++)
+                _data[i] = *(b + i);
+            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x31;
             CAN_Send(&txHeader, _data);
         }
             break;

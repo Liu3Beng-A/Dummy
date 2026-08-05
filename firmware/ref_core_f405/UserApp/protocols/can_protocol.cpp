@@ -103,6 +103,21 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     if (data[1] == 1)
                         dummy.SetStallMode(9);
                     break;
+                case 0x31:
+                    // 电机响应：查询电流限制 (0x31)
+                    dummy.motorJ[0]->UpdateCurrentLimitCallback(*(float*)(data), true);
+                    printf("[I_LIMIT] RAIL [9] = %f A\r\n", (double)*(float*)(data));
+                    break;
+                case 0x92:
+                    // 电机响应：设置电流限制成功 (0x92)
+                    dummy.motorJ[0]->UpdateCurrentLimitCallback(*(float*)(data + 4), true);
+                    printf("[I_LIMIT] RAIL [9] SET OK = %f A (saved to EEPROM)\r\n", (double)*(float*)(data + 4));
+                    break;
+                case 0x93:
+                    // 电机响应：设置电流限制失败 (0x93)
+                    dummy.motorJ[0]->UpdateCurrentLimitCallback(*(float*)(data + 4), false);
+                    printf("[I_LIMIT] RAIL [9] SET FAIL - value exceeds motor max current!\r\n");
+                    break;
                 default:
                     break;
             }
@@ -141,6 +156,21 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     if (data[1] == 1)
                         dummy.SetStallMode((int)id);
                     break;
+                case 0x31:
+                    // 电机响应：查询电流限制 (0x31)
+                    dummy.motorJ[id]->UpdateCurrentLimitCallback(*(float*)(data), true);
+                    printf("[I_LIMIT] J%d [%d] = %f A\r\n", id, id, (double)*(float*)(data));
+                    break;
+                case 0x92:
+                    // 电机响应：设置电流限制成功 (0x92)
+                    dummy.motorJ[id]->UpdateCurrentLimitCallback(*(float*)(data + 4), true);
+                    printf("[I_LIMIT] J%d [%d] SET OK = %f A (saved to EEPROM)\r\n", id, id, (double)*(float*)(data + 4));
+                    break;
+                case 0x93:
+                    // 电机响应：设置电流限制失败 (0x93)
+                    dummy.motorJ[id]->UpdateCurrentLimitCallback(*(float*)(data + 4), false);
+                    printf("[I_LIMIT] J%d [%d] SET FAIL - value exceeds motor max current!\r\n", id, id);
+                    break;
                 default:
                     break;
             }
@@ -156,6 +186,21 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     break;
                 case 0x25:
                     memcpy(&dummy.hand->temperature, data, sizeof(uint32_t));
+                    break;
+                case 0x31:
+                    // 电机响应：查询电流限制 (0x31)
+                    dummy.hand->UpdateCurrentLimitCallback(*(float*)(data), true);
+                    printf("[I_LIMIT] HAND [8] = %f A\r\n", (double)*(float*)(data));
+                    break;
+                case 0x92:
+                    // 电机响应：设置电流限制成功 (0x92)
+                    dummy.hand->UpdateCurrentLimitCallback(*(float*)(data + 4), true);
+                    printf("[I_LIMIT] HAND [8] SET OK = %f A (saved to EEPROM)\r\n", (double)*(float*)(data + 4));
+                    break;
+                case 0x93:
+                    // 电机响应：设置电流限制失败 (0x93)
+                    dummy.hand->UpdateCurrentLimitCallback(*(float*)(data + 4), false);
+                    printf("[I_LIMIT] HAND [8] SET FAIL - value exceeds motor max current!\r\n");
                     break;
                 default:
                     break;

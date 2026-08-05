@@ -566,29 +566,61 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s.find("I_LIMIT_J") != std::string::npos)
         {
-            float I;
-            uint32_t node;
-            sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &I);
-            if (node == 9)
+            // 修复 sscanf 问题：通过返回值判断是设置(2个参数)还是查询(1个参数)
+            uint32_t node = 0;
+            float I = 0;
+            int args = sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &I);
+
+            if (args == 2)
             {
-                // 节点 9: 地轨电机（motorJ[0] 对应 CAN ID=9）
-                dummy.motorJ[0]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
+                // ── 设置模式：有2个参数 ──
+                if (node == 9)
+                {
+                    // 节点 9: 地轨电机（motorJ[0] 对应 CAN ID=9）
+                    dummy.motorJ[0]->SetCurrentLimit(I);
+                    Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨) - 等待电机保存...", I);
+                }
+                else if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->SetCurrentLimit(I);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f] - 等待电机保存...", node, I);
+                }
+                else if (node == 8)
+                {
+                    dummy.hand->SetCurrentLimit(I);
+                    Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪) - 等待电机保存...", I);
+                }
+                else
+                {
+                    Respond(_responseChannel, "error: invalid node ID %lu", node);
+                }
             }
-            else if (node >= 1 && node <= 6)
+            else if (args == 1)
             {
-                dummy.motorJ[node]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f]", node, I);
-            }
-            else if (node == 8)
-            {
-                dummy.hand->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪)", I);
+                // ── 查询模式：只有1个参数（node），需要从电机固件获取真实值 ──
+                if (node == 9)
+                {
+                    dummy.motorJ[0]->GetCurrentLimit();
+                    Respond(_responseChannel, "ok QUERY MOTOR [9] - 等待电机响应...");
+                }
+                else if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->GetCurrentLimit();
+                    Respond(_responseChannel, "ok QUERY MOTOR [%lu] - 等待电机响应...", node);
+                }
+                else if (node == 8)
+                {
+                    dummy.hand->GetCurrentLimit();
+                    Respond(_responseChannel, "ok QUERY MOTOR [8] (夹爪) - 等待电机响应...");
+                }
+                else
+                {
+                    Respond(_responseChannel, "error: invalid node ID %lu", node);
+                }
             }
             else
             {
-                Respond(_responseChannel,
-                        "error SET MOTOR [%lu] CURRENT_LIMIT [%f] is wrong", node, I);
+                Respond(_responseChannel, "error: invalid I_LIMIT_J command format");
             }
         }
         else
@@ -1143,28 +1175,61 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("I_LIMIT_J") != std::string::npos)
         {
-            float I;
-            uint32_t node;
-            sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &I);
-            if (node == 9)
+            // 修复 sscanf 问题：通过返回值判断是设置(2个参数)还是查询(1个参数)
+            uint32_t node = 0;
+            float I = 0;
+            int args = sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &I);
+
+            if (args == 2)
             {
-                // 节点 9: 地轨电机（motorJ[0] 对应 CAN ID=9）
-                dummy.motorJ[0]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
+                // ── 设置模式：有2个参数 ──
+                if (node == 9)
+                {
+                    // 节点 9: 地轨电机（motorJ[0] 对应 CAN ID=9）
+                    dummy.motorJ[0]->SetCurrentLimit(I);
+                    Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨) - 等待电机保存...", I);
+                }
+                else if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->SetCurrentLimit(I);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f] - 等待电机保存...", node, I);
+                }
+                else if (node == 8)
+                {
+                    dummy.hand->SetCurrentLimit(I);
+                    Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪) - 等待电机保存...", I);
+                }
+                else
+                {
+                    Respond(_responseChannel, "error: invalid node ID %lu", node);
+                }
             }
-            else if (node >= 1 && node <= 6)
+            else if (args == 1)
             {
-                dummy.motorJ[node]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f]", node, I);
-            }
-            else if (node == 8)
-            {
-                dummy.hand->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪)", I);
+                // ── 查询模式：只有1个参数（node），需要从电机固件获取真实值 ──
+                if (node == 9)
+                {
+                    dummy.motorJ[0]->GetCurrentLimit();
+                    Respond(_responseChannel, "ok QUERY MOTOR [9] - 等待电机响应...");
+                }
+                else if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->GetCurrentLimit();
+                    Respond(_responseChannel, "ok QUERY MOTOR [%lu] - 等待电机响应...", node);
+                }
+                else if (node == 8)
+                {
+                    dummy.hand->GetCurrentLimit();
+                    Respond(_responseChannel, "ok QUERY MOTOR [8] (夹爪) - 等待电机响应...");
+                }
+                else
+                {
+                    Respond(_responseChannel, "error: invalid node ID %lu", node);
+                }
             }
             else
             {
-                Respond(_responseChannel, "error SET MOTOR [%lu] CURRENT_LIMIT [%f] is wrong", node, I);
+                Respond(_responseChannel, "error: invalid I_LIMIT_J command format");
             }
         }
         else

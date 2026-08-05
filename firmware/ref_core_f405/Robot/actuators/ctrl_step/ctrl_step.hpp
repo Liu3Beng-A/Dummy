@@ -31,6 +31,8 @@ public:
     bool inverseDirection;
     uint8_t reduction;
     State state = STOP;
+    float currentLimit = 0;      // 当前设置的电流限制（A），从电机固件查询获得
+    bool currentLimitResponsePending = false;  // 等待电机响应标志
 
     // 判定实测角度是否已收敛到目标容差内（单位：度）
     bool AllAtTarget(float epsilon_deg = 1.0f) const {
@@ -48,6 +50,7 @@ public:
     void SetPositionWithVelocityLimit(float _pos, float _vel);
     void SetNodeID(uint32_t _id);
     void SetCurrentLimit(float _val);
+    void GetCurrentLimit();  // 查询电机固件的真实电流限制值
     void SetVelocityLimit(float _val);
     void SetAcceleration(float _val);
     void SetDceKp(int32_t _val);
@@ -67,6 +70,7 @@ public:
 
     void UpdateAngle();
     void UpdateAngleCallback(float _pos, bool _isFinished);
+    void UpdateCurrentLimitCallback(float _currentLimit, bool _success);  // 处理 0x92/0x93/0x31 响应
     void SetStallMode();
 
 

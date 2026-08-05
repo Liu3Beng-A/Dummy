@@ -8,6 +8,9 @@ extern "C" {
 #include <stdbool.h>
 #include "stdint-gcc.h"
 
+/* 电机额定电流上限 (mA)，设置时不能超过此值 */
+#define MOTOR_RATED_CURRENT_MAX  2000  /* 35电机: 2.0A */
+
 typedef enum configStatus_t
 {
     CONFIG_RESTORE = 0,

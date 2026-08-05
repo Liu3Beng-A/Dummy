@@ -11,6 +11,9 @@ extern "C" {
 /* 地轨电机固定 CAN ID=9（不依赖 DIP 开关拨码） */
 #define RAIL_FIXED_NODE_ID 9
 
+/* 电机额定电流上限 (mA)，设置时不能超过此值 */
+#define MOTOR_RATED_CURRENT_MAX  3000  /* 57电机: 3.0A */
+
 typedef enum configStatus_t
 {
     CONFIG_RESTORE = 0,

@@ -146,6 +146,29 @@ void CtrlStepMotor::SetCurrentLimit(float _val)
 }
 
 
+void CtrlStepMotor::GetCurrentLimit()
+{
+    uint8_t mode = 0x31;
+    txHeader.StdId = nodeID << 7 | mode;
+
+    // 查询命令不需要参数，只需要发送空数据
+    for (int i = 0; i < 8; i++)
+        canBuf[i] = 0;
+
+    currentLimitResponsePending = true;  // 标记等待响应
+    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+
+void CtrlStepMotor::UpdateCurrentLimitCallback(float _currentLimit, bool _success)
+{
+    currentLimitResponsePending = false;  // 清除等待标志
+    currentLimit = _currentLimit;         // 更新缓存值
+    // _success 决定是否通知串口
+    // 通知机制由外部通过轮询 currentLimitResponsePending 或其他方式处理
+}
+
+
 void CtrlStepMotor::SetVelocityLimit(float _val)
 {
     uint8_t mode = 0x13;

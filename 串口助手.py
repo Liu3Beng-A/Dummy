@@ -8,7 +8,21 @@ import math
 import configparser
 import os
 from pathlib import Path
-#你好
+
+# 电机额定电流上限配置 (A)，与电机固件中的 MOTOR_RATED_CURRENT_MAX 一致
+# 设置电流时不能超过此值（串口助手侧的第一重保护）
+MOTOR_RATED_CURRENT_MAX = {
+    1: 2.0,   # 35电机 J1: 2.0A
+    2: 2.0,   # 35电机 J2: 2.0A
+    3: 2.0,   # 35电机 J3: 2.0A
+    4: 2.0,   # 35电机 J4: 2.0A
+    5: 2.0,   # 35电机 J5: 2.0A
+    6: 2.0,   # 35电机 J6: 2.0A
+    8: 1.5,   # 夹爪 35电机: 1.5A
+    9: 3.0,   # 地轨 57电机: 3.0A
+}
+
+# 你好
 class RobotSerialAssistant:
     def __init__(self, root):
         self.root = root
@@ -500,6 +514,23 @@ class RobotSerialAssistant:
         self.ent_i_limit = ttk.Entry(cur_f, width=7, font=("Arial", 10))
         self.ent_i_limit.insert(0, "1.5")
         self.ent_i_limit.pack(side=tk.LEFT, padx=4)
+        # 显示额定最大值提示
+        self.lbl_i_max = ttk.Label(cur_f, text="", font=("Arial", 9), foreground="#e67700")
+        self.lbl_i_max.pack(side=tk.LEFT, padx=(0, 4))
+
+        def on_node_changed(event=None):
+            try:
+                node = int(self.cb_acc_node.get())
+                if node in MOTOR_RATED_CURRENT_MAX:
+                    self.lbl_i_max.config(text=f"最大{ MOTOR_RATED_CURRENT_MAX[node] }A")
+                else:
+                    self.lbl_i_max.config(text="")
+            except:
+                self.lbl_i_max.config(text="")
+
+        self.cb_acc_node.bind("<<ComboboxSelected>>", on_node_changed)
+        on_node_changed()  # 初始化显示
+
         tk.Button(cur_f, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
                   relief=tk.FLAT, command=self.send_i_limit).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
@@ -1331,6 +1362,35 @@ class RobotSerialAssistant:
                                     self.root.after(0, self._send_next_position)
                                 else:
                                     self.root.after(0, lambda: self.log(f"顺序发送完成，共{total}个点位", "INFO"))
+                            # 拦截 [I_LIMIT] 响应并更新电流限制显示
+                            if "[I_LIMIT]" in line:
+                                # 格式: [I_LIMIT] J1 [1] = 1.50 A
+                                # 格式: [I_LIMIT] RAIL [9] SET OK = 1.50 A (saved to EEPROM)
+                                # 格式: [I_LIMIT] J1 [1] SET FAIL - value exceeds motor max current!
+                                import re
+                                match = re.search(r'\[I_LIMIT\]\s+(\w+)\s+\[(\d+)\]\s*(?:SET OK|SET FAIL|=)', line)
+                                if match:
+                                    motor_name = match.group(1)  # J1, RAIL, HAND
+                                    node_id = int(match.group(2))  # 1, 9, 8
+
+                                    if "SET FAIL" in line:
+                                        self.root.after(0, lambda n=node_id: self.log(
+                                            f"节点{n}设置电流失败！超过电机额定最大值！", "ERROR"))
+                                    else:
+                                        # 提取电流值
+                                        val_match = re.search(r'=\s*([\d.]+)\s*A', line)
+                                        if val_match:
+                                            current_val = float(val_match.group(1))
+                                            self.root.after(0, lambda n=node_id, v=current_val: self.log(
+                                                f"节点{n}电流限制已更新: {v}A", "INFO"))
+                                            # 如果当前选中的节点匹配，更新输入框
+                                            try:
+                                                sel_node = int(self.cb_acc_node.get())
+                                                if sel_node == n:
+                                                    self.root.after(0, lambda v=v: self.ent_i_limit.delete(0, tk.END))
+                                                    self.root.after(0, lambda v=v: self.ent_i_limit.insert(0, str(v)))
+                                            except:
+                                                pass
                 # 无数据时短暂休眠，不阻塞主循环
                 time.sleep(0.05)
             except serial.SerialException as e:
@@ -1486,6 +1546,19 @@ class RobotSerialAssistant:
         try:
             node = int(self.cb_acc_node.get())
             i_limit = float(self.ent_i_limit.get())
+
+            # 第一重保护：串口助手侧检查是否超过额定最大值
+            if node in MOTOR_RATED_CURRENT_MAX:
+                max_current = MOTOR_RATED_CURRENT_MAX[node]
+                if i_limit > max_current:
+                    messagebox.showerror(
+                        "错误",
+                        f"节点 {node} 的电流 {i_limit}A 超过了额定最大值 {max_current}A！\n"
+                        f"设置值必须 ≤ {max_current}A"
+                    )
+                    return
+
+            # 发送设置命令
             if 1 <= node <= 6 and i_limit > 0:
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit}")
             elif node == 8 and i_limit > 0:

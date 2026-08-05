@@ -11,6 +11,9 @@ extern "C" {
 /* 夹爪固件专用宏 */
 #define GRIPPER_FIXED_NODE_ID 8  /* 夹爪固定 CAN 节点 ID=8 */
 
+/* 电机额定电流上限 (mA)，设置时不能超过此值 */
+#define MOTOR_RATED_CURRENT_MAX  1500  /* 夹爪35电机: 1.5A */
+
 typedef enum configStatus_t
 {
     CONFIG_RESTORE = 0,
