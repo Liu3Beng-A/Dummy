@@ -99,14 +99,21 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("PID_RAIL Kd=%ld\r\n", (long)dummy.motorDceKds[0]);
                     break;
                 case 0x7C:
-                    // 电机主动上报堵转
-                    if (data[1] == 1)
-                        dummy.SetStallMode(9);
+                    // P2-XXX fix: 暂时忽略电机主动上报的堵转信号
+                    // 原因：电机固件的堵转检测逻辑在上电初始化过程中会误报，
+                    //       导致地轨电机一旦上电就进入 stallMode 而无法 !START 使能。
+                    //       用户应通过 !DISABLE + !START 重新使能，或在电机使能失败时
+                    //       检查机械结构。
+                    // 调试保留：仅打印日志，不修改状态
+                    if (data[1] == 1) {
+                        printf("[WARN] Rail motor reported stall (ignored). "
+                               "If motor can't enable, check mechanical structure.\r\n");
+                    }
                     break;
                 case 0x31:
                     // 电机响应：查询电流限制 (0x31)
                     dummy.motorJ[0]->UpdateCurrentLimitCallback(*(float*)(data), true);
-                    printf("[I_LIMIT] RAIL [9] = %f A\r\n", (double)*(float*)(data));
+                    printf("[I_LIMIT] RAIL [9] = %f A (received)\r\n", (double)*(float*)(data));
                     break;
                 case 0x92:
                     // 电机响应：设置电流限制成功 (0x92)
@@ -152,9 +159,15 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("PID_J%d Kd=%ld\r\n", id, (long)dummy.motorDceKds[id]);
                     break;
                 case 0x7C:
-                    // 电机主动上报堵转
-                    if (data[1] == 1)
-                        dummy.SetStallMode((int)id);
+                    // P2-XXX fix: 暂时忽略电机主动上报的堵转信号
+                    // 原因：电机固件的堵转检测逻辑在上电初始化过程中会误报，
+                    //       导致关节电机一旦上电就进入 stallMode 而无法 !START 使能。
+                    //       用户应通过 !DISABLE + !START 重新使能，或在电机使能失败时
+                    //       检查机械结构。
+                    if (data[1] == 1) {
+                        printf("[WARN] Joint J%d motor reported stall (ignored). "
+                               "If motor can't enable, check mechanical structure.\r\n", id);
+                    }
                     break;
                 case 0x31:
                     // 电机响应：查询电流限制 (0x31)

@@ -25,8 +25,24 @@ void Main()
     // Setting priority is EEPROM > Motor.h
     EEPROM eeprom;
     eeprom.get(0, boardConfig);
-    if (boardConfig.configStatus != CONFIG_OK) // use default settings
+    // P0 fix: 不仅检查 configStatus，还要检查关键字段是否合理
+    // 旧版本固件可能写入了 currentLimit=0 等异常值，必须重置
+    bool config_valid = (boardConfig.configStatus == CONFIG_OK) &&
+                        (boardConfig.currentLimit >= 500) &&   // >= 0.5A
+                        (boardConfig.currentLimit <= 5000) &&  // <= 5.0A
+                        (boardConfig.calibrationCurrent >= 200) &&
+                        (boardConfig.velocityLimit > 0);
+    if (!config_valid) // use default settings
     {
+        if (boardConfig.configStatus != CONFIG_OK) {
+            // 首次启动或显式擦除
+            printf("[BOOT] First boot or erased EEPROM, load defaults\r\n");
+        } else {
+            // EEPROM 标记为 CONFIG_OK 但字段异常（旧版本写入的数据）
+            printf("[BOOT] EEPROM config invalid (curr=%ld, vel=%lu), reset to defaults\r\n",
+                   (long)boardConfig.currentLimit,
+                   (unsigned long)boardConfig.velocityLimit);
+        }
         // 57电机: 2.5A电流, kp=220, ki=400
         boardConfig = BoardConfig_t{
             .configStatus = CONFIG_OK,
@@ -49,6 +65,8 @@ void Main()
     }
     boardConfig.enableTempWatch=false;
     boardConfig.canNodeId = RAIL_FIXED_NODE_ID;
+    // 57电机堵转保护：从EEPROM读取，与其他电机一致
+    // 注意：这里不立即 eeprom.put()，因为循环里 CONFIG_COMMIT 处理时才会写
     motor.config.motionParams.encoderHomeOffset = boardConfig.encoderHomeOffset;
     motor.config.motionParams.ratedCurrent = boardConfig.currentLimit;
     motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;

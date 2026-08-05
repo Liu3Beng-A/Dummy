@@ -271,8 +271,10 @@ void Motor::CloseLoopControlTick()
     // stallThreshold 需在 stallProtectSwitch 判断外层声明，供 overload 检测复用
     const int32_t stallThreshold = (int32_t)(config.motionParams.ratedCurrent * 95 / 100);
 
+    // 57电机调试完成，恢复堵转检测逻辑
+    const bool stall_protect_actual = controller->config->stallProtectSwitch;
     // Stall detect
-    if (controller->config->stallProtectSwitch)
+    if (stall_protect_actual)
     {
         if (// Current Mode
             ((controller->modeRunning == MODE_COMMAND_CURRENT ||
