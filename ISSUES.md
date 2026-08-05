@@ -1,6 +1,6 @@
 # Dummy 机械臂项目问题清单
 
-> 更新时间: 2026-06-08  
+> 更新时间: 2026-08-05  
 > 适用范围: `ref_core_f405`、`motor_fw_f103_*`、`motor_fw_f103_gripper`、`串口助手.py`  
 > 本文用途: 只记录 **已知问题、风险、修复状态、建议修复顺序**。  
 > 配套文档: 功能规划与路线图请看 `TODO.md`。
@@ -46,12 +46,13 @@
 
 | 排名 | ID | 模块 | 问题 | 原因 |
 |---|---|---|---|---|
-| 1 | P0-12 | `ref_core_f405` | `EmergencyStop()` 不是真正急停 | 只改内存状态，没有真正向底层下发停机/制动/失能 |
-| 2 | P0-2 | `ref_core_f405` | `SetEnable(false)` 失能不完整 | 未清 `targetRailCurrent`，也未主动下发零电流 |
-| 3 | P0-3 | `ref_core_f405` | CAN 回调与 5kHz 控制循环数据竞争 | 共享状态在中断/任务之间并发读写 |
-| 4 | P0-7 | `ref_core_f405` | `ApplyPositionAsHome()` 发送脏 CAN 缓冲区 | 复用 `canBuf` 未清零，带随机残留数据 |
-| 5 | P0-8 | `ref_core_f405` | `CtrlStepMotor::SetEnable()` 状态语义错误 | enable=FINISH, disable=STOP，语义混乱 |
-| 6 | N-1 | `ref_core_f405` | `EmergencyStop()` 未下发 CAN 0x89 急停帧 | 电机固件完全不知道要停，只靠内存目标被动等待 |
+| 1 | P0-NEW | `ref_core_f405` | CAN TX 错误未释放信号量 → 主控永久卡死 | HAL 完成回调仅在 TXOK=1 触发，错误路径无 release |
+| 2 | P0-12 | `ref_core_f405` | `EmergencyStop()` 不是真正急停 | 只改内存状态，没有真正向底层下发停机/制动/失能 |
+| 3 | P0-2 | `ref_core_f405` | `SetEnable(false)` 失能不完整 | 未清 `targetRailCurrent`，也未主动下发零电流 |
+| 4 | P0-3 | `ref_core_f405` | CAN 回调与 5kHz 控制循环数据竞争 | 共享状态在中断/任务之间并发读写 |
+| 5 | P0-7 | `ref_core_f405` | `ApplyPositionAsHome()` 发送脏 CAN 缓冲区 | 复用 `canBuf` 未清零，带随机残留数据 |
+| 6 | P0-8 | `ref_core_f405` | `CtrlStepMotor::SetEnable()` 状态语义错误 | enable=FINISH, disable=STOP，语义混乱 |
+| 7 | N-1 | `ref_core_f405` | `EmergencyStop()` 未下发 CAN 0x89 急停帧 | 电机固件完全不知道要停，只靠内存目标被动等待 |
 
 ### 2.2 第二优先级：建议紧接着修
 
@@ -87,6 +88,18 @@
 ---
 
 ## 4. P0：上电前必须重点关注的问题
+
+### P0-NEW CAN TX 错误未释放发送信号量 → 主控永久卡死
+- **模块**：`ref_core_f405/Bsp/communication/interface_can.cpp`
+- **状态**：`[x]` 已修复（2026-08-05）
+- **问题**：`CanSendMessage()` 调用 `osSemaphoreAcquire(sem_can1_tx, osWaitForever)`。
+  STM32 HAL 的 `HAL_CAN_TxMailbox*CompleteCallback` **只在 TXOK=1（CAN 总线 ACK 成功）时触发**，
+  发送失败（仲裁丢失 / NACK / CRC 错误 / 位填充错）走 `HAL_CAN_ErrorCallback` 的 `TX_TERR` 分支。
+  原代码只在完成回调里 release 信号量，错误回调里没 release → 一旦 0x14 等帧发送失败，
+  `dummy.Init()` 的 6 帧设置加速度会**永久阻塞在第二条**，RGB/OLED 不亮。
+- **触发场景**：电机节点数较多（如 7 节点同时上电）→ CAN 总线短暂繁忙 → 0x14 仲裁失败。
+- **建议修法**：在 `HAL_CAN_ErrorCallback` 的 `TX_TERR0/1/2` 分支中也 `osSemaphoreRelease(sem_can1_tx/sem_can2_tx)`。
+- **修复方式**：已在三个邮箱的 `TX_TERR` 分支加上 `osSemaphoreRelease`，并加详细注释说明根因。
 
 ### P0-1 电机堵转/失步检测阈值错误
 - **模块**：`motor_fw_f103_all`
@@ -380,6 +393,7 @@
 ## 6. 当前建议修复顺序
 
 ### 第 1 组：先修安全与真正急停
+- [x] **P0-NEW** `HAL_CAN_ErrorCallback` 的 `TX_TERR` 分支 release 信号量（2026-08-05）
 - [ ] **N-1 + P0-12 合并修复**：`EmergencyStop()` 下发 CAN 0x89 急停帧，向所有电机节点广播
 - [ ] P0-2 `SetEnable(false)` 补充清零 `targetRailCurrent` 和 `targetCurrents`
 - [ ] P0-7 `ApplyPositionAsHome()` 发送前 `memset(canBuf, 0, 8)`
@@ -387,7 +401,7 @@
 
 ### 第 2 组：再修并发与通信
 - [ ] P0-3 CAN 中断共享状态解耦（中断只入队，控制线程统一消费）
-- [ ] N-6 `CanSendMessage` 的 `osWaitForever` 改为带超时（10ms）
+- [ ] N-6 `CanSendMessage` 的 `osWaitForever` 改为带超时（10ms），作为 P0-NEW 的二级防御
 - [ ] N-2 CAN 错误回调的 `else if` 链改为独立 `if`
 - [ ] P1-7 CAN 数据解包改 `memcpy`
 - [ ] P1-19 夹爪 0x7C 堵转通知接入主控

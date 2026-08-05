@@ -194,6 +194,10 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
     (void) original_error;
 
     // handle transmit errors in all three mailboxes
+    // [P0-FIX] CAN 发送失败时必须释放 sem_can1_tx / sem_can2_tx，
+    // 否则 osSemaphoreAcquire(..., osWaitForever) 会永久阻塞，主控卡死在 dummy.Init。
+    // HAL_CAN_TxMailbox*CompleteCallback 只在 TXOK=1（ACK 成功）时触发，
+    // TX 错误走 HAL_CAN_ErrorCallback 的 TX_TERR 分支，所以这里必须手动 release。
     if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST0)
     {
         SET_BIT(hcan->Instance->sTxMailBox[0].TIR, CAN_TI0R_TXRQ);
@@ -201,6 +205,8 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
     } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR0)
     {
         tx_error(ctx, 0);
+        if (hcan->Instance == CAN1) osSemaphoreRelease(sem_can1_tx);
+        else if (hcan->Instance == CAN2) osSemaphoreRelease(sem_can2_tx);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_EWG;
         hcan->ErrorCode &= ~HAL_CAN_ERROR_ACK;
         hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_TERR0;
@@ -213,6 +219,8 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
     } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR1)
     {
         tx_error(ctx, 1);
+        if (hcan->Instance == CAN1) osSemaphoreRelease(sem_can1_tx);
+        else if (hcan->Instance == CAN2) osSemaphoreRelease(sem_can2_tx);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_EWG;
         hcan->ErrorCode &= ~HAL_CAN_ERROR_ACK;
         hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_TERR1;
@@ -225,6 +233,8 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
     } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR2)
     {
         tx_error(ctx, 2);
+        if (hcan->Instance == CAN1) osSemaphoreRelease(sem_can1_tx);
+        else if (hcan->Instance == CAN2) osSemaphoreRelease(sem_can2_tx);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_EWG;
         hcan->ErrorCode &= ~HAL_CAN_ERROR_ACK;
         hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_TERR2;
