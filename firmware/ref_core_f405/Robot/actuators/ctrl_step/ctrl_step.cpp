@@ -193,7 +193,7 @@ void CtrlStepMotor::SetAcceleration(float _val)
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not  (1=保存，与电流方案一致)
+    canBuf[4] = 0; // Need save to EEPROM or not  (0=不保存，避免每次 SetJointAcceleration 触发电机 flash 写入阻塞导致 disable 失败)
 
     accBaseResponsePending = true;   // 等待电机 0x94 响应
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
