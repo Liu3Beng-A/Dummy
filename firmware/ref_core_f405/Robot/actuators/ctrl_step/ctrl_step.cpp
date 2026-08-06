@@ -22,17 +22,40 @@ CtrlStepMotor::CtrlStepMotor(CAN_HandleTypeDef* _hcan, uint8_t _id, bool _invers
 void CtrlStepMotor::SetEnable(bool _enable)
 {
     state = _enable ? FINISH : STOP;
-    if (!_enable)
+    if (!_enable) {
         targetAngle = 0;   // 禁用时清目标，避免残留导致误判
+        // 直接发两条 CAN：mode=0x01 disable + mode=0x03 电流=0
+        // 不调 SetCurrentSetPoint，避免 state=RUNNING 覆盖 disable 语义
+        uint8_t mode;
+        uint32_t val;
+        auto* b = (unsigned char*) &val;
+
+        // 1) 电流=0 (mode=0x03)
+        mode = 0x03;
+        txHeader.StdId = nodeID << 7 | mode;
+        val = 0;
+        for (int i = 0; i < 4; i++) canBuf[i] = *(b + i);
+        canBuf[4] = 0;  // Disable时无需电机ACK
+        CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+
+        // 2) disable电机 (mode=0x01)
+        mode = 0x01;
+        txHeader.StdId = nodeID << 7 | mode;
+        val = 0;
+        for (int i = 0; i < 4; i++) canBuf[i] = *(b + i);
+        canBuf[4] = 0;
+        CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+        return;
+    }
 
     uint8_t mode = 0x01;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Int to Bytes
-    uint32_t val = _enable ? 1 : 0;
+    uint32_t val = 1;
     auto* b = (unsigned char*) &val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
+    canBuf[4] = 1;  // Enable时需要电机ACK
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
