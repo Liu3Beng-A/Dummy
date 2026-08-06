@@ -9,13 +9,7 @@ import configparser
 import os
 from pathlib import Path
 
-# 电机额定电流上限配置 (A)，与电机固件 configurations.h 中 MOTOR_RATED_CURRENT_MAX 一致
-# CAN ID 对应电机型号：
-#   1~3 = 42电机 (J1~J3 关节)  → 2.3A
-#   4~6 = 35电机 (J4~J6 关节)  → 2.0A
-#   8   = 35电机 (夹爪)        → 2.0A
-#   9   = 57电机 (地轨)        → 3.0A
-# 设置电流时不能超过此值（串口助手侧的第一重保护）
+
 MOTOR_RATED_CURRENT_MAX = {
     1: 2.3,   # 42电机 J1: 2.3A
     2: 2.3,   # 42电机 J2: 2.3A
@@ -27,7 +21,6 @@ MOTOR_RATED_CURRENT_MAX = {
     9: 3.0,   # 地轨 57电机: 3.0A
 }
 
-# 你好
 class RobotSerialAssistant:
     def __init__(self, root):
         self.root = root
@@ -46,6 +39,12 @@ class RobotSerialAssistant:
         # 入队命令回执抑制（> / @ / & / $ 入队后 1s 内的纯数字行视为队列剩余空间，过滤掉）
         self._expect_queue_reply = False
         self._queue_reply_deadline_ms = 0
+        # 查询命令（#ACC_BASE_J / #I_LIMIT_J）超时兜底：记录当前查询的 "等待电机响应" 行，
+        # 0.5s 后在其下方打印电机实际回复，1s 后若仍无回复则打印丢包提示
+        self._pending_query_line = None   # 形如 "[11:44:28] [RX] ok QUERY MOTOR [1] BASE ACCELERATION - 等待电机响应..."
+        self._query_timeout_after_05s = None   # 0.5s 定时器句柄
+        self._query_timeout_after_10s = None   # 1.0s 定时器句柄
+        self._query_line_placeholder = None     # 0.5s 时打印的占位行索引（log行号），用于后续替换为真实数据
         # 主题与配色
         try:
             style = ttk.Style()
@@ -493,7 +492,7 @@ class RobotSerialAssistant:
         node_f.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(node_f, text="节点:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
         self.cb_acc_node = ttk.Combobox(node_f, width=6,
-                                         values=[str(i) for i in [1, 2, 3, 4, 5, 6, 8, 9]],
+                                         values=[str(i) for i in [1, 2, 3, 4, 5, 6, 8]],
                                          state="readonly")
         self.cb_acc_node.current(0)
         self.cb_acc_node.pack(side=tk.LEFT, padx=4)
@@ -520,22 +519,6 @@ class RobotSerialAssistant:
         self.ent_i_limit.insert(0, "1.5")
         self.ent_i_limit.pack(side=tk.LEFT, padx=4)
         # 显示额定最大值提示
-        self.lbl_i_max = ttk.Label(cur_f, text="", font=("Arial", 9), foreground="#e67700")
-        self.lbl_i_max.pack(side=tk.LEFT, padx=(0, 4))
-
-        def on_node_changed(event=None):
-            try:
-                node = int(self.cb_acc_node.get())
-                if node in MOTOR_RATED_CURRENT_MAX:
-                    self.lbl_i_max.config(text=f"最大{ MOTOR_RATED_CURRENT_MAX[node] }A")
-                else:
-                    self.lbl_i_max.config(text="")
-            except:
-                self.lbl_i_max.config(text="")
-
-        self.cb_acc_node.bind("<<ComboboxSelected>>", on_node_changed)
-        on_node_changed()  # 初始化显示
-
         tk.Button(cur_f, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
                   relief=tk.FLAT, command=self.send_i_limit).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
@@ -584,7 +567,7 @@ class RobotSerialAssistant:
         self.ent_rail_acc = ttk.Entry(raf, width=7, font=("Arial", 10))
         self.ent_rail_acc.insert(0, "500")
         self.ent_rail_acc.pack(side=tk.LEFT, padx=4)
-        self.scl_rail_acc = ttk.Scale(raf, from_=10, to=5000, orient=tk.HORIZONTAL)
+        self.scl_rail_acc = ttk.Scale(raf, from_=10, to=2000, orient=tk.HORIZONTAL)
         self.scl_rail_acc.set(500)
         self.scl_rail_acc.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self.lbl_rail_acc_val = ttk.Label(raf, text="500", width=6, font=("Arial", 10))
@@ -1286,6 +1269,32 @@ class RobotSerialAssistant:
         self.txt_log.insert(tk.END, f"[{time_str}] [{tag}] {msg}\n", tag_color)
         self.txt_log.see(tk.END)
 
+    # ── 查询命令超时兜底 ──
+    def _cancel_query_timers(self):
+        """取消所有待触发的查询超时定时器"""
+        if self._query_timeout_after_05s is not None:
+            self.root.after_cancel(self._query_timeout_after_05s)
+            self._query_timeout_after_05s = None
+        if self._query_timeout_after_10s is not None:
+            self.root.after_cancel(self._query_timeout_after_10s)
+            self._query_timeout_after_10s = None
+
+    def _on_query_timeout_05s(self):
+        """0.5s 后到达：电机的实际回复通常已在此之前通过 serial_receive_loop 打印；
+        如果此时 _pending_query_line 仍未清除，说明电机回复被延迟了（如 CAN 丢包重传）。
+        此时什么都不做，只等待 1s 超时处理。"""
+        self._query_timeout_after_05s = None  # 已触发，清除句柄
+        # 若此时收到电机回复，serial_receive_loop 中会拦截并打印，
+        # 同时调用 _cancel_query_timers 取消 1s 定时器
+
+    def _on_query_timeout_10s(self):
+        """1.0s 后到达：确认电机回复丢失，打印丢包提示"""
+        self._query_timeout_after_10s = None  # 已触发，清除句柄
+        if self._pending_query_line is not None:
+            self.root.after(0, lambda: self.log(
+                "⚠ 可能丢包，电机未响应，请重新发送查询指令", "WARN"))
+            self._pending_query_line = None
+
     def toggle_connection(self):
         if not self.is_connected:
             port = self.cb_ports.get()
@@ -1338,6 +1347,29 @@ class RobotSerialAssistant:
                                     continue
                                 # 超出时间窗或非入队命令的纯数字响应：放行显示
                             self.root.after(0, self.log, line, "RX")
+                            # ── 查询命令超时兜底 ──
+                            # 拦截 "等待电机响应..." → 启动 0.5s / 1.0s 定时器
+                            if "等待电机响应" in line:
+                                self._cancel_query_timers()
+                                self._pending_query_line = line
+                                self._query_timeout_after_05s = self.root.after(500, self._on_query_timeout_05s)
+                                self._query_timeout_after_10s = self.root.after(1000, self._on_query_timeout_10s)
+                            # 拦截电机实际回复（[ACC] 或 [I_LIMIT]）→ 取消定时器，打印实际数据
+                            # 注意：电机回复可能与 "等待电机响应..." 粘在同一行（固件 UART 粘包），
+                            # 故用 `in` 而非 `startswith` 判断；且必须验证 motor node 匹配，
+                            # 防止旧查询的回复被错误拦截。
+                            elif self._pending_query_line is not None:
+                                import re
+                                m_acc = re.search(r'\[ACC\]\s+\w+\s+\[(\d+)\]', line)
+                                m_ilim = re.search(r'\[I_LIMIT\]\s+\w+\s+\[(\d+)\]', line)
+                                if m_acc or m_ilim:
+                                    node = int((m_acc or m_ilim).group(1))
+                                    # 提取查询中的 node ID（格式 #ACC_BASE_J 5 / #I_LIMIT_J 1）
+                                    mq = re.search(r'#(?:ACC_BASE_J|I_LIMIT_J)\s+(\d+)', self._pending_query_line)
+                                    if mq and int(mq.group(1)) == node:
+                                        self._cancel_query_timers()
+                                        self.root.after(0, lambda l=line: self.log(l, "RX"))
+                                        self._pending_query_line = None
                             # 拦截 #GETJPOS 响应并同步滑块
                             if getattr(self, "_sync_waiting", False):
                                 if line.startswith("ok") or line.startswith(">"):
