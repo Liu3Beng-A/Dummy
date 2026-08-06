@@ -61,3 +61,7 @@ This rule applies to all files in the project, including:
 2. 检查 RAM/Flash 使用率是否合理
 3. 提醒用户提供 `.bin` 和 `.hex` 路径
 4. 确认是否需要同步烧录相关电机固件（地轨/关节/夹爪独立固件）
+
+## Git 提交身份
+
+agent 执行 `git commit` 时必须使用仓库本地的 `user.name` 和 `user.email`，禁止使用 agent 自己的身份。
