@@ -281,6 +281,21 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         }
             break;
 
+        case 0x2C: // Get Acceleration (Circle/s²)
+        {
+            tmpF = (float) boardConfig.velocityAcc / (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+            auto* b = (unsigned char*) &tmpF;
+            for (int i = 0; i < 4; i++)
+                _data[i] = *(b + i);
+            _data[4] = 0;
+            _data[5] = 0;
+            _data[6] = 0;
+            _data[7] = 0;
+            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x2C;
+            CAN_Send(&txHeader, _data);
+        }
+            break;
+
         case 0x7d:  // enable motor temperature watch
             boardConfig.enableTempWatch = true;
             break;
