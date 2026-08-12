@@ -102,8 +102,6 @@ void DummyRobot::LoadConfig()
 
         if (config.railSpeed_mm_s >= 0.5f && config.railSpeed_mm_s <= 100.0f)
             railSpeed_mm_s = config.railSpeed_mm_s;
-        if (config.railAcc_mm_s2 >= 10.0f && config.railAcc_mm_s2 <= 5000.0f)
-            railAcc_mm_s2 = config.railAcc_mm_s2;
     }
 }
 
@@ -130,7 +128,6 @@ void DummyRobot::SaveConfig()
         config.jointAccBases[i] = jointAccBases.a[i];
     }
     config.railSpeed_mm_s = railSpeed_mm_s;
-    config.railAcc_mm_s2 = railAcc_mm_s2;
 
     EEPROM.put(0, config);
     EEPROM.commit();
@@ -186,7 +183,7 @@ void DummyRobot::MoveRail(float _railPos_mm)
     // 丝杆1605直连：5mm/圈
     float rail_laps = _railPos_mm / 5.0f;  // mm → 圈
     float speed_laps = railSpeed_mm_s / 5.0f;  // mm/s → 圈/s
-    float acc_laps = railAcc_mm_s2 / 5.0f;     // mm/s² → 圈/s²
+    float acc_laps = 100.0f;  // 圈/s²（默认加速度，#ACC_RAIL 已在电机层设好）
 
     // 先下发加速度（CAN 0x14），再下发位置+速度（CAN 0x07）
     motorJ[0]->SetAcceleration(acc_laps);
@@ -214,19 +211,6 @@ void DummyRobot::SetRailSpeed(float _speed_mm_s)
     if (_speed_mm_s < 0.5f)        _speed_mm_s = 0.5f;
     else if (_speed_mm_s > 100.0f) _speed_mm_s = 100.0f;
     railSpeed_mm_s = _speed_mm_s;
-}
-
-/**
- * @brief 设置地轨运行加速度
- * @param _acc_mm_s2 地轨目标加速度 (mm/s²)
- * @note 限幅范围 [10, 5000] mm/s²，超出范围自动截断
- * @note 每次 MoveRail 时自动下发到电机固件
- */
-void DummyRobot::SetRailAcc(float _acc_mm_s2)
-{
-    if (_acc_mm_s2 < 10.0f)         _acc_mm_s2 = 10.0f;
-    else if (_acc_mm_s2 > 5000.0f)  _acc_mm_s2 = 5000.0f;
-    railAcc_mm_s2 = _acc_mm_s2;
 }
 
 /**
@@ -433,7 +417,7 @@ void DummyRobot::SetJointAcceleration(float _acc)
     else if (_acc > 100) _acc = 100;
 
     for (int i = 1; i <= 6; i++)
-        motorJ[i]->SetAcceleration(_acc / 100.0f * jointAccBases.a[i - 1]);
+        motorJ[i]->SetAcceleration_persist(_acc / 100.0f * jointAccBases.a[i - 1], false);
 }
 
 /**

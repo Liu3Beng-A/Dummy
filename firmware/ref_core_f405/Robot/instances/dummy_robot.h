@@ -26,7 +26,6 @@ struct EepromConfig {
     uint32_t rgbStateDisable; // 机械臂断电/失能状态下的灯效模式
     float jointAccBases[6];   // 各个关节电机基准加速度参数
     float railSpeed_mm_s;     // 地轨速度 (mm/s)
-    float railAcc_mm_s2;      // 地轨加速度 (mm/s²)
 };
 
 /**
@@ -103,7 +102,6 @@ public:
     float currentRailPos = 0.0f;   // 地轨当前位置 (mm)
     float targetRailPos = 0.0f;    // 地轨目标位置 (mm)
     float railSpeed_mm_s = 50.0f;  // 地轨当前速度 (mm/s)，可通过 #SPEED_RAIL 修改
-    float railAcc_mm_s2 = 500.0f;  // 地轨加速度 (mm/s²)，可通过 #ACC_RAIL 修改，默认 500
 
     float targetRailCurrent = 0.0f; // 地轨目标电流 (mA)
 
@@ -206,7 +204,6 @@ public:
     void MoveRail(float _railPos_mm);
     void MoveRailRelative(float _delta_mm);
     void SetRailSpeed(float _speed_mm_s);
-    void SetRailAcc(float _acc_mm_s2);
     void SetJointSpeed(float _speed);
     void SetJointAcceleration(float _acc);
     void UpdateJointAngles();
@@ -243,7 +240,6 @@ public:
             make_protocol_function("set_joint_speed",  *this, &DummyRobot::SetJointSpeed,       "speed"),
             make_protocol_function("set_joint_acc",    *this, &DummyRobot::SetJointAcceleration, "acc"),
             make_protocol_function("set_rail_speed",  *this, &DummyRobot::SetRailSpeed,  "speed"),
-            make_protocol_function("set_rail_acc",    *this, &DummyRobot::SetRailAcc,    "acc"),
             make_protocol_function("set_command_mode", *this, &DummyRobot::SetCommandMode,       "mode"),
             make_protocol_object("tuning", tuningHelper.MakeProtocolDefinitions())
         );

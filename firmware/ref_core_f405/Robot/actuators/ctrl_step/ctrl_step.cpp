@@ -140,7 +140,20 @@ void CtrlStepMotor::SetCurrentLimit(float _val)
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    canBuf[4] = 1; // 默认持久化（fiber 协议调用路径）
+
+    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+void CtrlStepMotor::SetCurrentLimit_persist(float _val, bool persist)
+{
+    uint8_t mode = 0x12;
+    txHeader.StdId = nodeID << 7 | mode;
+
+    auto* b = (unsigned char*) &_val;
+    for (int i = 0; i < 4; i++)
+        canBuf[i] = *(b + i);
+    canBuf[4] = persist ? 1 : 0;  // B2 修复：按参数决定是否写 EEPROM
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
@@ -170,9 +183,39 @@ void CtrlStepMotor::SetAcceleration(float _val)
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 0; // Need save to EEPROM or not
+    canBuf[4] = 0; // 默认不写 EEPROM（fiber 协议调用路径）
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+void CtrlStepMotor::SetAcceleration_persist(float _val, bool persist)
+{
+    uint8_t mode = 0x14;
+    txHeader.StdId = nodeID << 7 | mode;
+
+    auto* b = (unsigned char*) &_val;
+    for (int i = 0; i < 4; i++)
+        canBuf[i] = *(b + i);
+    canBuf[4] = persist ? 1 : 0;  // 按参数决定是否写 EEPROM
+
+    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+
+void CtrlStepMotor::QueryCurrentLimit()
+{
+    uint8_t mode = 0x2D;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::QueryAcceleration()
+{
+    uint8_t mode = 0x2C;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
 }
 
 

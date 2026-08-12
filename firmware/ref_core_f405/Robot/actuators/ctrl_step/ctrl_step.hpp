@@ -48,8 +48,12 @@ public:
     void SetPositionWithVelocityLimit(float _pos, float _vel);
     void SetNodeID(uint32_t _id);
     void SetCurrentLimit(float _val);
+    void SetCurrentLimit_persist(float _val, bool persist);
     void SetVelocityLimit(float _val);
     void SetAcceleration(float _val);
+    void SetAcceleration_persist(float _val, bool persist);
+    void QueryCurrentLimit();
+    void QueryAcceleration();
     void SetDceKp(int32_t _val);
     void SetDceKv(int32_t _val);
     void SetDceKi(int32_t _val);
