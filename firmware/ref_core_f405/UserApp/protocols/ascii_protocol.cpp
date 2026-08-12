@@ -354,6 +354,11 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 dummy.motorJ[node]->SetDceKv(kv);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KV [%lu]", node, kv);
             }
+            else if (node == 8)
+            {
+                dummy.hand->SetDceKv(kv);
+                Respond(_responseChannel, "ok SET HAND [8] DCE_KV [%lu]", kv);
+            }
             else
             {
                 Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV [%lu] is wrong", node, kv);
@@ -367,6 +372,11 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             {
                 dummy.motorJ[node]->SetDceKp(kp);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KP [%lu]", node, kp);
+            }
+            else if (node == 8)
+            {
+                dummy.hand->SetDceKp(kp);
+                Respond(_responseChannel, "ok SET HAND [8] DCE_KP [%lu]", kp);
             }
             else
             {
@@ -382,6 +392,11 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 dummy.motorJ[node]->SetDceKi(ki);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KI [%lu]", node, ki);
             }
+            else if (node == 8)
+            {
+                dummy.hand->SetDceKi(ki);
+                Respond(_responseChannel, "ok SET HAND [8] DCE_KI [%lu]", ki);
+            }
             else
             {
                 Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI [%lu] is wrong", node, ki);
@@ -395,6 +410,11 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             {
                 dummy.motorJ[node]->SetDceKd(kd);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KD [%lu]", node, kd);
+            }
+            else if (node == 8)
+            {
+                dummy.hand->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET HAND [8] DCE_KD [%lu]", kd);
             }
             else
             {
@@ -421,9 +441,17 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 dummy.motorJ[node]->QueryDceKd();
                 Respond(_responseChannel, "ok QUERY PID MOTOR [%lu]", node);
             }
+            else if (node == 8)
+            {
+                dummy.hand->QueryDceKp();
+                dummy.hand->QueryDceKv();
+                dummy.hand->QueryDceKi();
+                dummy.hand->QueryDceKd();
+                Respond(_responseChannel, "ok QUERY PID HAND [8]");
+            }
             else
             {
-                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 9 for rail, 1~6 for joints)", node);
+                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 9 for rail, 1~6 for joints, 8 for gripper)", node);
             }
         }
         else if (s.find("REBOOT") != std::string::npos)
@@ -1073,6 +1101,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 dummy.motorJ[node]->SetDceKv(kv);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KV [%lu]", node, kv);
             }
+            else if (node == 8)
+            {
+                dummy.hand->SetDceKv(kv);
+                Respond(_responseChannel, "ok SET HAND [8] DCE_KV [%lu]", kv);
+            }
             else
             {
                 Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV [%lu] is wrong", node, kv);
@@ -1086,6 +1119,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             {
                 dummy.motorJ[node]->SetDceKp(kp);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KP [%lu]", node, kp);
+            }
+            else if (node == 8)
+            {
+                dummy.hand->SetDceKp(kp);
+                Respond(_responseChannel, "ok SET HAND [8] DCE_KP [%lu]", kp);
             }
             else
             {
@@ -1101,6 +1139,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 dummy.motorJ[node]->SetDceKi(ki);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KI [%lu]", node, ki);
             }
+            else if (node == 8)
+            {
+                dummy.hand->SetDceKi(ki);
+                Respond(_responseChannel, "ok SET HAND [8] DCE_KI [%lu]", ki);
+            }
             else
             {
                 Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI [%lu] is wrong", node, ki);
@@ -1114,6 +1157,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             {
                 dummy.motorJ[node]->SetDceKd(kd);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KD [%lu]", node, kd);
+            }
+            else if (node == 8)
+            {
+                dummy.hand->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET HAND [8] DCE_KD [%lu]", kd);
             }
             else
             {
@@ -1140,9 +1188,17 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 dummy.motorJ[node]->QueryDceKd();
                 Respond(_responseChannel, "ok QUERY PID MOTOR [%lu]", node);
             }
+            else if (node == 8)
+            {
+                dummy.hand->QueryDceKp();
+                dummy.hand->QueryDceKv();
+                dummy.hand->QueryDceKi();
+                dummy.hand->QueryDceKd();
+                Respond(_responseChannel, "ok QUERY PID HAND [8]");
+            }
             else
             {
-                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 9 for rail, 1~6 for joints)", node);
+                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 9 for rail, 1~6 for joints, 8 for gripper)", node);
             }
         }
         else if (s.find("REBOOT") != std::string::npos)

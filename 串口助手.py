@@ -152,6 +152,11 @@ class RobotSerialAssistant:
                                     fg="#ff6b6b", font=("Arial", 10, "bold"))
         self.lbl_status.pack(side=tk.LEFT, padx=6)
 
+        # 电机使能状态指示（与 STOP 同高同字号，左对齐到 STOP 左边）
+        self.lbl_motor_state = tk.Label(top_bar, text="● 电机已失能", font=("Arial", 12, "bold"),
+                                         bg="#495057", fg="#ff6b6b", padx=20, pady=8)
+        self.lbl_motor_state.pack(side=tk.RIGHT, padx=(0, 8), pady=8)
+
         # 右侧：急停按钮（最醒目）
         self.btn_emergency = tk.Button(top_bar, text="[ !STOP 急停 ]", font=("Arial", 12, "bold"),
                                        bg="#c92a2a", fg="white", activebackground="#a02222",
@@ -195,10 +200,6 @@ class RobotSerialAssistant:
                   relief=tk.FLAT, pady=6, command=self._cmd_disable).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
         tk.Button(sys_row1, text="回零", font=("Arial", 10), bg="#5c7cfa", fg="white",
                   relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!HOME")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
-        # UI4: 电机使能状态指示
-        self.lbl_motor_state = tk.Label(sys_row1, text="已失能", font=("Arial", 9, "bold"),
-                                         bg="#495057", fg="#ff6b6b", pady=6, padx=8)
-        self.lbl_motor_state.pack(side=tk.LEFT, padx=(4, 0))
         tk.Button(sys_row1, text="休息", font=("Arial", 10), bg="#868e96", fg="white",
                   relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!RESET")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
 
@@ -482,7 +483,7 @@ class RobotSerialAssistant:
         node_f.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(node_f, text="节点:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
         self.cb_acc_node = ttk.Combobox(node_f, width=6,
-                                         values=[str(i) for i in [1, 2, 3, 4, 5, 6, 8, 9]],
+                                         values=[str(i) for i in [1, 2, 3, 4, 5, 6, 8]],
                                          state="readonly")
         self.cb_acc_node.current(0)
         self.cb_acc_node.pack(side=tk.LEFT, padx=4)
@@ -1355,9 +1356,9 @@ class RobotSerialAssistant:
     def _update_motor_state(self, enabled):
         self._motor_enabled = enabled
         if enabled:
-            self.lbl_motor_state.config(text="已使能", bg="#2b8a3e", fg="white")
+            self.lbl_motor_state.config(text="● 电机已使能", bg="#2b8a3e", fg="white")
         else:
-            self.lbl_motor_state.config(text="已失能", bg="#495057", fg="#ff6b6b")
+            self.lbl_motor_state.config(text="● 电机已失能", bg="#495057", fg="#ff6b6b")
 
     def _cmd_start(self):
         self._motor_enabled = True
@@ -1526,10 +1527,20 @@ class RobotSerialAssistant:
         try:
             node = int(self.cb_acc_node.get())
             acc = float(self.ent_acc_val.get())
-            if 1 <= node <= 6 and 1.0 <= acc <= 2000.0:
+            if acc < 1.0:
+                acc = 1.0
+            elif acc > 5000.0:
+                acc = 5000.0
+            if 1 <= node <= 6:
                 self.send_cmd(f"#ACC_BASE_J {node} {acc}")
+            elif node == 8:
+                # 夹爪没有 BASE 概念，直接发给电机做临时设置（ASCII 解析端会写夹爪)
+                self.send_cmd(f"#ACC_J {node} {acc}")
+            elif node == 9:
+                # 地轨 ACC_BASE 不存在，改用 ACC_RAIL
+                self.send_cmd(f"#ACC_RAIL {acc:.1f}")
             else:
-                messagebox.showerror("错误", "节点必须为1-6，加速度必须在1-2000之间")
+                messagebox.showerror("错误", "节点必须为1-6/8/9")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
@@ -1540,14 +1551,16 @@ class RobotSerialAssistant:
         try:
             node = int(self.cb_acc_node.get())
             i_limit = float(self.ent_i_limit.get())
-            if 1 <= node <= 6 and i_limit > 0:
+            if i_limit <= 0:
+                messagebox.showerror("错误", "电流必须大于 0")
+                return
+            if i_limit > 3.0:
+                i_limit = 3.0
+            # 1~6关节/地轨/夹爪均可设置电流限制
+            if node in (1, 2, 3, 4, 5, 6, 8, 9):
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit}")
-            elif node == 8 and i_limit > 0:
-                self.send_cmd(f"#I_LIMIT_J 8 {i_limit}")
-            elif node == 9 and i_limit > 0:
-                self.send_cmd(f"#I_LIMIT_J 9 {i_limit}")
             else:
-                messagebox.showerror("错误", "节点必须为1-6或8或9，电流必须大于0")
+                messagebox.showerror("错误", "节点必须为1-6/8/9")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 

@@ -169,6 +169,33 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 case 0x25:
                     memcpy(&dummy.hand->temperature, data, sizeof(uint32_t));
                     break;
+                case 0x28:
+                    memcpy(&dummy.motorDceKps[7], data, sizeof(int32_t));
+                    printf("PID_J8 Kp=%ld\r\n", (long)dummy.motorDceKps[7]);
+                    break;
+                case 0x29:
+                    memcpy(&dummy.motorDceKvs[7], data, sizeof(int32_t));
+                    printf("PID_J8 Kv=%ld\r\n", (long)dummy.motorDceKvs[7]);
+                    break;
+                case 0x2A:
+                    memcpy(&dummy.motorDceKis[7], data, sizeof(int32_t));
+                    printf("PID_J8 Ki=%ld\r\n", (long)dummy.motorDceKis[7]);
+                    break;
+                case 0x2B:
+                    memcpy(&dummy.motorDceKds[7], data, sizeof(int32_t));
+                    printf("PID_J8 Kd=%ld\r\n", (long)dummy.motorDceKds[7]);
+                    break;
+                case 0x2C:
+                    printf("[ACC] MOTOR [8] = %.2f\r\n", *(float*)data);
+                    break;
+                case 0x2D:
+                    printf("[I_LIMIT] MOTOR [8] = %.2f\r\n", *(float*)data);
+                    break;
+                case 0x7C:
+                    // 电机主动上报堵转
+                    if (data[1] == 1)
+                        dummy.SetStallMode(8);
+                    break;
                 default:
                     break;
             }
