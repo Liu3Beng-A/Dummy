@@ -7,6 +7,7 @@ import time
 import math
 import configparser
 import os
+import re
 from pathlib import Path
 #你好
 class RobotSerialAssistant:
@@ -95,6 +96,9 @@ class RobotSerialAssistant:
             
         self.serial_port = None
         self.is_connected = False
+        self._motor_enabled = False  # UI4: 电机使能状态
+        self._last_acc_node = None   # UI1+UI2: 上次设加速度的节点
+        self._last_i_node = None     # UI1+UI2: 上次设电流的节点
 
         # RGB 亮度配置（掉电保持），必须在 create_widgets 之前加载
         self.rgb_brightness = 100
@@ -186,11 +190,15 @@ class RobotSerialAssistant:
         sys_row1 = ttk.Frame(sys_f)
         sys_row1.pack(fill=tk.X)
         tk.Button(sys_row1, text="启动", font=("Arial", 10, "bold"), bg="#2b8a3e", fg="white",
-                  relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!START")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
+                  relief=tk.FLAT, pady=6, command=self._cmd_start).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
         tk.Button(sys_row1, text="失能", font=("Arial", 10), bg="#495057", fg="white",
-                  relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!DISABLE")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
+                  relief=tk.FLAT, pady=6, command=self._cmd_disable).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
         tk.Button(sys_row1, text="回零", font=("Arial", 10), bg="#5c7cfa", fg="white",
                   relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!HOME")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
+        # UI4: 电机使能状态指示
+        self.lbl_motor_state = tk.Label(sys_row1, text="已失能", font=("Arial", 9, "bold"),
+                                         bg="#495057", fg="#ff6b6b", pady=6, padx=8)
+        self.lbl_motor_state.pack(side=tk.LEFT, padx=(4, 0))
         tk.Button(sys_row1, text="休息", font=("Arial", 10), bg="#868e96", fg="white",
                   relief=tk.FLAT, pady=6, command=lambda: self.send_cmd("!RESET")).pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=1)
 
@@ -479,10 +487,10 @@ class RobotSerialAssistant:
         self.cb_acc_node.current(0)
         self.cb_acc_node.pack(side=tk.LEFT, padx=4)
         tk.Button(node_f, text="查加速度", font=("Arial", 10), bg="#495057", fg="white",
-                  relief=tk.FLAT, command=lambda: self.send_cmd(f"#ACC_BASE_J {self.cb_acc_node.get()}")
+                  relief=tk.FLAT, command=lambda: self.send_cmd(f"#GETJACC {self.cb_acc_node.get()}")
                   ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         tk.Button(node_f, text="查电流", font=("Arial", 10), bg="#495057", fg="white",
-                  relief=tk.FLAT, command=lambda: self.send_cmd(f"#I_LIMIT_J {self.cb_acc_node.get()}")
+                  relief=tk.FLAT, command=lambda: self.send_cmd(f"#GETI {self.cb_acc_node.get()}")
                   ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         acc_f = ttk.Frame(parent)
@@ -1301,7 +1309,11 @@ class RobotSerialAssistant:
                                     self._expect_queue_reply = False
                                     continue
                                 # 超出时间窗或非入队命令的纯数字响应：放行显示
-                            self.root.after(0, self.log, line, "RX")
+                            # UI1+UI2: 拦截 [ACC] / [I_LIMIT] 响应，0.5s 后自动发查询命令
+                            if line.startswith("[ACC]") or line.startswith("[I_LIMIT]"):
+                                self.root.after(500, lambda l=line: [self.log(l, "RX"), self._query_acc_or_i(l)])
+                            else:
+                                self.root.after(0, self.log, line, "RX")
                             # 拦截 #GETJPOS 响应并同步滑块
                             if getattr(self, "_sync_waiting", False):
                                 if line.startswith("ok") or line.startswith(">"):
@@ -1340,6 +1352,38 @@ class RobotSerialAssistant:
                 self.root.after(0, self.log, f"读取异常: {e}", "ERROR")
                 break
 
+    def _update_motor_state(self, enabled):
+        self._motor_enabled = enabled
+        if enabled:
+            self.lbl_motor_state.config(text="已使能", bg="#2b8a3e", fg="white")
+        else:
+            self.lbl_motor_state.config(text="已失能", bg="#495057", fg="#ff6b6b")
+
+    def _cmd_start(self):
+        self._motor_enabled = True
+        self._update_motor_state(True)
+        self.send_cmd("!START")
+
+    def _cmd_disable(self):
+        self._motor_enabled = False
+        self._update_motor_state(False)
+        self.send_cmd("!DISABLE")
+
+    def _query_acc_or_i(self, response_line):
+        if not self.is_connected:
+            return
+        try:
+            if response_line.startswith("[ACC]"):
+                node = getattr(self, "_last_acc_node", None)
+                if node is not None:
+                    self.send_cmd(f"#GETJACC {node}")
+            elif response_line.startswith("[I_LIMIT]"):
+                node = getattr(self, "_last_i_node", None)
+                if node is not None:
+                    self.send_cmd(f"#GETI {node}")
+        except Exception:
+            pass
+
     def send_cmd(self, cmd):
         if not self.is_connected or not self.serial_port:
             self.log("未连接串口", "WARN")
@@ -1355,6 +1399,13 @@ class RobotSerialAssistant:
             if stripped and stripped[0] in ('>', '@', '&', '$'):
                 self._expect_queue_reply = True
                 self._queue_reply_deadline_ms = time.time() * 1000.0 + 1000.0
+            # UI1+UI2: 记录节点，供 500ms 后发查询命令用
+            m = re.match(r'#(ACC_J|I_LIMIT_J)\s+(\d+)', stripped)
+            if m:
+                if m.group(1) == "ACC_J":
+                    self._last_acc_node = int(m.group(2))
+                else:
+                    self._last_i_node = int(m.group(2))
         except Exception as e:
             self.log(f"发送失败: {e}", "ERROR")
 
@@ -1483,6 +1534,9 @@ class RobotSerialAssistant:
             messagebox.showerror("错误", "请输入有效的数字")
 
     def send_i_limit(self):
+        if self._motor_enabled:
+            messagebox.showwarning("提示", "电机已使能，设置电流限制可能不安全。\n\n请先点击\"失能\"按钮再操作。")
+            return
         try:
             node = int(self.cb_acc_node.get())
             i_limit = float(self.ent_i_limit.get())
@@ -1551,7 +1605,7 @@ class RobotSerialAssistant:
             messagebox.showerror("错误", "请输入有效的数字")
 
     def query_rail_acc(self):
-        self.send_cmd("#ACC_RAIL")
+        self.send_cmd("#GETJACC 9")
 
     def set_rail_current(self, current):
         """设置地轨电机电流限制"""
@@ -1559,7 +1613,7 @@ class RobotSerialAssistant:
         self.log(f"已设置地轨电流限制为 {current}A", "INFO")
 
     def query_rail_current(self):
-        self.send_cmd("#I_LIMIT_J 9")
+        self.send_cmd("#GETI 9")
 
     def apply_rail_current(self):
         try:
