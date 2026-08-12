@@ -98,6 +98,12 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     memcpy(&dummy.motorDceKds[0], data, sizeof(int32_t));
                     printf("PID_RAIL Kd=%ld\r\n", (long)dummy.motorDceKds[0]);
                     break;
+                case 0x2C:
+                    printf("[ACC] MOTOR [9] = %.2f\r\n", *(float*)data);
+                    break;
+                case 0x2D:
+                    printf("[I_LIMIT] MOTOR [9] = %.2f\r\n", *(float*)data);
+                    break;
                 case 0x7C:
                     // 电机主动上报堵转
                     if (data[1] == 1)
@@ -135,6 +141,12 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 case 0x2B:
                     memcpy(&dummy.motorDceKds[id], data, sizeof(int32_t));
                     printf("PID_J%d Kd=%ld\r\n", id, (long)dummy.motorDceKds[id]);
+                    break;
+                case 0x2C:
+                    printf("[ACC] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
+                    break;
+                case 0x2D:
+                    printf("[I_LIMIT] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
                     break;
                 case 0x7C:
                     // 电机主动上报堵转

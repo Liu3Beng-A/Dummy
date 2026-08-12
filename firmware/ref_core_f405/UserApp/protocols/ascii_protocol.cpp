@@ -499,16 +499,35 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             float S;
             uint32_t node;
-            sscanf(_cmd, "#ACC_J %lu %f", &node, &S);
-            if (node >= 1 && node <= 6)
+            char saveFlag = 0;
+            int ret = sscanf(_cmd, "#ACC_J %lu %f %c", &node, &S, &saveFlag);
+            if (ret >= 2)
             {
-                dummy.motorJ[node]->SetAcceleration(S);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] ACCELERATION [%f]", node, S);
+                bool persist = (saveFlag == '&');
+                if (node == 9)
+                {
+                    dummy.motorJ[0]->SetAcceleration_persist(S, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [9] ACCELERATION [%f]", S);
+                }
+                else if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->SetAcceleration_persist(S, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] ACCELERATION [%f]", node, S);
+                }
+                else if (node == 8)
+                {
+                    dummy.hand->SetAcceleration_persist(S, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [8] ACCELERATION [%f] (夹爪)", S);
+                }
+                else
+                {
+                    Respond(_responseChannel,
+                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong", node, S);
+                }
             }
             else
             {
-                Respond(_responseChannel,
-                        "error SET MOTOR [%lu] ACCELERATION [%f] is wrong", node, S);
+                Respond(_responseChannel, "error ACC_J parse failed");
             }
         }
         else if (s.find("SPEED_J") != std::string::npos)
@@ -551,44 +570,96 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             char saveFlag;
             if (sscanf(_cmd, "#ACC_RAIL %f %c", &acc, &saveFlag) >= 1)
             {
-                dummy.SetRailAcc(acc);
-                Respond(_responseChannel, "ok rail acc set to %.1f mm/s2", acc);
-                if (saveFlag == '&')
-                {
-                    dummy.SaveConfig();
-                    Respond(_responseChannel, " [saved to EEPROM]");
-                }
+                bool persist = (saveFlag == '&');
+                dummy.motorJ[0]->SetAcceleration_persist(acc, persist);
+                Respond(_responseChannel, "ok rail acc set to %.1f", acc);
             }
             else
             {
-                Respond(_responseChannel, "%.1f", dummy.railAcc_mm_s2);
+                Respond(_responseChannel, "use #GETJACC 9 to query");
             }
         }
         else if (s.find("I_LIMIT_J") != std::string::npos)
         {
             float I;
             uint32_t node;
-            sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &I);
-            if (node == 9)
+            char saveFlag = 0;
+            int ret = sscanf(_cmd, "#I_LIMIT_J %lu %f %c", &node, &I, &saveFlag);
+            if (ret >= 2)
             {
-                // 节点 9: 地轨电机（motorJ[0] 对应 CAN ID=9）
-                dummy.motorJ[0]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
-            }
-            else if (node >= 1 && node <= 6)
-            {
-                dummy.motorJ[node]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f]", node, I);
-            }
-            else if (node == 8)
-            {
-                dummy.hand->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪)", I);
+                bool persist = (saveFlag == '&');
+                if (node == 9)
+                {
+                    dummy.motorJ[0]->SetCurrentLimit_persist(I, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
+                }
+                else if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->SetCurrentLimit_persist(I, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f]", node, I);
+                }
+                else if (node == 8)
+                {
+                    dummy.hand->SetCurrentLimit_persist(I, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪)", I);
+                }
+                else
+                {
+                    Respond(_responseChannel,
+                            "error SET MOTOR [%lu] CURRENT_LIMIT [%f] is wrong", node, I);
+                }
             }
             else
             {
-                Respond(_responseChannel,
-                        "error SET MOTOR [%lu] CURRENT_LIMIT [%f] is wrong", node, I);
+                Respond(_responseChannel, "error I_LIMIT_J parse failed");
+            }
+        }
+        else if (s.find("GETJACC") != std::string::npos)
+        {
+            uint32_t node;
+            sscanf(_cmd, "#GETJACC %lu", &node);
+            if (node == 9)
+            {
+                dummy.motorJ[0]->QueryAcceleration();
+                Respond(_responseChannel, "ok QUERY ACC MOTOR [9]");
+            }
+            else if (node >= 1 && node <= 6)
+            {
+                dummy.motorJ[node]->QueryAcceleration();
+                Respond(_responseChannel, "ok QUERY ACC MOTOR [%lu]", node);
+            }
+            else if (node == 8)
+            {
+                dummy.hand->QueryAcceleration();
+                Respond(_responseChannel, "ok QUERY ACC MOTOR [8] (夹爪)");
+            }
+            else
+            {
+                Respond(_responseChannel, "error GET MOTOR [%lu] ACCELERATION is wrong", node);
+            }
+        }
+        else if (s.find("GETI") != std::string::npos)
+        {
+            uint32_t node;
+            sscanf(_cmd, "#GETI %lu", &node);
+            if (node == 9)
+            {
+                dummy.motorJ[0]->QueryCurrentLimit();
+                Respond(_responseChannel, "ok QUERY I_LIMIT MOTOR [9]");
+            }
+            else if (node >= 1 && node <= 6)
+            {
+                dummy.motorJ[node]->QueryCurrentLimit();
+                Respond(_responseChannel, "ok QUERY I_LIMIT MOTOR [%lu]", node);
+            }
+            else if (node == 8)
+            {
+                dummy.hand->QueryCurrentLimit();
+                Respond(_responseChannel, "ok QUERY I_LIMIT MOTOR [8] (夹爪)");
+            }
+            else
+            {
+                Respond(_responseChannel, "error GET MOTOR [%lu] CURRENT_LIMIT is wrong", node);
             }
         }
         else
@@ -983,17 +1054,13 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             char saveFlag;
             if (sscanf(_cmd, "#ACC_RAIL %f %c", &acc, &saveFlag) >= 1)
             {
-                dummy.SetRailAcc(acc);
-                Respond(_responseChannel, "ok rail acc set to %.1f mm/s2", acc);
-                if (saveFlag == '&')
-                {
-                    dummy.SaveConfig();
-                    Respond(_responseChannel, " [saved to EEPROM]");
-                }
+                bool persist = (saveFlag == '&');
+                dummy.motorJ[0]->SetAcceleration_persist(acc, persist);
+                Respond(_responseChannel, "ok rail acc set to %.1f", acc);
             }
             else
             {
-                Respond(_responseChannel, "%.1f", dummy.railAcc_mm_s2);
+                Respond(_responseChannel, "use #GETJACC 9 to query");
             }
         }
         else if (s.find("SET_DCE_KV") != std::string::npos)
@@ -1115,15 +1182,30 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             float S;
             uint32_t node;
-            sscanf(_cmd, "#ACC_J %lu %f", &node, &S);
-            if (node >= 1 && node <= 6)
+            char saveFlag = 0;
+            int ret = sscanf(_cmd, "#ACC_J %lu %f %c", &node, &S, &saveFlag);
+            if (ret >= 2)
             {
-                dummy.motorJ[node]->SetAcceleration(S);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] ACCELERATION [%f]", node, S);
+                bool persist = (saveFlag == '&');
+                if (node == 9)
+                {
+                    dummy.motorJ[0]->SetAcceleration_persist(S, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [9] ACCELERATION [%f]", S);
+                }
+                else if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->SetAcceleration_persist(S, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] ACCELERATION [%f]", node, S);
+                }
+                else
+                {
+                    Respond(_responseChannel,
+                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong", node, S);
+                }
             }
             else
             {
-                Respond(_responseChannel, "error SET MOTOR [%lu] ACCELERATION [%f] is wrong", node, S);
+                Respond(_responseChannel, "error ACC_J parse failed");
             }
         }
         else if (s.find("SPEED_J") != std::string::npos)
@@ -1145,26 +1227,35 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             float I;
             uint32_t node;
-            sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &I);
-            if (node == 9)
+            char saveFlag = 0;
+            int ret = sscanf(_cmd, "#I_LIMIT_J %lu %f %c", &node, &I, &saveFlag);
+            if (ret >= 2)
             {
-                // 节点 9: 地轨电机（motorJ[0] 对应 CAN ID=9）
-                dummy.motorJ[0]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
-            }
-            else if (node >= 1 && node <= 6)
-            {
-                dummy.motorJ[node]->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f]", node, I);
-            }
-            else if (node == 8)
-            {
-                dummy.hand->SetCurrentLimit(I);
-                Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪)", I);
+                bool persist = (saveFlag == '&');
+                if (node == 9)
+                {
+                    dummy.motorJ[0]->SetCurrentLimit_persist(I, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
+                }
+                else if (node >= 1 && node <= 6)
+                {
+                    dummy.motorJ[node]->SetCurrentLimit_persist(I, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] CURRENT_LIMIT [%f]", node, I);
+                }
+                else if (node == 8)
+                {
+                    dummy.hand->SetCurrentLimit_persist(I, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [8] CURRENT_LIMIT [%f] (夹爪)", I);
+                }
+                else
+                {
+                    Respond(_responseChannel,
+                            "error SET MOTOR [%lu] CURRENT_LIMIT [%f] is wrong", node, I);
+                }
             }
             else
             {
-                Respond(_responseChannel, "error SET MOTOR [%lu] CURRENT_LIMIT [%f] is wrong", node, I);
+                Respond(_responseChannel, "error I_LIMIT_J parse failed");
             }
         }
         else
