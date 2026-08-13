@@ -95,13 +95,13 @@ class DummyRobot
 {
 public:
     // 地轨相关常量
-    // 直连丝杆1605（无减速）：200步/圈 × 1024微步 / 5mm/圈 = 40960 步/mm
-    static constexpr float RAIL_STEPS_PER_MM = 40960.0f;
+    // 丝杆1605 + 5:1减速箱：200步/圈 × 256微步 × 5 / 5mm/圈 = 204800 步/mm
+    static constexpr float RAIL_STEPS_PER_MM = 204800.0f;
 
     // 地轨状态变量
     float currentRailPos = 0.0f;   // 地轨当前位置 (mm)
     float targetRailPos = 0.0f;    // 地轨目标位置 (mm)
-    float railSpeed_mm_s = 50.0f;  // 地轨当前速度 (mm/s)，可通过 #SPEED_RAIL 修改
+    float railSpeed_mm_s = 15.0f;  // 地轨当前速度 (mm/s)，可通过 #SPEED_RAIL 修改，上限 30mm/s
 
     float targetRailCurrent = 0.0f; // 地轨目标电流 (mA)
 
