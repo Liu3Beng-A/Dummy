@@ -664,6 +664,8 @@ class RobotSerialAssistant:
                                         state="readonly")
         self.cb_pid_node.current(0)
         self.cb_pid_node.pack(side=tk.LEFT, padx=4)
+        self.cb_pid_node.bind("<<ComboboxSelected>>", lambda _: self._fill_pid_from_node())
+        self.root.after(0, self._fill_pid_from_node)  # 初始化时填入当前节点建议参数
         tk.Button(node_f, text="查询", font=("Arial", 10), bg="#495057", fg="white",
                   relief=tk.FLAT, command=self.query_pid).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
@@ -672,23 +674,34 @@ class RobotSerialAssistant:
         pid_grid.columnconfigure(1, weight=1)
 
         self.ent_pid, self.scl_pid, self.lbl_pid_val = {}, {}, {}
-        # 建议参数：来自 #GET_PID 实测值，跨节点统一。
+        # 建议参数：来自 #GET_PID 实测值（2026-08-13），按节点独立记录。
         # 地轨(node=9) / 关节(node=1~6) / 夹爪(node=8) 查询后自动回显到界面控件。
-        pid_defaults = {"kp": 200, "kv": 80, "ki": 300, "kd": 250}
+        pid_defaults = {
+            9:  {"kp": 180,  "kv": 220, "ki": 30,  "kd": 120},
+            1:  {"kp": 200,  "kv": 80,  "ki": 300, "kd": 250},
+            2:  {"kp": 200,  "kv": 80,  "ki": 300, "kd": 250},
+            3:  {"kp": 200,  "kv": 80,  "ki": 300, "kd": 250},
+            4:  {"kp": 200,  "kv": 50,  "ki": 0,   "kd": 100},
+            5:  {"kp": 250,  "kv": 50,  "ki": 0,   "kd": 100},
+            6:  {"kp": 200,  "kv": 50,  "ki": 0,   "kd": 100},
+            8:  {"kp": 200,  "kv": 80,  "ki": 100, "kd": 100},
+        }
+        # 当前选中节点的默认参数（会随节点切换更新控件）
+        self._pid_defaults = pid_defaults
         pid_ranges = {"kp": (0, 5000), "kv": (0, 5000), "ki": (0, 1000), "kd": (0, 2000)}
 
         for idx, (label, key) in enumerate([("Kp", "kp"), ("Kv", "kv"), ("Ki", "ki"), ("Kd", "kd")]):
             ttk.Label(pid_grid, text=f"{label}:", font=("Arial", 10, "bold")).grid(
                 row=0, column=idx*3, sticky="e", padx=2, pady=2)
             ent = ttk.Entry(pid_grid, width=6, font=("Arial", 10))
-            ent.insert(0, str(pid_defaults[key]))
+            ent.insert(0, str(pid_defaults[1][key]))  # 初始用 J1 默认值
             ent.grid(row=0, column=idx*3+1, padx=2, pady=2)
             self.ent_pid[key] = ent
             scl = ttk.Scale(pid_grid, from_=pid_ranges[key][0], to=pid_ranges[key][1], orient=tk.HORIZONTAL)
-            scl.set(pid_defaults[key])
+            scl.set(pid_defaults[1][key])
             scl.grid(row=0, column=idx*3+2, sticky="ew", padx=2, pady=2)
             self.scl_pid[key] = scl
-            lbl = ttk.Label(pid_grid, text=str(pid_defaults[key]), width=5, font=("Arial", 10))
+            lbl = ttk.Label(pid_grid, text=str(pid_defaults[1][key]), width=5, font=("Arial", 10))
             lbl.grid(row=0, column=idx*3+3, padx=(0, 4), pady=2)
             self.lbl_pid_val[key] = lbl
 
@@ -717,8 +730,30 @@ class RobotSerialAssistant:
             ent.bind("<Return>", mk_ecb(key, rng))
             ent.bind("<FocusOut>", mk_ecb(key, rng))
 
-        ttk.Label(parent, text="建议: 地轨/关节/夹爪默认 kp=200 kv=80 ki=300 kd=250",
-                  font=("Arial", 8), foreground="#868e96").pack(anchor="w", pady=(0, 4))
+        # --- 建议参数参考表格：8 个节点 × 4 参数 ---
+        ttk.Label(parent, text="实测建议参数（选节点后控件自动填入）",
+                  font=("Arial", 8), foreground="#868e96").pack(anchor="w", pady=(6, 2))
+
+        tbl = ttk.Frame(parent)
+        tbl.pack(fill=tk.X)
+        # 表头
+        hdr_font = ("Arial", 8, "bold")
+        cell_font = ("Arial", 8)
+        ttk.Label(tbl, text="节点",  font=hdr_font, width=6, anchor="center").grid(row=0, column=0, padx=1, pady=1)
+        ttk.Label(tbl, text="Kp",    font=hdr_font, width=6, anchor="center").grid(row=0, column=1, padx=1, pady=1)
+        ttk.Label(tbl, text="Kv",    font=hdr_font, width=6, anchor="center").grid(row=0, column=2, padx=1, pady=1)
+        ttk.Label(tbl, text="Ki",    font=hdr_font, width=6, anchor="center").grid(row=0, column=3, padx=1, pady=1)
+        ttk.Label(tbl, text="Kd",    font=hdr_font, width=6, anchor="center").grid(row=0, column=4, padx=1, pady=1)
+        # 数据行
+        node_names = {9: "地轨", 1: "J1", 2: "J2", 3: "J3", 4: "J4", 5: "J5", 6: "J6", 8: "夹爪"}
+        for row_i, (node, name) in enumerate(node_names.items(), start=1):
+            bg = "#f1f3f5" if row_i % 2 == 0 else "white"
+            ttk.Label(tbl, text=name, font=cell_font, width=6, anchor="center",
+                      background=bg).grid(row=row_i, column=0, padx=1, pady=1)
+            d = pid_defaults[node]
+            for col_i, key in enumerate(["kp", "kv", "ki", "kd"], start=1):
+                ttk.Label(tbl, text=str(d[key]), font=cell_font, width=6, anchor="center",
+                          background=bg).grid(row=row_i, column=col_i, padx=1, pady=1)
 
         pid_btns = ttk.Frame(parent)
         pid_btns.pack(fill=tk.X, pady=(6, 0))
@@ -1806,6 +1841,25 @@ class RobotSerialAssistant:
         node = int(self.cb_pid_node.get())
         self.apply_pid()
         self.log(f"PID 参数已保存到节点 {node} EEPROM", "INFO")
+
+    # ── PID 节点切换 → 填入建议参数 ──
+    def _fill_pid_from_node(self):
+        """切换节点后，用建议参数填满 Kp/Kv/Ki/Kd 控件"""
+        try:
+            node = int(self.cb_pid_node.get())
+        except ValueError:
+            return
+        defaults = self._pid_defaults.get(node)
+        if not defaults:
+            return
+        def _do():
+            for key in ["kp", "kv", "ki", "kd"]:
+                v = defaults[key]
+                self.ent_pid[key].delete(0, tk.END)
+                self.ent_pid[key].insert(0, str(v))
+                self.scl_pid[key].set(v)
+                self.lbl_pid_val[key].config(text=str(v))
+        self.root.after(0, _do)
 
     # ── PID 合并回包解析 ──
     def _update_pid_from_response(self, line):
