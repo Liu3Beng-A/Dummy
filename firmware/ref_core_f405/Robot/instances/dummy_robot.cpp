@@ -187,10 +187,9 @@ void DummyRobot::MoveRail(float _railPos_mm)
     // 两者抵消：mm → 电机圈数 = _railPos_mm（数值不变，但单位是"电机圈数"）
     float rail_laps = _railPos_mm / 5.0f * 5.0f;  // 等价于 _railPos_mm
     float speed_laps = railSpeed_mm_s / 5.0f * 5.0f;  // 等价于 railSpeed_mm_s
-    float acc_laps = 100.0f;  // 圈/s²（默认加速度，#ACC_RAIL 已在电机层设好）
 
-    // 先下发加速度（CAN 0x14），再下发位置+速度（CAN 0x07）
-    motorJ[0]->SetAcceleration(acc_laps);
+    // 加速度由用户在 #ACC_RAIL 时设置，电机固件已持久化到 ratedVelocityAcc
+    // 此处不再下发 0x14，避免每帧覆盖用户设定的加速度
     motorJ[0]->SetPositionWithVelocityLimit(rail_laps, speed_laps);
 }
 
