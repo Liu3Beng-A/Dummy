@@ -672,8 +672,8 @@ class RobotSerialAssistant:
         pid_grid.columnconfigure(1, weight=1)
 
         self.ent_pid, self.scl_pid, self.lbl_pid_val = {}, {}, {}
-        # 建议参数：来自 #GET_PID 实测值（J1~J3/J6 共用一套，J4/J5 有差异）
-        # 地轨/关节/夹爪查询后可自动回显到界面
+        # 建议参数：来自 #GET_PID 实测值，跨节点统一。
+        # 地轨(node=9) / 关节(node=1~6) / 夹爪(node=8) 查询后自动回显到界面控件。
         pid_defaults = {"kp": 200, "kv": 80, "ki": 300, "kd": 250}
         pid_ranges = {"kp": (0, 5000), "kv": (0, 5000), "ki": (0, 1000), "kd": (0, 2000)}
 
@@ -716,6 +716,9 @@ class RobotSerialAssistant:
                 return cb
             ent.bind("<Return>", mk_ecb(key, rng))
             ent.bind("<FocusOut>", mk_ecb(key, rng))
+
+        ttk.Label(parent, text="建议: 地轨/关节/夹爪默认 kp=200 kv=80 ki=300 kd=250",
+                  font=("Arial", 8), foreground="#868e96").pack(anchor="w", pady=(0, 4))
 
         pid_btns = ttk.Frame(parent)
         pid_btns.pack(fill=tk.X, pady=(6, 0))
