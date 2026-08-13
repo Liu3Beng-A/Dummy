@@ -60,6 +60,26 @@ static CAN_TxHeaderTypeDef txHeader =
 
 extern DummyRobot dummy;
 
+// ── PID 合并回包状态（修复 P2） ──
+// motorDceKps[8] 索引: [0]=地轨(node=9), [1~6]=关节(node=1~6), [7]=夹爪(node=8)
+// 为每个节点维护一个计数器，收到 0x28(Kp)/0x29(Kv)/0x2A(Ki)/0x2B(Kd) 之一就+1，
+// 4个都到后 printf() 合并回包（走 _write 到 USB+UART4）。
+static int32_t _pid_tmp_kp[8] = {0}, _pid_tmp_kv[8] = {0};
+static int32_t _pid_tmp_ki[8] = {0}, _pid_tmp_kd[8] = {0};
+static uint8_t _pid_rcv_cnt[8] = {0};
+
+// 辅助：将 CAN nodeID 转为 motorDceKps[] 数组索引
+static inline int _pid_node_to_idx(uint8_t nodeId) {
+    if (nodeId == 9) return 0;      // 地轨
+    if (nodeId == 8) return 7;      // 夹爪
+    return (int)nodeId;              // 关节 1~6 → 索引 1~6
+}
+
+// CAN nodeID → 打印时显示的节点号（用户可见）
+static inline int _pid_node_to_disp(uint8_t nodeId) {
+    return (int)nodeId;
+}
+
 void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* data)
 {
     // Common CAN message callback, uses ID 32~0x7FF.
@@ -83,20 +103,60 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     memcpy(&dummy.motorJ[0]->temperature, data, sizeof(uint32_t));
                     break;
                 case 0x28:
-                    memcpy(&dummy.motorDceKps[0], data, sizeof(int32_t));
-                    printf("PID_RAIL Kp=%ld\r\n", (long)dummy.motorDceKps[0]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_kp[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x29:
-                    memcpy(&dummy.motorDceKvs[0], data, sizeof(int32_t));
-                    printf("PID_RAIL Kv=%ld\r\n", (long)dummy.motorDceKvs[0]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_kv[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x2A:
-                    memcpy(&dummy.motorDceKis[0], data, sizeof(int32_t));
-                    printf("PID_RAIL Ki=%ld\r\n", (long)dummy.motorDceKis[0]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_ki[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x2B:
-                    memcpy(&dummy.motorDceKds[0], data, sizeof(int32_t));
-                    printf("PID_RAIL Kd=%ld\r\n", (long)dummy.motorDceKds[0]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_kd[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x2C:
                     printf("[ACC] MOTOR [9] = %.2f\r\n", *(float*)data);
@@ -127,20 +187,60 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                      memcpy(&dummy.motorJ[id]->temperature, data, sizeof(uint32_t));
                     break;
                 case 0x28:
-                    memcpy(&dummy.motorDceKps[id], data, sizeof(int32_t));
-                    printf("PID_J%d Kp=%ld\r\n", id, (long)dummy.motorDceKps[id]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_kp[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x29:
-                    memcpy(&dummy.motorDceKvs[id], data, sizeof(int32_t));
-                    printf("PID_J%d Kv=%ld\r\n", id, (long)dummy.motorDceKvs[id]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_kv[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x2A:
-                    memcpy(&dummy.motorDceKis[id], data, sizeof(int32_t));
-                    printf("PID_J%d Ki=%ld\r\n", id, (long)dummy.motorDceKis[id]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_ki[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x2B:
-                    memcpy(&dummy.motorDceKds[id], data, sizeof(int32_t));
-                    printf("PID_J%d Kd=%ld\r\n", id, (long)dummy.motorDceKds[id]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_kd[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x2C:
                     printf("[ACC] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
@@ -170,20 +270,60 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     memcpy(&dummy.hand->temperature, data, sizeof(uint32_t));
                     break;
                 case 0x28:
-                    memcpy(&dummy.motorDceKps[7], data, sizeof(int32_t));
-                    printf("PID_J8 Kp=%ld\r\n", (long)dummy.motorDceKps[7]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_kp[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x29:
-                    memcpy(&dummy.motorDceKvs[7], data, sizeof(int32_t));
-                    printf("PID_J8 Kv=%ld\r\n", (long)dummy.motorDceKvs[7]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_kv[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x2A:
-                    memcpy(&dummy.motorDceKis[7], data, sizeof(int32_t));
-                    printf("PID_J8 Ki=%ld\r\n", (long)dummy.motorDceKis[7]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_ki[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x2B:
-                    memcpy(&dummy.motorDceKds[7], data, sizeof(int32_t));
-                    printf("PID_J8 Kd=%ld\r\n", (long)dummy.motorDceKds[7]);
+                    {
+                        int idx = _pid_node_to_idx(id);
+                        _pid_tmp_kd[idx] = *(int32_t*)data;
+                        _pid_rcv_cnt[idx]++;
+                        if (_pid_rcv_cnt[idx] == 4) {
+                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                                   _pid_node_to_disp(id),
+                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_rcv_cnt[idx] = 0;
+                        }
+                    }
                     break;
                 case 0x2C:
                     printf("[ACC] MOTOR [8] = %.2f\r\n", *(float*)data);

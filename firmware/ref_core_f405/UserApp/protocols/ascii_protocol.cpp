@@ -347,78 +347,108 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             uint32_t kv, node;
             sscanf(_cmd, "#SET_DCE_KV %lu %lu", &node, &kv);
-            /* 修复：使用 && 替代 & （原代码误用位与运算符） */
-            /* 2026-06-25: 放开 node=0 限制，允许通过 ASCII 命令调整地轨电机 DCE 参数 */
-            if (node >= 0 && node <= 6)
-            {
+            /* 修复 P4: node=9(地轨) 走 motorJ[0], node=0 改为报错, 关节范围改为 1~6 */
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKv(kv);
+                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KV [%lu]", kv);
+            }
+            else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKv(kv);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KV [%lu]", node, kv);
             }
-            else if (node == 8)
-            {
+            else if (node == 8) {
                 dummy.hand->SetDceKv(kv);
-                Respond(_responseChannel, "ok SET HAND [8] DCE_KV [%lu]", kv);
+                Respond(_responseChannel, "ok SET MOTOR [8] DCE_KV [%lu]", kv);
             }
-            else
-            {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV [%lu] is wrong", node, kv);
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KP") != std::string::npos)
         {
             uint32_t kp, node;
             sscanf(_cmd, "#SET_DCE_KP %lu %lu", &node, &kp);
-            if (node >= 0 && node <= 6)
-            {
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKp(kp);
+                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KP [%lu]", kp);
+            }
+            else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKp(kp);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KP [%lu]", node, kp);
             }
-            else if (node == 8)
-            {
+            else if (node == 8) {
                 dummy.hand->SetDceKp(kp);
-                Respond(_responseChannel, "ok SET HAND [8] DCE_KP [%lu]", kp);
+                Respond(_responseChannel, "ok SET MOTOR [8] DCE_KP [%lu]", kp);
             }
-            else
-            {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP [%lu] is wrong", node, kp);
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KI") != std::string::npos)
         {
             uint32_t ki, node;
             sscanf(_cmd, "#SET_DCE_KI %lu %lu", &node, &ki);
-            if (node >= 0 && node <= 6)
-            {
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKi(ki);
+                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KI [%lu]", ki);
+            }
+            else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKi(ki);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KI [%lu]", node, ki);
             }
-            else if (node == 8)
-            {
+            else if (node == 8) {
                 dummy.hand->SetDceKi(ki);
-                Respond(_responseChannel, "ok SET HAND [8] DCE_KI [%lu]", ki);
+                Respond(_responseChannel, "ok SET MOTOR [8] DCE_KI [%lu]", ki);
             }
-            else
-            {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI [%lu] is wrong", node, ki);
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KD") != std::string::npos)
         {
             uint32_t kd, node;
             sscanf(_cmd, "#SET_DCE_KD %lu %lu", &node, &kd);
-            if (node >= 0 && node <= 6)
-            {
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KD [%lu]", kd);
+            }
+            else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKd(kd);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KD [%lu]", node, kd);
             }
-            else if (node == 8)
-            {
+            else if (node == 8) {
                 dummy.hand->SetDceKd(kd);
-                Respond(_responseChannel, "ok SET HAND [8] DCE_KD [%lu]", kd);
+                Respond(_responseChannel, "ok SET MOTOR [8] DCE_KD [%lu]", kd);
             }
-            else
-            {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD [%lu] is wrong", node, kd);
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+            }
+        }
+        else if (s.find("SET_PID") != std::string::npos)
+        {
+            /* 新命令: 一次性设置 4 个 PID 参数 */
+            uint32_t node, kp, kv, ki, kd;
+            sscanf(_cmd, "#SET_PID %lu %lu %lu %lu %lu", &node, &kp, &kv, &ki, &kd);
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKp(kp);
+                dummy.motorJ[0]->SetDceKv(kv);
+                dummy.motorJ[0]->SetDceKi(ki);
+                dummy.motorJ[0]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [9] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
+            } else if (node >= 1 && node <= 6) {
+                dummy.motorJ[node]->SetDceKp(kp);
+                dummy.motorJ[node]->SetDceKv(kv);
+                dummy.motorJ[node]->SetDceKi(ki);
+                dummy.motorJ[node]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [%lu] kp=%lu kv=%lu ki=%lu kd=%lu", node, kp, kv, ki, kd);
+            } else if (node == 8) {
+                dummy.hand->SetDceKp(kp);
+                dummy.hand->SetDceKv(kv);
+                dummy.hand->SetDceKi(ki);
+                dummy.hand->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [8] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
+            } else {
+                Respond(_responseChannel, "error SET PID [%lu] wrong node (use 9=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("GET_PID") != std::string::npos)
@@ -1095,77 +1125,108 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             uint32_t kv, node;
             sscanf(_cmd, "#SET_DCE_KV %lu %lu", &node, &kv);
-            /* 2026-06-25: 放开 node=0 限制，允许通过 ASCII 命令调整地轨电机 DCE 参数 */
-            if (node >= 0 && node <= 6)
-            {
+            /* 修复 P4: node=9(地轨) 走 motorJ[0], node=0 改为报错, 关节范围改为 1~6 */
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKv(kv);
+                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KV [%lu]", kv);
+            }
+            else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKv(kv);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KV [%lu]", node, kv);
             }
-            else if (node == 8)
-            {
+            else if (node == 8) {
                 dummy.hand->SetDceKv(kv);
-                Respond(_responseChannel, "ok SET HAND [8] DCE_KV [%lu]", kv);
+                Respond(_responseChannel, "ok SET MOTOR [8] DCE_KV [%lu]", kv);
             }
-            else
-            {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV [%lu] is wrong", node, kv);
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KP") != std::string::npos)
         {
             uint32_t kp, node;
             sscanf(_cmd, "#SET_DCE_KP %lu %lu", &node, &kp);
-            if (node >= 0 && node <= 6)
-            {
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKp(kp);
+                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KP [%lu]", kp);
+            }
+            else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKp(kp);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KP [%lu]", node, kp);
             }
-            else if (node == 8)
-            {
+            else if (node == 8) {
                 dummy.hand->SetDceKp(kp);
-                Respond(_responseChannel, "ok SET HAND [8] DCE_KP [%lu]", kp);
+                Respond(_responseChannel, "ok SET MOTOR [8] DCE_KP [%lu]", kp);
             }
-            else
-            {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP [%lu] is wrong", node, kp);
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KI") != std::string::npos)
         {
             uint32_t ki, node;
             sscanf(_cmd, "#SET_DCE_KI %lu %lu", &node, &ki);
-            if (node >= 0 && node <= 6)
-            {
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKi(ki);
+                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KI [%lu]", ki);
+            }
+            else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKi(ki);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KI [%lu]", node, ki);
             }
-            else if (node == 8)
-            {
+            else if (node == 8) {
                 dummy.hand->SetDceKi(ki);
-                Respond(_responseChannel, "ok SET HAND [8] DCE_KI [%lu]", ki);
+                Respond(_responseChannel, "ok SET MOTOR [8] DCE_KI [%lu]", ki);
             }
-            else
-            {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI [%lu] is wrong", node, ki);
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KD") != std::string::npos)
         {
             uint32_t kd, node;
             sscanf(_cmd, "#SET_DCE_KD %lu %lu", &node, &kd);
-            if (node >= 0 && node <= 6)
-            {
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KD [%lu]", kd);
+            }
+            else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKd(kd);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KD [%lu]", node, kd);
             }
-            else if (node == 8)
-            {
+            else if (node == 8) {
                 dummy.hand->SetDceKd(kd);
-                Respond(_responseChannel, "ok SET HAND [8] DCE_KD [%lu]", kd);
+                Respond(_responseChannel, "ok SET MOTOR [8] DCE_KD [%lu]", kd);
             }
-            else
-            {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD [%lu] is wrong", node, kd);
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+            }
+        }
+        else if (s.find("SET_PID") != std::string::npos)
+        {
+            /* 新命令: 一次性设置 4 个 PID 参数 */
+            uint32_t node, kp, kv, ki, kd;
+            sscanf(_cmd, "#SET_PID %lu %lu %lu %lu %lu", &node, &kp, &kv, &ki, &kd);
+            if (node == 9) {
+                dummy.motorJ[0]->SetDceKp(kp);
+                dummy.motorJ[0]->SetDceKv(kv);
+                dummy.motorJ[0]->SetDceKi(ki);
+                dummy.motorJ[0]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [9] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
+            } else if (node >= 1 && node <= 6) {
+                dummy.motorJ[node]->SetDceKp(kp);
+                dummy.motorJ[node]->SetDceKv(kv);
+                dummy.motorJ[node]->SetDceKi(ki);
+                dummy.motorJ[node]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [%lu] kp=%lu kv=%lu ki=%lu kd=%lu", node, kp, kv, ki, kd);
+            } else if (node == 8) {
+                dummy.hand->SetDceKp(kp);
+                dummy.hand->SetDceKv(kv);
+                dummy.hand->SetDceKi(ki);
+                dummy.hand->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [8] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
+            } else {
+                Respond(_responseChannel, "error SET PID [%lu] wrong node (use 9=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("GET_PID") != std::string::npos)

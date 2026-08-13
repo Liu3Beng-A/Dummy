@@ -672,7 +672,9 @@ class RobotSerialAssistant:
         pid_grid.columnconfigure(1, weight=1)
 
         self.ent_pid, self.scl_pid, self.lbl_pid_val = {}, {}, {}
-        pid_defaults = {"kp": 500, "kv": 200, "ki": 50, "kd": 100}
+        # 建议参数：来自 #GET_PID 实测值（J1~J3/J6 共用一套，J4/J5 有差异）
+        # 地轨/关节/夹爪查询后可自动回显到界面
+        pid_defaults = {"kp": 200, "kv": 80, "ki": 300, "kd": 250}
         pid_ranges = {"kp": (0, 5000), "kv": (0, 5000), "ki": (0, 1000), "kd": (0, 2000)}
 
         for idx, (label, key) in enumerate([("Kp", "kp"), ("Kv", "kv"), ("Ki", "ki"), ("Kd", "kd")]):
@@ -1298,52 +1300,64 @@ class RobotSerialAssistant:
                     if data:
                         text = data.decode('utf-8', errors='replace')
                         # 按行分割，防止残留字符堆积
-                        for line in text.split('\n'):
-                            line = line.strip()
-                            if not line:
+                        for raw in text.split('\n'):
+                            raw = raw.strip()
+                            if not raw:
                                 continue
-                            # 过滤固件入队回执的纯数字行（如"15"=队列剩余空间），避免污染日志
-                            # 仅在入队命令（> / @ / & / $）刚发出去 1 秒内抑制；
-                            # 其他查询（如 !RGB_BRIGHT 返回 "100"）正常显示。
-                            if line.isdigit():
-                                if self._expect_queue_reply and time.time() * 1000.0 < self._queue_reply_deadline_ms:
-                                    self._expect_queue_reply = False
+                            # 处理固件将多条响应合并到一行的边界情况（如 CAN 回调 printf 无 \r\n）
+                            # 例如 "ok QUERY PID MOTOR [2]ok PID 2 kp=200..."
+                            # 按 "ok " 分割，每段独立处理
+                            parts = raw.split("ok ")
+                            for i, part in enumerate(parts):
+                                part = part.strip()
+                                if not part:
                                     continue
-                                # 超出时间窗或非入队命令的纯数字响应：放行显示
-                            # UI1+UI2: 拦截 [ACC] / [I_LIMIT] 响应，0.5s 后自动发查询命令
-                            if line.startswith("[ACC]") or line.startswith("[I_LIMIT]"):
-                                self.root.after(500, lambda l=line: [self.log(l, "RX"), self._query_acc_or_i(l)])
-                            else:
-                                self.root.after(0, self.log, line, "RX")
-                            # 拦截 #GETJPOS 响应并同步滑块
-                            if getattr(self, "_sync_waiting", False):
-                                if line.startswith("ok") or line.startswith(">"):
-                                    tokens = line.lstrip(">ok").split()
-                                    nums = []
-                                    for t in tokens:
-                                        t = t.strip().rstrip(",")
-                                        if not t:
-                                            continue
-                                        try:
-                                            nums.append(str(float(t)))
-                                        except ValueError:
-                                            pass
-                                    if len(nums) >= 6:
-                                        # GETJPOS 只返回6个关节，Rail 用当前滑块值
-                                        self._sync_data = nums[:6]
-                                        self._sync_waiting = False
-                                        self.root.after(0, lambda n=len(nums): self.log(f"收到{n}个关节数据，已同步（Rail使用滑块当前值）", "INFO"))
-                                    else:
-                                        self.root.after(0, lambda: self.log(f"数据不足: {nums}", "WARN"))
-                            # 拦截 ok 触发下一条顺序发送（SEQ 模式下固件阻塞到位后回单字 ok）
-                            if getattr(self, "_pos_queue_running", False) and line == "ok":
-                                self._pos_queue_running = False
-                                self._pos_queue_idx += 1
-                                total = len(self._pos_queue_pending)
-                                if self._pos_queue_idx < total:
-                                    self.root.after(0, self._send_next_position)
+                                line = "ok " + part  # 还原 "ok " 前缀
+                                # 过滤固件入队回执的纯数字行（如"15"=队列剩余空间），避免污染日志
+                                # 仅在入队命令（> / @ / & / $）刚发出去 1 秒内抑制；
+                                # 其他查询（如 !RGB_BRIGHT 返回 "100"）正常显示。
+                                if line.isdigit():
+                                    if self._expect_queue_reply and time.time() * 1000.0 < self._queue_reply_deadline_ms:
+                                        self._expect_queue_reply = False
+                                        continue
+                                    # 超出时间窗或非入队命令的纯数字响应：放行显示
+                                # UI1+UI2: 拦截 [ACC] / [I_LIMIT] 响应，0.5s 后自动发查询命令
+                                if line.startswith("[ACC]") or line.startswith("[I_LIMIT]"):
+                                    self.root.after(500, lambda l=line: [self.log(l, "RX"), self._query_acc_or_i(l)])
+                                # PID: 拦截合并回包，更新 UI，超时由 query_pid 中的 500ms timer 兜底
+                                elif line.startswith("ok PID "):
+                                    self.root.after(0, self.log, line, "RX")
+                                    self._update_pid_from_response(line)
                                 else:
-                                    self.root.after(0, lambda: self.log(f"顺序发送完成，共{total}个点位", "INFO"))
+                                    self.root.after(0, self.log, line, "RX")
+                                # 拦截 #GETJPOS 响应并同步滑块
+                                if getattr(self, "_sync_waiting", False):
+                                    if line.startswith("ok") or line.startswith(">"):
+                                        tokens = line.lstrip(">ok").split()
+                                        nums = []
+                                        for t in tokens:
+                                            t = t.strip().rstrip(",")
+                                            if not t:
+                                                continue
+                                            try:
+                                                nums.append(str(float(t)))
+                                            except ValueError:
+                                                pass
+                                        if len(nums) >= 6:
+                                            self._sync_data = nums[:6]
+                                            self._sync_waiting = False
+                                            self.root.after(0, lambda n=len(nums): self.log(f"收到{n}个关节数据，已同步（Rail使用滑块当前值）", "INFO"))
+                                        else:
+                                            self.root.after(0, lambda: self.log(f"数据不足: {nums}", "WARN"))
+                                # 拦截 ok 触发下一条顺序发送（SEQ 模式下固件阻塞到位后回单字 ok）
+                                if getattr(self, "_pos_queue_running", False) and line == "ok":
+                                    self._pos_queue_running = False
+                                    self._pos_queue_idx += 1
+                                    total = len(self._pos_queue_pending)
+                                    if self._pos_queue_idx < total:
+                                        self.root.after(0, self._send_next_position)
+                                    else:
+                                        self.root.after(0, lambda: self.log(f"顺序发送完成，共{total}个点位", "INFO"))
                 # 无数据时短暂休眠，不阻塞主循环
                 time.sleep(0.05)
             except serial.SerialException as e:
@@ -1766,28 +1780,83 @@ class RobotSerialAssistant:
         node = int(self.cb_pid_node.get())
         self.send_cmd(f"#GET_PID {node}")
         self.log(f"已发送 #GET_PID {node}，等待电机 CAN 回传...", "INFO")
+        # 500ms 超时兜底
+        if hasattr(self, "_pid_query_timer") and self._pid_query_timer is not None:
+            self.root.after_cancel(self._pid_query_timer)
+        self._pid_query_timer = self.root.after(500, self._pid_query_timeout)
 
     def apply_pid(self):
-        """应用（临时写入，不保存 EEPROM）"""
+        """保存 PID 到 EEPROM（使用新命令 #SET_PID，一次发送4个值）"""
         try:
             node = int(self.cb_pid_node.get())
             kp = int(self.ent_pid["kp"].get())
             kv = int(self.ent_pid["kv"].get())
             ki = int(self.ent_pid["ki"].get())
             kd = int(self.ent_pid["kd"].get())
-            self.send_cmd(f"#SET_DCE_KP {node} {kp}")
-            self.send_cmd(f"#SET_DCE_KV {node} {kv}")
-            self.send_cmd(f"#SET_DCE_KI {node} {ki}")
-            self.send_cmd(f"#SET_DCE_KD {node} {kd}")
-            self.log(f"已应用 PID (节点{node}): Kp={kp} Kv={kv} Ki={ki} Kd={kd}", "INFO")
+            self.send_cmd(f"#SET_PID {node} {kp} {kv} {ki} {kd}")
+            self.log(f"已保存 PID (节点{node}): Kp={kp} Kv={kv} Ki={ki} Kd={kd}", "INFO")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的 PID 数值")
 
     def save_pid(self):
-        """保存到 EEPROM（通过 canBuf[4]=1 触发固件自动保存）"""
+        """保存到 EEPROM（与 apply_pid 行为相同，每次都写 EEPROM）"""
         node = int(self.cb_pid_node.get())
         self.apply_pid()
         self.log(f"PID 参数已保存到节点 {node} EEPROM", "INFO")
+
+    # ── PID 合并回包解析 ──
+    def _update_pid_from_response(self, line):
+        """解析 'ok PID <node> kp=X kv=Y ki=Z kd=D' 并更新界面"""
+        # 格式: ok PID 3 kp=200 kv=80 ki=300 kd=250
+        m = re.search(r'ok PID\s+(\d+)\s+kp=(-?\d+)\s+kv=(-?\d+)\s+ki=(-?\d+)\s+kd=(-?\d+)', line)
+        if not m:
+            return
+        node = int(m.group(1))
+        kp = int(m.group(2))
+        kv = int(m.group(3))
+        ki = int(m.group(4))
+        kd = int(m.group(5))
+
+        # 如果当前选中的节点匹配，更新控件
+        current_node = int(self.cb_pid_node.get())
+        if node != current_node:
+            return
+
+        def _do_update():
+            self.ent_pid["kp"].delete(0, tk.END)
+            self.ent_pid["kp"].insert(0, str(kp))
+            self.scl_pid["kp"].set(kp)
+            self.lbl_pid_val["kp"].config(text=str(kp))
+
+            self.ent_pid["kv"].delete(0, tk.END)
+            self.ent_pid["kv"].insert(0, str(kv))
+            self.scl_pid["kv"].set(kv)
+            self.lbl_pid_val["kv"].config(text=str(kv))
+
+            self.ent_pid["ki"].delete(0, tk.END)
+            self.ent_pid["ki"].insert(0, str(ki))
+            self.scl_pid["ki"].set(ki)
+            self.lbl_pid_val["ki"].config(text=str(ki))
+
+            self.ent_pid["kd"].delete(0, tk.END)
+            self.ent_pid["kd"].insert(0, str(kd))
+            self.scl_pid["kd"].set(kd)
+            self.lbl_pid_val["kd"].config(text=str(kd))
+
+            self.log(f"[PID] 节点{node} 回显: Kp={kp} Kv={kv} Ki={ki} Kd={kd}", "INFO")
+
+            # 取消超时提示
+            if hasattr(self, "_pid_query_timer") and self._pid_query_timer is not None:
+                self.root.after_cancel(self._pid_query_timer)
+                self._pid_query_timer = None
+
+        self.root.after(0, _do_update)
+
+    def _pid_query_timeout(self):
+        """超时提示（500ms 内未收到合并回包）"""
+        if hasattr(self, "_pid_query_timer") and self._pid_query_timer is not None:
+            self._pid_query_timer = None
+        self.log("[PID] 查询超时，请检查 CAN 总线和电机固件", "WARN")
 
 
 if __name__ == "__main__":
