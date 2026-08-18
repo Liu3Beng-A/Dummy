@@ -35,8 +35,8 @@ inline float AbsMaxOf6(DOF6Kinematic::Joint6D_t _joints, uint8_t &_index)
 DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
     hcan(_hcan)
 {
-    // motorJ[0]: 地轨（线性滑轨，丝杆1605 + 5:1减速箱，转1圈=5mm，行程 -250~250mm）
-    motorJ[0] = new CtrlStepMotor(_hcan, 9, false, 5, -250, 250);
+    // motorJ[0]: 地轨（线性滑轨，直连丝杆1605，转1圈=5mm，行程 -250~250mm）
+    motorJ[0] = new CtrlStepMotor(_hcan, 9, false, 1, -250, 250);
 
     motorJ[1] = new CtrlStepMotor(_hcan, 1, false, 50, -175, 175);
     motorJ[2] = new CtrlStepMotor(_hcan, 2, true,  50,  -75,  90);
@@ -100,7 +100,7 @@ void DummyRobot::LoadConfig()
                 jointAccBases.a[i] = config.jointAccBases[i];
         }
 
-        if (config.railSpeed_mm_s >= 0.5f && config.railSpeed_mm_s <= 30.0f)
+        if (config.railSpeed_mm_s >= 0.5f && config.railSpeed_mm_s <= 100.0f)
             railSpeed_mm_s = config.railSpeed_mm_s;
     }
 }
@@ -173,20 +173,16 @@ void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t _joints)
 }
 
 /**
- * @brief 下发地轨指令（mm → 电机圈数）
+ * @brief 下发地轨指令（mm → 圈）
  * @param _railPos_mm 地轨目标位置 (mm)
  * @note 地轨不纳入6-DOF运动学求解，单独管理
  * @note 电机固件 CAN 协议期望接收：位置(圈)、速度(圈/s)，内部乘以细分系数
- * @note 丝杆1605 + 5:1减速箱：电机转5圈 = 丝杆转1圈 = 5mm
  */
 void DummyRobot::MoveRail(float _railPos_mm)
 {
-    // 丝杆1605 + 5:1减速箱：
-    // mm → 丝杆圈数：/ 5.0f
-    // 丝杆圈数 → 电机圈数：× 5.0f（减速比）
-    // 两者抵消：mm → 电机圈数 = _railPos_mm（数值不变，但单位是"电机圈数"）
-    float rail_laps = _railPos_mm / 5.0f * 5.0f;  // 等价于 _railPos_mm
-    float speed_laps = railSpeed_mm_s / 5.0f * 5.0f;  // 等价于 railSpeed_mm_s
+    // 丝杆1605直连：5mm/圈
+    float rail_laps = _railPos_mm / 5.0f;  // mm → 圈
+    float speed_laps = railSpeed_mm_s / 5.0f;  // mm/s → 圈/s
 
     // 加速度由用户在 #ACC_RAIL 时设置，电机固件已持久化到 ratedVelocityAcc
     // 此处不再下发 0x14，避免每帧覆盖用户设定的加速度
@@ -207,12 +203,12 @@ void DummyRobot::MoveRailRelative(float _delta_mm)
 /**
  * @brief 设置地轨运行速度
  * @param _speed_mm_s 地轨目标速度 (mm/s)
- * @note 限幅范围 [0.5, 30] mm/s，超出范围自动截断
+ * @note 限幅范围 [0.5, 100] mm/s，超出范围自动截断
  */
 void DummyRobot::SetRailSpeed(float _speed_mm_s)
 {
     if (_speed_mm_s < 0.5f)        _speed_mm_s = 0.5f;
-    else if (_speed_mm_s > 30.0f) _speed_mm_s = 30.0f;
+    else if (_speed_mm_s > 100.0f) _speed_mm_s = 100.0f;
     railSpeed_mm_s = _speed_mm_s;
 }
 

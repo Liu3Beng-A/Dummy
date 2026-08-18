@@ -520,12 +520,12 @@ class RobotSerialAssistant:
         rsf.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(rsf, text="mm/s:", font=("Arial", 10)).pack(side=tk.LEFT)
         self.ent_rail_speed = ttk.Entry(rsf, width=6, font=("Arial", 10))
-        self.ent_rail_speed.insert(0, "15")
+        self.ent_rail_speed.insert(0, "50")
         self.ent_rail_speed.pack(side=tk.LEFT, padx=4)
-        self.scl_rail_speed = ttk.Scale(rsf, from_=0.5, to=30, orient=tk.HORIZONTAL)
-        self.scl_rail_speed.set(15)
+        self.scl_rail_speed = ttk.Scale(rsf, from_=0.5, to=100, orient=tk.HORIZONTAL)
+        self.scl_rail_speed.set(50)
         self.scl_rail_speed.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.lbl_rail_speed_val = ttk.Label(rsf, text="15.0", width=6, font=("Arial", 10))
+        self.lbl_rail_speed_val = ttk.Label(rsf, text="50.0", width=6, font=("Arial", 10))
         self.lbl_rail_speed_val.pack(side=tk.LEFT)
 
         rs_btns = ttk.Frame(parent)
@@ -1624,8 +1624,8 @@ class RobotSerialAssistant:
             speed = float(self.ent_rail_speed.get())
             if speed < 0.5:
                 speed = 0.5
-            elif speed > 30:
-                speed = 30
+            elif speed > 100:
+                speed = 100
             self.send_cmd(f"#SPEED_RAIL {speed:.1f}")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
@@ -1635,8 +1635,8 @@ class RobotSerialAssistant:
             speed = float(self.ent_rail_speed.get())
             if speed < 0.5:
                 speed = 0.5
-            elif speed > 30:
-                speed = 30
+            elif speed > 100:
+                speed = 100
             self.send_cmd(f"#SPEED_RAIL {speed:.1f} &")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
