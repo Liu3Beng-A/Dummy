@@ -38,7 +38,6 @@ void Main()
             .dce_kd = 250,
             .motor_temperature = 0.0,
             .enableMotorOnBoot=false,
-            .enableStallProtect=false,     // 夹爪禁用堵转检测
             .enableTempWatch=false,
         };
         eeprom.put(0, boardConfig);
@@ -55,7 +54,6 @@ void Main()
     motor.config.ctrlParams.dce.kv = boardConfig.dce_kv;
     motor.config.ctrlParams.dce.ki = boardConfig.dce_ki;
     motor.config.ctrlParams.dce.kd = boardConfig.dce_kd;
-    motor.config.ctrlParams.stallProtectSwitch = boardConfig.enableStallProtect;
 
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);
@@ -194,7 +192,6 @@ void OnButton2Event(Button::Event _event)
             break;
         case ButtonBase::CLICK:
             printf("KEY2\r\n");
-            motor.controller->ClearStallFlag();
             break;
     }
 }

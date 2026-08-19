@@ -94,7 +94,7 @@ e:/Dummy-code/
 │   │   ├── Core/                    # STM32 HAL初始化
 │   │   ├── 3rdParty/               # 第三方库 (Fibre, U8G2)
 │   │   └── doc/
-│   │       └── rail_sync_plan_B.md  # 地轨同步方案B设计文档
+│   │       └── (原 rail_sync_plan_B.md 已并入 7DOF冗余机械臂逆解方案.md)
 │   │
 │   └── motor_fw_f103_*/              # 电机驱动固件 (STM32F103, 4种变体)
 │       ├── UserApp/                 # main.cpp, CAN协议

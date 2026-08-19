@@ -19,7 +19,6 @@ public:
         config.motionParams.ratedVelocity = 30 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
         config.motionParams.ratedVelocityAcc = 1000 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 
-        config.ctrlParams.stallProtectSwitch = false;
         config.ctrlParams.pid =
             Controller::PID_t{
                 .kp = 5,
@@ -100,8 +99,6 @@ public:
         {
             PID_t pid;
             DCE_t dce;
-
-            bool stallProtectSwitch;
         } Config_t;
 
 
@@ -118,7 +115,6 @@ public:
         Mode_t requestMode;
         Mode_t modeRunning;
         State_t state = STATE_STOP;
-        bool isStalled = false;
 
 
         void Init();
@@ -134,7 +130,6 @@ public:
         void SetDisable(bool _disable);
         void SetBrake(bool _brake);
         void ApplyPosAsHomeOffset();
-        void ClearStallFlag();
 
 
     private:
@@ -161,7 +156,6 @@ public:
         bool softBrake{};
         bool softNewCurve{};
         int32_t focPosition{};
-        uint32_t stalledTime{};
         uint32_t overloadTime{};
         bool overloadFlag{};
 

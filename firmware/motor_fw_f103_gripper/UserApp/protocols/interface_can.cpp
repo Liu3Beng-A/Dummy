@@ -18,7 +18,6 @@ extern EncoderCalibrator encoderCalibrator;
  * 参数设置命令 (可存储至 EEPROM):
  *   0x12: 设置电流限制 (ratedCurrent, mA)
  *   0x14: 设置加速度
- *   0x1B: 启用/禁用堵转保护 (本固件默认禁用)
  *
  * 查询命令:
  *   0x21: 查询电流, 0x22: 查询速度, 0x23: 查询位置
@@ -47,9 +46,6 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         case 0x01:  // Enable Motor
             motor.controller->requestMode = (*(uint32_t*) (RxData) == 1) ?
                                             Motor::MODE_COMMAND_VELOCITY : Motor::MODE_STOP;
-            // ENABLE 清除堵转标志
-            if (*(uint32_t*) (RxData) == 1)
-                motor.controller->ClearStallFlag();
             break;
         case 0x02:  // Do Calibration
             encoderCalibrator.isTriggered = true;
@@ -185,12 +181,6 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         case 0x1A:  // Set DCE Kd
             motor.config.ctrlParams.dce.kd = *(int32_t*) (RxData);
             boardConfig.dce_kd = motor.config.ctrlParams.dce.kd;
-            if (_data[4])
-                boardConfig.configStatus = CONFIG_COMMIT;
-            break;
-        case 0x1B:  // Set Enable Stall-Protect
-            motor.config.ctrlParams.stallProtectSwitch = (*(uint32_t*) (RxData) == 1);
-            boardConfig.enableStallProtect = motor.config.ctrlParams.stallProtectSwitch;
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;

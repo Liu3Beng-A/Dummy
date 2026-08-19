@@ -102,12 +102,6 @@ void Motor::CloseLoopControlTick()
         controller->focPosition = 0;    // clear outputs
         controller->focCurrent = 0;
         driver->Sleep();
-    } else if (controller->isStalled)
-    {
-        // P1-32 fix: stall does NOT sleep - maintain minimum holding torque
-        // to prevent arm free-fall under gravity. Fall through to normal
-        // control loop which will output low holding current.
-        controller->ClearIntegral();
     } else if (controller->softBrake)
     {
         controller->ClearIntegral();
@@ -178,7 +172,6 @@ void Motor::CloseLoopControlTick()
     {
         controller->softNewCurve = false;
         controller->ClearIntegral();
-        controller->ClearStallFlag();
 
         switch (controller->modeRunning)
         {
@@ -266,40 +259,8 @@ void Motor::CloseLoopControlTick()
     /******************************** State Check ********************************/
     int32_t current = abs(controller->focCurrent);
 
-    // stallThreshold 需在 stallProtectSwitch 判断外层声明，供 overload 检测复用
+    // Overload 检测阈值：额定电流的 95%
     const int32_t stallThreshold = (int32_t)(config.motionParams.ratedCurrent * 95 / 100);
-
-    // Stall detect
-    if (controller->config->stallProtectSwitch)
-    {
-        if (// Current Mode
-            ((controller->modeRunning == MODE_COMMAND_CURRENT ||
-              controller->modeRunning == MODE_PWM_CURRENT) &&
-             (current != 0))
-            || // Other Mode: current >= ratedCurrent * 0.95
-            current >= stallThreshold)
-        {
-            if (abs(controller->estVelocity) < MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 5)
-            {
-                if (controller->stalledTime >= 1000 * 1000) {
-                    controller->isStalled = true;
-                    // 主动上报堵转: StdId = (nodeID << 7) | 0x7C, Data[0]=nodeID, Data[1]=1(stall)
-                    CAN_TxHeaderTypeDef txHdr = {};
-                    txHdr.StdId = (boardConfig.canNodeId << 7) | 0x7C;
-                    txHdr.IDE = CAN_ID_STD;
-                    txHdr.RTR = CAN_RTR_DATA;
-                    txHdr.DLC = 8;
-                    uint8_t txData[8] = { (uint8_t)boardConfig.canNodeId, 1, 0, 0, 0, 0, 0, 0 };
-                    CAN_Send(&txHdr, txData);
-                }
-                else
-                    controller->stalledTime += motionPlanner.CONTROL_PERIOD;
-            }
-        } else // can ONLY clear stall flag  MANUALLY
-        {
-            controller->stalledTime = 0;
-        }
-    }
 
     // Overload detect
     if ((controller->modeRunning != MODE_COMMAND_CURRENT) &&
@@ -321,8 +282,6 @@ void Motor::CloseLoopControlTick()
         controller->state = STATE_NO_CALIB;
     else if (controller->modeRunning == MODE_STOP)
         controller->state = STATE_STOP;
-    else if (controller->isStalled)
-        controller->state = STATE_STALL;
     else if (controller->overloadFlag)
         controller->state = STATE_OVERLOAD;
     else
@@ -537,13 +496,6 @@ void Motor::Controller::SetBrake(bool _brake)
 }
 
 
-void Motor::Controller::ClearStallFlag()
-{
-    stalledTime = 0;
-    isStalled = false;
-}
-
-
 int32_t Motor::Controller::CompensateAdvancedAngle(int32_t _vel)
 {
     /*
@@ -607,9 +559,6 @@ void Motor::Controller::Init()
 
     focPosition = 0;
     focCurrent = 0;
-
-    stalledTime = 0;
-    isStalled = false;
 
     overloadTime = 0;
     overloadFlag = false;

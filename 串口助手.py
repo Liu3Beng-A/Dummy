@@ -483,7 +483,7 @@ class RobotSerialAssistant:
         node_f.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(node_f, text="节点:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
         self.cb_acc_node = ttk.Combobox(node_f, width=6,
-                                         values=[str(i) for i in [1, 2, 3, 4, 5, 6, 8]],
+                                         values=[str(i) for i in [9, 1, 2, 3, 4, 5, 6, 8]],
                                          state="readonly")
         self.cb_acc_node.current(0)
         self.cb_acc_node.pack(side=tk.LEFT, padx=4)
@@ -511,8 +511,55 @@ class RobotSerialAssistant:
         self.ent_i_limit.pack(side=tk.LEFT, padx=4)
         tk.Button(cur_f, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
                   relief=tk.FLAT, command=self.send_i_limit).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(cur_f, text="保存", font=("Arial", 10, "bold"), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=self.save_i_limit).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
-        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+        # 电流/加速度 推荐值表 + 说明
+        ttk.Label(parent, text="电流/加速度 推荐值（按电机类型）",
+                  font=("Arial", 9, "bold"), foreground="#495057").pack(anchor="w", pady=(4, 2))
+        body_frame = ttk.Frame(parent)
+        body_frame.pack(fill=tk.X)
+
+        # 左：推荐值表格（紧凑版：字体 9，行间距 1）
+        i_table = ttk.Frame(body_frame)
+        i_table.pack(side=tk.LEFT, anchor="nw")
+        hdr_font = ("Arial", 9, "bold")
+        cell_font = ("Arial", 9)
+        ttk.Label(i_table, text="电机",   font=hdr_font, width=10, anchor="center").grid(row=0, column=0, padx=1, pady=1)
+        ttk.Label(i_table, text="推荐 I", font=hdr_font, width=8,  anchor="center").grid(row=0, column=1, padx=1, pady=1)
+        ttk.Label(i_table, text="最大 I", font=hdr_font, width=8,  anchor="center").grid(row=0, column=2, padx=1, pady=1)
+        ttk.Label(i_table, text="Acc",    font=hdr_font, width=8,  anchor="center").grid(row=0, column=3, padx=1, pady=1)
+        # 推荐值表（基于 #GETI / #GETJACC 实测 2026-08-19）
+        i_recs = [
+            ("42电机 J1-J3", "2.0 A",  "2.3 A",  "150"),
+            ("35电机 J4-J6", "1.5 A",  "2.0 A",  "150"),
+            ("57电机 地轨",  "2.8 A",  "3.0 A",  "30"),
+            ("35电机 夹爪",  "1.5 A",  "2.0 A",  "100"),
+        ]
+        for row_i, (name, rec, mx, acc) in enumerate(i_recs, start=1):
+            bg = "#f1f3f5" if row_i % 2 == 0 else "white"
+            ttk.Label(i_table, text=name, font=cell_font, width=10, anchor="center",
+                      background=bg).grid(row=row_i, column=0, padx=1, pady=1)
+            ttk.Label(i_table, text=rec,  font=cell_font, width=8,  anchor="center",
+                      background=bg).grid(row=row_i, column=1, padx=1, pady=1)
+            ttk.Label(i_table, text=mx,   font=cell_font, width=8,  anchor="center",
+                      background=bg).grid(row=row_i, column=2, padx=1, pady=1)
+            ttk.Label(i_table, text=acc,  font=cell_font, width=8,  anchor="center",
+                      background=bg).grid(row=row_i, column=3, padx=1, pady=1)
+
+        # 右：应用/保存按钮说明（横向一字排开，不换行）
+        tip_frame = ttk.Frame(body_frame)
+        tip_frame.pack(side=tk.LEFT, anchor="nw", padx=(12, 0), pady=(2, 0))
+        tip_font = ("Arial", 9)
+        tk.Label(tip_frame, text="说明：", font=("Arial", 9, "bold"),
+                 fg="#495057").pack(side=tk.LEFT)
+        tk.Label(tip_frame, text="●", font=("Arial", 9), fg="#3b5bdb").pack(side=tk.LEFT, padx=(8, 1))
+        tk.Label(tip_frame, text="应用=仅RAM", font=tip_font, fg="#495057").pack(side=tk.LEFT)
+        tk.Label(tip_frame, text="●", font=("Arial", 9), fg="#2b8a3e").pack(side=tk.LEFT, padx=(8, 1))
+        tk.Label(tip_frame, text="保存=EEPROM(掉电保持)",
+                 font=tip_font, fg="#495057").pack(side=tk.LEFT)
+
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
         # 地轨速度
         tk.Label(parent, text="地轨速度 (#SPEED_RAIL)", font=("Arial", 10, "bold")).pack(anchor="w")
@@ -555,12 +602,12 @@ class RobotSerialAssistant:
         raf.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(raf, text="mm/s2:", font=("Arial", 10)).pack(side=tk.LEFT)
         self.ent_rail_acc = ttk.Entry(raf, width=7, font=("Arial", 10))
-        self.ent_rail_acc.insert(0, "500")
+        self.ent_rail_acc.insert(0, "30")
         self.ent_rail_acc.pack(side=tk.LEFT, padx=4)
-        self.scl_rail_acc = ttk.Scale(raf, from_=10, to=5000, orient=tk.HORIZONTAL)
-        self.scl_rail_acc.set(500)
+        self.scl_rail_acc = ttk.Scale(raf, from_=1, to=200, orient=tk.HORIZONTAL)
+        self.scl_rail_acc.set(30)
         self.scl_rail_acc.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.lbl_rail_acc_val = ttk.Label(raf, text="500", width=6, font=("Arial", 10))
+        self.lbl_rail_acc_val = ttk.Label(raf, text="30", width=6, font=("Arial", 10))
         self.lbl_rail_acc_val.pack(side=tk.LEFT)
 
         ra_btns = ttk.Frame(parent)
@@ -678,12 +725,12 @@ class RobotSerialAssistant:
         # 地轨(node=9) / 关节(node=1~6) / 夹爪(node=8) 查询后自动回显到界面控件。
         pid_defaults = {
             9:  {"kp": 180,  "kv": 220, "ki": 30,  "kd": 120},
-            1:  {"kp": 200,  "kv": 80,  "ki": 300, "kd": 250},
-            2:  {"kp": 200,  "kv": 80,  "ki": 300, "kd": 250},
-            3:  {"kp": 200,  "kv": 80,  "ki": 300, "kd": 250},
-            4:  {"kp": 200,  "kv": 50,  "ki": 0,   "kd": 100},
-            5:  {"kp": 250,  "kv": 50,  "ki": 0,   "kd": 100},
-            6:  {"kp": 200,  "kv": 50,  "ki": 0,   "kd": 100},
+            1:  {"kp": 200,  "kv": 500, "ki": 300, "kd": 250},
+            2:  {"kp": 200,  "kv": 500, "ki": 300, "kd": 250},
+            3:  {"kp": 200,  "kv": 500, "ki": 300, "kd": 250},
+            4:  {"kp": 195,  "kv": 500, "ki": 300, "kd": 250},
+            5:  {"kp": 195,  "kv": 500, "ki": 300, "kd": 250},
+            6:  {"kp": 195,  "kv": 500, "ki": 300, "kd": 250},
             8:  {"kp": 200,  "kv": 80,  "ki": 100, "kd": 100},
         }
         # 当前选中节点的默认参数（会随节点切换更新控件）
@@ -1608,9 +1655,30 @@ class RobotSerialAssistant:
                 return
             if i_limit > 3.0:
                 i_limit = 3.0
-            # 1~6关节/地轨/夹爪均可设置电流限制
+            # 1~6关节/地轨/夹爪均可设置电流限制（应用：不写入EEPROM）
             if node in (1, 2, 3, 4, 5, 6, 8, 9):
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit}")
+            else:
+                messagebox.showerror("错误", "节点必须为1-6/8/9")
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字")
+
+    def save_i_limit(self):
+        """带 & 的电流设置，会写入电机EEPROM"""
+        if self._motor_enabled:
+            messagebox.showwarning("提示", "电机已使能，设置电流限制可能不安全。\n\n请先点击\"失能\"按钮再操作。")
+            return
+        try:
+            node = int(self.cb_acc_node.get())
+            i_limit = float(self.ent_i_limit.get())
+            if i_limit <= 0:
+                messagebox.showerror("错误", "电流必须大于 0")
+                return
+            if i_limit > 3.0:
+                i_limit = 3.0
+            if node in (1, 2, 3, 4, 5, 6, 8, 9):
+                self.send_cmd(f"#I_LIMIT_J {node} {i_limit} &")
+                self.log(f"已保存节点{node} 电流={i_limit}A 到EEPROM", "INFO")
             else:
                 messagebox.showerror("错误", "节点必须为1-6/8/9")
         except ValueError:
