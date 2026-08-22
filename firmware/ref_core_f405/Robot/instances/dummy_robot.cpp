@@ -498,6 +498,16 @@ void DummyRobot::SetEnable(bool _enable)
     motorJ[0]->SetEnable(_enable);  // 地轨
     hand->SetEnable(_enable);       // 夹爪
     isEnabled = _enable;
+
+    // F.6 (2026-08-23 决策): SetEnable(true) 后自动恢复堵转保护开启
+    // 不管用户之前是否发了 !STALL_DIS，下次 enable 时都强制开启
+    // 配合电机端 main.cpp 强制 stallProtectSwitch = true 实现完整 F.6 行为
+    if (_enable) {
+        osDelay(50);  // 等待电机完成 VELOCITY→POSITION 切换
+        for (int i = 0; i < 7; i++) {
+            motorJ[i]->SetEnableStallProtect(true);
+        }
+    }
 }
 
 /**

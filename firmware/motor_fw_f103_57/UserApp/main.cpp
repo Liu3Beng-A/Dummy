@@ -60,7 +60,9 @@ void Main()
     motor.config.ctrlParams.dce.kv = boardConfig.dce_kv;
     motor.config.ctrlParams.dce.ki = boardConfig.dce_ki;
     motor.config.ctrlParams.dce.kd = boardConfig.dce_kd;
-    motor.config.ctrlParams.stallProtectSwitch = boardConfig.enableStallProtect;
+    // F.6 (2026-08-23 决策): 强制上电默认开启堵转保护，覆盖 EEPROM 默认值
+    // 用户的 !STALL_DIS 仅本次会话有效，重启后自动恢复开启
+    motor.config.ctrlParams.stallProtectSwitch = true;
 
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);

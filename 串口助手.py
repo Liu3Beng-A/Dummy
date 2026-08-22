@@ -213,6 +213,28 @@ class RobotSerialAssistant:
                       relief=tk.FLAT, pady=4, command=lambda v=val: self.send_cmd(f"#CMDMODE {v}")
                       ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1)
 
+        # --- 堵转保护 toggle 按钮（2026-08-23 决策 F.6） ---
+        # 默认开启；重启后自动恢复开启；不写 EEPROM
+        ttk.Separator(sys_f, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+        stall_row = ttk.Frame(sys_f)
+        stall_row.pack(fill=tk.X)
+        self.stall_protect_var = tk.BooleanVar(value=True)
+        self.stall_protect_btn = tk.Checkbutton(
+            stall_row,
+            text="堵转检测保护（地轨+J1~J6）",
+            variable=self.stall_protect_var,
+            indicatoron=False,  # toggle 样式（按下/弹起）
+            selectcolor="#2b8a3e",  # 按下（开）背景色
+            font=("Arial", 10, "bold"),
+            relief=tk.RAISED,
+            pady=4,
+            command=self._cmd_stall_protect,
+            width=30,
+        )
+        self.stall_protect_btn.pack(fill=tk.X, pady=2)
+        ttk.Label(stall_row, text="提示：重启后自动恢复开启", font=("Arial", 8),
+                  foreground="#868e96").pack(anchor="w", padx=4)
+
         # --- 查询与校准 ---
         query_f = ttk.LabelFrame(left_col, text="查询与置零", padding=6)
         query_f.pack(fill=tk.X, pady=(0, 6))
@@ -1468,6 +1490,19 @@ class RobotSerialAssistant:
         self._motor_enabled = False
         self._update_motor_state(False)
         self.send_cmd("!DISABLE")
+
+    def _cmd_stall_protect(self):
+        """堵转保护 toggle 按钮回调（2026-08-23 决策 F.6）
+        - 默认开启（True）
+        - 点击切换状态并发送 !STALL_EN 或 !STALL_DIS
+        - 不写 EEPROM，重启后主控自动恢复开启
+        """
+        if self.stall_protect_var.get():
+            self.send_cmd("!STALL_EN")
+            self.log("→ !STALL_EN (开启堵转保护)")
+        else:
+            self.send_cmd("!STALL_DIS")
+            self.log("→ !STALL_DIS (临时关闭堵转保护，重启后自动恢复)")
 
     def _query_acc_or_i(self, response_line):
         if not self.is_connected:

@@ -171,9 +171,12 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
         case 0x1B:  // Set Enable Stall-Protect
             motor.config.ctrlParams.stallProtectSwitch = (*(uint32_t*) (RxData) == 1);
-            boardConfig.enableStallProtect = motor.config.ctrlParams.stallProtectSwitch;
-            if (_data[4])
+            // F.6 (2026-08-23 决策): 默认不写 EEPROM，用户的 !STALL_DIS 仅本次会话有效
+            // 仅当 _data[4]==1 时才显式持久化（向后兼容保留能力）
+            if (_data[4] == 1) {
+                boardConfig.enableStallProtect = motor.config.ctrlParams.stallProtectSwitch;
                 boardConfig.configStatus = CONFIG_COMMIT;
+            }
             break;
 
 

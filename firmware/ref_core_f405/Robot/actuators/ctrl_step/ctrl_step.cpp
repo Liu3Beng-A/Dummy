@@ -253,7 +253,9 @@ void CtrlStepMotor::SetEnableStallProtect(bool _enable)
     auto* b = (unsigned char*) &val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    // F.6 (2026-08-23 决策): 默认不写 EEPROM，用户的 !STALL_DIS 仅本次会话有效
+    // 临时禁用状态，重启后主控会自动恢复开启（SetEnable(true) 末尾发 !STALL_EN）
+    canBuf[4] = 0;  // Need save to EEPROM or not
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
