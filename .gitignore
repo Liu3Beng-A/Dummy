@@ -23,3 +23,6 @@ Release/
 __pycache__/
 *.pyc
 *.pyo
+
+# 二次开发参考源码备份（不入库，源仓库已归档在 gitlab/github）
+source code/

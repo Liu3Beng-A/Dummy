@@ -377,6 +377,167 @@
 
 ---
 
+### 5.5 堵转重构专项遗漏（2026-08-23）
+
+> 来源：`重构方案—堵转检测重构需求.md` 第 12 节"测试清单"+附录 E"50 项遗漏清单"。
+> 状态：`[ ] NEW`（待 stall 重构实施时同步处理）
+
+#### C-1 电机端 stallState 字段类型不一致（修复 #46/#47/#48）
+- **模块**：`motor_fw_f103_all` + `ref_core_f405`
+- **状态**：`[ ]` 文档已统一为 `enum StallMode_t`，代码待实施
+- **问题**：原文档用 `controller->stallMode`、`motionParams.stallState.stallMode`、`controller->isStalled`、`uint8_t stallMode` 多种写法并存，实施时会混乱
+- **建议**：统一为 `Motor::stallState.stallMode`（Motor 类独立成员，`enum StallMode_t { IDLE=0, RETREATING=1, LOCKED=2 }`）
+- **关联**：决策 #28、Q7 命名约定、附录 E.17
+
+#### C-2 LOCKED 入口 static bool 残留 bug（修复 #17）
+- **模块**：`motor_fw_f103_all/Ctrl/Motor/motor.cpp`
+- **状态**：`[ ]`
+- **问题**：原 Q7 实现用 `static bool lockEntryCleared`（函数级静态），多次进入 LOCKED 残留 true，不会再清积分
+- **建议**：改用 `motor.stallState.lockEntryCleared` 字段，IDLE 时重置
+- **关联**：Q7 实现片段、附录 E.7
+
+#### C-3 决策 #45 "所有电机" 表述错误（修复 #35）
+- **模块**：`重构方案—堵转检测重构需求.md` + 4 份电机固件
+- **状态**：`[x]` 文档已修正，代码待实施
+- **问题**：决策 #45 原文"所有电机统一 35556 步"实际指关节电机（35/42），57 地轨是 51200 步
+- **建议**：实施时按 #45 修订版，关节电机 35556 步，地轨 51200 步
+- **关联**：决策 #45 修订、第 2.5.6.1 节表
+
+#### C-4 0x7C 上报丢失 fallback 缺失（修复 #6）
+- **模块**：`ref_core_f405/UserApp/protocols/can_protocol.cpp` + `dummy_robot.cpp`
+- **状态**：`[ ]`
+- **问题**：CAN 丢包时主控 `motorStallMask` 与电机端 `stallMode` 不一致
+- **建议**：新增 0x1B 轮询（每 100ms 一次）作为兜底
+- **关联**：决策 #49 末尾、附录 E.6
+
+#### C-5 encoder_calibrator 校准时主控 mask 残留（修复 #7）
+- **模块**：`motor_fw_f103_all/Ctrl/Sensor/Encoder/encoder_calibrator_base.cpp` + `dummy_robot.cpp`
+- **状态**：`[ ]`
+- **问题**：校准时电机端清 stall，但主控 mask 还在
+- **建议**：校准完成时通过 0x7C 上报 IDLE 自动清 mask；或 calibration 入口显式 `dummy.ClearStallMode(idx)`
+- **关联**：附录 E.4
+
+#### C-6 Homing/Resting 阻塞循环无 stall 检查（修复 #5）
+- **模块**：`ref_core_f405/Robot/instances/dummy_robot.cpp`
+- **状态**：`[ ]`
+- **问题**：除 MoveJ/MoveL 外，Homing/Resting 也有 `while(IsMoving())` 阻塞，需要同样加 stall 检查 + 30s 超时
+- **关联**：附录 E.3
+
+#### C-7 !STALL_IGNORE 与 mask 交互（修复 #8）
+- **模块**：`ref_core_f405/UserApp/protocols/ascii_protocol.cpp` + `dummy_robot.cpp`
+- **状态**：`[ ]`
+- **问题**：`!STALL_IGNORE X` 临时禁用时只设 `stallProtectSwitch=false`，没清 mask
+- **建议**：实现片段见附录 E.5
+- **关联**：决策 #26、附录 E.5
+
+#### C-8 SetStallMode/ClearStallMode 临界区保护（修复 #49）
+- **模块**：`ref_core_f405/Robot/instances/dummy_robot.cpp` + `can_protocol.cpp`
+- **状态**：`[ ]`
+- **问题**：CAN RX 中断上下文改 mask，主循环读 mask，无保护会数据竞争
+- **建议**：`taskENTER_CRITICAL_FROM_ISR()` 保护
+- **关联**：附录 E.13、E.25
+
+#### C-9 SetEnable(true) 后 50ms 延迟（修复 #21）
+- **模块**：`ref_core_f405/Robot/instances/dummy_robot.cpp`
+- **状态**：`[ ]`
+- **问题**：`SetEnable(true)` 立即返回，但电机端 VELOCITY→POSITION 切换未完成，期间发 MoveJ 可能漏处理
+- **建议**：`osDelay(50)` 等待
+- **关联**：附录 E.15
+
+#### C-10 CtrlStepMotor::SetEnable 清 stall（修复 #22）
+- **模块**：`ref_core_f405/Robot/actuators/ctrl_step/ctrl_step.cpp`
+- **状态**：`[ ]`
+- **问题**：CtrlStepMotor::SetEnable 没清 stallMode，主控 mask 状态不一致
+- **建议**：见附录 E.16
+- **关联**：附录 E.16
+
+#### C-11 未校准时 stall 误触发（修复 #24）
+- **模块**：`motor_fw_f103_all/Ctrl/Motor/motor.cpp`
+- **状态**：`[ ]`
+- **问题**：`encoder->isCalibrated=false` 时位置误差很大，误触发 stall
+- **建议**：ProcessStallDetect 入口加 `if (!encoder->isCalibrated) return;`
+- **关联**：附录 E.18
+
+#### C-12 ClearIntegral 清除范围未明确（修复 #28）
+- **模块**：`motor_fw_f103_all/Ctrl/Motor/motor.cpp`
+- **状态**：`[ ]`
+- **问题**：原实现可能只清部分积分项
+- **建议**：见附录 E.21（清 PID/DCE 积分，不清 focCurrent/estVelocityIntegral）
+- **关联**：附录 E.21
+
+#### C-13 encoderHomeOffset 改变 stall 误触发（修复 #29）
+- **模块**：`motor_fw_f103_all/Ctrl/Motor/motor.cpp`
+- **状态**：`[ ]`
+- **问题**：`ApplyPosAsHomeOffset` 后 estPosition 跳变，可能误触发 stall
+- **建议**：见附录 E.22
+- **关联**：附录 E.22
+
+#### C-14 Button2 CLICK 应急按钮改造（修复 #31）
+- **模块**：`motor_fw_f103_all/UserApp/main.cpp`
+- **状态**：`[ ]`
+- **问题**：原 `ClearStallFlag()` 删除后，Button2 CLICK 失去应急功能
+- **建议**：见附录 E.23
+- **关联**：决策 #42、附录 E.23
+
+#### C-15 motorStallMask[7] 下标约定（修复 #4）
+- **模块**：`ref_core_f405/Robot/instances/dummy_robot.h`
+- **状态**：`[ ]`
+- **问题**：下标语义不明确（CAN ID 还是 motorJ[] 下标？）
+- **建议**：固定为 `motorJ[]` 数组下标（0=地轨, 1~6=关节），不含夹爪
+- **关联**：附录 E.2
+
+#### C-16 EEPROM 字段清单（修复 #3）
+- **模块**：`motor_fw_f103_all/UserApp/configurations.h` + `main.cpp`
+- **状态**：`[ ]`
+- **问题**：哪些 stall 字段进 EEPROM 不明确
+- **建议**：只有 `stallCurrentThreshold` 进 EEPROM，其余运行时 RAM
+- **关联**：附录 E.1
+
+#### C-17 CloseLoopControlTick 完整流程图（修复 #26）
+- **模块**：`motor_fw_f103_all/Ctrl/Motor/motor.cpp`
+- **状态**：`[ ]`
+- **问题**：重构后 CloseLoopControlTick 入口顺序需要明确
+- **建议**：附录 E.20 给出完整流程图
+- **关联**：附录 E.20
+
+#### C-18 P0-8 SetEnable FINISH 修复具体方案（修复 #16）
+- **模块**：`ref_core_f405/Robot/actuators/ctrl_step/ctrl_step.cpp`
+- **状态**：`[ ]` 决策 #43 说本次 stall 重构**不动 P0-8**，但提供具体方案
+- **建议**：附录 E.12
+- **关联**：附录 E.12、决策 #43
+
+#### C-19 !STALL_STATUS 异步查询机制（修复 #25）
+- **模块**：`ref_core_f405/UserApp/protocols/ascii_protocol.cpp` + `can_protocol.cpp`
+- **状态**：`[ ]`
+- **问题**：当前实现可能阻塞，0x7C 回包超时未处理
+- **建议**：见附录 E.19
+- **关联**：附录 E.19
+
+#### C-20 dummy_robot.h 完整改动清单（修复 #45）
+- **模块**：`ref_core_f405/Robot/instances/dummy_robot.h`
+- **状态**：`[ ]`
+- **建议**：见附录 E.24
+- **关联**：附录 E.24
+
+#### C-21-50 其它细节（实施时参考附录 E）
+- **状态**：`[ ]`
+- **关联**：`重构方案—堵转检测重构需求.md` 附录 E.1-E.25（含 EEPROM 清单、mask 下标、Homing 修复、calibration 处理、!STALL_IGNORE 行为、时序图、STATUS 响应、0x01 叠加实现、!DISABLE/!START 流程、P0-8 方案、临界区保护等 25 个细节）
+
+#### 关联文档
+- 主方案文档：`重构方案—堵转检测重构需求.md`
+- 决策清单：第 6 节 #1-#60
+- 实施清单：第 10 节（按文件分组）
+- 测试清单：第 12 节（19 项）
+- 50 项遗漏详细说明：附录 E（E.1-E.25）
+
+#### 修复优先级
+1. **阻塞实施**（必须先修）：C-1、C-2、C-3、C-15、C-16
+2. **影响正确性**（实施时修）：C-4、C-5、C-8、C-11、C-12、C-13
+3. **锦上添花**（实施后补）：C-6、C-7、C-9、C-10、C-14、C-17-C-20
+4. **可选**：C-18（不在本次 stall 重构范围）、C-21-50（细节）
+
+---
+
 ## 6. 当前建议修复顺序
 
 ### 第 1 组：先修安全与真正急停
