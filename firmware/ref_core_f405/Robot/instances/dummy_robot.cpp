@@ -429,6 +429,15 @@ void DummyRobot::SetStallMode()
 
 void DummyRobot::SetStallMode(int motorIndex)
 {
+    // 重构阶段3 (2026-08-23): 维护 motorStallMask + 支持单独电机
+    if (motorIndex < 0) {
+        // 全部电机标记为 LOCKED
+        for (int i = 0; i < 7; i++) motorStallMask[i] = true;
+    } else if (motorIndex >= 0 && motorIndex <= 6) {
+        // 标记单个电机（motorIndex 对应 motorJ[] 索引）
+        motorStallMask[motorIndex] = true;
+    }
+
     // 切换 RGB 为红色心跳，视觉提示堵转
     SetRGBMode(RGB::RED_HEARTBEAT);
     // 停发新位置指令，保持当前位置（同步 targetAngle 避免误判）
@@ -438,7 +447,31 @@ void DummyRobot::SetStallMode(int motorIndex)
     }
     // 清空指令队列，防止残留指令堆积
     commandHandler.ClearFifo();
-    (void)motorIndex;  // 未来可用于区分哪个电机堵转并做针对性处理
+}
+
+void DummyRobot::ClearStallMode(int motorIndex)
+{
+    // 重构阶段3 (2026-08-23): 清除单个电机的 LOCKED 状态
+    if (motorIndex < 0) {
+        for (int i = 0; i < 7; i++) motorStallMask[i] = false;
+    } else if (motorIndex >= 0 && motorIndex <= 6) {
+        motorStallMask[motorIndex] = false;
+    }
+    // 如果所有电机都解除了 → 恢复 RGB
+    bool anyLocked = false;
+    for (int i = 0; i < 7; i++) if (motorStallMask[i]) { anyLocked = true; break; }
+    if (!anyLocked) {
+        SetRGBMode(RGB::CYBER_BREATH);  // 恢复赛博呼吸（无 GREEN_BREATH）
+    }
+}
+
+bool DummyRobot::IsAnyMotorStalled() const
+{
+    // 重构阶段3 (2026-08-23): 检查任一电机是否处于 LOCKED
+    for (int i = 0; i < 7; i++) {
+        if (motorStallMask[i]) return true;
+    }
+    return false;
 }
 
 void DummyRobot::Homing()

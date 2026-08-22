@@ -165,9 +165,13 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("[I_LIMIT] MOTOR [9] = %.2f\r\n", *(float*)data);
                     break;
                 case 0x7C:
-                    // 电机主动上报堵转
-                    if (data[1] == 1)
-                        dummy.SetStallMode(9);
+                    // 重构阶段3+4 (2026-08-23): 0x7C 完整状态机上报
+                    // data[0]=nodeID, data[1]=stallMode(0=IDLE/1=RETREATING/2=LOCKED), data[2~3]=i_q(mA), data[4]=enabled
+                    if (data[1] == 2 /* STALL_LOCKED */) {
+                        dummy.SetStallMode(0);  // 地轨 motorJ[0]
+                    } else if (data[1] == 0 /* STALL_IDLE */) {
+                        dummy.ClearStallMode(0);
+                    }
                     break;
                 default:
                     break;
@@ -249,9 +253,13 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("[I_LIMIT] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
                     break;
                 case 0x7C:
-                    // 电机主动上报堵转
-                    if (data[1] == 1)
-                        dummy.SetStallMode((int)id);
+                    // 重构阶段3+4 (2026-08-23): 0x7C 完整状态机上报
+                    // data[0]=nodeID, data[1]=stallMode(0=IDLE/1=RETREATING/2=LOCKED), data[2~3]=i_q(mA), data[4]=enabled
+                    if (data[1] == 2 /* STALL_LOCKED */) {
+                        dummy.SetStallMode((int)id);  // id 1~6 → motorJ[1~6]
+                    } else if (data[1] == 0 /* STALL_IDLE */) {
+                        dummy.ClearStallMode((int)id);
+                    }
                     break;
                 default:
                     break;
@@ -332,9 +340,9 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("[I_LIMIT] MOTOR [8] = %.2f\r\n", *(float*)data);
                     break;
                 case 0x7C:
-                    // 电机主动上报堵转
-                    if (data[1] == 1)
-                        dummy.SetStallMode(8);
+                    // 夹爪不参与堵转（重构阶段3, 2026-08-23 决策 #19）
+                    // 保留 0x7C 处理以便调试，但 SetStallMode(8) 无效（mask 不含夹爪）
+                    (void)data;  // 静默忽略
                     break;
                 default:
                     break;
