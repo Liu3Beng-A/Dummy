@@ -22,6 +22,17 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
     float tmpF;
     int32_t tmpI;
 
+    // 重构阶段2.3 (2026-08-23): LOCKED 时拒绝新指令
+    // 允许的指令：0x01 (Enable，会清 stall) / 0x02 (Calibration)
+    //           / 0x7E (Erase) / 0x7F (Reboot) / 0x89 (Emergency Stop)
+    //           / 0x1B (Stall Protect Switch，用户可主动开/关)
+    if (motor.stallState.stallMode == Motor::STALL_LOCKED &&
+        _cmd != 0x01 && _cmd != 0x02 && _cmd != 0x7E && _cmd != 0x7F &&
+        _cmd != 0x89 && _cmd != 0x1B) {
+        // LOCKED 状态：忽略位置/速度/电流指令，保持当前位置
+        return;
+    }
+
     switch (_cmd)
     {
         // 0x00~0x0F No Memory CMDs
