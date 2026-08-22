@@ -69,6 +69,26 @@ public:
         STATE_NO_CALIB
     } State_t;
 
+    // 重构阶段2 (2026-08-23): 堵转保护状态机
+    typedef enum
+    {
+        STALL_IDLE = 0,         // 正常运行
+        STALL_RETREATING = 1,   // 回退中（短暂时态）
+        STALL_LOCKED = 2,       // 已锁定，保持位置
+    } StallMode_t;
+
+    // 堵转保护配置（运行时 RAM，不进 EEPROM）
+    typedef struct
+    {
+        bool enabled;                   // 总开关（!STALL_EN 控制，决策 F.5）
+        StallMode_t stallMode;          // 当前状态机
+        bool lockEntryCleared;          // LOCKED 入口积分清零标志（修复 #17）
+        uint32_t stallDetectTime;       // 触发延迟计数（200ms）
+        uint32_t stallRetreatTime;      // 回退时间计数（超时 2000ms）
+        int32_t lastGoalPosition;       // 回退起点
+        int32_t lastMoveDirection;      // +1 / -1
+    } StallConfig_t;
+
 
     class Controller
     {
@@ -118,6 +138,8 @@ public:
         Mode_t requestMode;
         Mode_t modeRunning;
         State_t state = STATE_STOP;
+        // 重构阶段2 (2026-08-23): isStalled 改为 stallState.stallMode（修复 #41）
+        // 保留 isStalled 作为兼容（实际值 = stallState.stallMode == STALL_LOCKED）
         bool isStalled = false;
 
 
@@ -187,6 +209,17 @@ public:
     Controller* controller = nullptr;
     EncoderBase* encoder = nullptr;
     DriverBase* driver = nullptr;
+
+    // 重构阶段2 (2026-08-23): 堵转保护状态机实例
+    StallConfig_t stallState = {
+        .enabled = true,                  // 默认开启（main.cpp 强制）
+        .stallMode = STALL_IDLE,
+        .lockEntryCleared = false,
+        .stallDetectTime = 0,
+        .stallRetreatTime = 0,
+        .lastGoalPosition = 0,
+        .lastMoveDirection = +1,
+    };
 
 
     void Tick20kHz();
