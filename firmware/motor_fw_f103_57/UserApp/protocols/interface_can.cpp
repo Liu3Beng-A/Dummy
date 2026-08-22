@@ -182,12 +182,25 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
         case 0x1B:  // Set Enable Stall-Protect
             motor.config.ctrlParams.stallProtectSwitch = (*(uint32_t*) (RxData) == 1);
+            motor.stallState.enabled = (*(uint32_t*) (RxData) == 1);
             // F.6 (2026-08-23 决策): 默认不写 EEPROM，用户的 !STALL_DIS 仅本次会话有效
             // 仅当 _data[4]==1 时才显式持久化（向后兼容保留能力）
             if (_data[4] == 1) {
                 boardConfig.enableStallProtect = motor.config.ctrlParams.stallProtectSwitch;
                 boardConfig.configStatus = CONFIG_COMMIT;
             }
+            break;
+        case 0x1D:  // Set Stall Threshold (重构阶段2.4, 2026-08-23)
+            boardConfig.stallCurrentThreshold = *(int32_t*) RxData;
+            motor.stallState.stallCurrentThreshold = *(int32_t*) RxData;
+            if (_data[4])
+                boardConfig.configStatus = CONFIG_COMMIT;
+            break;
+        case 0x1E:  // Set Stall Retreat Steps (重构阶段2.4, 2026-08-23)
+            boardConfig.stallRetreatSteps = *(int32_t*) RxData;
+            motor.stallState.retreatSteps = *(int32_t*) RxData;
+            if (_data[4])
+                boardConfig.configStatus = CONFIG_COMMIT;
             break;
 
 

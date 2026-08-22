@@ -34,6 +34,11 @@ typedef struct Config_t
     bool enableMotorOnBoot;
     bool enableStallProtect;
     bool enableTempWatch;
+    // 重构阶段2.4 (2026-08-23): 堵转保护可调参数（EEPROM 持久化）
+    int32_t stallCurrentThreshold;   // 堵转检测电流阈值（mA），默认 ratedCurrent * 95 / 100
+    int32_t stallRetreatSteps;       // 回退步数（35/42=711=5°, 57=40960=5mm）
+    uint16_t stallDetectTimeMs;      // 触发延迟（ms），默认 200
+    uint16_t stallRetreatTimeMs;     // 回退超时（ms），默认 2000
 } BoardConfig_t;
 
 extern BoardConfig_t boardConfig;

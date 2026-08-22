@@ -48,8 +48,14 @@ void Main()
             .dce_kd = 250,
             .motor_temperature = 0.0,
             .enableMotorOnBoot=false,
-            .enableStallProtect=false,
+            .enableStallProtect=true,           // 重构 F.6: 默认开启
             .enableTempWatch=false,
+            // 重构阶段2.4 (2026-08-23): 初始化堵转保护参数
+            // 35 电机：回退 5°（约 711 步），200ms 检测，2000ms 超时
+            .stallCurrentThreshold = 0,         // 0 表示用 ratedCurrent * 95% 计算
+            .stallRetreatSteps = 711,            // 5° = 51200/72 ≈ 711
+            .stallDetectTimeMs = 200,
+            .stallRetreatTimeMs = 2000,
         };
         eeprom.put(0, boardConfig);
     }
@@ -72,12 +78,13 @@ void Main()
     motor.config.ctrlParams.stallProtectSwitch = true;
 
     // 重构阶段2.2 (2026-08-23): 初始化堵转状态机（按电机类型差异化默认值）
-    // 35 电机：回退 5°（约 711 步）
-    motor.stallState.enabled = true;
+    // 重构阶段2.4 (2026-08-23): 改用 boardConfig 中的 EEPROM 配置
+    motor.stallState.enabled = (boardConfig.enableStallProtect || true);  // F.6: 强制开
     motor.stallState.stallMode = Motor::STALL_IDLE;
-    motor.stallState.retreatSteps = 711;          // 5° (51200 / 72)
-    motor.stallState.detectThresholdTime = 4000;  // 200ms @ 50us
-    motor.stallState.retreatTimeoutTime = 40000;  // 2000ms @ 50us
+    motor.stallState.retreatSteps = boardConfig.stallRetreatSteps;
+    motor.stallState.detectThresholdTime = boardConfig.stallDetectTimeMs * 1000 / 50;  // ms × 1000 / 50us
+    motor.stallState.retreatTimeoutTime = boardConfig.stallRetreatTimeMs * 1000 / 50;
+    // stallCurrentThreshold: 0 表示由 motor.cpp 自动按 ratedCurrent × 95% 计算
 
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);
