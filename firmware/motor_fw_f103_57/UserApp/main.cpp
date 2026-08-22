@@ -64,6 +64,14 @@ void Main()
     // 用户的 !STALL_DIS 仅本次会话有效，重启后自动恢复开启
     motor.config.ctrlParams.stallProtectSwitch = true;
 
+    // 重构阶段2.2 (2026-08-23): 初始化堵转状态机（按电机类型差异化默认值）
+    // 57 电机（地轨）：回退 5mm = 40960 步
+    motor.stallState.enabled = true;
+    motor.stallState.stallMode = Motor::STALL_IDLE;
+    motor.stallState.retreatSteps = 40960;        // 5mm (1mm = 40960 步)
+    motor.stallState.detectThresholdTime = 4000;  // 200ms @ 50us
+    motor.stallState.retreatTimeoutTime = 40000;  // 2000ms @ 50us
+
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);
     motor.AttachEncoder(&mt6816);

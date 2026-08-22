@@ -87,6 +87,12 @@ public:
         uint32_t stallRetreatTime;      // 回退时间计数（超时 2000ms）
         int32_t lastGoalPosition;       // 回退起点
         int32_t lastMoveDirection;      // +1 / -1
+        // 重构阶段2.2 (2026-08-23): 新增回退参数（编译期默认，按电机类型覆盖）
+        int32_t retreatSteps;           // 回退距离（步数）：35/42=711 (5°), 57=40960 (5mm)
+        uint32_t detectThresholdTime;   // 检测延迟（200ms = 4000×50us）
+        uint32_t retreatTimeoutTime;    // 回退超时（2000ms = 40000×50us）
+        int32_t stallCurrentThreshold;  // 电流阈值（mA），默认 ratedCurrent * 95 / 100
+        int32_t stallVelocityThreshold; // 速度阈值（步数/周期），默认 MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 5
     } StallConfig_t;
 
 
@@ -211,15 +217,8 @@ public:
     DriverBase* driver = nullptr;
 
     // 重构阶段2 (2026-08-23): 堵转保护状态机实例
-    StallConfig_t stallState = {
-        .enabled = true,                  // 默认开启（main.cpp 强制）
-        .stallMode = STALL_IDLE,
-        .lockEntryCleared = false,
-        .stallDetectTime = 0,
-        .stallRetreatTime = 0,
-        .lastGoalPosition = 0,
-        .lastMoveDirection = +1,
-    };
+    // 默认值：启用 + IDLE；具体阈值/回退步数在 main.cpp 中按电机类型覆盖
+    StallConfig_t stallState = {};
 
 
     void Tick20kHz();
