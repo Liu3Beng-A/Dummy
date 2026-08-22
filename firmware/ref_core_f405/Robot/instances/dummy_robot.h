@@ -193,6 +193,12 @@ public:
     // 由 SetEnable(true) / !STALL_RESUME 时清 false
     bool motorStallMask[7] = {false};                     // 不含夹爪（夹爪不参与堵转）
 
+    // 重构阶段4 (2026-08-23): 堵转保护启用配置
+    // stallProtectMask[i]: 第 i 个电机的堵转保护是否启用（运行时 RAM，不持久化）
+    // 由 !STALL_EN/!STALL_DIS (ascii_protocol.cpp) 更新
+    // 由 SetEnable(true) 末尾强制全部设为 true（重启后自动恢复开启，决策 F.6）
+    bool stallProtectMask[7] = {true};                    // 默认开启（含地轨），不含夹爪
+
     CommandMode commandMode = DEFAULT_COMMAND_MODE;        
     uint32_t lastServoTime = 0;                            
 
@@ -221,6 +227,8 @@ public:
     void SetStallMode(int motorIndex);
     void ClearStallMode(int motorIndex = -1);  // 重构阶段3 (2026-08-23)
     bool IsAnyMotorStalled() const;             // 重构阶段3 (2026-08-23)
+    void SetStallProtect(int motorIndex, bool _enable);  // 重构阶段4 (2026-08-23)
+    void QueryStallStatus();                      // 重构阶段4 (2026-08-23)
     void Homing();
     void Resting();
     bool IsMoving();

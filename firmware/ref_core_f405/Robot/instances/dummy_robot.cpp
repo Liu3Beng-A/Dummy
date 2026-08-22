@@ -535,12 +535,48 @@ void DummyRobot::SetEnable(bool _enable)
     // F.6 (2026-08-23 决策): SetEnable(true) 后自动恢复堵转保护开启
     // 不管用户之前是否发了 !STALL_DIS，下次 enable 时都强制开启
     // 配合电机端 main.cpp 强制 stallProtectSwitch = true 实现完整 F.6 行为
+    // 重构阶段4 (2026-08-23): 同时更新主控 stallProtectMask
     if (_enable) {
         osDelay(50);  // 等待电机完成 VELOCITY→POSITION 切换
         for (int i = 0; i < 7; i++) {
             motorJ[i]->SetEnableStallProtect(true);
+            stallProtectMask[i] = true;  // 同步本机缓存
         }
     }
+}
+
+void DummyRobot::SetStallProtect(int motorIndex, bool _enable)
+{
+    // 重构阶段4 (2026-08-23): 设置指定电机堵转保护开关
+    // motorIndex: 0~6（0=地轨, 1~6=关节），不含夹爪
+    if (motorIndex < 0 || motorIndex > 6) return;
+    stallProtectMask[motorIndex] = _enable;
+    motorJ[motorIndex]->SetEnableStallProtect(_enable);
+}
+
+void DummyRobot::QueryStallStatus()
+{
+    // 重构阶段4 (2026-08-23): 查询所有电机堵转状态
+    // 当前实现：直接打印本地 stallProtectMask（精确）+ motorStallMask（LOCKED 状态）
+    // 未来可以发 CAN 0x1C 让电机端上报更详细信息
+    printf("ok STALL_STATUS");
+    printf(" rail_en=%d j1_en=%d j2_en=%d j3_en=%d j4_en=%d j5_en=%d j6_en=%d",
+           stallProtectMask[0] ? 1 : 0,
+           stallProtectMask[1] ? 1 : 0,
+           stallProtectMask[2] ? 1 : 0,
+           stallProtectMask[3] ? 1 : 0,
+           stallProtectMask[4] ? 1 : 0,
+           stallProtectMask[5] ? 1 : 0,
+           stallProtectMask[6] ? 1 : 0);
+    printf(" rail_lock=%d j1_lock=%d j2_lock=%d j3_lock=%d j4_lock=%d j5_lock=%d j6_lock=%d",
+           motorStallMask[0] ? 1 : 0,
+           motorStallMask[1] ? 1 : 0,
+           motorStallMask[2] ? 1 : 0,
+           motorStallMask[3] ? 1 : 0,
+           motorStallMask[4] ? 1 : 0,
+           motorStallMask[5] ? 1 : 0,
+           motorStallMask[6] ? 1 : 0);
+    printf("\r\n");
 }
 
 /**

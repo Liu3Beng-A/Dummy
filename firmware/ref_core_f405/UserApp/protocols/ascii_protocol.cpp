@@ -147,21 +147,80 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             Respond(_responseChannel, "ok hand close");
         }
 
-        /* ── 堵转检测控制指令 ──
-         * !STALL_EN  → 开启所有电机堵转检测（发 CAN 0x1B 到 J0~J6）
-         * !STALL_DIS → 关闭所有电机堵转检测
+        /* ── 堵转检测控制指令（重构阶段4, 2026-08-23）──
+         * !STALL_EN             → 开启所有电机堵转检测（地轨+J1~J6）
+         * !STALL_EN j3          → 开启单个电机（j3 / rail）
+         * !STALL_DIS            → 关闭所有电机堵转检测
+         * !STALL_DIS j3         → 关闭单个电机
+         * !STALL_STATUS         → 查询所有电机堵转状态（enabled + LOCKED）
+         * !STALL_RESUME [idx]   → 解除 LOCKED 状态（idx 可选，-1=全部）
          */
-        else if (s.find("STALL_EN") != std::string::npos)
+        else if (s.find("STALL_EN") != std::string::npos && s.find("DIS") == std::string::npos)
         {
-            for (int i = 0; i < 7; i++)
-                dummy.motorJ[i]->SetEnableStallProtect(true);
-            Respond(_responseChannel, "ok stall protect enabled");
+            // 解析参数
+            int targetIdx = -1;  // -1=全部
+            if (s.find("rail") != std::string::npos) targetIdx = 0;
+            else if (s.find("j1") != std::string::npos) targetIdx = 1;
+            else if (s.find("j2") != std::string::npos) targetIdx = 2;
+            else if (s.find("j3") != std::string::npos) targetIdx = 3;
+            else if (s.find("j4") != std::string::npos) targetIdx = 4;
+            else if (s.find("j5") != std::string::npos) targetIdx = 5;
+            else if (s.find("j6") != std::string::npos) targetIdx = 6;
+
+            if (targetIdx < 0) {
+                for (int i = 0; i < 7; i++) dummy.SetStallProtect(i, true);
+            } else {
+                dummy.SetStallProtect(targetIdx, true);
+            }
+            Respond(_responseChannel, targetIdx < 0 ?
+                "ok stall protect enabled (all)" :
+                "ok stall protect enabled");
         }
         else if (s.find("STALL_DIS") != std::string::npos)
         {
-            for (int i = 0; i < 7; i++)
-                dummy.motorJ[i]->SetEnableStallProtect(false);
-            Respond(_responseChannel, "ok stall protect disabled");
+            int targetIdx = -1;
+            if (s.find("rail") != std::string::npos) targetIdx = 0;
+            else if (s.find("j1") != std::string::npos) targetIdx = 1;
+            else if (s.find("j2") != std::string::npos) targetIdx = 2;
+            else if (s.find("j3") != std::string::npos) targetIdx = 3;
+            else if (s.find("j4") != std::string::npos) targetIdx = 4;
+            else if (s.find("j5") != std::string::npos) targetIdx = 5;
+            else if (s.find("j6") != std::string::npos) targetIdx = 6;
+
+            if (targetIdx < 0) {
+                for (int i = 0; i < 7; i++) dummy.SetStallProtect(i, false);
+            } else {
+                dummy.SetStallProtect(targetIdx, false);
+            }
+            Respond(_responseChannel, targetIdx < 0 ?
+                "ok stall protect disabled (all)" :
+                "ok stall protect disabled");
+        }
+        else if (s.find("STALL_STATUS") != std::string::npos)
+        {
+            // 触发查询响应（响应在 dummy.QueryStallStatus 中打印）
+            dummy.QueryStallStatus();
+        }
+        else if (s.find("STALL_RESUME") != std::string::npos)
+        {
+            int targetIdx = -1;
+            if (s.find("j1") != std::string::npos) targetIdx = 1;
+            else if (s.find("j2") != std::string::npos) targetIdx = 2;
+            else if (s.find("j3") != std::string::npos) targetIdx = 3;
+            else if (s.find("j4") != std::string::npos) targetIdx = 4;
+            else if (s.find("j5") != std::string::npos) targetIdx = 5;
+            else if (s.find("j6") != std::string::npos) targetIdx = 6;
+            else if (s.find("rail") != std::string::npos) targetIdx = 0;
+
+            // 解除 LOCKED 状态：发 0x01 enable 给电机，让电机端 ClearStallFlag
+            if (targetIdx == 0 || targetIdx < 0) {
+                if (targetIdx < 0) {
+                    for (int i = 0; i < 7; i++) dummy.ClearStallMode(i);
+                } else {
+                    dummy.ClearStallMode(0);
+                }
+            }
+            Respond(_responseChannel, "ok stall resumed");
         }
 
         /* ── RGB 信仰灯控制指令 ──
