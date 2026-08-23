@@ -264,7 +264,7 @@ dof6Solver = new DOF6Kinematic(
 
 | 常量 | 值 | 说明 |
 |------|-----|------|
-| `RAIL_STEPS_PER_MM` | 40960 | 地轨步数当量 (丝杆1605直连, 200步×256微步/5mm导程) |
+| `RAIL_STEPS_PER_MM` | 10240 | 地轨步数当量 (丝杆1605直连, 1圈=51200步/5mm导程 → 1mm = 51200/5 = 10240步) |
 | `RAIL_DEFAULT_SPEED_MM_S` | 20.0f | 地轨默认速度 mm/s |
 | `DEFAULT_JOINT_SPEED` | 80.0f | 关节默认速度 (°/s) |
 | `DEFAULT_JOINT_ACCELERATION_LOW` | 5.0f | 低加速度 (°/s²) |
@@ -565,8 +565,10 @@ FOC_current = DCE_Kp × position_error
 ```
 1mm = (步数/圈 × 微步数) / 丝杆导程
      = (200 × 256) / 5
-     = 40960 步/mm
+     = 10240 步/mm
 ```
+
+**验证**：5mm × 10240 步/mm = 51200 步 = 1圈（57电机直驱）✓ 用户实测：发送 5mm 移动 = 转 1 圈
 
 ---
 
