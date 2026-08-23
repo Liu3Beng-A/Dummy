@@ -10,6 +10,8 @@
 #include "rgb.hpp"
 #include "eeprom_interface.h"
 
+class StreamSink;  // 前向声明，避免在头文件里引入 fibre/protocol.hpp
+
 #define EEPROM_MAGIC 0x12345679
 
 /**
@@ -228,7 +230,7 @@ public:
     void ClearStallMode(int motorIndex = -1);  // 重构阶段3 (2026-08-23)
     bool IsAnyMotorStalled() const;             // 重构阶段3 (2026-08-23)
     void SetStallProtect(int motorIndex, bool _enable);  // 重构阶段4 (2026-08-23)
-    void QueryStallStatus();                      // 重构阶段4 (2026-08-23)
+    void QueryStallStatus(StreamSink* _channel = nullptr);  // 重构阶段4 (2026-08-23) + 修复 (2026-08-23): 接受响应通道参数
     void Homing();
     void Resting();
     bool IsMoving();

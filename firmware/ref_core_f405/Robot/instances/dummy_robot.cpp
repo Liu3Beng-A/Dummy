@@ -554,29 +554,40 @@ void DummyRobot::SetStallProtect(int motorIndex, bool _enable)
     motorJ[motorIndex]->SetEnableStallProtect(_enable);
 }
 
-void DummyRobot::QueryStallStatus()
+void DummyRobot::QueryStallStatus(StreamSink* _channel)
 {
-    // 重构阶段4 (2026-08-23): 查询所有电机堵转状态
-    // 当前实现：直接打印本地 stallProtectMask（精确）+ motorStallMask（LOCKED 状态）
-    // 未来可以发 CAN 0x1C 让电机端上报更详细信息
-    printf("ok STALL_STATUS");
-    printf(" rail_en=%d j1_en=%d j2_en=%d j3_en=%d j4_en=%d j5_en=%d j6_en=%d",
-           stallProtectMask[0] ? 1 : 0,
-           stallProtectMask[1] ? 1 : 0,
-           stallProtectMask[2] ? 1 : 0,
-           stallProtectMask[3] ? 1 : 0,
-           stallProtectMask[4] ? 1 : 0,
-           stallProtectMask[5] ? 1 : 0,
-           stallProtectMask[6] ? 1 : 0);
-    printf(" rail_lock=%d j1_lock=%d j2_lock=%d j3_lock=%d j4_lock=%d j5_lock=%d j6_lock=%d",
-           motorStallMask[0] ? 1 : 0,
-           motorStallMask[1] ? 1 : 0,
-           motorStallMask[2] ? 1 : 0,
-           motorStallMask[3] ? 1 : 0,
-           motorStallMask[4] ? 1 : 0,
-           motorStallMask[5] ? 1 : 0,
-           motorStallMask[6] ? 1 : 0);
-    printf("\r\n");
+    // 重构阶段4 (2026-08-23) + 修复 (2026-08-23): 接受 _channel 参数
+    // 原版：直接 printf → 同时写 USB + UART4，触发 UART4 RS485 总线半双工冲突，
+    //       并因 printf 阻塞 osDelay(20) ms，OLED/RGB 看似"卡住"
+    // 修复：传入 _responseChannel 走异步 process_bytes 队列，避免阻塞主任务；
+    //       UART4 那边就不再收到这个查询响应，避免与 RS485 总线上的电机 CAN 数据冲突。
+    char buf[160];
+    int len = snprintf(buf, sizeof(buf),
+        "ok STALL_STATUS"
+        " rail_en=%d j1_en=%d j2_en=%d j3_en=%d j4_en=%d j5_en=%d j6_en=%d"
+        " rail_lock=%d j1_lock=%d j2_lock=%d j3_lock=%d j4_lock=%d j5_lock=%d j6_lock=%d\r\n",
+        stallProtectMask[0] ? 1 : 0,
+        stallProtectMask[1] ? 1 : 0,
+        stallProtectMask[2] ? 1 : 0,
+        stallProtectMask[3] ? 1 : 0,
+        stallProtectMask[4] ? 1 : 0,
+        stallProtectMask[5] ? 1 : 0,
+        stallProtectMask[6] ? 1 : 0,
+        motorStallMask[0] ? 1 : 0,
+        motorStallMask[1] ? 1 : 0,
+        motorStallMask[2] ? 1 : 0,
+        motorStallMask[3] ? 1 : 0,
+        motorStallMask[4] ? 1 : 0,
+        motorStallMask[5] ? 1 : 0,
+        motorStallMask[6] ? 1 : 0);
+    if (len < 0) return;
+    if (_channel) {
+        _channel->process_bytes((const uint8_t*)buf, len, nullptr);
+    } else {
+        // 后备路径：直接写 stdout（同时 USB + UART4），保留旧行为
+        fwrite(buf, 1, len, stdout);
+        fflush(stdout);
+    }
 }
 
 /**

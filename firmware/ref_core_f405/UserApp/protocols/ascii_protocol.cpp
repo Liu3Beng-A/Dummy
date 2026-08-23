@@ -199,7 +199,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         else if (s.find("STALL_STATUS") != std::string::npos)
         {
             // 触发查询响应（响应在 dummy.QueryStallStatus 中打印）
-            dummy.QueryStallStatus();
+            dummy.QueryStallStatus(&_responseChannel);
         }
         else if (s.find("STALL_RESUME") != std::string::npos)
         {

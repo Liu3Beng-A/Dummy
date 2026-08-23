@@ -235,8 +235,10 @@ class RobotSerialAssistant:
         ttk.Label(stall_row, text="提示：重启后自动恢复开启", font=("Arial", 8),
                   foreground="#868e96").pack(anchor="w", padx=4)
         # 重构阶段4 (2026-08-23): 加查询按钮
-        ttk.Button(stall_row, text="查询堵转状态", font=("Arial", 9),
-                   command=self._cmd_stall_status).pack(fill=tk.X, pady=2)
+        # ttk.Button 不支持 font 参数，改用 tk.Button（与其他系统按钮风格一致）
+        tk.Button(stall_row, text="查询堵转状态", font=("Arial", 9), bg="#495057", fg="white",
+                  relief=tk.FLAT, pady=4,
+                  command=self._cmd_stall_status).pack(fill=tk.X, pady=2)
 
         # --- 查询与校准 ---
         query_f = ttk.LabelFrame(left_col, text="查询与置零", padding=6)
