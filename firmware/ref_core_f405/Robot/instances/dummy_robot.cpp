@@ -273,6 +273,10 @@ bool DummyRobot::MoveL(float _x, float _y, float _z, float _a, float _b, float _
  */
 bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm)
 {
+    // 重构阶段3 (2026-08-23): 堵转拦截
+    // 任意电机处于 LOCKED → 直接拒绝，返回 false
+    if (IsAnyMotorStalled()) return false;
+
     DOF6Kinematic::Joint6D_t targetJointsTmp(_j1, _j2, _j3, _j4, _j5, _j6);
     uint8_t maxIndex;
 
@@ -318,6 +322,9 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, fl
  */
 bool DummyRobot::ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm)
 {
+    // 重构阶段3 (2026-08-23): 堵转拦截
+    if (IsAnyMotorStalled()) return false;
+
     DOF6Kinematic::Joint6D_t targetJointsTmp(_j1, _j2, _j3, _j4, _j5, _j6);
 
     // 地轨限位检查
@@ -427,14 +434,15 @@ void DummyRobot::SetStallMode()
     SetStallMode(-1);  // 不指定电机，全部停住
 }
 
+/**
+ * @brief 标记电机为 LOCKED 状态（由 can_protocol 收到 0x7C 时调用）
+ * @param motorIndex -1 表示全部电机
+ */
 void DummyRobot::SetStallMode(int motorIndex)
 {
-    // 重构阶段3 (2026-08-23): 维护 motorStallMask + 支持单独电机
     if (motorIndex < 0) {
-        // 全部电机标记为 LOCKED
         for (int i = 0; i < 7; i++) motorStallMask[i] = true;
     } else if (motorIndex >= 0 && motorIndex <= 6) {
-        // 标记单个电机（motorIndex 对应 motorJ[] 索引）
         motorStallMask[motorIndex] = true;
     }
 
@@ -449,19 +457,33 @@ void DummyRobot::SetStallMode(int motorIndex)
     commandHandler.ClearFifo();
 }
 
+/**
+ * @brief 解除 LOCKED 状态（重构 2026-08-23）
+ * 通过下发 0x01 Enable 给电机，让电机端走 ClearStallFlag 路径
+ * @param motorIndex -1 表示全部电机
+ */
 void DummyRobot::ClearStallMode(int motorIndex)
 {
-    // 重构阶段3 (2026-08-23): 清除单个电机的 LOCKED 状态
+    // 清除主控 mask
     if (motorIndex < 0) {
         for (int i = 0; i < 7; i++) motorStallMask[i] = false;
     } else if (motorIndex >= 0 && motorIndex <= 6) {
         motorStallMask[motorIndex] = false;
     }
+
+    // 让电机端走 ClearStallFlag：下发 0x01 Enable
+    // 电机端 0x01 处理中会自动 ClearStallFlag（接口_can.cpp:0x01）
+    if (motorIndex < 0) {
+        for (int i = 0; i < 7; i++) motorJ[i]->SetEnable(true);
+    } else if (motorIndex >= 0 && motorIndex <= 6) {
+        motorJ[motorIndex]->SetEnable(true);
+    }
+
     // 如果所有电机都解除了 → 恢复 RGB
     bool anyLocked = false;
     for (int i = 0; i < 7; i++) if (motorStallMask[i]) { anyLocked = true; break; }
     if (!anyLocked) {
-        SetRGBMode(RGB::CYBER_BREATH);  // 恢复赛博呼吸（无 GREEN_BREATH）
+        SetRGBMode(RGB::CYBER_BREATH);
     }
 }
 
@@ -534,45 +556,37 @@ void DummyRobot::SetEnable(bool _enable)
 
     // F.6 (2026-08-23 决策): SetEnable(true) 后自动恢复堵转保护开启
     // 不管用户之前是否发了 !STALL_DIS，下次 enable 时都强制开启
-    // 配合电机端 main.cpp 强制 stallProtectSwitch = true 实现完整 F.6 行为
-    // 重构阶段4 (2026-08-23): 同时更新主控 stallProtectMask
+    // 配合电机端 main.cpp 强制 stallState.enabled = true 实现完整 F.6 行为
     if (_enable) {
         osDelay(50);  // 等待电机完成 VELOCITY→POSITION 切换
         for (int i = 0; i < 7; i++) {
             motorJ[i]->SetEnableStallProtect(true);
-            stallProtectMask[i] = true;  // 同步本机缓存
         }
     }
 }
 
+/**
+ * @brief 设置指定电机堵转保护开关（!STALL_EN/!STALL_DIS 入口，重构 2026-08-23）
+ * 直接转发给 CtrlStepMotor（最终下发 0x1B 给电机端）
+ * 主控不再维护 stallProtectMask 缓存——电机端 main.cpp 上电默认开，
+ * SetEnable(true) 时也会强制恢复（决策 F.6）
+ */
 void DummyRobot::SetStallProtect(int motorIndex, bool _enable)
 {
-    // 重构阶段4 (2026-08-23): 设置指定电机堵转保护开关
-    // motorIndex: 0~6（0=地轨, 1~6=关节），不含夹爪
     if (motorIndex < 0 || motorIndex > 6) return;
-    stallProtectMask[motorIndex] = _enable;
     motorJ[motorIndex]->SetEnableStallProtect(_enable);
 }
 
+/**
+ * @brief 查询所有电机 LOCKED 状态（重构 2026-08-23）
+ * 不再报告 enable 状态（stallProtectMask 已移除）——电机端上电默认开
+ */
 void DummyRobot::QueryStallStatus(StreamSink* _channel)
 {
-    // 重构阶段4 (2026-08-23) + 修复 (2026-08-23): 接受 _channel 参数
-    // 原版：直接 printf → 同时写 USB + UART4，触发 UART4 RS485 总线半双工冲突，
-    //       并因 printf 阻塞 osDelay(20) ms，OLED/RGB 看似"卡住"
-    // 修复：传入 _responseChannel 走异步 process_bytes 队列，避免阻塞主任务；
-    //       UART4 那边就不再收到这个查询响应，避免与 RS485 总线上的电机 CAN 数据冲突。
-    char buf[160];
+    char buf[96];
     int len = snprintf(buf, sizeof(buf),
         "ok STALL_STATUS"
-        " rail_en=%d j1_en=%d j2_en=%d j3_en=%d j4_en=%d j5_en=%d j6_en=%d"
         " rail_lock=%d j1_lock=%d j2_lock=%d j3_lock=%d j4_lock=%d j5_lock=%d j6_lock=%d\r\n",
-        stallProtectMask[0] ? 1 : 0,
-        stallProtectMask[1] ? 1 : 0,
-        stallProtectMask[2] ? 1 : 0,
-        stallProtectMask[3] ? 1 : 0,
-        stallProtectMask[4] ? 1 : 0,
-        stallProtectMask[5] ? 1 : 0,
-        stallProtectMask[6] ? 1 : 0,
         motorStallMask[0] ? 1 : 0,
         motorStallMask[1] ? 1 : 0,
         motorStallMask[2] ? 1 : 0,
@@ -584,7 +598,6 @@ void DummyRobot::QueryStallStatus(StreamSink* _channel)
     if (_channel) {
         _channel->process_bytes((const uint8_t*)buf, len, nullptr);
     } else {
-        // 后备路径：直接写 stdout（同时 USB + UART4），保留旧行为
         fwrite(buf, 1, len, stdout);
         fflush(stdout);
     }

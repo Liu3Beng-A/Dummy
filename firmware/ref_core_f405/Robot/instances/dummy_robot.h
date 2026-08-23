@@ -189,20 +189,14 @@ public:
     DOF6Kinematic::Pose6D_t  currentPose6D  = {};         // 当前设备工作空间笛卡尔位姿坐标投影信息 (系统自动解算保持更新)
     volatile uint8_t jointsStateFlag = 0b00000000;        // 每一位(bit)严格监控和指示对应关节底层的轨迹插补到位触发状况
 
-    // 重构阶段3 (2026-08-23): 主控端堵转状态管理
+// 堵转状态管理（重构 2026-08-23）
     // motorStallMask[i]: 第 i 个电机（含地轨 motorJ[0]）当前是否处于 LOCKED 状态
     // 由 can_protocol.cpp 收到 0x7C data[1]==STALL_LOCKED 时置 true
-    // 由 SetEnable(true) / !STALL_RESUME 时清 false
+    // 由 !STALL_RESUME / SetEnable(true) 时清 false
     bool motorStallMask[7] = {false};                     // 不含夹爪（夹爪不参与堵转）
 
-    // 重构阶段4 (2026-08-23): 堵转保护启用配置
-    // stallProtectMask[i]: 第 i 个电机的堵转保护是否启用（运行时 RAM，不持久化）
-    // 由 !STALL_EN/!STALL_DIS (ascii_protocol.cpp) 更新
-    // 由 SetEnable(true) 末尾强制全部设为 true（重启后自动恢复开启，决策 F.6）
-    bool stallProtectMask[7] = {true};                    // 默认开启（含地轨），不含夹爪
-
-    CommandMode commandMode = DEFAULT_COMMAND_MODE;        
-    uint32_t lastServoTime = 0;                            
+    CommandMode commandMode = DEFAULT_COMMAND_MODE;
+    uint32_t lastServoTime = 0;
 
     // 分布式通讯执行器操作列表
     // motorJ 包含 7 个空间: index[0] 作为广播掩码，index[1-6] 为 6个活动物理自由度
@@ -227,10 +221,10 @@ public:
     void SetEnable(bool _enable);
     void SetStallMode();
     void SetStallMode(int motorIndex);
-    void ClearStallMode(int motorIndex = -1);  // 重构阶段3 (2026-08-23)
-    bool IsAnyMotorStalled() const;             // 重构阶段3 (2026-08-23)
-    void SetStallProtect(int motorIndex, bool _enable);  // 重构阶段4 (2026-08-23)
-    void QueryStallStatus(StreamSink* _channel = nullptr);  // 重构阶段4 (2026-08-23) + 修复 (2026-08-23): 接受响应通道参数
+    void ClearStallMode(int motorIndex = -1);  // 清除 LOCKED 状态：电机端 ClearStallFlag
+    bool IsAnyMotorStalled() const;
+    void SetStallProtect(int motorIndex, bool _enable);  // !STALL_EN/!STALL_DIS 入口
+    void QueryStallStatus(StreamSink* _channel = nullptr);  // !STALL_STATUS 入口
     void Homing();
     void Resting();
     bool IsMoving();

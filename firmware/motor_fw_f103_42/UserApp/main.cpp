@@ -4,7 +4,7 @@
 #include <tim.h>
 
 
-/* Component Definitions -----------------------------------------------------*/
+/* Component Definitions */
 BoardConfig_t boardConfig;
 Motor motor;
 TB67H450 tb67H450;
@@ -14,7 +14,7 @@ Button button1(1, 1000), button2(2, 3000);
 void OnButton1Event(Button::Event _event);
 void OnButton2Event(Button::Event _event);
 Led statusLed;
-/* Main Entry ----------------------------------------------------------------*/
+/* Main Entry */
 void Main()
 {
     uint64_t serialNum = GetSerialNumber();
@@ -33,14 +33,14 @@ void Main()
     eeprom.get(0, boardConfig);
     if (boardConfig.configStatus != CONFIG_OK) // use default settings
     {
-        // 42电机: 2A电流, kp=200, ki=300
+        // 35电机: 2A电流, kp=195, ki=300
         boardConfig = BoardConfig_t{
             .configStatus = CONFIG_OK,
             .encoderHomeOffset = 0,
             .defaultMode = Motor::MODE_COMMAND_POSITION,
             .currentLimit = 2 * 1000,    // 2A
-            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
-            .velocityAcc = 100 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
+            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,
+            .velocityAcc = 100 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,
             .calibrationCurrent=2000,
             .dce_kp = 200,
             .dce_kv = 80,
@@ -48,19 +48,12 @@ void Main()
             .dce_kd = 250,
             .motor_temperature = 0.0,
             .enableMotorOnBoot=false,
-            .enableStallProtect=true,           // 重构 F.6: 默认开启
+            .enableStallProtect=true,   // F.6 默认开
             .enableTempWatch=false,
-            // 重构阶段2.4 (2026-08-23): 初始化堵转保护参数
-            // 42 电机：回退 5°（约 711 步），200ms 检测，2000ms 超时
-            .stallCurrentThreshold = 0,         // 0 表示用 ratedCurrent * 95% 计算
-            .stallRetreatSteps = 711,            // 5° = 51200/72 ≈ 711
-            .stallDetectTimeMs = 200,
-            .stallRetreatTimeMs = 2000,
         };
         eeprom.put(0, boardConfig);
     }
     boardConfig.enableTempWatch=false;
-    //depends on 3 bits switch now
     boardConfig.canNodeId = defaultNodeID;
     motor.config.motionParams.encoderHomeOffset = boardConfig.encoderHomeOffset;
     motor.config.motionParams.ratedCurrent = boardConfig.currentLimit;
@@ -73,17 +66,14 @@ void Main()
     motor.config.ctrlParams.dce.kv = boardConfig.dce_kv;
     motor.config.ctrlParams.dce.ki = boardConfig.dce_ki;
     motor.config.ctrlParams.dce.kd = boardConfig.dce_kd;
-    // F.6 (2026-08-23 决策): 强制上电默认开启堵转保护，覆盖 EEPROM 默认值
-    // 用户的 !STALL_DIS 仅本次会话有效，重启后自动恢复开启
-    motor.config.ctrlParams.stallProtectSwitch = true;
 
-    // 重构阶段2.2 (2026-08-23): 初始化堵转状态机（按电机类型差异化默认值）
-    // 重构阶段2.4 (2026-08-23): 改用 boardConfig 中的 EEPROM 配置
-    motor.stallState.enabled = (boardConfig.enableStallProtect || true);  // F.6: 强制开
+    /*---------- 堵转保护状态机初始化（重构 2026-08-23）----------*/
+    // F.6: 上电默认开启（覆盖 EEPROM）
+    motor.stallState.enabled = true;
     motor.stallState.stallMode = Motor::STALL_IDLE;
-    motor.stallState.retreatSteps = boardConfig.stallRetreatSteps;
-    motor.stallState.detectThresholdTime = boardConfig.stallDetectTimeMs * 1000 / 50;  // ms × 1000 / 50us
-    motor.stallState.retreatTimeoutTime = boardConfig.stallRetreatTimeMs * 1000 / 50;
+    // 回退距离：35 电机 5° = 360°×5/360 = 1/72 圈
+    //          1/72 × 51200 步 = 711 步（≈5°）
+    motor.stallState.retreatSteps = 711;
 
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);
@@ -123,7 +113,7 @@ void Main()
 }
 
 
-/* Event Callbacks -----------------------------------------------------------*/
+/* Event Callbacks */
 uint32_t count;
 extern "C" void Tim1Callback100Hz()
 {

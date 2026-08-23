@@ -19,7 +19,6 @@ public:
         config.motionParams.ratedVelocity = 30 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
         config.motionParams.ratedVelocityAcc = 1000 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 
-        config.ctrlParams.stallProtectSwitch = false;
         config.ctrlParams.pid =
             Controller::PID_t{
                 .kp = 15,
@@ -69,7 +68,7 @@ public:
         STATE_NO_CALIB
     } State_t;
 
-    // 重构阶段2 (2026-08-23): 堵转保护状态机
+    // 堵转保护状态机（重构 2026-08-23）
     typedef enum
     {
         STALL_IDLE = 0,         // 正常运行
@@ -77,22 +76,16 @@ public:
         STALL_LOCKED = 2,       // 已锁定，保持位置
     } StallMode_t;
 
-    // 堵转保护配置（运行时 RAM，不进 EEPROM）
+    // 堵转保护运行时状态（不持久化 EEPROM，retreatSteps 在 main.cpp 初始化）
     typedef struct
     {
-        bool enabled;                   // 总开关（!STALL_EN 控制，决策 F.5）
-        StallMode_t stallMode;          // 当前状态机
-        bool lockEntryCleared;          // LOCKED 入口积分清零标志（修复 #17）
-        uint32_t stallDetectTime;       // 触发延迟计数（200ms）
-        uint32_t stallRetreatTime;      // 回退时间计数（超时 2000ms）
-        int32_t lastGoalPosition;       // 回退起点
-        int32_t lastMoveDirection;      // +1 / -1
-        // 重构阶段2.2 (2026-08-23): 新增回退参数（编译期默认，按电机类型覆盖）
-        int32_t retreatSteps;           // 回退距离（步数）：35/42=711 (5°), 57=40960 (5mm)
-        uint32_t detectThresholdTime;   // 检测延迟（200ms = 4000×50us）
-        uint32_t retreatTimeoutTime;    // 回退超时（2000ms = 40000×50us）
-        int32_t stallCurrentThreshold;  // 电流阈值（mA），默认 ratedCurrent * 95 / 100
-        int32_t stallVelocityThreshold; // 速度阈值（步数/周期），默认 MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 5
+        bool enabled;                // 总开关（!STALL_EN 控制，F.6 上电默认开）
+        StallMode_t stallMode;       // 当前状态机
+        uint32_t stallDetectTime;    // 触发延迟累加（50us/tick）
+        uint32_t stallRetreatTime;   // 回退时间累加
+        int32_t lastGoalPosition;    // 回退起点
+        int32_t lastMoveDirection;   // +1 / -1
+        int32_t retreatSteps;        // 回退距离（步数，按电机类型硬编码）
     } StallConfig_t;
 
 
@@ -126,8 +119,6 @@ public:
         {
             PID_t pid;
             DCE_t dce;
-
-            bool stallProtectSwitch;
         } Config_t;
 
 
@@ -144,9 +135,7 @@ public:
         Mode_t requestMode;
         Mode_t modeRunning;
         State_t state = STATE_STOP;
-        // 重构阶段2 (2026-08-23): isStalled 改为 stallState.stallMode（修复 #41）
-        // 保留 isStalled 作为兼容（实际值 = stallState.stallMode == STALL_LOCKED）
-        bool isStalled = false;
+        bool isStalled = false;  // LOCKED 兼容字段（= stallMode == STALL_LOCKED）
 
 
         void Init();
@@ -189,9 +178,6 @@ public:
         bool softBrake{};
         bool softNewCurve{};
         int32_t focPosition{};
-        uint32_t stalledTime{};
-        uint32_t overloadTime{};
-        bool overloadFlag{};
 
 
         void AttachConfig(Config_t* _config);
@@ -216,9 +202,7 @@ public:
     EncoderBase* encoder = nullptr;
     DriverBase* driver = nullptr;
 
-    // 重构阶段2 (2026-08-23): 堵转保护状态机实例
-    // 默认值：启用 + IDLE；具体阈值/回退步数在 main.cpp 中按电机类型覆盖
-    StallConfig_t stallState = {};
+    StallConfig_t stallState = {};  // 默认 enabled=false, stallMode=IDLE，main.cpp 初始化
 
 
     void Tick20kHz();

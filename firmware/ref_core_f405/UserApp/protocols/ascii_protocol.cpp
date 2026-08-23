@@ -157,7 +157,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
          */
         else if (s.find("STALL_EN") != std::string::npos && s.find("DIS") == std::string::npos)
         {
-            // 解析参数
             int targetIdx = -1;  // -1=全部
             if (s.find("rail") != std::string::npos) targetIdx = 0;
             else if (s.find("j1") != std::string::npos) targetIdx = 1;
@@ -198,7 +197,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s.find("STALL_STATUS") != std::string::npos)
         {
-            // 触发查询响应（响应在 dummy.QueryStallStatus 中打印）
             dummy.QueryStallStatus(&_responseChannel);
         }
         else if (s.find("STALL_RESUME") != std::string::npos)
@@ -212,14 +210,8 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             else if (s.find("j6") != std::string::npos) targetIdx = 6;
             else if (s.find("rail") != std::string::npos) targetIdx = 0;
 
-            // 解除 LOCKED 状态：发 0x01 enable 给电机，让电机端 ClearStallFlag
-            if (targetIdx == 0 || targetIdx < 0) {
-                if (targetIdx < 0) {
-                    for (int i = 0; i < 7; i++) dummy.ClearStallMode(i);
-                } else {
-                    dummy.ClearStallMode(0);
-                }
-            }
+            // 解除 LOCKED：ClearStallMode 内部会下发 Enable 让电机端 ClearStallFlag
+            dummy.ClearStallMode(targetIdx);
             Respond(_responseChannel, "ok stall resumed");
         }
 
@@ -795,6 +787,13 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             Respond(_responseChannel, "error: robot not enabled, send !START first");
             return;
         }
+        /* 重构阶段3 (2026-08-23): 堵转拦截
+         * 任意电机处于 LOCKED → 直接拒绝运动指令，提示先 !STALL_RESUME */
+        if (dummy.IsAnyMotorStalled())
+        {
+            Respond(_responseChannel, "error: motor stalled, send !STALL_RESUME first");
+            return;
+        }
         /* 运动/力矩指令直接入队，返回队列剩余空间供上位机流控 */
         uint32_t freeSize = dummy.commandHandler.Push(_cmd);
         Respond(_responseChannel, "%d", freeSize);
@@ -968,18 +967,6 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             dummy.hand->SetAngleWithCurrentLimit(1);
             Respond(_responseChannel, "ok hand close");
-        }
-        else if (s.find("STALL_EN") != std::string::npos)
-        {
-            for (int i = 0; i < 7; i++)
-                dummy.motorJ[i]->SetEnableStallProtect(true);
-            Respond(_responseChannel, "ok stall protect enabled");
-        }
-        else if (s.find("STALL_DIS") != std::string::npos)
-        {
-            for (int i = 0; i < 7; i++)
-                dummy.motorJ[i]->SetEnableStallProtect(false);
-            Respond(_responseChannel, "ok stall protect disabled");
         }
         else if (s.find("RGB_BRIGHT") != std::string::npos)
         {
@@ -1444,6 +1431,12 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         if (!dummy.IsEnabled())
         {
             Respond(_responseChannel, "error: robot not enabled, send !START first");
+            return;
+        }
+        /* 重构阶段3 (2026-08-23): 堵转拦截 */
+        if (dummy.IsAnyMotorStalled())
+        {
+            Respond(_responseChannel, "error: motor stalled, send !STALL_RESUME first");
             return;
         }
         uint32_t freeSize = dummy.commandHandler.Push(_cmd);
