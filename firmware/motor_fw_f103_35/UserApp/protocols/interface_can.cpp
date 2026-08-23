@@ -22,10 +22,11 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
     float tmpF;
     int32_t tmpI;
 
-    // LOCKED 时拒绝新指令（重构 2026-08-23）
+    // LOCKED/RETREATING 时拒绝新指令（重构 2026-08-23 + Bug #6 修复）
     // 允许的指令：0x01 (Enable，会 ClearStallFlag) / 0x02 (Calibration)
     //           / 0x7E (Erase) / 0x7F (Reboot) / 0x89 (Emergency Stop)
-    if (motor.stallState.stallMode == Motor::STALL_LOCKED &&
+    if ((motor.stallState.stallMode == Motor::STALL_LOCKED ||
+         motor.stallState.stallMode == Motor::STALL_RETREATING) &&
         _cmd != 0x01 && _cmd != 0x02 && _cmd != 0x7E && _cmd != 0x7F &&
         _cmd != 0x89) {
         return;
@@ -38,13 +39,10 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             // 重构 2026-08-24: 区分 LOCKED 与其他状态（决策 #16/#17）
             //  - 非 LOCKED: 切 VELOCITY (false→STOP / true→VELOCITY)
             //  - LOCKED:    切 POSITION + SetVelocitySetPoint(estVelocity) 防止减速冲击
-            //               requestMode 切到 POSITION 时 modeChange 自动软重启 motion planner
-            //               (见 motor.cpp L168-172 Mode Change Handling → softNewCurve=true)
             if (*(uint32_t*) (RxData) == 1) {
                 if (motor.stallState.stallMode == Motor::STALL_LOCKED) {
                     motor.controller->requestMode = Motor::MODE_COMMAND_POSITION;
-                    motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;
-                    // estVelocity 是 Controller 私有成员，用 GetVelocity() × 步/圈 转回 int32
+                    // Bug #22 修复：不要覆盖 ratedVelocity（EEPROM 字段）
                     int32_t estVelSteps = (int32_t)(
                         motor.controller->GetVelocity()
                         * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
@@ -52,9 +50,11 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
                 } else {
                     motor.controller->requestMode = Motor::MODE_COMMAND_VELOCITY;
                 }
-                // ENABLE 清除堵转状态（电机端走 0x01 → ClearStallFlag → STALL_IDLE）
+                // ENABLE 清除堵转状态
                 motor.controller->ClearStallFlag();
             } else {
+                // Bug #19 修复：disable 也清 stall
+                motor.controller->ClearStallFlag();
                 motor.controller->requestMode = Motor::MODE_STOP;
             }
             break;

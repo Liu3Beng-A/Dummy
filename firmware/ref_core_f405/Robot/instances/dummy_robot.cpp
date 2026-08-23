@@ -274,8 +274,11 @@ bool DummyRobot::MoveL(float _x, float _y, float _z, float _a, float _b, float _
 bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm)
 {
     // 重构阶段3 (2026-08-23): 堵转拦截
-    // 任意电机处于 LOCKED → 直接拒绝，返回 false
-    if (IsAnyMotorStalled()) return false;
+    // Bug #20 修复：打印提示而非静默失败
+    if (IsAnyMotorStalled()) {
+        printf("warn: MoveJ rejected, motor stalled, send !STALL_RESUME first\r\n");
+        return false;
+    }
 
     DOF6Kinematic::Joint6D_t targetJointsTmp(_j1, _j2, _j3, _j4, _j5, _j6);
     uint8_t maxIndex;
@@ -322,8 +325,11 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, fl
  */
 bool DummyRobot::ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm)
 {
-    // 重构阶段3 (2026-08-23): 堵转拦截
-    if (IsAnyMotorStalled()) return false;
+    // 重构阶段3 (2026-08-23) + Bug #20 修复
+    if (IsAnyMotorStalled()) {
+        printf("warn: ServoJ rejected, motor stalled, send !STALL_RESUME first\r\n");
+        return false;
+    }
 
     DOF6Kinematic::Joint6D_t targetJointsTmp(_j1, _j2, _j3, _j4, _j5, _j6);
 
@@ -472,22 +478,35 @@ void DummyRobot::SetStallMode(int motorIndex)
  */
 void DummyRobot::ClearStallMode(int motorIndex)
 {
+    // Bug #24 + #27 修复：先检查电机端 stallMode 是否真为 LOCKED 才发 enable
+    // 否则每次收到 0x7C IDLE 上报都会强制 SetEnable(true) → 触发 VELOCITY 模式 + softNewCurve → 电机可能突然抖动
+    bool needEnable = false;
     CtrlStepMotor::StallMode_t newMode = CtrlStepMotor::STALL_IDLE;
     if (motorIndex < 0) {
+        for (int i = 0; i < 7; i++) {
+            if (motorJ[i] && motorJ[i]->stallMode == CtrlStepMotor::STALL_LOCKED) {
+                needEnable = true;
+                break;
+            }
+        }
         for (int i = 0; i < 7; i++) {
             motorStallMask[i] = false;
             if (motorJ[i]) motorJ[i]->SetStallMode(newMode);
         }
     } else if (motorIndex >= 0 && motorIndex <= 6) {
+        needEnable = (motorJ[motorIndex] &&
+                      motorJ[motorIndex]->stallMode == CtrlStepMotor::STALL_LOCKED);
         motorStallMask[motorIndex] = false;
         if (motorJ[motorIndex]) motorJ[motorIndex]->SetStallMode(newMode);
     }
 
-    // 让电机端走 ClearStallFlag：下发 0x01 Enable
-    if (motorIndex < 0) {
-        for (int i = 0; i < 7; i++) motorJ[i]->SetEnable(true);
-    } else if (motorIndex >= 0 && motorIndex <= 6) {
-        motorJ[motorIndex]->SetEnable(true);
+    // 仅当确实有电机处于 LOCKED 时才发 enable（电机端走 ClearStallFlag 路径）
+    if (needEnable) {
+        if (motorIndex < 0) {
+            for (int i = 0; i < 7; i++) motorJ[i]->SetEnable(true);
+        } else if (motorIndex >= 0 && motorIndex <= 6) {
+            motorJ[motorIndex]->SetEnable(true);
+        }
     }
 
     // 如果所有电机都解除了 → 恢复 RGB
@@ -608,10 +627,11 @@ void DummyRobot::SetStallProtect(int motorIndex, bool _enable)
  */
 void DummyRobot::QueryStallStatus(StreamSink* _channel)
 {
-    char buf[96];
+    // Bug #11+#13 修复：文档要求 ok STALL_STATUS rail=0 j1=1 ...
+    char buf[128];
     int len = snprintf(buf, sizeof(buf),
         "ok STALL_STATUS"
-        " rail_lock=%d j1_lock=%d j2_lock=%d j3_lock=%d j4_lock=%d j5_lock=%d j6_lock=%d\r\n",
+        " rail=%d j1=%d j2=%d j3=%d j4=%d j5=%d j6=%d\r\n",
         motorStallMask[0] ? 1 : 0,
         motorStallMask[1] ? 1 : 0,
         motorStallMask[2] ? 1 : 0,
@@ -735,6 +755,18 @@ uint32_t DummyRobot::CommandHandler::Push(const std::string &_cmd)
  */
 void DummyRobot::CommandHandler::EmergencyStop()
 {
+    // Bug #16 修复（P0-5 老问题）：让所有电机立即 Brake 而不是 MoveJ + 禁用主控
+    // 通过对每个电机 SetEnable(false)，电机端 0x01 false 会:
+    //   1. ClearStallFlag (Bug #19 已修)
+    //   2. requestMode = STOP
+    // 配合主控 isEnabled=false 让所有任务停止派发
+    if (context->motorJ[0]) context->motorJ[0]->SetEnable(false);  // 地轨
+    if (context->hand) context->hand->SetEnable(false);            // 夹爪
+    for (int i = 1; i <= 6; i++) {
+        if (context->motorJ[i]) context->motorJ[i]->SetEnable(false);
+    }
+
+    // 仍然调用 MoveJ 让 MoveJ 队列清空（不再下发新位置指令）
     context->MoveJ(context->currentJoints.a[0], context->currentJoints.a[1],
                    context->currentJoints.a[2], context->currentJoints.a[3],
                    context->currentJoints.a[4], context->currentJoints.a[5],

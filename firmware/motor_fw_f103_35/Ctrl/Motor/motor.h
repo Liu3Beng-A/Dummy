@@ -86,7 +86,8 @@ public:
         int32_t lastGoalPosition;    // 回退起点
         int32_t lastMoveDirection;   // +1 / -1
         int32_t retreatSteps;        // 回退距离（步数，按电机类型硬编码）
-        uint32_t enableTimestamp;    // 2026-08-24: enable/ClearStallFlag 时间戳（HAL_GetTick），用于启动豁免期 100ms 判定
+        uint32_t enableTimestamp;    // 2026-08-24: enable/ClearStallFlag 时间戳
+        StallMode_t lastStallMode;   // Bug #28 修复：上一次 stallMode
     } StallConfig_t;
 
 
@@ -153,6 +154,8 @@ public:
         void SetBrake(bool _brake);
         void ApplyPosAsHomeOffset();
         void ClearStallFlag();
+        // Bug #7 修复（偏差-18）：RETREATING 软重启
+        void ResetMotionPlanner();
 
 
     private:

@@ -21,6 +21,8 @@ CtrlStepMotor::CtrlStepMotor(CAN_HandleTypeDef* _hcan, uint8_t _id, bool _invers
 
 void CtrlStepMotor::SetEnable(bool _enable)
 {
+    // P0-8 修复：State 枚举当前没有 IDLE，FINISH 实际语义是"已就绪可接收指令"
+    // 等价于 IDLE（等待下一个角度指令）→ 后续可加 enum 值再改
     state = _enable ? FINISH : STOP;
     if (!_enable)
         targetAngle = 0;   // 禁用时清目标，避免残留导致误判
@@ -89,6 +91,9 @@ void CtrlStepMotor::SetVelocitySetPoint(float _val)
 
 void CtrlStepMotor::SetPositionSetPoint(float _val)
 {
+    // Bug #15 修复：LOCKED 状态拒绝位置指令，避免干扰电机端保位
+    if (stallMode == STALL_LOCKED) return;
+
     uint8_t mode = 0x05;
     txHeader.StdId = nodeID << 7 | mode;
 
@@ -224,6 +229,8 @@ void CtrlStepMotor::QueryAcceleration()
 
 void CtrlStepMotor::ApplyPositionAsHome()
 {
+    // P0-7 修复：清 canBuf 避免发送残留数据
+    memset(canBuf, 0, sizeof(canBuf));
     uint8_t mode = 0x15;
     txHeader.StdId = nodeID << 7 | mode;
 

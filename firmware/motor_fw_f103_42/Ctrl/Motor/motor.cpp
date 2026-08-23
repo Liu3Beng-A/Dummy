@@ -124,10 +124,10 @@ void Motor::CloseLoopControlTick()
     {
         // LOCKED 状态：保持当前位置（PID 保位防坠落）
         // Q1 A1（2026-08-24 用户拍板）：状态切换那一帧一次性 ClearIntegral 清 RETREATING 累积的脏 I 项
-        static StallMode_t lastMode = STALL_IDLE;
-        if (lastMode != STALL_LOCKED) {
+        // Bug #28 修复：lastMode 必须随 ClearStallFlag 一起重置，否则第二次 LOCKED 时不清 I 项
+        if (stallState.lastStallMode != STALL_LOCKED) {
             controller->ClearIntegral();
-            lastMode = STALL_LOCKED;
+            stallState.lastStallMode = STALL_LOCKED;
         }
         controller->CalcDceToOutput(controller->softPosition, controller->softVelocity);
     } else if (controller->softBrake)
@@ -360,11 +360,10 @@ void Motor::CloseLoopControlTick()
                 int32_t retreatTarget = stallState.lastGoalPosition
                                       - stallState.lastMoveDirection * stallState.retreatSteps;
                 controller->SetPositionSetPoint(retreatTarget);
-                // 软重启 motion planner（决策 #18）：modeRunning==POSITION 不会自动切 → 强制 STOP→POSITION
-                if (controller->modeRunning == Motor::MODE_COMMAND_POSITION) {
-                    controller->requestMode = Motor::MODE_STOP;
-                    controller->requestMode = Motor::MODE_COMMAND_POSITION;
-                }
+                // 软重启 motion planner（Bug #7 修复 / 偏差-18）：
+                // 用 public ResetMotionPlanner() 触发 softNewCurve=true
+                // 之前用 requestMode=STOP→POSITION 同一周期无效，Mode Change Handling 检测不变
+                controller->ResetMotionPlanner();
 
                 stallState.stallRetreatTime += motionPlanner.CONTROL_PERIOD;
 
@@ -628,8 +627,31 @@ void Motor::Controller::ClearStallFlag()
     context->stallState.stallDetectTime = 0;
     context->stallState.stallRetreatTime = 0;
     context->stallState.stallMode = STALL_IDLE;
+    // Bug #28 修复：重置 lastStallMode 让下次 LOCKED 入口能正常触发 ClearIntegral
+    context->stallState.lastStallMode = STALL_IDLE;
     // 启动豁免期（2026-08-24 决策）：记录 enable 时间戳，启动后 100ms 内不检测堵转
     context->stallState.enableTimestamp = HAL_GetTick();
+    // Bug #1 修复（偏差-24）：ClearStallFlag 主动发 0x7C IDLE 上报，让主控 mask 立即清零
+    // 否则 CAN 丢包时主控不知道电机已退出 LOCKED，MoveJ 一直拦截
+    CAN_TxHeaderTypeDef txHdr = {};
+    txHdr.StdId = (boardConfig.canNodeId << 7) | 0x7C;
+    txHdr.IDE = CAN_ID_STD;
+    txHdr.RTR = CAN_RTR_DATA;
+    txHdr.DLC = 8;
+    uint8_t txData[8] = {
+        (uint8_t)boardConfig.canNodeId,
+        (uint8_t)STALL_IDLE,
+        0, 0, 1, 0, 0, 0
+    };
+    CAN_Send(&txHdr, txData);
+}
+
+
+void Motor::Controller::ResetMotionPlanner()
+{
+    // Bug #7 修复（偏差-18）：直接设 softNewCurve=true
+    // 下一周期 Motion Plan 块会执行 positionTracker.NewTask() 重新规划
+    softNewCurve = true;
 }
 
 

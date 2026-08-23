@@ -122,10 +122,10 @@ void Motor::CloseLoopControlTick()
     {
         // LOCKED 状态：保持当前位置（PID 保位防坠落）
         // Q1 A1（2026-08-24）：状态切换那一帧一次性 ClearIntegral 清 RETREATING 累积的脏 I 项
-        static StallMode_t lastMode = STALL_IDLE;
-        if (lastMode != STALL_LOCKED) {
+        // Bug #28 修复：lastStallMode 跟随 stallState 而非 static，避免反复 LOCKED 时失效
+        if (stallState.lastStallMode != STALL_LOCKED) {
             controller->ClearIntegral();
-            lastMode = STALL_LOCKED;
+            stallState.lastStallMode = STALL_LOCKED;
         }
         controller->CalcDceToOutput(controller->softPosition, controller->softVelocity);
     } else if (controller->softBrake)
@@ -360,11 +360,8 @@ void Motor::CloseLoopControlTick()
                 int32_t retreatTarget = stallState.lastGoalPosition
                                       - stallState.lastMoveDirection * stallState.retreatSteps;
                 controller->SetPositionSetPoint(retreatTarget);
-                // 软重启 motion planner（决策 #18）：modeRunning==POSITION 不会自动切 → 强制 STOP→POSITION
-                if (controller->modeRunning == Motor::MODE_COMMAND_POSITION) {
-                    controller->requestMode = Motor::MODE_STOP;
-                    controller->requestMode = Motor::MODE_COMMAND_POSITION;
-                }
+                // Bug #7 修复（偏差-18）：用 ResetMotionPlanner() 触发 softNewCurve=true
+                controller->ResetMotionPlanner();
 
                 stallState.stallRetreatTime += motionPlanner.CONTROL_PERIOD;
 
@@ -636,8 +633,29 @@ void Motor::Controller::ClearStallFlag()
     context->stallState.stallDetectTime = 0;
     context->stallState.stallRetreatTime = 0;
     context->stallState.stallMode = STALL_IDLE;
+    // Bug #28 修复：重置 lastStallMode
+    context->stallState.lastStallMode = STALL_IDLE;
     // 启动豁免期（2026-08-24 决策）：记录 enable 时间戳，启动后 100ms 内不检测堵转
     context->stallState.enableTimestamp = HAL_GetTick();
+    // Bug #1 修复（偏差-24）：ClearStallFlag 主动发 0x7C IDLE 上报
+    CAN_TxHeaderTypeDef txHdr = {};
+    txHdr.StdId = (boardConfig.canNodeId << 7) | 0x7C;
+    txHdr.IDE = CAN_ID_STD;
+    txHdr.RTR = CAN_RTR_DATA;
+    txHdr.DLC = 8;
+    uint8_t txData[8] = {
+        (uint8_t)boardConfig.canNodeId,
+        (uint8_t)STALL_IDLE,
+        0, 0, 1, 0, 0, 0
+    };
+    CAN_Send(&txHdr, txData);
+}
+
+
+void Motor::Controller::ResetMotionPlanner()
+{
+    // Bug #7 修复（偏差-18）
+    softNewCurve = true;
 }
 
 
