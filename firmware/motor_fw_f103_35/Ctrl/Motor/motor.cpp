@@ -7,16 +7,20 @@
 
 
 /*================================================================
- * 堵转保护硬编码常量（D4 方案，2026-08-23 重构）
+ * 堵转保护硬编码常量（D4 方案，2026-08-23 重构 + 2026-08-24 决策修订）
  * 不进 EEPROM，不接受运行时调参。修改后必须重新编译。
+ *
+ * Q1 A1（用户 2026-08-24 拍板）：LOCKED 入口 ClearIntegral 清 RETREATING 累积的脏 I 项
+ * Q2（用户 2026-08-24 拍板）：RETREATING→LOCKED 阈值 5 步（替换原 1/10 圈 = 5120 步容差）
  *================================================================*/
 static constexpr int32_t D4_PERROR_THRESHOLD      = 800;     // 位置模式：estError > 800 步（≈1.5625°）视为"有控制意图"
-static constexpr int32_t D4_IS_POWERING_RATIO     = 25;      // 通电判定：|focCurrent| > rated × 25/100
+static constexpr int32_t D4_IS_POWERING_RATIO     = 75;      // 通电判定：|focCurrent| > rated × 75/100（2026-08-23 24:00 决策，1A 限幅场景自适应）
 static constexpr int32_t D4_COMMANDING_CUR_RATIO  = 10;      // 力矩模式：|goalCurrent| > rated × 10/100 视为"有意施加力"
-static constexpr int32_t D4_STARTUP_GRACE_MS      = 500;     // 启动豁免期：ClearStallFlag 后 500ms 不检测
+static constexpr int32_t D4_STARTUP_GRACE_MS      = 100;     // 启动豁免期：ClearStallFlag/enable 后 100ms 不检测堵转
 static constexpr int32_t D4_VELOCITY_THRESHOLD    = (200 * 256) / 5;  // 1/5 圈/周期 = 10240 步
 static constexpr uint32_t STALL_DETECT_TICKS      = 4000;    // 触发延迟 200ms（50us × 4000）
 static constexpr uint32_t STALL_RETREAT_TICKS     = 40000;   // 回退超时 2000ms（50us × 40000）
+static constexpr int32_t STALL_RETREAT_DONE_THRESHOLD = 5;   // Q2：RETREATING→LOCKED 阈值（误差 < 5 步即认为回退到位）
 
 
 void Motor::Tick20kHz()
@@ -119,7 +123,13 @@ void Motor::CloseLoopControlTick()
     } else if (stallState.stallMode == STALL_LOCKED)
     {
         // LOCKED 状态：保持当前位置（PID 保位防坠落）
-        // 不调 ClearIntegral，避免位置环积分清零导致保持位置误差累计
+        // Q1 A1（2026-08-24 用户拍板）：状态切换那一帧一次性 ClearIntegral 清 RETREATING 累积的脏 I 项
+        //  后续靠 P 项 + DCE 重积分自动输出保位力矩
+        static StallMode_t lastMode = STALL_IDLE;
+        if (lastMode != STALL_LOCKED) {
+            controller->ClearIntegral();
+            lastMode = STALL_LOCKED;
+        }
         // 直接走 DCE 闭环，softPosition 已停在当前位置
         controller->CalcDceToOutput(controller->softPosition, controller->softVelocity);
     } else if (controller->softBrake)
@@ -280,10 +290,17 @@ void Motor::CloseLoopControlTick()
     controller->softBrake = controller->goalBrake;
 
     /******************************** Stall State Machine (D4) ********************************/
+    // 启动豁免期（2026-08-24 决策）：ClearStallFlag / 初次 enable 后 100ms 不检测堵转
+    // 否则电机刚 enable 时 PID I 项为空、电流/速度未稳定，立刻做堵转判定会误触发
+    const uint32_t tNow = HAL_GetTick();
+    const bool inStartupGrace = stallState.enabled && stallState.enableTimestamp > 0
+        && (tNow - stallState.enableTimestamp) < (uint32_t)D4_STARTUP_GRACE_MS;
+
     if (stallState.enabled &&
         !controller->softDisable &&
         encoder->IsCalibrated() &&
-        !encoder->HasNoMagnet())
+        !encoder->HasNoMagnet() &&
+        !inStartupGrace)
     {
         switch (stallState.stallMode)
         {
@@ -346,12 +363,22 @@ void Motor::CloseLoopControlTick()
                 int32_t retreatTarget = stallState.lastGoalPosition
                                       - stallState.lastMoveDirection * stallState.retreatSteps;
                 controller->SetPositionSetPoint(retreatTarget);
+                // 软重启 motion planner（决策 #18）：
+                //   modeChange 路径中 softNewCurve 自动置位（motor.cpp L168-172），
+                //   所以这里调用 SetPositionSetPoint 后等下一次 modeRunning != requestMode 自动触发。
+                //   但 RETREATING 期间 modeRunning==POSITION 不会切换 → 必须主动切 STOP→POSITION 一次
+                //   才能让 motion planner 重启。最简单办法：直接设 requestMode=STOP 后再回 POSITION。
+                //   副作用：每个 RETREATING tick 切一次模式，性能开销小（< 1us）但能保证 retreatTarget 生效。
+                if (controller->modeRunning == Motor::MODE_COMMAND_POSITION) {
+                    controller->requestMode = Motor::MODE_STOP;
+                    controller->requestMode = Motor::MODE_COMMAND_POSITION;
+                }
 
                 stallState.stallRetreatTime += motionPlanner.CONTROL_PERIOD;
 
-                // LOCKED 触发条件：超时 或 已回退到位（< 1/10 圈）
+                // LOCKED 触发条件：超时 或 已回退到位（< 5 步，Q2 决策 2026-08-24）
                 bool reachedRetreat = (abs(controller->realPosition - retreatTarget)
-                                       < MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 10);
+                                       < STALL_RETREAT_DONE_THRESHOLD);
 
                 if (stallState.stallRetreatTime >= STALL_RETREAT_TICKS || reachedRetreat)
                 {
@@ -610,8 +637,8 @@ void Motor::Controller::ClearStallFlag()
     context->stallState.stallDetectTime = 0;
     context->stallState.stallRetreatTime = 0;
     context->stallState.stallMode = STALL_IDLE;
-    // D4 启动豁免期基准时间戳（首次 enable 后给 500ms 稳定窗口）
-    // 这里不引入新字段，由 idle 状态机的 commandingMotion 自然忽略短时误差
+    // 启动豁免期（2026-08-24 决策）：记录 enable 时间戳，启动后 100ms 内不检测堵转
+    context->stallState.enableTimestamp = HAL_GetTick();
 }
 
 

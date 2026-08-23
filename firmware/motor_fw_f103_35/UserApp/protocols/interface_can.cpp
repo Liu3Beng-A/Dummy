@@ -35,13 +35,33 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
     {
         // 0x00~0x0F No Memory CMDs
         case 0x01:  // Enable Motor
-            motor.controller->requestMode = (*(uint32_t*) (RxData) == 1) ?
-                                            Motor::MODE_COMMAND_VELOCITY : Motor::MODE_STOP;
-            // ENABLE 清除堵转状态（电机端走 0x01 → ClearStallFlag → STALL_IDLE）
-            if (*(uint32_t*) (RxData) == 1)
+            // 重构 2026-08-24: 区分 LOCKED 与其他状态（决策 #16/#17）
+            //  - 非 LOCKED: 切 VELOCITY (false→STOP / true→VELOCITY)
+            //  - LOCKED:    切 POSITION + SetVelocitySetPoint(estVelocity) 防止减速冲击
+            //               requestMode 切到 POSITION 时 modeChange 自动软重启 motion planner
+            //               (见 motor.cpp L168-172 Mode Change Handling → softNewCurve=true)
+            if (*(uint32_t*) (RxData) == 1) {
+                if (motor.stallState.stallMode == Motor::STALL_LOCKED) {
+                    motor.controller->requestMode = Motor::MODE_COMMAND_POSITION;
+                    motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;
+                    // estVelocity 是 Controller 私有成员，用 GetVelocity() × 步/圈 转回 int32
+                    int32_t estVelSteps = (int32_t)(
+                        motor.controller->GetVelocity()
+                        * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+                    motor.controller->SetVelocitySetPoint(estVelSteps);
+                } else {
+                    motor.controller->requestMode = Motor::MODE_COMMAND_VELOCITY;
+                }
+                // ENABLE 清除堵转状态（电机端走 0x01 → ClearStallFlag → STALL_IDLE）
                 motor.controller->ClearStallFlag();
+            } else {
+                motor.controller->requestMode = Motor::MODE_STOP;
+            }
             break;
         case 0x02:  // Do Calibration
+            // 重构 2026-08-24: encoder_calibrator 入口强制 stallMode=IDLE（决策 #34）
+            // 否则校准过程中可能误触 LOCKED 导致编码器偏移异常
+            motor.controller->ClearStallFlag();
             encoderCalibrator.isTriggered = true;
             break;
         case 0x03:  // Set Current SetPoint

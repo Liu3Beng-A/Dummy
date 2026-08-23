@@ -86,6 +86,7 @@ public:
         int32_t lastGoalPosition;    // 回退起点
         int32_t lastMoveDirection;   // +1 / -1
         int32_t retreatSteps;        // 回退距离（步数，按电机类型硬编码）
+        uint32_t enableTimestamp;    // 2026-08-24: enable/ClearStallFlag 时间戳（HAL_GetTick），启动豁免期 100ms 判定
     } StallConfig_t;
 
 

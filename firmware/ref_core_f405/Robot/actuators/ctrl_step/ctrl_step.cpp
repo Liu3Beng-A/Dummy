@@ -24,6 +24,9 @@ void CtrlStepMotor::SetEnable(bool _enable)
     state = _enable ? FINISH : STOP;
     if (!_enable)
         targetAngle = 0;   // 禁用时清目标，避免残留导致误判
+    // 重构 2026-08-24 偏差-23 / 文档 C3：disable 时同步清 stallMode（电机端也会发 ClearStallFlag）
+    if (!_enable)
+        stallMode = STALL_IDLE;
 
     uint8_t mode = 0x01;
     txHeader.StdId = nodeID << 7 | mode;
@@ -289,6 +292,8 @@ void CtrlStepMotor::EraseConfigs()
 
 void CtrlStepMotor::SetAngle(float _angle)
 {
+    // 重构 2026-08-24 偏差-14：LOCKED 时不发位置命令给电机端（电机端会拒收，浪费 CAN）
+    if (stallMode != STALL_IDLE) return;
     _angle = inverseDirection ? -_angle : _angle;
     float stepMotorCnt = _angle / 360.0f * (float) reduction;
     SetPositionSetPoint(stepMotorCnt);
@@ -297,6 +302,8 @@ void CtrlStepMotor::SetAngle(float _angle)
 
 void CtrlStepMotor::SetAngleWithVelocityLimit(float _angle, float _vel)
 {
+    // 重构 2026-08-24 偏差-14：LOCKED 时不发位置命令给电机端
+    if (stallMode != STALL_IDLE) return;
     _angle = inverseDirection ? -_angle : _angle;
     float stepMotorCnt = _angle / 360.0f * (float) reduction;
     SetPositionWithVelocityLimit(stepMotorCnt, _vel);
@@ -324,6 +331,16 @@ void CtrlStepMotor::UpdateAngleCallback(float _pos, bool _isFinished)
 void CtrlStepMotor::SetStallMode()
 {
     state = STALL;
+}
+
+// 重构 2026-08-24 偏差-21：电机端 0x7C 上报时由 DummyRobot::SetStallMode 内部调用
+void CtrlStepMotor::SetStallMode(CtrlStepMotor::StallMode_t _mode)
+{
+    stallMode = _mode;
+    if (_mode == StallMode_t::STALL_LOCKED)
+        state = STALL;
+    else if (_mode == StallMode_t::STALL_IDLE)
+        state = FINISH;   // 解锁后认为 FINISH（电机端 LOCKED 分支走 CalcDceToOutput 输出保位力矩，已稳定）
 }
 
 

@@ -165,12 +165,19 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("[I_LIMIT] MOTOR [9] = %.2f\r\n", *(float*)data);
                     break;
                 case 0x7C:
-                    // 重构阶段3+4 (2026-08-23): 0x7C 完整状态机上报
-                    // data[0]=nodeID, data[1]=stallMode(0=IDLE/1=RETREATING/2=LOCKED), data[2~3]=i_q(mA), data[4]=enabled
-                    if (data[1] == 2 /* STALL_LOCKED */) {
-                        dummy.SetStallMode(0);  // 地轨 motorJ[0]
-                    } else if (data[1] == 0 /* STALL_IDLE */) {
-                        dummy.ClearStallMode(0);
+                    // 重构阶段3+4 (2026-08-23) + 2026-08-24 偏差-21：
+                    // 0x7C 完整状态机上报，更新 CtrlStepMotor::stallMode 让 SetAngle 自动拦截
+                    // data[0]=nodeID, data[1]=stallMode(0=IDLE/1=RETREATING/2=LOCKED)
+                    {
+                        CtrlStepMotor::StallMode_t m = (CtrlStepMotor::StallMode_t)data[1];
+                        // 同步更新 dummy.motorJ[0]->stallMode 与 motorStallMask
+                        dummy.motorJ[0]->SetStallMode(m);
+                        if (data[1] == 2 /* STALL_LOCKED */) {
+                            dummy.SetStallMode(0);  // 地轨 motorJ[0]（同时刷 mask）
+                        } else if (data[1] == 0 /* STALL_IDLE */) {
+                            dummy.ClearStallMode(0);
+                        }
+                        // RETREATING 暂不动作（等电机端发 LOCKED）
                     }
                     break;
                 default:
@@ -253,12 +260,15 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("[I_LIMIT] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
                     break;
                 case 0x7C:
-                    // 重构阶段3+4 (2026-08-23): 0x7C 完整状态机上报
-                    // data[0]=nodeID, data[1]=stallMode(0=IDLE/1=RETREATING/2=LOCKED), data[2~3]=i_q(mA), data[4]=enabled
-                    if (data[1] == 2 /* STALL_LOCKED */) {
-                        dummy.SetStallMode((int)id);  // id 1~6 → motorJ[1~6]
-                    } else if (data[1] == 0 /* STALL_IDLE */) {
-                        dummy.ClearStallMode((int)id);
+                    // 重构阶段3+4 + 2026-08-24 偏差-21：同步更新 CtrlStepMotor::stallMode
+                    {
+                        CtrlStepMotor::StallMode_t m = (CtrlStepMotor::StallMode_t)data[1];
+                        dummy.motorJ[id]->SetStallMode(m);
+                        if (data[1] == 2 /* STALL_LOCKED */) {
+                            dummy.SetStallMode((int)id);  // id 1~6 → motorJ[1~6]
+                        } else if (data[1] == 0 /* STALL_IDLE */) {
+                            dummy.ClearStallMode((int)id);
+                        }
                     }
                     break;
                 default:

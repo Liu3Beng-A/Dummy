@@ -71,9 +71,12 @@ void Main()
     // F.6: 上电默认开启（覆盖 EEPROM）
     motor.stallState.enabled = true;
     motor.stallState.stallMode = Motor::STALL_IDLE;
-    // 回退距离：35 电机 5° = 360°×5/360 = 1/72 圈
-    //          1/72 × 51200 步 = 711 步（≈5°）
-    motor.stallState.retreatSteps = 711;
+    // 回退距离（2026-08-23 决策 #7 / 偏差-4）：
+    //   35 电机（关节电机，50:1 减速，50:1）输出轴 5°
+    //   1° = 51200/360 = 142.2 步（电机端），5° × 50 = 7111 步（关节端）
+    //   修正：关节电机 50:1 → 电机端 5°×50 = 250° = 35556 步
+    //   注：上一版 711 步是文档偏差-4 中的旧值，按 60 项 #7 决策修正
+    motor.stallState.retreatSteps = 35556;
 
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);

@@ -65,8 +65,8 @@ void Main()
     // F.6: 上电默认开启（覆盖 EEPROM）
     motor.stallState.enabled = true;
     motor.stallState.stallMode = Motor::STALL_IDLE;
-    // 回退距离：57 电机（地轨）5mm = 40960 × 5 = 204800 步
-    motor.stallState.retreatSteps = 204800;
+    // 回退距离（2026-08-23 决策 #7 / 偏差-4）：57 电机（地轨，丝杆1605直驱）5mm = 1 圈 = 51200 步
+    motor.stallState.retreatSteps = 51200;
 
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);

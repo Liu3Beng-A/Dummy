@@ -437,13 +437,21 @@ void DummyRobot::SetStallMode()
 /**
  * @brief 标记电机为 LOCKED 状态（由 can_protocol 收到 0x7C 时调用）
  * @param motorIndex -1 表示全部电机
+ *
+ * 重构 2026-08-24：同步更新对应 CtrlStepMotor 的 stallMode 字段
+ * （偏差-21 / 文档 #47/#54），让 SetAngle/SetAngleWithVelocityLimit 自动拦截
  */
 void DummyRobot::SetStallMode(int motorIndex)
 {
+    CtrlStepMotor::StallMode_t newMode = CtrlStepMotor::STALL_LOCKED;
     if (motorIndex < 0) {
-        for (int i = 0; i < 7; i++) motorStallMask[i] = true;
+        for (int i = 0; i < 7; i++) {
+            motorStallMask[i] = true;
+            if (motorJ[i]) motorJ[i]->SetStallMode(newMode);
+        }
     } else if (motorIndex >= 0 && motorIndex <= 6) {
         motorStallMask[motorIndex] = true;
+        if (motorJ[motorIndex]) motorJ[motorIndex]->SetStallMode(newMode);
     }
 
     // 切换 RGB 为红色心跳，视觉提示堵转
@@ -458,21 +466,24 @@ void DummyRobot::SetStallMode(int motorIndex)
 }
 
 /**
- * @brief 解除 LOCKED 状态（重构 2026-08-23）
+ * @brief 解除 LOCKED 状态（重构 2026-08-23 + 2026-08-24 偏差-21）
  * 通过下发 0x01 Enable 给电机，让电机端走 ClearStallFlag 路径
  * @param motorIndex -1 表示全部电机
  */
 void DummyRobot::ClearStallMode(int motorIndex)
 {
-    // 清除主控 mask
+    CtrlStepMotor::StallMode_t newMode = CtrlStepMotor::STALL_IDLE;
     if (motorIndex < 0) {
-        for (int i = 0; i < 7; i++) motorStallMask[i] = false;
+        for (int i = 0; i < 7; i++) {
+            motorStallMask[i] = false;
+            if (motorJ[i]) motorJ[i]->SetStallMode(newMode);
+        }
     } else if (motorIndex >= 0 && motorIndex <= 6) {
         motorStallMask[motorIndex] = false;
+        if (motorJ[motorIndex]) motorJ[motorIndex]->SetStallMode(newMode);
     }
 
     // 让电机端走 ClearStallFlag：下发 0x01 Enable
-    // 电机端 0x01 处理中会自动 ClearStallFlag（接口_can.cpp:0x01）
     if (motorIndex < 0) {
         for (int i = 0; i < 7; i++) motorJ[i]->SetEnable(true);
     } else if (motorIndex >= 0 && motorIndex <= 6) {
@@ -504,7 +515,10 @@ void DummyRobot::Homing()
     MoveJ(0, 0, 90, 0, 0, 0, 0);  // 归零姿态，地轨=0mm
     MoveJoints(targetJoints);
     MoveRail(targetRailPos);
-    while (IsMoving())
+    // 重构 2026-08-24 偏差-22 / 文档 C2：加 stall 检查 + 10s 超时（防堵转时死锁）
+    uint32_t t0 = millis();
+    while (IsMoving() && IsEnabled() && !IsAnyMotorStalled()
+           && (millis() - t0 < 10000))
         osDelay(10);
 
     SetJointSpeed(lastSpeed);
@@ -522,7 +536,10 @@ void DummyRobot::Resting()
           REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5], 0);  // 待机姿态，地轨=0mm
     MoveJoints(targetJoints);
     MoveRail(targetRailPos);
-    while (IsMoving())
+    // 重构 2026-08-24 偏差-22 / 文档 C5：加 stall 检查 + 10s 超时
+    uint32_t t0 = millis();
+    while (IsMoving() && IsEnabled() && !IsAnyMotorStalled()
+           && (millis() - t0 < 10000))
         osDelay(10);
 
     SetJointSpeed(lastSpeed);
@@ -553,6 +570,14 @@ void DummyRobot::SetEnable(bool _enable)
     motorJ[0]->SetEnable(_enable);  // 地轨
     hand->SetEnable(_enable);       // 夹爪
     isEnabled = _enable;
+
+    // 重构 2026-08-24 偏差-23 / 文档 C3：disable 时清主控 motorStallMask
+    if (!_enable) {
+        for (int i = 0; i < 7; i++) {
+            motorStallMask[i] = false;
+            if (motorJ[i]) motorJ[i]->SetStallMode(CtrlStepMotor::STALL_IDLE);
+        }
+    }
 
     // F.6 (2026-08-23 决策): SetEnable(true) 后自动恢复堵转保护开启
     // 不管用户之前是否发了 !STALL_DIS，下次 enable 时都强制开启
