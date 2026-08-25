@@ -1,24 +1,8 @@
 #include "configurations.h"
 #include "motor.h"
 #include <can.h>
-#include "stm32f1xx_hal.h"  // HAL_GetTick 用于 LOCKED 时上报时间戳
 
 #include <cmath>
-
-
-/*================================================================
- * 堵转保护硬编码常量（D4 方案，2026-08-23 重构 + 2026-08-24 决策修订）
- * Q1 A1：LOCKED 入口 ClearIntegral 清 RETREATING 累积的脏 I 项
- * Q2：RETREATING→LOCKED 阈值 5 步
- *================================================================*/
-static constexpr int32_t D4_PERROR_THRESHOLD      = 800;
-static constexpr int32_t D4_IS_POWERING_RATIO     = 75;
-static constexpr int32_t D4_COMMANDING_CUR_RATIO  = 10;
-static constexpr int32_t D4_STARTUP_GRACE_MS      = 100;
-static constexpr int32_t D4_VELOCITY_THRESHOLD    = (200 * 256) / 5;
-static constexpr uint32_t STALL_DETECT_TICKS      = 4000;
-static constexpr uint32_t STALL_RETREAT_TICKS     = 40000;
-static constexpr int32_t STALL_RETREAT_DONE_THRESHOLD = 5;   // Q2
 
 
 void Motor::Tick20kHz()
@@ -118,16 +102,12 @@ void Motor::CloseLoopControlTick()
         controller->focPosition = 0;    // clear outputs
         controller->focCurrent = 0;
         driver->Sleep();
-    } else if (stallState.stallMode == STALL_LOCKED)
+    } else if (controller->isStalled)
     {
-        // LOCKED 状态：保持当前位置（PID 保位防坠落）
-        // Q1 A1（2026-08-24）：状态切换那一帧一次性 ClearIntegral 清 RETREATING 累积的脏 I 项
-        // Bug #28 修复：lastStallMode 跟随 stallState 而非 static，避免反复 LOCKED 时失效
-        if (stallState.lastStallMode != STALL_LOCKED) {
-            controller->ClearIntegral();
-            stallState.lastStallMode = STALL_LOCKED;
-        }
-        controller->CalcDceToOutput(controller->softPosition, controller->softVelocity);
+        // P1-32 fix: stall does NOT sleep - maintain minimum holding torque
+        // to prevent arm free-fall under gravity. Fall through to normal
+        // control loop which will output low holding current.
+        controller->ClearIntegral();
     } else if (controller->softBrake)
     {
         controller->ClearIntegral();
@@ -170,7 +150,7 @@ void Motor::CloseLoopControlTick()
         }
     }
 
-    /******************************* Mode Change Handling *******************************/
+    /******************************* Mode Change Handle *******************************/
     if (controller->modeRunning != controller->requestMode)
     {
         controller->modeRunning = controller->requestMode;
@@ -198,9 +178,7 @@ void Motor::CloseLoopControlTick()
     {
         controller->softNewCurve = false;
         controller->ClearIntegral();
-        // 重构 2026-08-23: 不再无条件 ClearStallFlag
-        // LOCKED 状态下新曲线不会破坏状态机（LOCKED 分支只看 stallMode）
-        // IDLE 状态下 ClearStallFlag 本身是 no-op
+        controller->ClearStallFlag();
 
         switch (controller->modeRunning)
         {
@@ -237,7 +215,7 @@ void Motor::CloseLoopControlTick()
         }
     }
 
-    /******************************* Update Soft Goal ********************************/
+    /******************************* Update Soft Goal *******************************/
     switch (controller->modeRunning)
     {
         case MODE_STOP:
@@ -287,119 +265,57 @@ void Motor::CloseLoopControlTick()
     controller->softDisable = controller->goalDisable;
     controller->softBrake = controller->goalBrake;
 
-    /******************************** Stall State Machine (D4) ********************************/
-    // 启动豁免期（2026-08-24 决策）：ClearStallFlag / 初次 enable 后 100ms 不检测堵转
-    const uint32_t tNow = HAL_GetTick();
-    const bool inStartupGrace = stallState.enabled && stallState.enableTimestamp > 0
-        && (tNow - stallState.enableTimestamp) < (uint32_t)D4_STARTUP_GRACE_MS;
+    /******************************** State Check ********************************/
+    int32_t current = abs(controller->focCurrent);
 
-    if (stallState.enabled &&
-        !controller->softDisable &&
-        encoder->IsCalibrated() &&
-        !encoder->HasNoMagnet() &&
-        !inStartupGrace)
+    // stallThreshold 需在 stallProtectSwitch 判断外层声明，供 overload 检测复用
+    const int32_t stallThreshold = (int32_t)(config.motionParams.ratedCurrent * 95 / 100);
+
+    // Stall detect
+    if (controller->config->stallProtectSwitch)
     {
-        switch (stallState.stallMode)
+        if (// Current Mode
+            ((controller->modeRunning == MODE_COMMAND_CURRENT ||
+              controller->modeRunning == MODE_PWM_CURRENT) &&
+             (current != 0))
+            || // Other Mode: current >= ratedCurrent * 0.95
+            current >= stallThreshold)
         {
-            case STALL_IDLE:
+            if (abs(controller->estVelocity) < MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 5)
             {
-                // D4 三元组：commandingMotion ∧ actuallyStopped ∧ isPowering
-                // ───── 1. commandingMotion：控制意图判定 ─────
-                bool isTorqueMode = (controller->modeRunning == MODE_COMMAND_CURRENT
-                                  || controller->modeRunning == MODE_PWM_CURRENT);
-                bool commandingMotion = isTorqueMode
-                    ? (abs(controller->goalCurrent)
-                       > (int32_t)(config.motionParams.ratedCurrent * D4_COMMANDING_CUR_RATIO / 100))
-                    : (abs(controller->estError) > D4_PERROR_THRESHOLD);
-
-                // ───── 2. actuallyStopped：电机是否在动 ─────
-                bool actuallyStopped = (abs(controller->estVelocity) < D4_VELOCITY_THRESHOLD);
-
-                // ───── 3. isPowering：电机是否通电（按 rated 比例，避开 1A 限制下 focCurrent 偏低的问题） ─────
-                bool isPowering = (abs(controller->focCurrent)
-                                  > (int32_t)(config.motionParams.ratedCurrent * D4_IS_POWERING_RATIO / 100));
-
-                if (commandingMotion && actuallyStopped && isPowering)
-                {
-                    stallState.stallDetectTime += motionPlanner.CONTROL_PERIOD;
-                    if (stallState.stallDetectTime >= STALL_DETECT_TICKS)
-                    {
-                        // 200ms 持续条件满足 → 触发 RETREATING
-                        stallState.stallMode = STALL_RETREATING;
-                        stallState.stallRetreatTime = 0;
-                        stallState.lastGoalPosition = controller->goalPosition;
-                        stallState.lastMoveDirection = (controller->estVelocity >= 0) ? +1 : -1;
-
-                        // 上报 RETREATING
-                        CAN_TxHeaderTypeDef txHdr = {};
-                        txHdr.StdId = (boardConfig.canNodeId << 7) | 0x7C;
-                        txHdr.IDE = CAN_ID_STD;
-                        txHdr.RTR = CAN_RTR_DATA;
-                        txHdr.DLC = 8;
-                        uint8_t txData[8] = {
-                            (uint8_t)boardConfig.canNodeId,
-                            (uint8_t)STALL_RETREATING,
-                            (uint8_t)(controller->focCurrent & 0xFF),
-                            (uint8_t)((controller->focCurrent >> 8) & 0xFF),
-                            1, 0, 0, 0
-                        };
-                        CAN_Send(&txHdr, txData);
-                    }
-                }
-                else
-                {
-                    // 任一条件不满足 → 重置检测计数
-                    stallState.stallDetectTime = 0;
-                }
-                break;
-            }
-
-            case STALL_RETREATING:
-            {
-                // 强制反向 retreatSteps，电机自动朝反方向走出堵转位置
-                int32_t retreatTarget = stallState.lastGoalPosition
-                                      - stallState.lastMoveDirection * stallState.retreatSteps;
-                controller->SetPositionSetPoint(retreatTarget);
-                // Bug #7 修复（偏差-18）：用 ResetMotionPlanner() 触发 softNewCurve=true
-                controller->ResetMotionPlanner();
-
-                stallState.stallRetreatTime += motionPlanner.CONTROL_PERIOD;
-
-                // LOCKED 触发条件：超时 或 已回退到位（< 5 步，Q2 决策 2026-08-24）
-                bool reachedRetreat = (abs(controller->realPosition - retreatTarget)
-                                       < STALL_RETREAT_DONE_THRESHOLD);
-
-                if (stallState.stallRetreatTime >= STALL_RETREAT_TICKS || reachedRetreat)
-                {
-                    stallState.stallMode = STALL_LOCKED;
+                if (controller->stalledTime >= 1000 * 1000) {
                     controller->isStalled = true;
-
-                    // 上报 LOCKED
+                    // 主动上报堵转: StdId = (nodeID << 7) | 0x7C, Data[0]=nodeID, Data[1]=1(stall)
                     CAN_TxHeaderTypeDef txHdr = {};
                     txHdr.StdId = (boardConfig.canNodeId << 7) | 0x7C;
                     txHdr.IDE = CAN_ID_STD;
                     txHdr.RTR = CAN_RTR_DATA;
                     txHdr.DLC = 8;
-                    uint8_t txData[8] = {
-                        (uint8_t)boardConfig.canNodeId,
-                        (uint8_t)STALL_LOCKED,
-                        (uint8_t)(controller->focCurrent & 0xFF),
-                        (uint8_t)((controller->focCurrent >> 8) & 0xFF),
-                        1, 0, 0, 0
-                    };
+                    uint8_t txData[8] = { (uint8_t)boardConfig.canNodeId, 1, 0, 0, 0, 0, 0, 0 };
                     CAN_Send(&txHdr, txData);
                 }
-                break;
+                else
+                    controller->stalledTime += motionPlanner.CONTROL_PERIOD;
             }
-
-            case STALL_LOCKED:
-            {
-                // LOCKED 状态：保持当前位置（PID 保位）
-                // 由本函数顶部的 Ctrl Loop STALL_LOCKED 分支处理
-                // 这里无需操作
-                break;
-            }
+        } else // can ONLY clear stall flag  MANUALLY
+        {
+            controller->stalledTime = 0;
         }
+    }
+
+    // Overload detect
+    if ((controller->modeRunning != MODE_COMMAND_CURRENT) &&
+        (controller->modeRunning != MODE_PWM_CURRENT) &&
+        (current >= stallThreshold))
+    {
+        if (controller->overloadTime >= 1000 * 1000)
+            controller->overloadFlag = true;
+        else
+            controller->overloadTime += motionPlanner.CONTROL_PERIOD;
+    } else // auto clear overload flag when released
+    {
+        controller->overloadTime = 0;
+        controller->overloadFlag = false;
     }
 
     /******************************** Update State ********************************/
@@ -409,6 +325,8 @@ void Motor::CloseLoopControlTick()
         controller->state = STATE_STOP;
     else if (controller->isStalled)
         controller->state = STATE_STALL;
+    else if (controller->overloadFlag)
+        controller->state = STATE_OVERLOAD;
     else
     {
         if (controller->modeRunning == MODE_COMMAND_POSITION)
@@ -488,7 +406,7 @@ void Motor::Controller::CalcDceToOutput(int32_t _location, int32_t _speed)
     if (config->dce.pError > (3200)) config->dce.pError = (3200);   // limited pError to 1/16r (51200/16)
     if (config->dce.pError < (-3200)) config->dce.pError = (-3200);
     config->dce.vError = (_speed - estVelocity) >> 7;
-    if (config->dce.vError > (8000)) config->dce.vError = (8000);   // 57 地轨 DCE vError 上限比关节大一倍
+    if (config->dce.vError > (8000)) config->dce.vError = (8000);   // limited vError
     if (config->dce.vError < (-8000)) config->dce.vError = (-8000);
 
     // Anti-reset: clear integral when at target and nearly stopped
@@ -629,33 +547,8 @@ void Motor::Controller::SetBrake(bool _brake)
 
 void Motor::Controller::ClearStallFlag()
 {
+    stalledTime = 0;
     isStalled = false;
-    context->stallState.stallDetectTime = 0;
-    context->stallState.stallRetreatTime = 0;
-    context->stallState.stallMode = STALL_IDLE;
-    // Bug #28 修复：重置 lastStallMode
-    context->stallState.lastStallMode = STALL_IDLE;
-    // 启动豁免期（2026-08-24 决策）：记录 enable 时间戳，启动后 100ms 内不检测堵转
-    context->stallState.enableTimestamp = HAL_GetTick();
-    // Bug #1 修复（偏差-24）：ClearStallFlag 主动发 0x7C IDLE 上报
-    CAN_TxHeaderTypeDef txHdr = {};
-    txHdr.StdId = (boardConfig.canNodeId << 7) | 0x7C;
-    txHdr.IDE = CAN_ID_STD;
-    txHdr.RTR = CAN_RTR_DATA;
-    txHdr.DLC = 8;
-    uint8_t txData[8] = {
-        (uint8_t)boardConfig.canNodeId,
-        (uint8_t)STALL_IDLE,
-        0, 0, 1, 0, 0, 0
-    };
-    CAN_Send(&txHdr, txData);
-}
-
-
-void Motor::Controller::ResetMotionPlanner()
-{
-    // Bug #7 修复（偏差-18）
-    softNewCurve = true;
 }
 
 
@@ -723,7 +616,11 @@ void Motor::Controller::Init()
     focPosition = 0;
     focCurrent = 0;
 
+    stalledTime = 0;
     isStalled = false;
+
+    overloadTime = 0;
+    overloadFlag = false;
 
     config->pid.vError = 0;
     config->pid.vErrorLast = 0;
@@ -768,3 +665,5 @@ void Motor::Controller::ClearIntegral() const
     config->dce.integralRemainder = 0;
     config->dce.outputKi = 0;
 }
+
+

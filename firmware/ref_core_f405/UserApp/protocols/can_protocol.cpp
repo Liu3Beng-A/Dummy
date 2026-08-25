@@ -165,20 +165,9 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("[I_LIMIT] MOTOR [9] = %.2f\r\n", *(float*)data);
                     break;
                 case 0x7C:
-                    // 重构阶段3+4 (2026-08-23) + 2026-08-24 偏差-21：
-                    // 0x7C 完整状态机上报，更新 CtrlStepMotor::stallMode 让 SetAngle 自动拦截
-                    // data[0]=nodeID, data[1]=stallMode(0=IDLE/1=RETREATING/2=LOCKED)
-                    {
-                        CtrlStepMotor::StallMode_t m = (CtrlStepMotor::StallMode_t)data[1];
-                        // 同步更新 dummy.motorJ[0]->stallMode 与 motorStallMask
-                        dummy.motorJ[0]->SetStallMode(m);
-                        if (data[1] == 2 /* STALL_LOCKED */) {
-                            dummy.SetStallMode(0);  // 地轨 motorJ[0]（同时刷 mask）
-                        } else if (data[1] == 0 /* STALL_IDLE */) {
-                            dummy.ClearStallMode(0);
-                        }
-                        // RETREATING 暂不动作（等电机端发 LOCKED）
-                    }
+                    // 电机主动上报堵转
+                    if (data[1] == 1)
+                        dummy.SetStallMode(9);
                     break;
                 default:
                     break;
@@ -260,16 +249,9 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("[I_LIMIT] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
                     break;
                 case 0x7C:
-                    // 重构阶段3+4 + 2026-08-24 偏差-21：同步更新 CtrlStepMotor::stallMode
-                    {
-                        CtrlStepMotor::StallMode_t m = (CtrlStepMotor::StallMode_t)data[1];
-                        dummy.motorJ[id]->SetStallMode(m);
-                        if (data[1] == 2 /* STALL_LOCKED */) {
-                            dummy.SetStallMode((int)id);  // id 1~6 → motorJ[1~6]
-                        } else if (data[1] == 0 /* STALL_IDLE */) {
-                            dummy.ClearStallMode((int)id);
-                        }
-                    }
+                    // 电机主动上报堵转
+                    if (data[1] == 1)
+                        dummy.SetStallMode((int)id);
                     break;
                 default:
                     break;
@@ -350,9 +332,9 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     printf("[I_LIMIT] MOTOR [8] = %.2f\r\n", *(float*)data);
                     break;
                 case 0x7C:
-                    // 夹爪不参与堵转（重构阶段3, 2026-08-23 决策 #19）
-                    // 保留 0x7C 处理以便调试，但 SetStallMode(8) 无效（mask 不含夹爪）
-                    (void)data;  // 静默忽略
+                    // 电机主动上报堵转
+                    if (data[1] == 1)
+                        dummy.SetStallMode(8);
                     break;
                 default:
                     break;

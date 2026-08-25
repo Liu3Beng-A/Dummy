@@ -65,7 +65,7 @@ public:
         while (length)
         {
             size_t chunk = length < USB_TX_DATA_SIZE ? length : USB_TX_DATA_SIZE;
-            if (output_.process_packet(buffer, chunk) != 0)  // 修复 BUG (2026-08-23): 应传 chunk 而不是 length
+            if (output_.process_packet(buffer, length) != 0)
                 return -1;
             buffer += chunk;
             length -= chunk;

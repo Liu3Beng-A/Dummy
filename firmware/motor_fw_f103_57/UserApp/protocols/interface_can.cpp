@@ -22,42 +22,17 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
     float tmpF;
     int32_t tmpI;
 
-    // LOCKED/RETREATING 时拒绝新指令（重构 2026-08-23 + Bug #6 修复）
-    // 允许的指令：0x01 (Enable，会 ClearStallFlag) / 0x02 (Calibration)
-    //           / 0x7E (Erase) / 0x7F (Reboot) / 0x89 (Emergency Stop)
-    if ((motor.stallState.stallMode == Motor::STALL_LOCKED ||
-         motor.stallState.stallMode == Motor::STALL_RETREATING) &&
-        _cmd != 0x01 && _cmd != 0x02 && _cmd != 0x7E && _cmd != 0x7F &&
-        _cmd != 0x89) {
-        return;
-    }
-
     switch (_cmd)
     {
         // 0x00~0x0F No Memory CMDs
         case 0x01:  // Enable Motor
-            // 重构 2026-08-24: 区分 LOCKED 与其他状态（决策 #16/#17）
-            if (*(uint32_t*) (RxData) == 1) {
-                if (motor.stallState.stallMode == Motor::STALL_LOCKED) {
-                    motor.controller->requestMode = Motor::MODE_COMMAND_POSITION;
-                    // Bug #22 修复：不要覆盖 ratedVelocity（EEPROM 字段）
-                    int32_t estVelSteps = (int32_t)(
-                        motor.controller->GetVelocity()
-                        * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
-                    motor.controller->SetVelocitySetPoint(estVelSteps);
-                } else {
-                    motor.controller->requestMode = Motor::MODE_COMMAND_VELOCITY;
-                }
+            motor.controller->requestMode = (*(uint32_t*) (RxData) == 1) ?
+                                            Motor::MODE_COMMAND_VELOCITY : Motor::MODE_STOP;
+            // ENABLE 清除堵转标志
+            if (*(uint32_t*) (RxData) == 1)
                 motor.controller->ClearStallFlag();
-            } else {
-                // Bug #19 修复：disable 也清 stall
-                motor.controller->ClearStallFlag();
-                motor.controller->requestMode = Motor::MODE_STOP;
-            }
             break;
         case 0x02:  // Do Calibration
-            // 重构 2026-08-24: 入口强制 stallMode=IDLE（决策 #34）
-            motor.controller->ClearStallFlag();
             encoderCalibrator.isTriggered = true;
             break;
         case 0x03:  // Set Current SetPoint
@@ -194,11 +169,15 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
+        case 0x1B:  // Set Enable Stall-Protect
+            motor.config.ctrlParams.stallProtectSwitch = (*(uint32_t*) (RxData) == 1);
+            boardConfig.enableStallProtect = motor.config.ctrlParams.stallProtectSwitch;
+            if (_data[4])
+                boardConfig.configStatus = CONFIG_COMMIT;
+            break;
 
-        // 注意：0x1B/0x1D/0x1E/0x1F/0x20 等堵转相关自定义运行时调参命令已全部移除
-        // 堵转参数全部硬编码，详见 motor.cpp 顶部常量定义
 
-            // 0x21~0x2F Inquiry CMDs
+            // 0x20~0x2F Inquiry CMDs
         case 0x21: // Get Current
         {
             tmpF = motor.controller->GetFocCurrent();
@@ -233,6 +212,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             _data[4] = motor.controller->state == Motor::STATE_FINISH ? 1 : 0;
             txHeader.StdId = (boardConfig.canNodeId << 7) | 0x23;
             CAN_Send(&txHeader, _data);
+//            printf("CAN SEND BACK to NODE[%d]\n", boardConfig.canNodeId );
         }
             break;
         case 0x24: // Get Offset
@@ -343,8 +323,6 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             motor.controller->SetBrake(true);  // P0-5: brake instead of coast
             motor.controller->SetVelocitySetPoint(0);
             motor.controller->SetCurrentSetPoint(0);
-            // 重构 2026-08-23: 急停时清除堵转状态，避免 LOCKED 卡死
-            motor.controller->ClearStallFlag();
             printf("[CAN BROADCAST] Emergency Stop Received!\r\n");
         }
             break;
@@ -360,3 +338,4 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
     }
 
 }
+

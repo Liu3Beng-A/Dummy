@@ -4,7 +4,7 @@
 #include <tim.h>
 
 
-/* Component Definitions */
+/* Component Definitions -----------------------------------------------------*/
 BoardConfig_t boardConfig;
 Motor motor;
 TB67H450 tb67H450;
@@ -14,7 +14,7 @@ Button button1(1, 1000), button2(2, 3000);
 void OnButton1Event(Button::Event _event);
 void OnButton2Event(Button::Event _event);
 Led statusLed;
-/* Main Entry */
+/* Main Entry ----------------------------------------------------------------*/
 void Main()
 {
     uint64_t serialNum = GetSerialNumber();
@@ -33,8 +33,8 @@ void Main()
             .encoderHomeOffset = 0,
             .defaultMode = Motor::MODE_COMMAND_POSITION,
             .currentLimit = 2500,        // 2.5A
-            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,
-            .velocityAcc = 100 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,
+            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
+            .velocityAcc = 100 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
             .calibrationCurrent=2000,
             .dce_kp = 300,
             .dce_kv = 120,
@@ -42,7 +42,7 @@ void Main()
             .dce_kd = 50,
             .motor_temperature = 0.0,
             .enableMotorOnBoot=false,
-            .enableStallProtect=true,   // F.6 默认开
+            .enableStallProtect=false,
             .enableTempWatch=false,
         };
         eeprom.put(0, boardConfig);
@@ -60,13 +60,7 @@ void Main()
     motor.config.ctrlParams.dce.kv = boardConfig.dce_kv;
     motor.config.ctrlParams.dce.ki = boardConfig.dce_ki;
     motor.config.ctrlParams.dce.kd = boardConfig.dce_kd;
-
-    /*---------- 堵转保护状态机初始化（重构 2026-08-23）----------*/
-    // F.6: 上电默认开启（覆盖 EEPROM）
-    motor.stallState.enabled = true;
-    motor.stallState.stallMode = Motor::STALL_IDLE;
-    // 回退距离（2026-08-23 决策 #7 / 偏差-4）：57 电机（地轨，丝杆1605直驱）5mm = 1 圈 = 51200 步
-    motor.stallState.retreatSteps = 51200;
+    motor.config.ctrlParams.stallProtectSwitch = boardConfig.enableStallProtect;
 
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);
@@ -106,7 +100,7 @@ void Main()
 }
 
 
-/* Event Callbacks */
+/* Event Callbacks -----------------------------------------------------------*/
 uint32_t count;
 extern "C" void Tim1Callback100Hz()
 {
@@ -162,13 +156,13 @@ void OnButton1Event(Button::Event _event)
         case ButtonBase::CLICK:
             printf("KEY1\r\n");
             if (motor.controller->modeRunning != Motor::MODE_STOP)
-        {
-            boardConfig.defaultMode = motor.controller->modeRunning;
-            motor.controller->requestMode = Motor::MODE_STOP;
-        } else
-        {
-            motor.controller->requestMode = static_cast<Motor::Mode_t>(boardConfig.defaultMode);
-        }
+            {
+                boardConfig.defaultMode = motor.controller->modeRunning;
+                motor.controller->requestMode = Motor::MODE_STOP;
+            } else
+            {
+                motor.controller->requestMode = static_cast<Motor::Mode_t>(boardConfig.defaultMode);
+            }
             break;
     }
 }

@@ -19,6 +19,7 @@ public:
         config.motionParams.ratedVelocity = 30 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
         config.motionParams.ratedVelocityAcc = 1000 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 
+        config.ctrlParams.stallProtectSwitch = false;
         config.ctrlParams.pid =
             Controller::PID_t{
                 .kp = 5,
@@ -68,28 +69,6 @@ public:
         STATE_NO_CALIB
     } State_t;
 
-    // 堵转保护状态机（重构 2026-08-23）
-    typedef enum
-    {
-        STALL_IDLE = 0,         // 正常运行
-        STALL_RETREATING = 1,   // 回退中（短暂时态）
-        STALL_LOCKED = 2,       // 已锁定，保持位置
-    } StallMode_t;
-
-    // 堵转保护运行时状态（不持久化 EEPROM，retreatSteps 在 main.cpp 初始化）
-    typedef struct
-    {
-        bool enabled;                // 总开关（!STALL_EN 控制，F.6 上电默认开）
-        StallMode_t stallMode;       // 当前状态机
-        uint32_t stallDetectTime;    // 触发延迟累加（50us/tick）
-        uint32_t stallRetreatTime;   // 回退时间累加
-        int32_t lastGoalPosition;    // 回退起点
-        int32_t lastMoveDirection;   // +1 / -1
-        int32_t retreatSteps;        // 回退距离（步数，按电机类型硬编码）
-        uint32_t enableTimestamp;    // 2026-08-24: enable/ClearStallFlag 时间戳（HAL_GetTick），用于启动豁免期 100ms 判定
-        StallMode_t lastStallMode;   // Bug #28 修复：上一次 stallMode（替代 static 变量，让 ClearStallFlag 能重置）
-    } StallConfig_t;
-
 
     class Controller
     {
@@ -121,6 +100,8 @@ public:
         {
             PID_t pid;
             DCE_t dce;
+
+            bool stallProtectSwitch;
         } Config_t;
 
 
@@ -137,7 +118,7 @@ public:
         Mode_t requestMode;
         Mode_t modeRunning;
         State_t state = STATE_STOP;
-        bool isStalled = false;  // LOCKED 兼容字段（= stallMode == STALL_LOCKED）
+        bool isStalled = false;
 
 
         void Init();
@@ -154,10 +135,6 @@ public:
         void SetBrake(bool _brake);
         void ApplyPosAsHomeOffset();
         void ClearStallFlag();
-        // Bug #7 修复（偏差-18）：RETREATING 时强制触发 motion planner 软重启（设 softNewCurve=true）
-        // 之前用 requestMode = STOP → requestMode = POSITION 在同一周期两次写 requestMode，
-        // Mode Change Handling 检测 modeRunning==requestMode 不触发 softNewCurve
-        void ResetMotionPlanner();
 
 
     private:
@@ -184,6 +161,9 @@ public:
         bool softBrake{};
         bool softNewCurve{};
         int32_t focPosition{};
+        uint32_t stalledTime{};
+        uint32_t overloadTime{};
+        bool overloadFlag{};
 
 
         void AttachConfig(Config_t* _config);
@@ -207,8 +187,6 @@ public:
     Controller* controller = nullptr;
     EncoderBase* encoder = nullptr;
     DriverBase* driver = nullptr;
-
-    StallConfig_t stallState = {};  // 默认 enabled=false, stallMode=IDLE，main.cpp 初始化
 
 
     void Tick20kHz();

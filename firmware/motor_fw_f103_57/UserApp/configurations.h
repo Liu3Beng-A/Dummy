@@ -35,7 +35,7 @@ typedef struct Config_t
     int32_t dce_kd;
     float motor_temperature;
     bool enableMotorOnBoot;
-    bool enableStallProtect;   // 保留：仅供 SetEnable(true) 同步用，F.6 默认开
+    bool enableStallProtect;
     bool enableTempWatch;
 } BoardConfig_t;
 

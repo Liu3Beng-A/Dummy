@@ -4,7 +4,7 @@
 #include <tim.h>
 
 
-/* Component Definitions */
+/* Component Definitions -----------------------------------------------------*/
 BoardConfig_t boardConfig;
 Motor motor;
 TB67H450 tb67H450;
@@ -14,7 +14,7 @@ Button button1(1, 1000), button2(2, 3000);
 void OnButton1Event(Button::Event _event);
 void OnButton2Event(Button::Event _event);
 Led statusLed;
-/* Main Entry */
+/* Main Entry ----------------------------------------------------------------*/
 void Main()
 {
     uint64_t serialNum = GetSerialNumber();
@@ -33,14 +33,14 @@ void Main()
     eeprom.get(0, boardConfig);
     if (boardConfig.configStatus != CONFIG_OK) // use default settings
     {
-        // 35电机: 2A电流, kp=195, ki=300
+        // 42电机: 2A电流, kp=200, ki=300
         boardConfig = BoardConfig_t{
             .configStatus = CONFIG_OK,
             .encoderHomeOffset = 0,
             .defaultMode = Motor::MODE_COMMAND_POSITION,
             .currentLimit = 2 * 1000,    // 2A
-            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,
-            .velocityAcc = 100 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,
+            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
+            .velocityAcc = 100 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
             .calibrationCurrent=2000,
             .dce_kp = 200,
             .dce_kv = 80,
@@ -48,12 +48,13 @@ void Main()
             .dce_kd = 250,
             .motor_temperature = 0.0,
             .enableMotorOnBoot=false,
-            .enableStallProtect=true,   // F.6 默认开
+            .enableStallProtect=false,
             .enableTempWatch=false,
         };
         eeprom.put(0, boardConfig);
     }
     boardConfig.enableTempWatch=false;
+    //depends on 3 bits switch now
     boardConfig.canNodeId = defaultNodeID;
     motor.config.motionParams.encoderHomeOffset = boardConfig.encoderHomeOffset;
     motor.config.motionParams.ratedCurrent = boardConfig.currentLimit;
@@ -66,13 +67,7 @@ void Main()
     motor.config.ctrlParams.dce.kv = boardConfig.dce_kv;
     motor.config.ctrlParams.dce.ki = boardConfig.dce_ki;
     motor.config.ctrlParams.dce.kd = boardConfig.dce_kd;
-
-    /*---------- 堵转保护状态机初始化（重构 2026-08-23）----------*/
-    // F.6: 上电默认开启（覆盖 EEPROM）
-    motor.stallState.enabled = true;
-    motor.stallState.stallMode = Motor::STALL_IDLE;
-    // 回退距离（2026-08-23 决策 #7 / 偏差-4）：42 电机输出轴 5° = 电机端 250° = 35556 步
-    motor.stallState.retreatSteps = 35556;
+    motor.config.ctrlParams.stallProtectSwitch = boardConfig.enableStallProtect;
 
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);
@@ -112,7 +107,7 @@ void Main()
 }
 
 
-/* Event Callbacks */
+/* Event Callbacks -----------------------------------------------------------*/
 uint32_t count;
 extern "C" void Tim1Callback100Hz()
 {

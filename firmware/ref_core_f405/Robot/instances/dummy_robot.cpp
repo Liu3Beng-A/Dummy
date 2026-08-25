@@ -273,13 +273,6 @@ bool DummyRobot::MoveL(float _x, float _y, float _z, float _a, float _b, float _
  */
 bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm)
 {
-    // 重构阶段3 (2026-08-23): 堵转拦截
-    // Bug #20 修复：打印提示而非静默失败
-    if (IsAnyMotorStalled()) {
-        printf("warn: MoveJ rejected, motor stalled, send !STALL_RESUME first\r\n");
-        return false;
-    }
-
     DOF6Kinematic::Joint6D_t targetJointsTmp(_j1, _j2, _j3, _j4, _j5, _j6);
     uint8_t maxIndex;
 
@@ -325,12 +318,6 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, fl
  */
 bool DummyRobot::ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm)
 {
-    // 重构阶段3 (2026-08-23) + Bug #20 修复
-    if (IsAnyMotorStalled()) {
-        printf("warn: ServoJ rejected, motor stalled, send !STALL_RESUME first\r\n");
-        return false;
-    }
-
     DOF6Kinematic::Joint6D_t targetJointsTmp(_j1, _j2, _j3, _j4, _j5, _j6);
 
     // 地轨限位检查
@@ -440,26 +427,8 @@ void DummyRobot::SetStallMode()
     SetStallMode(-1);  // 不指定电机，全部停住
 }
 
-/**
- * @brief 标记电机为 LOCKED 状态（由 can_protocol 收到 0x7C 时调用）
- * @param motorIndex -1 表示全部电机
- *
- * 重构 2026-08-24：同步更新对应 CtrlStepMotor 的 stallMode 字段
- * （偏差-21 / 文档 #47/#54），让 SetAngle/SetAngleWithVelocityLimit 自动拦截
- */
 void DummyRobot::SetStallMode(int motorIndex)
 {
-    CtrlStepMotor::StallMode_t newMode = CtrlStepMotor::STALL_LOCKED;
-    if (motorIndex < 0) {
-        for (int i = 0; i < 7; i++) {
-            motorStallMask[i] = true;
-            if (motorJ[i]) motorJ[i]->SetStallMode(newMode);
-        }
-    } else if (motorIndex >= 0 && motorIndex <= 6) {
-        motorStallMask[motorIndex] = true;
-        if (motorJ[motorIndex]) motorJ[motorIndex]->SetStallMode(newMode);
-    }
-
     // 切换 RGB 为红色心跳，视觉提示堵转
     SetRGBMode(RGB::RED_HEARTBEAT);
     // 停发新位置指令，保持当前位置（同步 targetAngle 避免误判）
@@ -469,61 +438,7 @@ void DummyRobot::SetStallMode(int motorIndex)
     }
     // 清空指令队列，防止残留指令堆积
     commandHandler.ClearFifo();
-}
-
-/**
- * @brief 解除 LOCKED 状态（重构 2026-08-23 + 2026-08-24 偏差-21）
- * 通过下发 0x01 Enable 给电机，让电机端走 ClearStallFlag 路径
- * @param motorIndex -1 表示全部电机
- */
-void DummyRobot::ClearStallMode(int motorIndex)
-{
-    // Bug #24 + #27 修复：先检查电机端 stallMode 是否真为 LOCKED 才发 enable
-    // 否则每次收到 0x7C IDLE 上报都会强制 SetEnable(true) → 触发 VELOCITY 模式 + softNewCurve → 电机可能突然抖动
-    bool needEnable = false;
-    CtrlStepMotor::StallMode_t newMode = CtrlStepMotor::STALL_IDLE;
-    if (motorIndex < 0) {
-        for (int i = 0; i < 7; i++) {
-            if (motorJ[i] && motorJ[i]->stallMode == CtrlStepMotor::STALL_LOCKED) {
-                needEnable = true;
-                break;
-            }
-        }
-        for (int i = 0; i < 7; i++) {
-            motorStallMask[i] = false;
-            if (motorJ[i]) motorJ[i]->SetStallMode(newMode);
-        }
-    } else if (motorIndex >= 0 && motorIndex <= 6) {
-        needEnable = (motorJ[motorIndex] &&
-                      motorJ[motorIndex]->stallMode == CtrlStepMotor::STALL_LOCKED);
-        motorStallMask[motorIndex] = false;
-        if (motorJ[motorIndex]) motorJ[motorIndex]->SetStallMode(newMode);
-    }
-
-    // 仅当确实有电机处于 LOCKED 时才发 enable（电机端走 ClearStallFlag 路径）
-    if (needEnable) {
-        if (motorIndex < 0) {
-            for (int i = 0; i < 7; i++) motorJ[i]->SetEnable(true);
-        } else if (motorIndex >= 0 && motorIndex <= 6) {
-            motorJ[motorIndex]->SetEnable(true);
-        }
-    }
-
-    // 如果所有电机都解除了 → 恢复 RGB
-    bool anyLocked = false;
-    for (int i = 0; i < 7; i++) if (motorStallMask[i]) { anyLocked = true; break; }
-    if (!anyLocked) {
-        SetRGBMode(RGB::CYBER_BREATH);
-    }
-}
-
-bool DummyRobot::IsAnyMotorStalled() const
-{
-    // 重构阶段3 (2026-08-23): 检查任一电机是否处于 LOCKED
-    for (int i = 0; i < 7; i++) {
-        if (motorStallMask[i]) return true;
-    }
-    return false;
+    (void)motorIndex;  // 未来可用于区分哪个电机堵转并做针对性处理
 }
 
 void DummyRobot::Homing()
@@ -534,10 +449,7 @@ void DummyRobot::Homing()
     MoveJ(0, 0, 90, 0, 0, 0, 0);  // 归零姿态，地轨=0mm
     MoveJoints(targetJoints);
     MoveRail(targetRailPos);
-    // 重构 2026-08-24 偏差-22 / 文档 C2：加 stall 检查 + 10s 超时（防堵转时死锁）
-    uint32_t t0 = millis();
-    while (IsMoving() && IsEnabled() && !IsAnyMotorStalled()
-           && (millis() - t0 < 10000))
+    while (IsMoving())
         osDelay(10);
 
     SetJointSpeed(lastSpeed);
@@ -555,10 +467,7 @@ void DummyRobot::Resting()
           REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5], 0);  // 待机姿态，地轨=0mm
     MoveJoints(targetJoints);
     MoveRail(targetRailPos);
-    // 重构 2026-08-24 偏差-22 / 文档 C5：加 stall 检查 + 10s 超时
-    uint32_t t0 = millis();
-    while (IsMoving() && IsEnabled() && !IsAnyMotorStalled()
-           && (millis() - t0 < 10000))
+    while (IsMoving())
         osDelay(10);
 
     SetJointSpeed(lastSpeed);
@@ -589,63 +498,6 @@ void DummyRobot::SetEnable(bool _enable)
     motorJ[0]->SetEnable(_enable);  // 地轨
     hand->SetEnable(_enable);       // 夹爪
     isEnabled = _enable;
-
-    // 重构 2026-08-24 偏差-23 / 文档 C3：disable 时清主控 motorStallMask
-    if (!_enable) {
-        for (int i = 0; i < 7; i++) {
-            motorStallMask[i] = false;
-            if (motorJ[i]) motorJ[i]->SetStallMode(CtrlStepMotor::STALL_IDLE);
-        }
-    }
-
-    // F.6 (2026-08-23 决策): SetEnable(true) 后自动恢复堵转保护开启
-    // 不管用户之前是否发了 !STALL_DIS，下次 enable 时都强制开启
-    // 配合电机端 main.cpp 强制 stallState.enabled = true 实现完整 F.6 行为
-    if (_enable) {
-        osDelay(50);  // 等待电机完成 VELOCITY→POSITION 切换
-        for (int i = 0; i < 7; i++) {
-            motorJ[i]->SetEnableStallProtect(true);
-        }
-    }
-}
-
-/**
- * @brief 设置指定电机堵转保护开关（!STALL_EN/!STALL_DIS 入口，重构 2026-08-23）
- * 直接转发给 CtrlStepMotor（最终下发 0x1B 给电机端）
- * 主控不再维护 stallProtectMask 缓存——电机端 main.cpp 上电默认开，
- * SetEnable(true) 时也会强制恢复（决策 F.6）
- */
-void DummyRobot::SetStallProtect(int motorIndex, bool _enable)
-{
-    if (motorIndex < 0 || motorIndex > 6) return;
-    motorJ[motorIndex]->SetEnableStallProtect(_enable);
-}
-
-/**
- * @brief 查询所有电机 LOCKED 状态（重构 2026-08-23）
- * 不再报告 enable 状态（stallProtectMask 已移除）——电机端上电默认开
- */
-void DummyRobot::QueryStallStatus(StreamSink* _channel)
-{
-    // Bug #11+#13 修复：文档要求 ok STALL_STATUS rail=0 j1=1 ...
-    char buf[128];
-    int len = snprintf(buf, sizeof(buf),
-        "ok STALL_STATUS"
-        " rail=%d j1=%d j2=%d j3=%d j4=%d j5=%d j6=%d\r\n",
-        motorStallMask[0] ? 1 : 0,
-        motorStallMask[1] ? 1 : 0,
-        motorStallMask[2] ? 1 : 0,
-        motorStallMask[3] ? 1 : 0,
-        motorStallMask[4] ? 1 : 0,
-        motorStallMask[5] ? 1 : 0,
-        motorStallMask[6] ? 1 : 0);
-    if (len < 0) return;
-    if (_channel) {
-        _channel->process_bytes((const uint8_t*)buf, len, nullptr);
-    } else {
-        fwrite(buf, 1, len, stdout);
-        fflush(stdout);
-    }
 }
 
 /**
@@ -755,18 +607,6 @@ uint32_t DummyRobot::CommandHandler::Push(const std::string &_cmd)
  */
 void DummyRobot::CommandHandler::EmergencyStop()
 {
-    // Bug #16 修复（P0-5 老问题）：让所有电机立即 Brake 而不是 MoveJ + 禁用主控
-    // 通过对每个电机 SetEnable(false)，电机端 0x01 false 会:
-    //   1. ClearStallFlag (Bug #19 已修)
-    //   2. requestMode = STOP
-    // 配合主控 isEnabled=false 让所有任务停止派发
-    if (context->motorJ[0]) context->motorJ[0]->SetEnable(false);  // 地轨
-    if (context->hand) context->hand->SetEnable(false);            // 夹爪
-    for (int i = 1; i <= 6; i++) {
-        if (context->motorJ[i]) context->motorJ[i]->SetEnable(false);
-    }
-
-    // 仍然调用 MoveJ 让 MoveJ 队列清空（不再下发新位置指令）
     context->MoveJ(context->currentJoints.a[0], context->currentJoints.a[1],
                    context->currentJoints.a[2], context->currentJoints.a[3],
                    context->currentJoints.a[4], context->currentJoints.a[5],

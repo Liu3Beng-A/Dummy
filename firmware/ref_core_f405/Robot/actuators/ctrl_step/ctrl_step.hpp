@@ -32,12 +32,6 @@ public:
     uint8_t reduction;
     State state = STOP;
 
-    // 堵转状态机（重构 2026-08-24，文档偏差-14/#47/#54）
-    // 来源：电机端 0x7C data[1] 上报
-    // LOCKED 时：SetAngle / SetAngleWithVelocityLimit 自动 return（不发位置命令给电机端）
-    enum StallMode_t { STALL_IDLE = 0, STALL_RETREATING = 1, STALL_LOCKED = 2 };
-    StallMode_t stallMode = STALL_IDLE;
-
     // 判定实测角度是否已收敛到目标容差内（单位：度）
     bool AllAtTarget(float epsilon_deg = 1.0f) const {
         return fabsf(angle - targetAngle) <= epsilon_deg;
@@ -78,7 +72,6 @@ public:
     void UpdateAngle();
     void UpdateAngleCallback(float _pos, bool _isFinished);
     void SetStallMode();
-    void SetStallMode(StallMode_t _mode);  // 重构 2026-08-24：0x7C 上报后由 DummyRobot 调用
 
 
     // Communication protocol definitions
