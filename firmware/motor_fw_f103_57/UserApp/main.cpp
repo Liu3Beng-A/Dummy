@@ -113,9 +113,9 @@ extern "C" void Tim1Callback100Hz()
     button2.Tick(10);
     statusLed.Tick(10, motor.controller->state);
 
-    // ── 堵转 250ms 周期广播：仅 RETREATING 期间发 HEARTBEAT(状态=4)，不再重复发 TRIGGER(状态=1) ──
-    // 修复前: txData[1]=1 导致主控每 250ms 误以为"新堵转事件"并 ClearFifo + 重置 targetJoints
-    // 修复后: 状态=4 表示"RETREATING 进行中"，主控只在收到 TRIGGER/DONE/TIMEOUT 时调 SetStallMode
+    // ── 堵转 250ms 周期广播 (仅 RETREATING 期间) ──
+    // 持续发 TRIGGER(状态=1) 让主控重复执行 SetStallMode() 内 Bug-11 修复点:
+    //   targetRailPos = currentRailPos, 避免 enable 退出 LOCKED 后被主循环 MoveRail 覆盖电机端 ResetGoalsToCurrentPosition() 设置
     if (motor.controller->stallMode == Motor::STALL_RETREATING)
     {
         stallBroadcastCnt++;
@@ -127,7 +127,7 @@ extern "C" void Tim1Callback100Hz()
             txHdr.IDE = CAN_ID_STD;
             txHdr.RTR = CAN_RTR_DATA;
             txHdr.DLC = 8;
-            uint8_t txData[8] = { (uint8_t)boardConfig.canNodeId, 4, 0, 0, 0, 0, 0, 0 }; // 4=HEARTBEAT
+            uint8_t txData[8] = { (uint8_t)boardConfig.canNodeId, 1, 0, 0, 0, 0, 0, 0 };
             CAN_Send(&txHdr, txData);
         }
     }
