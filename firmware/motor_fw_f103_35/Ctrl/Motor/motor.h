@@ -19,7 +19,7 @@ public:
         config.motionParams.ratedVelocity = 30 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
         config.motionParams.ratedVelocityAcc = 1000 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 
-        config.ctrlParams.stallProtectSwitch = false;
+        config.ctrlParams.stallProtectSwitch = true;
         config.ctrlParams.pid =
             Controller::PID_t{
                 .kp = 5,
@@ -64,10 +64,15 @@ public:
         STATE_STOP,
         STATE_FINISH,
         STATE_RUNNING,
-        STATE_OVERLOAD,
-        STATE_STALL,
+        STATE_STALL,  // 仅用于 LED 指示（保留，不影响实际堵转逻辑）
         STATE_NO_CALIB
     } State_t;
+
+    enum StallMode_t {
+        STALL_IDLE = 0,       // 正常，检测堵转
+        STALL_RETREATING = 1, // 回退中
+        STALL_LOCKED = 2,     // 锁死，等 UNLOCKED
+    };
 
 
     class Controller
@@ -118,7 +123,16 @@ public:
         Mode_t requestMode;
         Mode_t modeRunning;
         State_t state = STATE_STOP;
-        bool isStalled = false;
+        StallMode_t stallMode = STALL_IDLE;
+        uint32_t stallStartTick{};       // 堵转检测计时开始（us）
+        uint32_t retreatStartTick{};     // 回退开始时刻（ms，2s超时用）
+        int32_t retreatTarget{};          // 回退目标位置（触发瞬间快照）
+        int32_t retreatDirection{};        // 回退方向（+1/-1，触发瞬间快照）
+        int32_t stallCurrentThreshold{};   // 电流阈值（ratedCurrent*75%）
+        uint32_t positionModeStartCycles{}; // 进入位置模式的起始周期（启动豁免期用）
+        uint8_t stallBroadcastCmd{};       // 待发送广播命令 (0=无, 1=TRIGGER, 2=DONE, 3=TIMEOUT)
+        bool stallDetectRisingEdge{};      // 堵转检测上升沿标记：true=三条件首次同时满足
+        int32_t stallDetectRisingEstError{}; // 上升沿时刻的 |estError| 值（200ms 后比对）
 
 
         void Init();
@@ -127,6 +141,9 @@ public:
         void SetVelocitySetPoint(int32_t _vel);
         void SetPositionSetPoint(int32_t _pos);
         bool SetPositionSetPointWithTime(int32_t _pos, float _time);
+        // 重置所有 goal/soft 状态（用于 enable/UNLOCKED 后电机停在当前位置）：
+        // 把 goalPosition=estPosition, 清零 goalVelocity/goalCurrent, 触发 softNewCurve
+        void ResetGoalsToCurrentPosition();
         float GetPosition(bool _isLap = false);
         float GetVelocity();
         float GetFocCurrent();
@@ -134,7 +151,9 @@ public:
         void SetDisable(bool _disable);
         void SetBrake(bool _brake);
         void ApplyPosAsHomeOffset();
-        void ClearStallFlag();
+        int32_t GetEstPosition() { return estPosition; }
+        int32_t GetEstVelocity() { return estVelocity; }
+        void ClearIntegral() { estVelocityIntegral = 0; estError = 0; }
 
 
     private:
@@ -161,16 +180,13 @@ public:
         bool softBrake{};
         bool softNewCurve{};
         int32_t focPosition{};
-        uint32_t stalledTime{};
-        uint32_t overloadTime{};
-        bool overloadFlag{};
 
 
         void AttachConfig(Config_t* _config);
         void CalcCurrentToOutput(int32_t current);
         void CalcPidToOutput(int32_t _speed);
         void CalcDceToOutput(int32_t _location, int32_t _speed);
-        void ClearIntegral() const;
+        void ClearTrajectory();
 
         static int32_t CompensateAdvancedAngle(int32_t _vel);
     };

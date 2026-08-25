@@ -213,6 +213,8 @@ public:
     void SetEnable(bool _enable);
     void SetStallMode();
     void SetStallMode(int motorIndex);
+    void BroadcastUnlock();
+    void QueryStallStatus();
     void Homing();
     void Resting();
     bool IsMoving();

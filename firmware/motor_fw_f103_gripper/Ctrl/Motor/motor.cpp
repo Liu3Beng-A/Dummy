@@ -259,31 +259,11 @@ void Motor::CloseLoopControlTick()
     /******************************** State Check ********************************/
     int32_t current = abs(controller->focCurrent);
 
-    // Overload 检测阈值：额定电流的 95%
-    const int32_t stallThreshold = (int32_t)(config.motionParams.ratedCurrent * 95 / 100);
-
-    // Overload detect
-    if ((controller->modeRunning != MODE_COMMAND_CURRENT) &&
-        (controller->modeRunning != MODE_PWM_CURRENT) &&
-        (current >= stallThreshold))
-    {
-        if (controller->overloadTime >= 1000 * 1000)
-            controller->overloadFlag = true;
-        else
-            controller->overloadTime += motionPlanner.CONTROL_PERIOD;
-    } else // auto clear overload flag when released
-    {
-        controller->overloadTime = 0;
-        controller->overloadFlag = false;
-    }
-
     /******************************** Update State ********************************/
     if (!encoder->IsCalibrated())
         controller->state = STATE_NO_CALIB;
     else if (controller->modeRunning == MODE_STOP)
         controller->state = STATE_STOP;
-    else if (controller->overloadFlag)
-        controller->state = STATE_OVERLOAD;
     else
     {
         if (controller->modeRunning == MODE_COMMAND_POSITION)
@@ -559,27 +539,6 @@ void Motor::Controller::Init()
 
     focPosition = 0;
     focCurrent = 0;
-
-    overloadTime = 0;
-    overloadFlag = false;
-
-    config->pid.vError = 0;
-    config->pid.vErrorLast = 0;
-    config->pid.outputKp = 0;
-    config->pid.outputKi = 0;
-    config->pid.outputKd = 0;
-    config->pid.integralRound = 0;
-    config->pid.integralRemainder = 0;
-    config->pid.output = 0;
-
-    config->dce.pError = 0;
-    config->dce.vError = 0;
-    config->dce.outputKp = 0;
-    config->dce.outputKi = 0;
-    config->dce.outputKd = 0;
-    config->dce.integralRound = 0;
-    config->dce.integralRemainder = 0;
-    config->dce.output = 0;
 }
 
 

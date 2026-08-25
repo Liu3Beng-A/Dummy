@@ -48,7 +48,7 @@ void Main()
             .dce_kd = 250,
             .motor_temperature = 0.0,
             .enableMotorOnBoot=false,
-            .enableStallProtect=false,
+            .enableStallProtect=true,
             .enableTempWatch=false,
         };
         eeprom.put(0, boardConfig);
@@ -67,7 +67,9 @@ void Main()
     motor.config.ctrlParams.dce.kv = boardConfig.dce_kv;
     motor.config.ctrlParams.dce.ki = boardConfig.dce_ki;
     motor.config.ctrlParams.dce.kd = boardConfig.dce_kd;
-    motor.config.ctrlParams.stallProtectSwitch = boardConfig.enableStallProtect;
+    // 堵转保护默认开启：忽略 EEPROM 值，始终使用 true
+    boardConfig.enableStallProtect = true;
+    motor.config.ctrlParams.stallProtectSwitch = true;
 
     /*---------------- Init Motor ----------------*/
     motor.AttachDriver(&tb67H450);
@@ -109,6 +111,7 @@ void Main()
 
 /* Event Callbacks -----------------------------------------------------------*/
 uint32_t count;
+static uint32_t stallBroadcastCnt = 0;  // 250ms 周期广播计数器
 extern "C" void Tim1Callback100Hz()
 {
     __HAL_TIM_CLEAR_IT(&htim1, TIM_IT_UPDATE);
@@ -116,6 +119,46 @@ extern "C" void Tim1Callback100Hz()
     button1.Tick(10);
     button2.Tick(10);
     statusLed.Tick(10, motor.controller->state);
+
+    // ── 堵转 250ms 周期广播 (仅 RETREATING 期间) ──
+    if (motor.controller->stallMode == Motor::STALL_RETREATING)
+    {
+        stallBroadcastCnt++;
+        if (stallBroadcastCnt >= 25)  // 25 × 10ms = 250ms
+        {
+            stallBroadcastCnt = 0;
+            // 再次发 STALL 广播
+            CAN_TxHeaderTypeDef txHdr = {};
+            txHdr.StdId = (boardConfig.canNodeId << 7) | 0x5A;
+            txHdr.IDE = CAN_ID_STD;
+            txHdr.RTR = CAN_RTR_DATA;
+            txHdr.DLC = 8;
+            uint8_t txData[8] = { (uint8_t)boardConfig.canNodeId, 1, 0, 0, 0, 0, 0, 0 };
+            CAN_Send(&txHdr, txData);
+        }
+    }
+    else
+    {
+        stallBroadcastCnt = 0;  // 非 RETREATING 清零计数器
+    }
+
+    // ── 堵转事件广播 (20kHz 设置标志，100Hz 这里发) ──
+    if (motor.controller->stallBroadcastCmd != 0)
+    {
+        CAN_TxHeaderTypeDef txHdr = {};
+        txHdr.StdId = (boardConfig.canNodeId << 7) | 0x5A;
+        txHdr.IDE = CAN_ID_STD;
+        txHdr.RTR = CAN_RTR_DATA;
+        txHdr.DLC = 8;
+        uint8_t txData[8] = {
+            (uint8_t)boardConfig.canNodeId,
+            motor.controller->stallBroadcastCmd,
+            0, 0, 0, 0, 0, 0
+        };
+        CAN_Send(&txHdr, txData);
+        motor.controller->stallBroadcastCmd = 0; // 清除标志
+    }
+
     if (boardConfig.enableTempWatch)
     {
         count ++;
@@ -206,7 +249,8 @@ void OnButton2Event(Button::Event _event)
             break;
         case ButtonBase::CLICK:
             printf("KEY2\r\n");
-            motor.controller->ClearStallFlag();
+            // 重置堵转检测: 清零计时
+            motor.controller->stallStartTick = 0;
             break;
     }
 }

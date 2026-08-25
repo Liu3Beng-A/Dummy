@@ -25,12 +25,42 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
     switch (_cmd)
     {
         // 0x00~0x0F No Memory CMDs
-        case 0x01:  // Enable Motor
-            motor.controller->requestMode = (*(uint32_t*) (RxData) == 1) ?
-                                            Motor::MODE_COMMAND_VELOCITY : Motor::MODE_STOP;
-            // ENABLE 清除堵转标志
+        case 0x01:  // Enable Motor (重构: 支持 stallMode 状态机)
             if (*(uint32_t*) (RxData) == 1)
-                motor.controller->ClearStallFlag();
+            {
+                // enable: 清除 stallMode → IDLE，退出 LOCKED
+                motor.controller->stallMode = Motor::STALL_IDLE;
+                // 关键：调用 ResetGoalsToCurrentPosition() 把 goalPosition 重置为 estPosition，
+                // 并清零 goalVelocity/goalCurrent/触发 softNewCurve，
+                // 否则下个 20kHz 周期 CalcSoftGoal(goalPosition) 仍会用堵转前的目标位置,
+                // 电机被再次驱动到同一目标 → 再次堵转 → 死循环。
+                motor.controller->ResetGoalsToCurrentPosition();
+                // 用当前位置作为 MotionPlanner 新起点 (estError = 0, 电机"已到位")
+                motor.motionPlanner.positionTracker.NewTask(motor.controller->GetEstPosition(), motor.controller->GetEstVelocity());
+                // 清堵转检测累积时间
+                motor.controller->stallStartTick = 0;
+                motor.controller->stallDetectRisingEdge = false;  // 重置上升沿标记
+                motor.controller->positionModeStartCycles = 0;   // 重新进入启动豁免期
+                // 恢复速度设置（回退期间可能改了 ratedVelocity）
+                motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;
+                motor.motionPlanner.positionTracker.SetVelocityAcc(boardConfig.velocityAcc);
+                // 注意：不改 requestMode，保持原模式等待新命令
+            }
+            else
+            {
+                // disable: 类似处理，电机失能
+                motor.controller->requestMode = Motor::MODE_STOP;
+                motor.controller->stallMode = Motor::STALL_IDLE;
+                // 同样重置 goalPosition，保持电机停在当前位置
+                motor.controller->ResetGoalsToCurrentPosition();
+                motor.motionPlanner.positionTracker.NewTask(motor.controller->GetEstPosition(), 0);
+                motor.controller->stallStartTick = 0;
+                motor.controller->stallDetectRisingEdge = false;
+                motor.controller->positionModeStartCycles = 0;
+                // 恢复速度设置（与 enable 路径一致: 回退期间可能改了 ratedVelocity）
+                motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;
+                motor.motionPlanner.positionTracker.SetVelocityAcc(boardConfig.velocityAcc);
+            }
             break;
         case 0x02:  // Do Calibration
             encoderCalibrator.isTriggered = true;
@@ -51,6 +81,10 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
                            (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
             break;
         case 0x05:  // Set Position SetPoint
+            // LOCKED/RETREATING 状态丢弃位置命令 (避免主控 stuck MoveJ 时反复下发覆盖 retreatTarget)
+            if (motor.controller->stallMode == Motor::STALL_LOCKED ||
+                motor.controller->stallMode == Motor::STALL_RETREATING)
+                break;
             if (motor.controller->modeRunning != Motor::MODE_COMMAND_POSITION)
             {
                 motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;
@@ -89,6 +123,10 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
         case 0x07:  // Set Position with Velocity-Limit
         {
+            // LOCKED/RETREATING 状态丢弃位置命令 (避免主控 stuck MoveJ 时反复下发覆盖 retreatTarget)
+            if (motor.controller->stallMode == Motor::STALL_LOCKED ||
+                motor.controller->stallMode == Motor::STALL_RETREATING)
+                break;
             if (motor.controller->modeRunning != Motor::MODE_COMMAND_POSITION)
             {
                 motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;
@@ -113,6 +151,8 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         case 0x12:  // Set Current-Limit and Store to EEPROM
             motor.config.motionParams.ratedCurrent = (int32_t) (*(float*) RxData * 1000);
             boardConfig.currentLimit = motor.config.motionParams.ratedCurrent;
+            // 更新堵转阈值：按新电流的 75% 计算
+            motor.controller->stallCurrentThreshold = motor.config.motionParams.ratedCurrent * 75 / 100;
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
@@ -169,11 +209,10 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
-        case 0x1B:  // Set Enable Stall-Protect
+        case 0x1B:  // Set Enable Stall-Protect (临时修改，不写 EEPROM)
             motor.config.ctrlParams.stallProtectSwitch = (*(uint32_t*) (RxData) == 1);
-            boardConfig.enableStallProtect = motor.config.ctrlParams.stallProtectSwitch;
-            if (_data[4])
-                boardConfig.configStatus = CONFIG_COMMIT;
+            // 不修改 boardConfig.enableStallProtect，保持默认 true
+            // 不写入 EEPROM，重启后恢复默认开启
             break;
 
 
@@ -323,7 +362,69 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             motor.controller->SetBrake(true);  // P0-5: brake instead of coast
             motor.controller->SetVelocitySetPoint(0);
             motor.controller->SetCurrentSetPoint(0);
+            // 急停不清 stallMode，保持 LOCKED 状态
             printf("[CAN BROADCAST] Emergency Stop Received!\r\n");
+        }
+            break;
+
+        // ── 堵转检测重构新增命令 (0x50~0x7F 区间: 与广播阈值 0x50 对齐，避开位宽冲突) ──
+        case 0x5A:  // 广播 STALL/STALL_DONE
+            // 其他电机收到 STALL 广播 → 直接进 LOCKED（跳过 RETREATING）
+            // 触发堵转的电机本身已在 RETREATING 状态，此处处理不影响
+            {
+                extern Motor motor;
+                uint8_t stallNodeId = _data[0];  // 发起堵转的节点 ID
+                uint8_t stallCmd = _data[1];     // 1=TRIGGER, 2=DONE, 3=TIMEOUT
+                (void)stallNodeId;  // 本节点不检查（自己广播也可能收到回环）
+
+                if (stallCmd == 1 && motor.controller->stallMode == Motor::STALL_IDLE)
+                {
+                    // 非堵转源电机：收到他人 STALL → 直接锁定
+                    motor.controller->stallMode = Motor::STALL_LOCKED;
+                    motor.controller->ClearIntegral();
+                    printf("[STALL] node=%d locked by remote stall\r\n", boardConfig.canNodeId);
+                }
+                // TRIGGER 状态下 STALL_DONE/TIMEOUT 不做特殊处理（由电机端主循环的 RETREATING 处理器负责）
+            }
+            break;
+
+        case 0x5B:  // 广播 UNLOCKED: 全局解除所有电机 LOCKED
+        {
+            extern Motor motor;
+            if (motor.controller->stallMode == Motor::STALL_LOCKED)
+            {
+                motor.controller->stallMode = Motor::STALL_IDLE;
+                // 关键: 调用 ResetGoalsToCurrentPosition() 把 goalPosition 重置为 estPosition，
+                // 否则 CalcSoftGoal(goalPosition) 仍会驱动电机到堵转前的目标位置 → 再次堵转
+                motor.controller->ResetGoalsToCurrentPosition();
+                motor.motionPlanner.positionTracker.NewTask(motor.controller->GetEstPosition(), motor.controller->GetEstVelocity());
+                motor.controller->stallStartTick = 0;
+                motor.controller->stallDetectRisingEdge = false;
+                motor.controller->positionModeStartCycles = 0;
+                motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;
+                motor.motionPlanner.positionTracker.SetVelocityAcc(boardConfig.velocityAcc);
+                printf("[CAN BROADCAST] UNLOCKED Received, node=%d\r\n", boardConfig.canNodeId);
+            }
+            // 非 LOCKED 状态忽略
+        }
+            break;
+
+        case 0x5C:  // 单播查询 stall 状态 (主控->单电机)
+        {
+            extern Motor motor;
+            uint8_t queryType = _data[0];
+            uint8_t respValue = 0;
+            if (queryType == 1)
+                respValue = motor.controller->config->stallProtectSwitch ? 1 : 0;
+            else if (queryType == 2)
+                respValue = (motor.controller->stallMode == Motor::STALL_LOCKED) ? 1 : 0;
+
+            txHeader.StdId = (boardConfig.canNodeId << 7) | 0x5C;
+            txHeader.IDE = CAN_ID_STD;
+            txHeader.RTR = CAN_RTR_DATA;
+            txHeader.DLC = 8;
+            uint8_t txData[8] = { queryType, respValue, 0, 0, 0, 0, 0, 0 };
+            CAN_Send(&txHeader, txData);
         }
             break;
 

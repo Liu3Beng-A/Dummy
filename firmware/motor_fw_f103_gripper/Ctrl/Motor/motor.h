@@ -63,7 +63,6 @@ public:
         STATE_STOP,
         STATE_FINISH,
         STATE_RUNNING,
-        STATE_OVERLOAD,
         STATE_STALL,
         STATE_NO_CALIB
     } State_t;
@@ -156,8 +155,6 @@ public:
         bool softBrake{};
         bool softNewCurve{};
         int32_t focPosition{};
-        uint32_t overloadTime{};
-        bool overloadFlag{};
 
 
         void AttachConfig(Config_t* _config);

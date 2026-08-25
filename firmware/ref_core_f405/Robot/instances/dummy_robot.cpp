@@ -436,9 +436,37 @@ void DummyRobot::SetStallMode(int motorIndex)
     for (int j = 1; j <= 6; j++) {
         motorJ[j]->targetAngle = currentJoints.a[j - 1] - initPose.a[j - 1];
     }
+    // Bug-11 修复: 同步 targetRailPos 到 currentRailPos，否则主循环 500ms 周期
+    // MoveRail(targetRailPos) 仍按堵转前目标下发，enable 退出 LOCKED 后会覆盖
+    // 电机端 ResetGoalsToCurrentPosition() 设置，导致再次向堵转点推进 → 死循环
+    targetRailPos = currentRailPos;
     // 清空指令队列，防止残留指令堆积
     commandHandler.ClearFifo();
     (void)motorIndex;  // 未来可用于区分哪个电机堵转并做针对性处理
+}
+
+void DummyRobot::BroadcastUnlock()
+{
+    // 连续 3 次 UNLOCKED 广播，间隔 100ms 防丢包
+    for (int i = 0; i < 3; i++)
+    {
+        motorJ[1]->BroadcastUnlock();  // 使用 motorJ[1] 作为 CAN 总线发送口
+        osDelay(100);
+    }
+    printf("[UNLOCK] broadcast x3 sent\r\n");
+}
+
+void DummyRobot::QueryStallStatus()
+{
+    // 查询地轨 + J1~J6 共 7 个电机的 en/lock 状态
+    // CAN IDs: 地轨=9, J1~J6 = 1~6
+    motorJ[0]->QueryStallStatus(1);  // 查询 stallProtectSwitch
+    motorJ[0]->QueryStallStatus(2);  // 查询 stallMode==LOCKED
+    for (int i = 1; i <= 6; i++)
+    {
+        motorJ[i]->QueryStallStatus(1);
+        motorJ[i]->QueryStallStatus(2);
+    }
 }
 
 void DummyRobot::Homing()

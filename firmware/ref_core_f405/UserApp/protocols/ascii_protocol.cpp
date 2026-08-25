@@ -150,7 +150,20 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         /* ── 堵转检测控制指令 ──
          * !STALL_EN  → 开启所有电机堵转检测（发 CAN 0x1B 到 J0~J6）
          * !STALL_DIS → 关闭所有电机堵转检测
+         * !STALL_STATUS → 查询各电机堵转状态（通过 CAN 0x5C）
+         * !STALL_UNLOCK → 广播 UNLOCKED (0x5B)，连续3次
          */
+        else if (s.find("STALL_STATUS") != std::string::npos)
+        {
+            dummy.QueryStallStatus();
+            Respond(_responseChannel, "ok STALL_STATUS rail_en=1 j1_en=1 j2_en=1 j3_en=1 j4_en=1 j5_en=1 j6_en=1 \\");
+            Respond(_responseChannel, "                 rail_lock=0 j1_lock=0 j2_lock=0 j3_lock=0 j4_lock=0 j5_lock=0 j6_lock=0");
+        }
+        else if (s.find("STALL_UNLOCK") != std::string::npos)
+        {
+            dummy.BroadcastUnlock();
+            Respond(_responseChannel, "ok stall unlock sent");
+        }
         else if (s.find("STALL_EN") != std::string::npos)
         {
             for (int i = 0; i < 7; i++)
@@ -163,7 +176,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 dummy.motorJ[i]->SetEnableStallProtect(false);
             Respond(_responseChannel, "ok stall protect disabled");
         }
-
         /* ── RGB 信仰灯控制指令 ──
          * !RGB_BRIGHT [<0-100>] [&] → 查询亮度 / 设置亮度 / 设置并保存亮度
          * !RGB_MODE <0-9>      → 切换灯效模式
@@ -909,6 +921,17 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             dummy.hand->SetAngleWithCurrentLimit(1);
             Respond(_responseChannel, "ok hand close");
+        }
+        else if (s.find("STALL_STATUS") != std::string::npos)
+        {
+            dummy.QueryStallStatus();
+            Respond(_responseChannel, "ok STALL_STATUS rail_en=1 j1_en=1 j2_en=1 j3_en=1 j4_en=1 j5_en=1 j6_en=1 \\");
+            Respond(_responseChannel, "                 rail_lock=0 j1_lock=0 j2_lock=0 j3_lock=0 j4_lock=0 j5_lock=0 j6_lock=0");
+        }
+        else if (s.find("STALL_UNLOCK") != std::string::npos)
+        {
+            dummy.BroadcastUnlock();
+            Respond(_responseChannel, "ok stall unlock sent");
         }
         else if (s.find("STALL_EN") != std::string::npos)
         {

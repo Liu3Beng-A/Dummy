@@ -68,6 +68,8 @@ public:
     void Reboot();
     uint32_t GetTemp();
     void EraseConfigs();
+    void BroadcastUnlock();   // 广播 UNLOCKED (0x5B)
+    void QueryStallStatus(uint8_t queryType); // 查询 stall 状态 (0x5C), type=1=en, type=2=lock
 
     void UpdateAngle();
     void UpdateAngleCallback(float _pos, bool _isFinished);

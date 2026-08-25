@@ -373,7 +373,7 @@ void EncoderCalibratorBase::TickMainLoop()
         ClearFlash();
     }
 
-    motor->controller->isStalled = true;
+    motor->controller->stallMode = Motor::STALL_LOCKED;
 
     state = CALI_DISABLE;
     isTriggered = false;

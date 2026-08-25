@@ -164,8 +164,41 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 case 0x2D:
                     printf("[I_LIMIT] MOTOR [9] = %.2f\r\n", *(float*)data);
                     break;
+                case 0x5A:
+                    // 电机堵转广播: data[0]=nodeID, data[1]=1=TRIGGER/2=DONE/3=TIMEOUT/4=HEARTBEAT
+                    {
+                        uint8_t stallNodeId = data[0];
+                        uint8_t stallCmd = data[1];
+                        if (stallCmd == 1) {
+                            // TRIGGER: 堵转刚触发
+                            dummy.SetStallMode((int)stallNodeId);
+                            printf("[STALL] node=%d TRIGGER\r\n", stallNodeId);
+                        } else if (stallCmd == 2) {
+                            // DONE: 回退完成
+                            dummy.SetStallMode((int)stallNodeId);
+                            printf("[STALL] node=%d done\r\n", stallNodeId);
+                        } else if (stallCmd == 3) {
+                            // TIMEOUT: 回退超时
+                            dummy.SetStallMode((int)stallNodeId);
+                            printf("[STALL] node=%d timeout\r\n", stallNodeId);
+                        }
+                        // state==4 (HEARTBEAT): RETREATING 期间心跳，忽略
+                    }
+                    break;
+                case 0x5C:
+                    // 0x5C 查询响应: data[0]=queryType(1=en/2=lock), data[1]=value(0/1)
+                    {
+                        uint8_t qtype = data[0];
+                        uint8_t qval = data[1];
+                        if (qtype == 1) {
+                            printf("[STALL_STATUS] node=%d en=%d\r\n", id, qval);
+                        } else if (qtype == 2) {
+                            printf("[STALL_STATUS] node=%d lock=%d\r\n", id, qval);
+                        }
+                    }
+                    break;
                 case 0x7C:
-                    // 电机主动上报堵转
+                    // 旧堵转上报 (兼容旧固件)
                     if (data[1] == 1)
                         dummy.SetStallMode(9);
                     break;
@@ -248,8 +281,38 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 case 0x2D:
                     printf("[I_LIMIT] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
                     break;
+                case 0x5A:
+                    // 电机堵转广播: data[0]=nodeID, data[1]=1=TRIGGER/2=DONE/3=TIMEOUT/4=HEARTBEAT
+                    {
+                        uint8_t stallNodeId = data[0];
+                        uint8_t stallCmd = data[1];
+                        if (stallCmd == 1) {
+                            dummy.SetStallMode((int)stallNodeId);
+                            printf("[STALL] node=%d TRIGGER\r\n", stallNodeId);
+                        } else if (stallCmd == 2) {
+                            dummy.SetStallMode((int)stallNodeId);
+                            printf("[STALL] node=%d done\r\n", stallNodeId);
+                        } else if (stallCmd == 3) {
+                            dummy.SetStallMode((int)stallNodeId);
+                            printf("[STALL] node=%d timeout\r\n", stallNodeId);
+                        }
+                        // state==4 (HEARTBEAT): RETREATING 期间心跳，忽略
+                    }
+                    break;
+                case 0x5C:
+                    // 0x5C 查询响应: data[0]=queryType(1=en/2=lock), data[1]=value(0/1)
+                    {
+                        uint8_t qtype = data[0];
+                        uint8_t qval = data[1];
+                        if (qtype == 1) {
+                            printf("[STALL_STATUS] node=%d en=%d\r\n", id, qval);
+                        } else if (qtype == 2) {
+                            printf("[STALL_STATUS] node=%d lock=%d\r\n", id, qval);
+                        }
+                    }
+                    break;
                 case 0x7C:
-                    // 电机主动上报堵转
+                    // 旧堵转上报 (兼容旧固件)
                     if (data[1] == 1)
                         dummy.SetStallMode((int)id);
                     break;
@@ -331,8 +394,11 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 case 0x2D:
                     printf("[I_LIMIT] MOTOR [8] = %.2f\r\n", *(float*)data);
                     break;
+                case 0x5A:
+                    // 夹爪固件不支持堵转检测，忽略
+                    break;
                 case 0x7C:
-                    // 电机主动上报堵转
+                    // 旧堵转上报 (兼容旧固件)
                     if (data[1] == 1)
                         dummy.SetStallMode(8);
                     break;

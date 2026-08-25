@@ -367,6 +367,7 @@ if ((controller->softPosition == controller->goalPosition)
 - 2026-08-23 02:00：用户决定**本重构排在堵转检测重构之后**，**Q1~Q6 提问部分全部移除**
 - 2026-08-23 03:15：用户指示把已确认决策（D1/D2/D4/D8）写入第 2 章，旧决策全部覆盖
 - 2026-08-23 03:20：AI 写入 D1/D2/D4/D8，并设置"待用户确认区"（TC1/TC2/TC3）+ "待决问题区"（P1/P2）
+- 2026-08-25 21:15：堵转重构 Bug-11 已修复（`SetStallMode()` 同步 `targetRailPos`），但衍生两个遗留待办登记到本文档 §6
 - ⏳ 待用户确认 TC1/TC2/TC3
 - ⏳ 待堵转检测重构完成后，决定 P1/P2
 - ⏳ 全部决策确认完毕后，AI 助手汇总到「需求清单」章节（参考 `重构方案—参数重构需求.md` 格式）
@@ -378,3 +379,77 @@ if ((controller->softPosition == controller->goalPosition)
 - ⏳ 待堵转检测重构完成后，再恢复 Q1~Q6 决策讨论
 - ⏳ 全部决策确认完毕后，AI 助手汇总到「需求清单」章节（参考 `重构方案—参数重构需求.md` 格式）
 - ⏳ 用户审阅后启动重构任务规划
+
+---
+
+## 6. 待办登记（来自堵转重构 Bug-11 衍生）
+
+> 本章节登记"在堵转重构中已修复 Bug-11，但衍生出本重构范畴内的待办"。这些待办与 D1/D2/D4 决策相关，**应纳入本重构一并处理**，不阻塞堵转重构完成。
+
+### T-1：`IsMoving()` 加入地轨判定
+
+**来源**：`重构方案—堵转检测重构需求.md` Bug-11（2026-08-25）
+
+**现状问题**：
+- `dummy_robot.cpp:560-569` 的 `IsMoving()` 只判定 `motorJ[1..6]`，**漏掉地轨 `motorJ[0]`**
+- MoveJ 阻塞循环（`dummy_robot.cpp:718`）在 STALL_DONE 后立即看到 J1~J6 都到位而退出 → 打印 `"ok"`
+- **副作用**：主控提前返回 ok，但地轨可能还在回退中（堵转 RETREATING 状态），用户体验割裂
+- 即使非堵转场景，地轨比关节晚到位时也会"主控以为到了，但用户看到地轨还在动"
+
+**修复方向**（详细方案待本重构启动后讨论）：
+```cpp
+bool DummyRobot::IsMoving()
+{
+    static constexpr float EPSILON_DEG = 1.0f;
+    static constexpr float EPSILON_MM  = 1.0f;  // 地轨 1mm 容差
+    for (int i = 1; i <= 6; i++)
+        if (fabsf(motorJ[i]->angle - motorJ[i]->targetAngle) > EPSILON_DEG)
+            return true;
+    // 新增地轨判定
+    if (fabsf(currentRailPos - targetRailPos) > EPSILON_MM)
+        return true;
+    return false;
+}
+```
+
+**前置依赖**：**T-2**（必须先有 `currentRailPos` 实时数据，否则 `IsMoving()` 用过期值判定会失真）
+
+### T-2：`UpdateJointAngles()` 轮询地轨 `motorJ[0]`，更新 `currentRailPos`
+
+**来源**：Bug-11 衍生（2026-08-25）
+
+**现状问题**：
+- `dummy_robot.cpp:362-385` 的 `UpdateJointAngles()` 只轮询 `motorJ[1..6]` 发 0x23 查询
+- **`motorJ[0]`（地轨，CAN ID=9）从不被查询**
+- `CtrlStepMotor::UpdateAngleCallback(float, bool)` 从未被调用 → `motorJ[0]->angle` 永远是 0.0f
+- 即便 T-1 把地轨加进 `IsMoving()`，用 `motorJ[0]->angle` 也没意义
+
+**修复方向**（详细方案待本重构启动后讨论）：
+- 在 `UpdateJointAngles()` 的 `group = 0/1/2` 轮询中加入 `motorJ[0]->UpdateAngle()`
+- 三个 group 都已满 → 改为 4 个 group（每 50ms 轮询 2 个，每 200ms 全轮一遍；CAN 总线压力可接受）
+- 实现 `CtrlStepMotor::UpdateAngleCallback()` 对地轨的特殊处理：地轨无减速比（reduction=1），直接用 `position_steps / MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS` 转圈数 × 5mm → 距离 mm
+- 或更简单：在 `dummy_robot` 里直接用 `currentRailPos = motorJ[0]->angle * 5.0f`（1 圈 = 5mm 直连丝杆）
+- 把 `UpdateJointAnglesCallback()` 的范围从 `i=1..6` 扩展到 `i=0..6`，把 `currentRailPos` 也刷新
+
+**与 D4 决策的关系**：
+- D4 要求地轨参与"同步抵达"计算 → 计算公式 `timeSec = max(所有轴距离 / 该轴速度)` 就要看 `currentRailPos`
+- 如果 `currentRailPos` 不更新，D4 的实现无法自洽（主控不知道地轨当前位置，规划速度时只能用初始 `currentRailPos=0`）
+
+**优先级**：🔴 **高**（T-1 的前置依赖，且 D4 决策落地的必要条件）
+
+### T-3（可选）：堵转后 `targetRailPos` 被偷偷改成 `currentRailPos` 的语义提示
+
+**来源**：Bug-11 衍生（2026-08-25）
+
+**现状问题**：
+- Bug-11 修复让 `SetStallMode()` 把 `targetRailPos = currentRailPos`
+- 这意味着用户发 `>251,...` 堵转后，主控 `targetRailPos` 偷偷变成回退后的位置（如 245mm），用户再发 `>200,...` 时 MoveJ 是从 245 出发，不是从 251 出发
+- 这是 Bug-11 文档里"场景 B 抛弃原目标"的设计取舍，但**没有任何 UI/串口提示**告诉用户"原 MoveJ 已被部分抛弃"
+- 文档《重构方案—堵转检测重构需求.md》§"LOCKED 状态"已说明这是有意为之，但实际运行中用户可能困惑
+
+**可选方案**：
+- (a) STALL_DONE 后主控打印 `[STALL] 原 MoveJ 已放弃，当前地轨=245mm，请重新发目标`（明确告知）
+- (b) 不打印，靠文档说明
+- (c) 串口助手 UI 上红色提示（`串口助手.py` 改 UI）
+
+**优先级**：🟡 **低**（不影响功能，仅影响体验；可推迟到 UI 改进批次统一处理）

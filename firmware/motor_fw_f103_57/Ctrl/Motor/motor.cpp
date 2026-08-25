@@ -102,12 +102,12 @@ void Motor::CloseLoopControlTick()
         controller->focPosition = 0;    // clear outputs
         controller->focCurrent = 0;
         driver->Sleep();
-    } else if (controller->isStalled)
+    } else if (controller->stallMode == STALL_LOCKED)
     {
-        // P1-32 fix: stall does NOT sleep - maintain minimum holding torque
-        // to prevent arm free-fall under gravity. Fall through to normal
-        // control loop which will output low holding current.
-        controller->ClearIntegral();
+        // LOCKED 状态: 保持 PID 闭环维持位置, 不响应新位置命令
+        // 主动跑 DCE 控制维持当前位置(以当前位置作为 setpoint, velocity=0),
+        // 否则上一次 RETREATING 末尾的 focCurrent 可能继续作用导致漂移, 或 focCurrent=0 时电机无力。
+        controller->CalcDceToOutput(controller->estPosition, 0);
     } else if (controller->softBrake)
     {
         controller->ClearIntegral();
@@ -155,6 +155,9 @@ void Motor::CloseLoopControlTick()
     {
         controller->modeRunning = controller->requestMode;
         controller->softNewCurve = true;
+        // 进入位置模式时重置启动豁免期计数器
+        if (controller->modeRunning == MODE_COMMAND_POSITION)
+            controller->positionModeStartCycles = 0;
     }
 
     /******************************* Update Hard-Goal *******************************/
@@ -178,7 +181,8 @@ void Motor::CloseLoopControlTick()
     {
         controller->softNewCurve = false;
         controller->ClearIntegral();
-        controller->ClearStallFlag();
+        controller->stallStartTick = 0;  // 切换曲线时重置堵转计时
+        controller->stallDetectRisingEdge = false;  // 切换曲线时也重置上升沿
 
         switch (controller->modeRunning)
         {
@@ -207,7 +211,6 @@ void Motor::CloseLoopControlTick()
                 break;
             case MODE_STEP_DIR:
                 motionPlanner.positionInterpolator.NewTask(controller->estPosition, controller->estVelocity);
-                // step/dir mode uses delta-position, so stay where we are
                 controller->goalPosition = controller->estPosition;
                 break;
             default:
@@ -265,57 +268,131 @@ void Motor::CloseLoopControlTick()
     controller->softDisable = controller->goalDisable;
     controller->softBrake = controller->goalBrake;
 
-    /******************************** State Check ********************************/
-    int32_t current = abs(controller->focCurrent);
-
-    // stallThreshold 需在 stallProtectSwitch 判断外层声明，供 overload 检测复用
-    const int32_t stallThreshold = (int32_t)(config.motionParams.ratedCurrent * 95 / 100);
-
-    // Stall detect
-    if (controller->config->stallProtectSwitch)
+    /******************************** Stall Detection (20kHz) *******************************/
+    // 仅位置模式下检测, 力矩/速度模式不检测
+    if (controller->config->stallProtectSwitch &&
+        controller->modeRunning == MODE_COMMAND_POSITION &&
+        controller->stallMode == STALL_IDLE)
     {
-        if (// Current Mode
-            ((controller->modeRunning == MODE_COMMAND_CURRENT ||
-              controller->modeRunning == MODE_PWM_CURRENT) &&
-             (current != 0))
-            || // Other Mode: current >= ratedCurrent * 0.95
-            current >= stallThreshold)
+        // 启动豁免期: 进入位置模式后前 100ms (2000 cycles @ 20kHz) 不检测
+        if (controller->positionModeStartCycles < 2000)
         {
-            if (abs(controller->estVelocity) < MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 5)
+            controller->positionModeStartCycles++;
+            // 豁免期内不积累任何 stallDetectRisingEdge
+            controller->stallDetectRisingEdge = false;
+        }
+        else
+        {
+            const int32_t stallCurrentThr = controller->stallCurrentThreshold; // ratedCurrent * 75%
+            const int32_t stallVelocityThr = 30;    // 30 step/s（10 太严，30 容忍小幅抖动）
+            const int32_t stallErrorThr = 30;        // 30 步（堵转压紧后误差可能缩小到 <50）
+            const uint32_t stallDurationUs = 200000; // 200ms = 200000us
+            // 上升沿二次验证：200ms 后误差必须仍然存在（说明确实卡住，没"漏过去"）
+            const int32_t stallRecheckErrorThr = 20;
+
+            int32_t current = abs(controller->focCurrent);
+
+            // 三条件判定 (上升沿检测)
+            bool allConditionsMet = (current > stallCurrentThr) &&
+                                     (abs(controller->estVelocity) < stallVelocityThr) &&
+                                     (abs(controller->estError) > stallErrorThr);
+
+            if (allConditionsMet)
             {
-                if (controller->stalledTime >= 1000 * 1000) {
-                    controller->isStalled = true;
-                    // 主动上报堵转: StdId = (nodeID << 7) | 0x7C, Data[0]=nodeID, Data[1]=1(stall)
-                    CAN_TxHeaderTypeDef txHdr = {};
-                    txHdr.StdId = (boardConfig.canNodeId << 7) | 0x7C;
-                    txHdr.IDE = CAN_ID_STD;
-                    txHdr.RTR = CAN_RTR_DATA;
-                    txHdr.DLC = 8;
-                    uint8_t txData[8] = { (uint8_t)boardConfig.canNodeId, 1, 0, 0, 0, 0, 0, 0 };
-                    CAN_Send(&txHdr, txData);
+                if (!controller->stallDetectRisingEdge)
+                {
+                    // 首次上升沿: 记录此时刻 + 误差值, 不立刻清零
+                    controller->stallDetectRisingEdge = true;
+                    controller->stallStartTick = motionPlanner.CONTROL_PERIOD; // 50us
+                    controller->stallDetectRisingEstError = abs(controller->estError);
                 }
                 else
-                    controller->stalledTime += motionPlanner.CONTROL_PERIOD;
+                {
+                    // 上升沿已触发: 持续累加计时 (容忍中间偶尔条件不满足)
+                    controller->stallStartTick += motionPlanner.CONTROL_PERIOD;
+
+                    if (controller->stallStartTick >= stallDurationUs)
+                    {
+                        // 200ms 后二次验证
+                        bool recheckCurrentStillHigh = (current > stallCurrentThr * 8 / 10); // 放宽到 80%
+                        bool recheckErrorStillLarge = (abs(controller->estError) > stallRecheckErrorThr) ||
+                                                     (abs(controller->estError) > controller->stallDetectRisingEstError / 2);
+                        bool velocityStillLow = (abs(controller->estVelocity) < stallVelocityThr * 3); // 放宽 3 倍容忍
+
+                        if (recheckCurrentStillHigh && recheckErrorStillLarge)
+                        {
+                            // IDLE -> RETREATING
+                            controller->retreatStartTick = HAL_GetTick();
+                            // 地轨回退距离: 51200 步 (约 5mm)
+                            controller->retreatDirection = (controller->goalPosition - controller->estPosition) > 0 ? -1 : +1;
+                            controller->retreatTarget = controller->estPosition + controller->retreatDirection * 51200;
+                            motionPlanner.positionTracker.NewTask(controller->estPosition, controller->estVelocity);
+                            config.motionParams.ratedVelocity = 50000;
+                            motionPlanner.positionTracker.SetVelocityAcc(100000);
+                            controller->SetPositionSetPoint(controller->retreatTarget);
+                            controller->ClearIntegral();
+                            controller->stallMode = STALL_RETREATING;
+                            controller->stallDetectRisingEdge = false;
+                            controller->stallStartTick = 0;
+                            controller->stallBroadcastCmd = 1; // STALL_TRIGGER
+                        }
+                        else if (!velocityStillLow)
+                        {
+                            // 200ms 后速度起来了 → 不是堵转
+                            controller->stallDetectRisingEdge = false;
+                            controller->stallStartTick = 0;
+                        }
+                        else if (controller->stallStartTick >= stallDurationUs * 2)
+                        {
+                            // 400ms 兜底强制触发
+                            controller->retreatStartTick = HAL_GetTick();
+                            controller->retreatDirection = (controller->goalPosition - controller->estPosition) > 0 ? -1 : +1;
+                            controller->retreatTarget = controller->estPosition + controller->retreatDirection * 51200;
+                            motionPlanner.positionTracker.NewTask(controller->estPosition, controller->estVelocity);
+                            config.motionParams.ratedVelocity = 50000;
+                            motionPlanner.positionTracker.SetVelocityAcc(100000);
+                            controller->SetPositionSetPoint(controller->retreatTarget);
+                            controller->ClearIntegral();
+                            controller->stallMode = STALL_RETREATING;
+                            controller->stallDetectRisingEdge = false;
+                            controller->stallStartTick = 0;
+                            controller->stallBroadcastCmd = 1;
+                        }
+                    }
+                }
             }
-        } else // can ONLY clear stall flag  MANUALLY
-        {
-            controller->stalledTime = 0;
+            else
+            {
+                // 三条件不满足: 仅当电机确实在动 (> 100 step/s) 时才清零上升沿
+                if (abs(controller->estVelocity) > 100)
+                {
+                    controller->stallDetectRisingEdge = false;
+                    controller->stallStartTick = 0;
+                }
+            }
         }
     }
 
-    // Overload detect
-    if ((controller->modeRunning != MODE_COMMAND_CURRENT) &&
-        (controller->modeRunning != MODE_PWM_CURRENT) &&
-        (current >= stallThreshold))
+    /******************************** RETREATING State Handler *******************************/
+    // 不用 state==STATE_FINISH（Update State 后续会把 RETREATING/LOCKED 覆盖成 STATE_STALL），
+    // 直接用原始变量判定是否到达回退目标位。
+    if (controller->stallMode == STALL_RETREATING)
     {
-        if (controller->overloadTime >= 1000 * 1000)
-            controller->overloadFlag = true;
-        else
-            controller->overloadTime += motionPlanner.CONTROL_PERIOD;
-    } else // auto clear overload flag when released
-    {
-        controller->overloadTime = 0;
-        controller->overloadFlag = false;
+        bool reachedGoal = (controller->modeRunning == MODE_COMMAND_POSITION) &&
+                           (controller->softPosition == controller->goalPosition) &&
+                           (controller->softVelocity == 0);
+        if (reachedGoal)
+        {
+            controller->stallMode = STALL_LOCKED;
+            controller->ClearIntegral(); // Q1-A1
+            controller->stallBroadcastCmd = 2; // STALL_DONE
+        }
+        else if (HAL_GetTick() - controller->retreatStartTick > 2000)
+        {
+            controller->stallMode = STALL_LOCKED;
+            controller->ClearIntegral();
+            controller->stallBroadcastCmd = 3; // STALL_TIMEOUT
+        }
     }
 
     /******************************** Update State ********************************/
@@ -323,10 +400,12 @@ void Motor::CloseLoopControlTick()
         controller->state = STATE_NO_CALIB;
     else if (controller->modeRunning == MODE_STOP)
         controller->state = STATE_STOP;
-    else if (controller->isStalled)
+    else if (controller->stallMode == STALL_RETREATING ||
+             controller->stallMode == STALL_LOCKED)
+    {
+        // 堵转时：RETRACTING 和 LOCKED 状态都显示 STATE_STALL（LED 指示）
         controller->state = STATE_STALL;
-    else if (controller->overloadFlag)
-        controller->state = STATE_OVERLOAD;
+    }
     else
     {
         if (controller->modeRunning == MODE_COMMAND_POSITION)
@@ -447,6 +526,18 @@ void Motor::Controller::SetCtrlMode(Motor::Mode_t _mode)
 }
 
 
+void Motor::Controller::ResetGoalsToCurrentPosition()
+{
+    // 用于 enable/UNLOCKED 后让电机真的停在当前位置, 而不是被旧 goalPosition 驱动到堵转点
+    // 把 goalPosition 设为当前位置, 清零 goalVelocity/goalCurrent, 触发 softNewCurve
+    // 让 CalcSoftGoal 下次计算时 softPosition = currentGoal = estPosition, estError = 0
+    SetPositionSetPoint(estPosition);
+    goalVelocity = 0;
+    goalCurrent = 0;
+    softNewCurve = true;
+}
+
+
 void Motor::Controller::AddTrajectorySetPoint(int32_t _pos, int32_t _vel)
 {
     SetPositionSetPoint(_pos);
@@ -545,13 +636,6 @@ void Motor::Controller::SetBrake(bool _brake)
 }
 
 
-void Motor::Controller::ClearStallFlag()
-{
-    stalledTime = 0;
-    isStalled = false;
-}
-
-
 int32_t Motor::Controller::CompensateAdvancedAngle(int32_t _vel)
 {
     /*
@@ -616,11 +700,14 @@ void Motor::Controller::Init()
     focPosition = 0;
     focCurrent = 0;
 
-    stalledTime = 0;
-    isStalled = false;
-
-    overloadTime = 0;
-    overloadFlag = false;
+    stallMode = STALL_IDLE;
+    stallStartTick = 0;
+    stallDetectRisingEdge = false;
+    retreatStartTick = 0;
+    retreatTarget = 0;
+    retreatDirection = 0;
+    positionModeStartCycles = 0;
+    stallCurrentThreshold = (int32_t)(context->config.motionParams.ratedCurrent * 75 / 100);
 
     config->pid.vError = 0;
     config->pid.vErrorLast = 0;
@@ -653,17 +740,4 @@ void Motor::Controller::AttachConfig(Motor::Controller::Config_t* _config)
 {
     config = _config;
 }
-
-
-void Motor::Controller::ClearIntegral() const
-{
-    config->pid.integralRound = 0;
-    config->pid.integralRemainder = 0;
-    config->pid.outputKi = 0;
-
-    config->dce.integralRound = 0;
-    config->dce.integralRemainder = 0;
-    config->dce.outputKi = 0;
-}
-
 
