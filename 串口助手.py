@@ -588,41 +588,6 @@ class RobotSerialAssistant:
 
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
-        # 地轨速度
-        tk.Label(parent, text="地轨速度 (#SPEED_RAIL)", font=("Arial", 10, "bold")).pack(anchor="w")
-        rsf = ttk.Frame(parent)
-        rsf.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(rsf, text="mm/s:", font=("Arial", 10)).pack(side=tk.LEFT)
-        self.ent_rail_speed = ttk.Entry(rsf, width=6, font=("Arial", 10))
-        self.ent_rail_speed.insert(0, "50")
-        self.ent_rail_speed.pack(side=tk.LEFT, padx=4)
-        self.scl_rail_speed = ttk.Scale(rsf, from_=0.5, to=100, orient=tk.HORIZONTAL)
-        self.scl_rail_speed.set(50)
-        self.scl_rail_speed.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.lbl_rail_speed_val = ttk.Label(rsf, text="50.0", width=6, font=("Arial", 10))
-        self.lbl_rail_speed_val.pack(side=tk.LEFT)
-
-        rs_btns = ttk.Frame(parent)
-        rs_btns.pack(fill=tk.X, pady=(0, 6))
-        tk.Button(rs_btns, text="查询", font=("Arial", 10), bg="#495057", fg="white",
-                  relief=tk.FLAT, command=self.query_rail_speed).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(rs_btns, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
-                  relief=tk.FLAT, command=self.apply_rail_speed).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(rs_btns, text="保存", font=("Arial", 10), bg="#2b8a3e", fg="white",
-                  relief=tk.FLAT, command=self.save_rail_speed).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-
-        def urss(val):
-            v = float(val)
-            self.lbl_rail_speed_val.config(text=f"{v:.1f}")
-            if self.ent_rail_speed.get() != f"{v:.1f}":
-                self.ent_rail_speed.delete(0, tk.END)
-                self.ent_rail_speed.insert(0, f"{v:.1f}")
-        self.scl_rail_speed.config(command=urss)
-        self.ent_rail_speed.bind("<Return>",
-            lambda e: self.scl_rail_speed.set(float(self.ent_rail_speed.get())))
-        self.ent_rail_speed.bind("<FocusOut>",
-            lambda e: self.scl_rail_speed.set(float(self.ent_rail_speed.get())))
-
         # 地轨加速度
         tk.Label(parent, text="地轨加速度 (#ACC_RAIL)", font=("Arial", 10, "bold")).pack(anchor="w")
         raf = ttk.Frame(parent)
@@ -1765,34 +1730,6 @@ class RobotSerialAssistant:
                 messagebox.showerror("错误", "节点必须为1-6/8/9")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
-
-    def send_rail_speed(self):
-        self.apply_rail_speed()
-
-    def apply_rail_speed(self):
-        try:
-            speed = float(self.ent_rail_speed.get())
-            if speed < 0.5:
-                speed = 0.5
-            elif speed > 100:
-                speed = 100
-            self.send_cmd(f"#SPEED_RAIL {speed:.1f}")
-        except ValueError:
-            messagebox.showerror("错误", "请输入有效的数字")
-
-    def save_rail_speed(self):
-        try:
-            speed = float(self.ent_rail_speed.get())
-            if speed < 0.5:
-                speed = 0.5
-            elif speed > 100:
-                speed = 100
-            self.send_cmd(f"#SPEED_RAIL {speed:.1f} &")
-        except ValueError:
-            messagebox.showerror("错误", "请输入有效的数字")
-
-    def query_rail_speed(self):
-        self.send_cmd("#SPEED_RAIL")
 
     def send_rail_acc(self):
         self.apply_rail_acc()
