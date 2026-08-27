@@ -87,7 +87,7 @@ public:
             make_protocol_function("erase_configs", *this, &CtrlStepMotor::EraseConfigs),
             make_protocol_function("set_enable", *this, &CtrlStepMotor::SetEnable, "enable"),
             make_protocol_function("set_position_with_time", *this,
-                                   &CtrlStepMotor::SetPositionWithVelocityLimit, "pos", "time"),
+                                   &CtrlStepMotor::SetPositionWithMotorRps, "pos", "time"),
             make_protocol_function("set_position", *this, &CtrlStepMotor::SetPositionSetPoint, "pos"),
             make_protocol_function("set_velocity", *this, &CtrlStepMotor::SetVelocitySetPoint, "vel"),
             make_protocol_function("set_velocity_limit", *this, &CtrlStepMotor::SetVelocityLimit, "vel"),
