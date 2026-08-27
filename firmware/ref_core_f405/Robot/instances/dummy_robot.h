@@ -4,7 +4,46 @@
 #include "algorithms/kinematic/6dof_kinematic.h"
 #include "actuators/ctrl_step/ctrl_step.hpp"
 #include "string"
-#define ALL 0
+// =====================================================================
+// MoveJ 速度重构（D-Q1/D-Q2/D-Q4 已拍板，2026-08-27 修订）
+// 单位体系：电机轴 r/s（与电机端 CAN 0x07 ratedVelocity 完全一致）
+// =====================================================================
+
+// 统一换算：slider (1~100) × 0.30 = 电机轴 r/s（未钳制前）
+// 钳制由 AXIS_MAX_RPS[] 负责（地轨 30 r/s，关节 20 r/s）
+static constexpr float SLIDER_TO_RPS = 0.30f;
+
+// 各轴电机轴 r/s 上限（用于钳制 slider 计算结果）
+// 地轨：直连丝杆 1605，物理上限 ~40 r/s，设 30 r/s = 150 mm/s（满速）
+// 关节：42/35 电机，电机端默认 30 r/s，设 20 r/s（保守）
+static constexpr float AXIS_MAX_RPS[7] = {
+    30.0f,   // 地轨
+    20.0f,   // J1
+    20.0f,   // J2
+    20.0f,   // J3
+    20.0f,   // J4
+    20.0f,   // J5
+    20.0f    // J6
+};
+
+// 电机减速比（用于距离 → 电机转数换算）
+// index [0]=地轨 (reduction=1, 直连), [1~5]=J1~J5 (50), [6]=J6 (30)
+static constexpr uint8_t MOTOR_REDUCTION[7] = {1, 50, 50, 50, 50, 50, 30};
+
+// 夹爪速度上限（电机轴 r/s，与35关节电机一致）
+// 夹爪 CAN ID=8，使用35电机 reduction=16，输出轴速度 = 20/16 ≈ 1.25 r/s
+static constexpr float HAND_MAX_RPS = 20.0f;
+
+// 各轴 sliderSpeed 上限（电机轴 r/s）
+static constexpr float AXIS_SLIDER_RPS[7] = {
+    30.0f,   // 地轨
+    20.0f,   // J1
+    20.0f,   // J2
+    20.0f,   // J3
+    20.0f,   // J4
+    20.0f,   // J5
+    20.0f    // J6
+};
 
 #include <cstdint>
 #include "rgb.hpp"
@@ -25,7 +64,6 @@ struct EepromConfig {
     uint32_t rgbStateEnable;  // 机械臂激活/使能状态下的灯效模式
     uint32_t rgbStateDisable; // 机械臂断电/失能状态下的灯效模式
     float jointAccBases[6];   // 各个关节电机基准加速度参数
-    float railSpeed_mm_s;     // 地轨速度 (mm/s)
 };
 
 /**
@@ -50,7 +88,7 @@ public:
     void SetAngleWithSpeedLimit(float _angle)
     {
         float target_angle = OpenedAngle + (ClosedAngle - OpenedAngle) * (_angle / 100.0f);
-        SetAngleWithVelocityLimit(target_angle, 70.0f);
+        SetAngleWithMotorRps(target_angle, HAND_MAX_RPS);
     }
 
     /**
@@ -101,9 +139,26 @@ public:
     // 地轨状态变量
     float currentRailPos = 0.0f;   // 地轨当前位置 (mm)
     float targetRailPos = 0.0f;    // 地轨目标位置 (mm)
-    float railSpeed_mm_s = 50.0f;  // 地轨当前速度 (mm/s)，可通过 #SPEED_RAIL 修改
 
     float targetRailCurrent = 0.0f; // 地轨目标电流 (mA)
+
+    // ===== 替换原 jointSpeed（旧的含义是关节 °/s，错误） =====
+    // 含义改为：电机轴 r/s（slider 换算后的目标速度上限，所有轴共用）
+    float jointSpeedRps = 20.0f;  // 默认值 = AXIS_MAX_RPS[1~6] 的关节上限
+
+    // ===== 替换原 dynamicJointSpeeds（旧的 6 个关节 °/s） =====
+    // 含义改为：7 个轴的电机轴 r/s（含地轨）
+    // 索引 [0]=地轨, [1~6]=关节
+    struct DynamicJointSpeeds7 {
+        float rps[7] = {0};
+    };
+    DynamicJointSpeeds7 dynamicJointSpeeds7;
+
+    // 旧字段保留（ServoJ 暂时还用）
+    DOF6Kinematic::Joint6D_t dynamicJointSpeeds = {0.5f, 0.5f, 0.5f, 1.5f, 1.5f, 1.5f};
+
+    // 硬编码 30 r/s，非 MoveJ 路径（Homing/Resting/EmergencyStop）的兜底速度。
+    float railSpeedRps = 30.0f;
 
     float targetCurrents[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
@@ -175,7 +230,7 @@ public:
     // 结构硬变量缺省状态与初始化约束池
     const DOF6Kinematic::Joint6D_t REST_POSE = {0, -75, 180, 0, 0, 0};
     const float DEFAULT_JOINT_SPEED     = 80;    
-    DOF6Kinematic::Joint6D_t jointAccBases = {150, 100, 200, 200, 200, 200}; 
+    DOF6Kinematic::Joint6D_t jointAccBases = {150, 150, 150, 150, 150, 150}; 
     const float DEFAULT_JOINT_ACCELERATION_LOW  = 5;     
     const float DEFAULT_JOINT_ACCELERATION_HIGH = 100;   
     const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_SEQUENTIAL;
@@ -197,13 +252,11 @@ public:
 
     // 系统调度与控制函数对外调用面板
     void Init();
-    bool MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm);
+    bool MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm, float _slider);
     bool MoveL(float _x, float _y, float _z, float _a, float _b, float _c);
     bool ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm);
     void MoveJoints(DOF6Kinematic::Joint6D_t _joints);
-    void MoveRail(float _railPos_mm);
     void MoveRailRelative(float _delta_mm);
-    void SetRailSpeed(float _speed_mm_s);
     void SetJointSpeed(float _speed);
     void SetJointAcceleration(float _acc);
     void UpdateJointAngles();
@@ -241,7 +294,6 @@ public:
             make_protocol_function("set_rgb_mode",     *this, &DummyRobot::SetRGBMode,      "mode"),
             make_protocol_function("set_joint_speed",  *this, &DummyRobot::SetJointSpeed,       "speed"),
             make_protocol_function("set_joint_acc",    *this, &DummyRobot::SetJointAcceleration, "acc"),
-            make_protocol_function("set_rail_speed",  *this, &DummyRobot::SetRailSpeed,  "speed"),
             make_protocol_function("set_command_mode", *this, &DummyRobot::SetCommandMode,       "mode"),
             make_protocol_object("tuning", tuningHelper.MakeProtocolDefinitions())
         );
@@ -276,9 +328,7 @@ public:
 
 private:
     CAN_HandleTypeDef* hcan;
-    float jointSpeed      = DEFAULT_JOINT_SPEED;
     float jointSpeedRatio = 1;
-    DOF6Kinematic::Joint6D_t dynamicJointSpeeds = {0.5f, 0.5f, 0.5f, 1.5f, 1.5f, 1.5f};
     DOF6Kinematic* dof6Solver;
     bool     isEnabled    = false;
     uint32_t rgbMode      = 0;

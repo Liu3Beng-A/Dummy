@@ -28,6 +28,73 @@ inline float AbsMaxOf6(DOF6Kinematic::Joint6D_t _joints, uint8_t &_index)
 }
 
 /**
+ * @brief 7 轴同步抵达速度规划（D-Q3 决策，2026-08-26）
+ * @param deltaRails[7] 各轴距离（地轨=mm，关节=°）
+ * @param sliderCaps[7] 各轴电机轴 r/s 上限（地轨=30，关节=20）
+ * @param sliderSpeed   统一基础速度（slider × SLIDER_TO_RPS = r/s）
+ * @param outSpeeds[7]  输出每轴最终电机轴 r/s
+ * @return timeBudget   同步抵达总时间 (s)
+ * @note 迭代收敛算法：用 sliderSpeed 算初始 timeBudget，再对每轴钳制到 cap，迭代直到稳定
+ */
+static float ComputeSyncSpeeds(const float deltaRails[7], const float sliderCaps[7],
+                               float sliderSpeed, float outSpeeds[7])
+{
+    // 步骤 1：各轴距离 → 电机轴转数
+    float distMotor[7];
+    for (int i = 0; i < 7; i++) {
+        if (i == 0) {
+            // 地轨：mm → 圈（直连丝杆 1605，5mm/圈，reduction=1）
+            distMotor[i] = fabsf(deltaRails[i]) / 5.0f;
+        } else {
+            // 关节：° → 电机圈（reduction × / 360）
+            distMotor[i] = fabsf(deltaRails[i]) * (float)MOTOR_REDUCTION[i] / 360.0f;
+        }
+    }
+
+    // 步骤 2：初始预算时间 = 最远轴用 sliderSpeed 跑的最快时间
+    float timeBudget = 0;
+    for (int i = 0; i < 7; i++) {
+        if (distMotor[i] < 0.001f) continue;
+        float t = distMotor[i] / sliderSpeed;
+        if (t > timeBudget) timeBudget = t;
+    }
+
+    if (timeBudget < 0.001f) {
+        // 所有轴距离都 ≈ 0，不动
+        for (int i = 0; i < 7; i++) outSpeeds[i] = 0;
+        return 0.0f;
+    }
+
+    // 步骤 3：迭代收敛（最多 10 轮，一般 2~3 轮收敛）
+    for (int iter = 0; iter < 10; iter++) {
+        float newTimeBudget = 0;
+        for (int i = 0; i < 7; i++) {
+            if (distMotor[i] < 0.001f) continue;
+            float speedNeeded = distMotor[i] / timeBudget;
+            float speedActual = fminf(speedNeeded, sliderCaps[i]);
+            float timeActual = distMotor[i] / speedActual;
+            if (timeActual > newTimeBudget) newTimeBudget = timeActual;
+        }
+        if (fabsf(newTimeBudget - timeBudget) < 0.001f) {
+            timeBudget = newTimeBudget;
+            break;
+        }
+        timeBudget = newTimeBudget;
+    }
+
+    // 步骤 4：输出每轴最终速度
+    for (int i = 0; i < 7; i++) {
+        if (distMotor[i] < 0.001f) {
+            outSpeeds[i] = 0;
+        } else {
+            float speedNeeded = distMotor[i] / timeBudget;
+            outSpeeds[i] = fminf(speedNeeded, sliderCaps[i]);
+        }
+    }
+    return timeBudget;
+}
+
+/**
  * @brief 主脑对象初始化部署程序
  * @param _hcan 通信层所强依赖的 CAN 指令下发数据流桥接通道句柄
  * @note 构建完备系统骨骼：motorJ[0]=地轨(ID=9, 固定), motorJ[1-6]=臂关节(ID=1-6), hand=夹爪(ID=8, 固定)
@@ -99,9 +166,6 @@ void DummyRobot::LoadConfig()
             if (config.jointAccBases[i] >= 1.0f && config.jointAccBases[i] <= 2000.0f)
                 jointAccBases.a[i] = config.jointAccBases[i];
         }
-
-        if (config.railSpeed_mm_s >= 0.5f && config.railSpeed_mm_s <= 100.0f)
-            railSpeed_mm_s = config.railSpeed_mm_s;
     }
 }
 
@@ -127,7 +191,6 @@ void DummyRobot::SaveConfig()
     {
         config.jointAccBases[i] = jointAccBases.a[i];
     }
-    config.railSpeed_mm_s = railSpeed_mm_s;
 
     EEPROM.put(0, config);
     EEPROM.commit();
@@ -166,10 +229,8 @@ void DummyRobot::Reboot()
 void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t _joints)
 {
     for (int j = 1; j <= 6; j++)
-    {
-        motorJ[j]->SetAngleWithVelocityLimit(_joints.a[j - 1] - initPose.a[j - 1],
-                                             dynamicJointSpeeds.a[j - 1]);
-    }
+        motorJ[j]->SetAngleWithMotorRps(_joints.a[j - 1] - initPose.a[j - 1],
+                                        dynamicJointSpeeds.a[j - 1]);
 }
 
 /**
@@ -178,17 +239,6 @@ void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t _joints)
  * @note 地轨不纳入6-DOF运动学求解，单独管理
  * @note 电机固件 CAN 协议期望接收：位置(圈)、速度(圈/s)，内部乘以细分系数
  */
-void DummyRobot::MoveRail(float _railPos_mm)
-{
-    // 丝杆1605直连：5mm/圈
-    float rail_laps = _railPos_mm / 5.0f;  // mm → 圈
-    float speed_laps = railSpeed_mm_s / 5.0f;  // mm/s → 圈/s
-
-    // 加速度由用户在 #ACC_RAIL 时设置，电机固件已持久化到 ratedVelocityAcc
-    // 此处不再下发 0x14，避免每帧覆盖用户设定的加速度
-    motorJ[0]->SetPositionWithVelocityLimit(rail_laps, speed_laps);
-}
-
 void DummyRobot::MoveRailRelative(float _delta_mm)
 {
     targetRailPos += _delta_mm;
@@ -197,19 +247,8 @@ void DummyRobot::MoveRailRelative(float _delta_mm)
         targetRailPos = motorJ[0]->angleLimitMax;
     if (targetRailPos < motorJ[0]->angleLimitMin)
         targetRailPos = motorJ[0]->angleLimitMin;
-    MoveRail(targetRailPos);
-}
-
-/**
- * @brief 设置地轨运行速度
- * @param _speed_mm_s 地轨目标速度 (mm/s)
- * @note 限幅范围 [0.5, 100] mm/s，超出范围自动截断
- */
-void DummyRobot::SetRailSpeed(float _speed_mm_s)
-{
-    if (_speed_mm_s < 0.5f)        _speed_mm_s = 0.5f;
-    else if (_speed_mm_s > 100.0f) _speed_mm_s = 100.0f;
-    railSpeed_mm_s = _speed_mm_s;
+    float rail_laps = targetRailPos / 5.0f;
+    motorJ[0]->SetPositionWithMotorRps(rail_laps, railSpeedRps);
 }
 
 /**
@@ -255,26 +294,30 @@ bool DummyRobot::MoveL(float _x, float _y, float _z, float _a, float _b, float _
 
     if (bestConfig >= 0)
     {
+        // 用当前 jointSpeedRps 反推 slider（近似）
+        float slider = jointSpeedRps / SLIDER_TO_RPS;
+        if (slider < 1) slider = 1;
+        if (slider > 100) slider = 100;
         return MoveJ(ikSolves.config[bestConfig].a[0],
                      ikSolves.config[bestConfig].a[1],
                      ikSolves.config[bestConfig].a[2],
                      ikSolves.config[bestConfig].a[3],
                      ikSolves.config[bestConfig].a[4],
                      ikSolves.config[bestConfig].a[5],
-                     currentRailPos);  // 地轨位置保持不变
+                     currentRailPos,
+                     slider);  // 地轨位置保持不变
     }
     return false;
 }
 
 /**
  * @brief 向定点旋转并发规划驱动组群下属协同运转指令
- * @param _j1~_j6: 臂关节角度 (°), _j7_mm: 地轨位置 (mm)
+ * @param _j1~_j6: 臂关节角度 (°), _j7_mm: 地轨位置 (mm), _slider: 速度滑块 (1~100)
  * @note 内置基于极限基准点运算降维匹配同步缩放比例限速引擎保护
  */
-bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm)
+bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm, float _slider)
 {
     DOF6Kinematic::Joint6D_t targetJointsTmp(_j1, _j2, _j3, _j4, _j5, _j6);
-    uint8_t maxIndex;
 
     // 地轨限位检查
     if (_j7_mm > motorJ[0]->angleLimitMax || _j7_mm < motorJ[0]->angleLimitMin)
@@ -288,22 +331,34 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, fl
             return false;
     }
 
-    // 计算各轴速度（保证所有关节同时到达）
     DOF6Kinematic::Joint6D_t deltaAngles = targetJointsTmp - currentJoints;
-    float maxAngle = AbsMaxOf6(deltaAngles, maxIndex);
-    float timeSec  = maxAngle / jointSpeed;
+    float deltaRail = _j7_mm - currentRailPos;
 
-    for (int j = 1; j <= 6; j++)
-    {
-        dynamicJointSpeeds.a[j - 1] = fabsf(deltaAngles.a[j - 1]) / timeSec;
-        if (dynamicJointSpeeds.a[j - 1] < 0.05f)
-            dynamicJointSpeeds.a[j - 1] = 0.05f;
-    }
+    // 构造 7 轴距离向量
+    float delta7[7] = {
+        deltaRail,                              // 地轨 (mm)
+        deltaAngles.a[0], deltaAngles.a[1], deltaAngles.a[2],
+        deltaAngles.a[3], deltaAngles.a[4], deltaAngles.a[5]
+    };
+
+    // 统一基础速度：slider × SLIDER_TO_RPS = r/s（钳制前）
+    float sliderSpeed = _slider * SLIDER_TO_RPS;
+    const float* sliderCaps = AXIS_MAX_RPS;
+
+    // 调用迭代收敛算法
+    ComputeSyncSpeeds(delta7, sliderCaps, sliderSpeed, dynamicJointSpeeds7.rps);
+
+    // 地轨速度写入 railSpeedRps（MoveJoints 会用到）
+    railSpeedRps = dynamicJointSpeeds7.rps[0];
 
     targetJoints = targetJointsTmp;
-    targetRailPos = _j7_mm;  // 存储地轨目标位置
+    targetRailPos = _j7_mm;
 
-    // 写入目标角度（纯位置误差判定用，不再依赖 jointsStateFlag）
+    // 旧字段 dynamicJointSpeeds（Joint6D_t）保持同步（向后兼容 ServoJ）
+    for (int j = 1; j <= 6; j++)
+        dynamicJointSpeeds.a[j - 1] = dynamicJointSpeeds7.rps[j];
+
+    // 写入目标角度（纯位置误差判定用）
     for (int j = 1; j <= 6; j++) {
         motorJ[j]->targetAngle = targetJointsTmp.a[j - 1] - initPose.a[j - 1];
     }
@@ -363,25 +418,25 @@ void DummyRobot::UpdateJointAngles()
 {
     static uint8_t group = 0;
 
-    switch (group)
-    {
+    switch (group) {
         case 0:
-            motorJ[1]->UpdateAngle();
-            motorJ[2]->UpdateAngle();
+            motorJ[1]->UpdateAngle();   // J1
+            motorJ[2]->UpdateAngle();   // J2
             break;
         case 1:
-            motorJ[3]->UpdateAngle();
-            motorJ[4]->UpdateAngle();
+            motorJ[3]->UpdateAngle();   // J3
+            motorJ[4]->UpdateAngle();   // J4
             break;
         case 2:
-            motorJ[5]->UpdateAngle();
-            motorJ[6]->UpdateAngle();
+            motorJ[5]->UpdateAngle();   // J5
+            motorJ[6]->UpdateAngle();   // J6
             break;
-        default:
+        case 3:
+            motorJ[0]->UpdateAngle();   // 地轨（T-2 新增）
             break;
     }
 
-    group = (group + 1) % 3;
+    group = (group + 1) % 4;
 }
 
 /**
@@ -392,19 +447,24 @@ void DummyRobot::UpdateJointAnglesCallback()
     for (int i = 1; i <= 6; i++)
     {
         currentJoints.a[i - 1] = motorJ[i]->angle + initPose.a[i - 1];
-        // jointsStateFlag 不再操作，IsMoving() 直接用位置误差判定
     }
+    // 地轨回包：motorJ[0]->angle 是"伪°"（= 圈×360，reduction=1）
+    // 反推 mm：mm = angle / 360 × 5
+    currentRailPos = motorJ[0]->angle / 360.0f * 5.0f;
 }
 
 /**
  * @brief 分配调准基准速率运行档位
  */
-void DummyRobot::SetJointSpeed(float _speed)
+void DummyRobot::SetJointSpeed(float _slider)
 {
-    if (_speed < 0)        _speed = 0;
-    else if (_speed > 100) _speed = 100;
+    if (_slider < 0)        _slider = 0;
+    else if (_slider > 100) _slider = 100;
 
-    jointSpeed = _speed * jointSpeedRatio;
+    jointSpeedRps = _slider * SLIDER_TO_RPS * jointSpeedRatio;
+    // 关节轴上限（D-Q4 修订）：slider 100 → 30 r/s → 由 AXIS_MAX_RPS[1~6] 钳制到 20 r/s
+    if (jointSpeedRps > AXIS_MAX_RPS[1])
+        jointSpeedRps = AXIS_MAX_RPS[1];
 }
 
 /**
@@ -471,16 +531,17 @@ void DummyRobot::QueryStallStatus()
 
 void DummyRobot::Homing()
 {
-    float lastSpeed = jointSpeed;
+    float lastSlider = jointSpeedRps / SLIDER_TO_RPS;  // r/s → slider 还原
     SetJointSpeed(10);
 
-    MoveJ(0, 0, 90, 0, 0, 0, 0);  // 归零姿态，地轨=0mm
+    MoveJ(0, 0, 90, 0, 0, 0, 0, 10);  // 归零姿态，地轨=0mm
     MoveJoints(targetJoints);
-    MoveRail(targetRailPos);
+    // 地轨：直接下发（railSpeedRps 默认 30 r/s）
+    motorJ[0]->SetPositionWithMotorRps(0, railSpeedRps);
     while (IsMoving())
         osDelay(10);
 
-    SetJointSpeed(lastSpeed);
+    SetJointSpeed(lastSlider);  // 还原用户原 slider
 }
 
 /**
@@ -488,17 +549,18 @@ void DummyRobot::Homing()
  */
 void DummyRobot::Resting()
 {
-    float lastSpeed = jointSpeed;
+    float lastSlider = jointSpeedRps / SLIDER_TO_RPS;
     SetJointSpeed(10);
 
     MoveJ(REST_POSE.a[0], REST_POSE.a[1], REST_POSE.a[2],
-          REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5], 0);  // 待机姿态，地轨=0mm
+          REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5], 0, 10);  // 待机姿态，地轨=0mm
     MoveJoints(targetJoints);
-    MoveRail(targetRailPos);
+    // 地轨：直接下发（railSpeedRps 默认 30 r/s）
+    motorJ[0]->SetPositionWithMotorRps(0, railSpeedRps);
     while (IsMoving())
         osDelay(10);
 
-    SetJointSpeed(lastSpeed);
+    SetJointSpeed(lastSlider);
 }
 
 /**
@@ -564,12 +626,18 @@ void DummyRobot::UpdateJointPose6D()
 bool DummyRobot::IsMoving()
 {
     static constexpr float EPSILON_DEG = 1.0f;
-    for (int i = 1; i <= 6; i++)
-    {
+    static constexpr float EPSILON_MM  = 0.5f;
+
+    // 地轨判定：currentRailPos vs targetRailPos
+    if (fabsf(currentRailPos - targetRailPos) > EPSILON_MM)
+        return true;
+
+    // 关节判定
+    for (int i = 1; i <= 6; i++) {
         if (fabsf(motorJ[i]->angle - motorJ[i]->targetAngle) > EPSILON_DEG)
-            return true;   // 有轴未到位，还在动
+            return true;
     }
-    return false;          // 所有轴都到位
+    return false;
 }
 
 /**
@@ -601,7 +669,7 @@ void DummyRobot::SetCommandMode(uint32_t _mode)
 
         case COMMAND_CONTINUES_TRAJECTORY:
             SetJointAcceleration(DEFAULT_JOINT_ACCELERATION_LOW);
-            jointSpeedRatio = 0.5f; 
+            // jointSpeedRatio 不再自动减半，由 SetJointSpeed 直接用 slider × SLIDER_TO_RPS
             break;
 
         case COMMAND_MOTOR_TUNING:
@@ -638,9 +706,10 @@ void DummyRobot::CommandHandler::EmergencyStop()
     context->MoveJ(context->currentJoints.a[0], context->currentJoints.a[1],
                    context->currentJoints.a[2], context->currentJoints.a[3],
                    context->currentJoints.a[4], context->currentJoints.a[5],
-                   context->currentRailPos);
+                   context->currentRailPos, 10);  // 10 = 安全速度
     context->MoveJoints(context->targetJoints);
-    context->MoveRail(context->targetRailPos);
+    // 地轨：直接下发（railSpeedRps 默认 30 r/s）
+    context->motorJ[0]->SetPositionWithMotorRps(context->targetRailPos / 5.0f, context->railSpeedRps);
     context->isEnabled = false;
     ClearFifo();
 }
@@ -714,10 +783,12 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 if (argNum >= 7)
                 {
                     if (context->MoveJ(joints[0], joints[1], joints[2],
-                                   joints[3], joints[4], joints[5], j7))
+                                   joints[3], joints[4], joints[5], j7, speed))
                     {
                         context->MoveJoints(context->targetJoints);
-                        context->MoveRail(context->targetRailPos);
+                        // 地轨：MoveJ 已填入 railSpeedRps，直接下发
+                        context->motorJ[0]->SetPositionWithMotorRps(
+                            context->targetRailPos / 5.0f, context->railSpeedRps);
 
                         while (context->IsMoving() && context->IsEnabled())
                             osDelay(5);
@@ -767,10 +838,12 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 if (argNum >= 7)
                 {
                     if (context->MoveJ(joints[0], joints[1], joints[2],
-                                   joints[3], joints[4], joints[5], j7))
+                                   joints[3], joints[4], joints[5], j7, speed))
                     {
                         context->MoveJoints(context->targetJoints);
-                        context->MoveRail(context->targetRailPos);
+                        // 地轨：MoveJ 已填入 railSpeedRps，直接下发
+                        context->motorJ[0]->SetPositionWithMotorRps(
+                            context->targetRailPos / 5.0f, context->railSpeedRps);
 
                         Respond(*usbStreamOutputPtr,  "ok");
                         Respond(*uart4StreamOutputPtr, "ok");
@@ -816,7 +889,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 if (argNum >= 7)
                 {
                     if (context->MoveJ(joints[0], joints[1], joints[2],
-                                   joints[3], joints[4], joints[5], j7))
+                                   joints[3], joints[4], joints[5], j7, speed))
                     {
                         Respond(*usbStreamOutputPtr,  "ok");
                         Respond(*uart4StreamOutputPtr, "ok");
@@ -869,7 +942,9 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                     if (context->ServoJ(joints[0], joints[1], joints[2], joints[3], joints[4], joints[5], j7))
                     {
                         context->MoveJoints(context->targetJoints);
-                        context->MoveRail(context->targetRailPos);
+                        // 地轨：直接下发（railSpeedRps 默认 30 r/s）
+                        context->motorJ[0]->SetPositionWithMotorRps(
+                            context->targetRailPos / 5.0f, context->railSpeedRps);
                     }
                 }
             }

@@ -42,7 +42,9 @@ void ThreadControlLoopFixUpdate(void* argument)
                     // 为了规避高频堵塞带宽问题, 将动作同步压频至 50Hz 更新发送至总线
                     if (updateCounter % 100 == 0) {
                         dummy.MoveJoints(dummy.targetJoints);
-                        dummy.MoveRail(dummy.targetRailPos);  // 地轨下发
+                        // 地轨：直接下发（railSpeedRps 由 MoveJ 计算填入）
+                        dummy.motorJ[0]->SetPositionWithMotorRps(
+                            dummy.targetRailPos / 5.0f, dummy.railSpeedRps);
                     }
                     // 以 100Hz 的抽样频段穿插捕获下挂驱动节点的轴端原位映射偏角
                     if (updateCounter % 50 == 25) {
@@ -56,7 +58,9 @@ void ThreadControlLoopFixUpdate(void* argument)
                 case DummyRobot::COMMAND_SERVO_J:
                     // 高频下发臂关节和地轨
                     dummy.MoveJoints(dummy.targetJoints);
-                    dummy.MoveRail(dummy.targetRailPos);  // 地轨高频下发
+                    // 地轨：直接下发（railSpeedRps 默认 30 r/s）
+                    dummy.motorJ[0]->SetPositionWithMotorRps(
+                        dummy.targetRailPos / 5.0f, dummy.railSpeedRps);
                     if (updateCounter % 50 == 25) {
                         dummy.UpdateJointAngles();
                     }

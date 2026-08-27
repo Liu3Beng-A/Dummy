@@ -615,25 +615,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "error SET MOTOR [%lu] SPEED [%f] is wrong", node, S);
             }
         }
-        else if (s.find("SPEED_RAIL") != std::string::npos)
-        {
-            float speed;
-            char saveFlag;
-            if (sscanf(_cmd, "#SPEED_RAIL %f %c", &speed, &saveFlag) >= 1)
-            {
-                dummy.SetRailSpeed(speed);
-                Respond(_responseChannel, "ok rail speed set to %.1f mm/s", speed);
-                if (saveFlag == '&')
-                {
-                    dummy.SaveConfig();
-                    Respond(_responseChannel, " [saved to EEPROM]");
-                }
-            }
-            else
-            {
-                Respond(_responseChannel, "%.1f", dummy.railSpeed_mm_s);
-            }
-        }
         else if (s.find("ACC_RAIL") != std::string::npos)
         {
             float acc;
@@ -1108,25 +1089,6 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             {
                 Respond(_responseChannel,
                         "error SET MOTOR [%lu] BASE ACCELERATION [%f] is wrong", node, S);
-            }
-        }
-        else if (s.find("SPEED_RAIL") != std::string::npos)
-        {
-            float speed;
-            char saveFlag;
-            if (sscanf(_cmd, "#SPEED_RAIL %f %c", &speed, &saveFlag) >= 1)
-            {
-                dummy.SetRailSpeed(speed);
-                Respond(_responseChannel, "ok rail speed set to %.1f mm/s", speed);
-                if (saveFlag == '&')
-                {
-                    dummy.SaveConfig();
-                    Respond(_responseChannel, " [saved to EEPROM]");
-                }
-            }
-            else
-            {
-                Respond(_responseChannel, "%.1f", dummy.railSpeed_mm_s);
             }
         }
         else if (s.find("ACC_RAIL") != std::string::npos)

@@ -99,22 +99,28 @@ void CtrlStepMotor::SetPositionSetPoint(float _val)
 }
 
 
-void CtrlStepMotor::SetPositionWithVelocityLimit(float _pos, float _vel)
+void CtrlStepMotor::SetPositionWithMotorRps(float _pos, float _rps)
 {
     uint8_t mode = 0x07;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Float to Bytes
     auto* b = (unsigned char*) &_pos;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    b = (unsigned char*) &_vel;
+    b = (unsigned char*) &_rps;
     for (int i = 4; i < 8; i++)
         canBuf[i] = *(b + i - 4);
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
 
+
+void CtrlStepMotor::SetAngleWithMotorRps(float _angle, float _rps)
+{
+    _angle = inverseDirection ? -_angle : _angle;
+    float stepMotorCnt = _angle / 360.0f * (float) reduction;
+    SetPositionWithMotorRps(stepMotorCnt, _rps);
+}
 
 void CtrlStepMotor::SetNodeID(uint32_t _id)
 {
@@ -293,12 +299,6 @@ void CtrlStepMotor::SetAngle(float _angle)
 }
 
 
-void CtrlStepMotor::SetAngleWithVelocityLimit(float _angle, float _vel)
-{
-    _angle = inverseDirection ? -_angle : _angle;
-    float stepMotorCnt = _angle / 360.0f * (float) reduction;
-    SetPositionWithVelocityLimit(stepMotorCnt, _vel);
-}
 
 
 void CtrlStepMotor::UpdateAngle()

@@ -38,14 +38,14 @@ public:
     }
 
     void SetAngle(float _angle);
-    void SetAngleWithVelocityLimit(float _angle, float _vel);
+    void SetAngleWithMotorRps(float _angle, float _rps);
     // CAN Command
     void SetEnable(bool _enable);
     void SetEnableTemp(bool _enable);
     void SetCurrentSetPoint(float _val);
     void SetVelocitySetPoint(float _val);
     void SetPositionSetPoint(float _val);
-    void SetPositionWithVelocityLimit(float _pos, float _vel);
+    void SetPositionWithMotorRps(float _pos, float _rps);
     void SetNodeID(uint32_t _id);
     void SetCurrentLimit(float _val);
     void SetCurrentLimit_persist(float _val, bool persist);

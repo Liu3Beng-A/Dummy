@@ -140,7 +140,6 @@ $0.5,0.5,0.5,0.2,0.2,0.1,0  # 力矩控制
 | `#GETLPOS` | 获取末端位姿 |
 | `#SET_DCE_KP <node> <val>` | 设置电机 DCE_Kp |
 | `#SET_PID <node> <kp> <kv> <ki> <kd>` | 一次性设置 4 个 PID 参数 |
-| `#SPEED_RAIL <val>` | 设置地轨速度 |
 | `#SPEED_J <node> <val>` | 设置关节速度 |
 | `#ACC_J <node> <val>` | 设置关节加速度 |
 | `#I_LIMIT_J <node> <val>` | 设置电流限幅 |
