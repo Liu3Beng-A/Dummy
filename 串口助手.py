@@ -25,9 +25,6 @@ class RobotSerialAssistant:
         self._pos_queue_pending = []     # 待发送队列
         self._pos_queue_idx = 0          # 当前发送索引
         self._pos_queue_speed = 50       # 顺序发送速度
-        # 入队命令回执抑制（> / @ / & / $ 入队后 1s 内的纯数字行视为队列剩余空间，过滤掉）
-        self._expect_queue_reply = False
-        self._queue_reply_deadline_ms = 0
         # 主题与配色
         try:
             style = ttk.Style()
@@ -558,78 +555,31 @@ class RobotSerialAssistant:
         i_table.pack(side=tk.LEFT, anchor="nw")
         hdr_font = ("Arial", 9, "bold")
         cell_font = ("Arial", 9)
-        ttk.Label(i_table, text="电机",   font=hdr_font, width=10, anchor="center").grid(row=0, column=0, padx=1, pady=1)
-        ttk.Label(i_table, text="推荐 I", font=hdr_font, width=8,  anchor="center").grid(row=0, column=1, padx=1, pady=1)
-        ttk.Label(i_table, text="最大 I", font=hdr_font, width=8,  anchor="center").grid(row=0, column=2, padx=1, pady=1)
-        ttk.Label(i_table, text="Acc",    font=hdr_font, width=8,  anchor="center").grid(row=0, column=3, padx=1, pady=1)
+        ttk.Label(i_table, text="电机",      font=hdr_font, width=12, anchor="center").grid(row=0, column=0, padx=1, pady=1)
+        ttk.Label(i_table, text="推荐 I",    font=hdr_font, width=8,  anchor="center").grid(row=0, column=1, padx=1, pady=1)
+        ttk.Label(i_table, text="Acc",      font=hdr_font, width=8,  anchor="center").grid(row=0, column=2, padx=1, pady=1)
         # 推荐值表（基于 #GETI / #GETJACC 实测 2026-08-19）
         i_recs = [
-            ("42电机 J1-J3", "2.0 A",  "2.3 A",  "150"),
-            ("35电机 J4-J6", "1.5 A",  "2.0 A",  "150"),
-            ("57电机 地轨",  "2.8 A",  "3.0 A",  "30"),
-            ("35电机 夹爪",  "1.5 A",  "2.0 A",  "100"),
+            ("42电机 J1-J3", "2.0 A",  "10"),
+            ("35电机 J4-J6", "1.5 A",  "10"),
+            ("57电机 地轨",  "2.8 A",  "10"),
+            ("35电机 夹爪",  "1.5 A",  "10"),
         ]
-        for row_i, (name, rec, mx, acc) in enumerate(i_recs, start=1):
+        for row_i, (name, rec, acc) in enumerate(i_recs, start=1):
             bg = "#f1f3f5" if row_i % 2 == 0 else "white"
-            ttk.Label(i_table, text=name, font=cell_font, width=10, anchor="center",
+            ttk.Label(i_table, text=name, font=cell_font, width=12, anchor="center",
                       background=bg).grid(row=row_i, column=0, padx=1, pady=1)
             ttk.Label(i_table, text=rec,  font=cell_font, width=8,  anchor="center",
                       background=bg).grid(row=row_i, column=1, padx=1, pady=1)
-            ttk.Label(i_table, text=mx,   font=cell_font, width=8,  anchor="center",
-                      background=bg).grid(row=row_i, column=2, padx=1, pady=1)
             ttk.Label(i_table, text=acc,  font=cell_font, width=8,  anchor="center",
-                      background=bg).grid(row=row_i, column=3, padx=1, pady=1)
+                      background=bg).grid(row=row_i, column=2, padx=1, pady=1)
 
-        # 右：应用/保存按钮说明（横向一字排开，不换行）
+        # 右：应用/保存说明（横向单行）
         tip_frame = ttk.Frame(body_frame)
-        tip_frame.pack(side=tk.LEFT, anchor="nw", padx=(12, 0), pady=(2, 0))
+        tip_frame.pack(side=tk.LEFT, anchor="nw", padx=(16, 0), pady=(2, 0))
         tip_font = ("Arial", 9)
-        tk.Label(tip_frame, text="说明：", font=("Arial", 9, "bold"),
-                 fg="#495057").pack(side=tk.LEFT)
-        tk.Label(tip_frame, text="●", font=("Arial", 9), fg="#3b5bdb").pack(side=tk.LEFT, padx=(8, 1))
         tk.Label(tip_frame, text="应用=仅RAM", font=tip_font, fg="#495057").pack(side=tk.LEFT)
-        tk.Label(tip_frame, text="●", font=("Arial", 9), fg="#2b8a3e").pack(side=tk.LEFT, padx=(8, 1))
-        tk.Label(tip_frame, text="保存=EEPROM(掉电保持)",
-                 font=tip_font, fg="#495057").pack(side=tk.LEFT)
-
-        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
-
-        # v2.6 删除独立"地轨加速度"块：地轨走上方统一块（节点=9，加速度值 r/s²）
-        # 保留：地轨电流（专用大块，物理对象不同）
-        # 地轨电流 (#I_LIMIT_J 9)
-        tk.Label(parent, text="地轨电流 (#I_LIMIT_J 9)", font=("Arial", 10, "bold")).pack(anchor="w")
-        rcf = ttk.Frame(parent)
-        rcf.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(rcf, text="A:", font=("Arial", 10)).pack(side=tk.LEFT)
-        self.ent_rail_current = ttk.Entry(rcf, width=6, font=("Arial", 10))
-        self.ent_rail_current.insert(0, "2.8")
-        self.ent_rail_current.pack(side=tk.LEFT, padx=4)
-        self.scl_rail_current = ttk.Scale(rcf, from_=0.1, to=3.0, orient=tk.HORIZONTAL)
-        self.scl_rail_current.set(2.8)
-        self.scl_rail_current.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.lbl_rail_current_val = ttk.Label(rcf, text="2.8", width=4, font=("Arial", 10))
-        self.lbl_rail_current_val.pack(side=tk.LEFT)
-
-        rc_btns = ttk.Frame(parent)
-        rc_btns.pack(fill=tk.X, pady=(0, 0))
-        tk.Button(rc_btns, text="查询", font=("Arial", 10), bg="#495057", fg="white",
-                  relief=tk.FLAT, command=self.query_rail_current).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(rc_btns, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
-                  relief=tk.FLAT, command=self.apply_rail_current).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(rc_btns, text="保存", font=("Arial", 10), bg="#2b8a3e", fg="white",
-                  relief=tk.FLAT, command=self.save_rail_current).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-
-        def ursc(val):
-            v = float(val)
-            self.lbl_rail_current_val.config(text=f"{v:.1f}")
-            if self.ent_rail_current.get() != f"{v:.1f}":
-                self.ent_rail_current.delete(0, tk.END)
-                self.ent_rail_current.insert(0, f"{v:.1f}")
-        self.scl_rail_current.config(command=ursc)
-        self.ent_rail_current.bind("<Return>",
-            lambda e: self.scl_rail_current.set(float(self.ent_rail_current.get())))
-        self.ent_rail_current.bind("<FocusOut>",
-            lambda e: self.scl_rail_current.set(float(self.ent_rail_current.get())))
+        tk.Label(tip_frame, text="  |  保存=EEPROM(掉电保持)", font=tip_font, fg="#495057").pack(side=tk.LEFT)
 
     def _build_torque_tab(self, parent):
         ttk.Label(parent, text="电流力矩控制（单位：A）",
@@ -689,7 +639,7 @@ class RobotSerialAssistant:
         # 建议参数：来自 #GET_PID 实测值（2026-08-13），按节点独立记录。
         # 地轨(node=9) / 关节(node=1~6) / 夹爪(node=8) 查询后自动回显到界面控件。
         pid_defaults = {
-            9:  {"kp": 180,  "kv": 220, "ki": 30,  "kd": 120},
+            9:  {"kp": 180,  "kv": 600, "ki": 30,  "kd": 300},
             1:  {"kp": 200,  "kv": 500, "ki": 300, "kd": 250},
             2:  {"kp": 200,  "kv": 500, "ki": 300, "kd": 250},
             3:  {"kp": 200,  "kv": 500, "ki": 300, "kd": 250},
@@ -1028,7 +978,6 @@ class RobotSerialAssistant:
             return
         self._sync_waiting = True
         self.send_cmd("#GETJPOS")
-        self.log("已发送 #GETJPOS，等待响应...", "INFO")
         self.root.after(500, self._check_sync_response)
 
     def _check_sync_response(self):
@@ -1040,19 +989,30 @@ class RobotSerialAssistant:
         self._sync_waiting = False
 
     def _apply_sync_data(self, data):
-        if len(data) < 6:
-            self.log(f"数据长度不足: {len(data)}", "ERROR")
+        if len(data) < 7:
+            self.log(f"数据长度不足（需要 7）: {len(data)}", "ERROR")
             return
-        for i in range(min(6, len(data))):
+        # data 顺序：data[0]=Rail(mm), data[1..6]=J1..J6(deg)
+        # 同步 J1~J6 (data[1..6])
+        for i in range(6):
             try:
-                v = float(data[i])
+                v = float(data[i + 1])
                 self.scl_joints[i].set(v)
                 self.ent_joints[i].delete(0, tk.END)
                 self.ent_joints[i].insert(0, f"{v:.2f}")
                 self.lbl_joints[i].config(text=f"{v:.2f}")
             except (ValueError, IndexError):
                 pass
-        self.log("已同步机械臂当前位置到滑块", "INFO")
+        # 同步 Rail (data[0])
+        try:
+            rv = float(data[0])
+            self.scl_j7.set(rv)
+            self.ent_j7.delete(0, tk.END)
+            self.ent_j7.insert(0, f"{rv:.2f}")
+            self.lbl_j7.config(text=f"{rv:.2f} mm")
+        except (ValueError, IndexError):
+            pass
+        self.log("已同步机械臂当前位置", "INFO")
 
     def read_current_position(self):
         """读取当前滑块位置并显示"""
@@ -1069,10 +1029,12 @@ class RobotSerialAssistant:
         rval = float(self.ent_j7.get())
         pos = [round(v, 2) for v in jvals + [rval]]
         idx = len(self.stored_positions) + 1
-        name = f"#{idx} [{','.join(str(v) for v in pos[:3])}...]"
-        self.stored_positions.append((name, pos))
-        self._pos_listbox.insert(tk.END, name)
-        self.log(f"已存储: {name}", "INFO")
+        # listbox 用短名（保持列表紧凑），日志用全量
+        short_name = f"#{idx}"
+        full_name = f"#{idx} [{','.join(str(v) for v in pos)}]"
+        self.stored_positions.append((short_name, pos))
+        self._pos_listbox.insert(tk.END, short_name)
+        self.log(f"已存储: {full_name}", "INFO")
 
     def _delete_position(self):
         idx = self._pos_listbox.curselection()
@@ -1111,7 +1073,8 @@ class RobotSerialAssistant:
             self.lbl_j7.config(text=f"{pos[6]:.2f} mm")
         except (ValueError, IndexError):
             pass
-        self.log(f"已加载: {name}", "INFO")
+        full = f"{name} [{','.join(str(v) for v in pos)}]"
+        self.log(f"已加载: {full}", "INFO")
 
     def send_selected_position(self):
         """发送列表中选中的点位到机械臂"""
@@ -1127,7 +1090,6 @@ class RobotSerialAssistant:
             speed = 50
         cmd = ">" + ",".join(str(v) for v in pos[:7]) + f",{speed}"
         self.send_cmd(cmd)
-        self.log(f"已发送: {name} → {cmd}", "INFO")
 
     def send_all_positions(self):
         """按顺序发送所有点位（等上一个到达后再发下一个）"""
@@ -1156,8 +1118,9 @@ class RobotSerialAssistant:
         i = self._pos_queue_idx
         name, pos = self._pos_queue_pending[i]
         cmd = ">" + ",".join(str(v) for v in pos[:7]) + f",{self._pos_queue_speed}"
+        # 必须在 send_cmd 之前设标志，避免固件 ok 先到导致 handler 漏接
+        self._pos_queue_running = True
         self.send_cmd(cmd)
-        self.log(f"  [{i+1}/{total}] {name}", "INFO")
 
     # ==============================================
     # 夹爪控制（移动到右栏关节控制区）
@@ -1356,21 +1319,18 @@ class RobotSerialAssistant:
                                 continue
                             # 处理固件将多条响应合并到一行的边界情况（如 CAN 回调 printf 无 \r\n）
                             # 例如 "ok QUERY PID MOTOR [2]ok PID 2 kp=200..."
-                            # 按 "ok " 分割，每段独立处理
-                            parts = raw.split("ok ")
-                            for i, part in enumerate(parts):
-                                part = part.strip()
-                                if not part:
-                                    continue
-                                line = "ok " + part  # 还原 "ok " 前缀
-                                # 过滤固件入队回执的纯数字行（如"15"=队列剩余空间），避免污染日志
-                                # 仅在入队命令（> / @ / & / $）刚发出去 1 秒内抑制；
-                                # 其他查询（如 !RGB_BRIGHT 返回 "100"）正常显示。
+                            # 路由：裸 ok / ok 开头 / 其他
+                            if raw == "ok":
+                                lines = ["ok"]
+                            elif raw.startswith("ok "):
+                                parts = raw.split("ok ")
+                                lines = ["ok " + p.strip() for p in parts[1:] if p.strip()]
+                            else:
+                                lines = [raw]
+                            for line in lines:
+                                # 过滤固件入队回执的纯数字行（如"31"=队列剩余空间），避免污染日志
                                 if line.isdigit():
-                                    if self._expect_queue_reply and time.time() * 1000.0 < self._queue_reply_deadline_ms:
-                                        self._expect_queue_reply = False
-                                        continue
-                                    # 超出时间窗或非入队命令的纯数字响应：放行显示
+                                    continue
                                 # UI1+UI2: 拦截 [ACC] / [I_LIMIT] 响应，0.5s 后自动发查询命令
                                 if line.startswith("[ACC]") or line.startswith("[I_LIMIT]"):
                                     self.root.after(500, lambda l=line: [self.log(l, "RX"), self._query_acc_or_i(l)])
@@ -1397,12 +1357,12 @@ class RobotSerialAssistant:
                                                 nums.append(str(float(t)))
                                             except ValueError:
                                                 pass
-                                        if len(nums) >= 6:
-                                            self._sync_data = nums[:6]
+                                        if len(nums) >= 7:
+                                            self._sync_data = nums[:7]
                                             self._sync_waiting = False
-                                            self.root.after(0, lambda n=len(nums): self.log(f"收到{n}个关节数据，已同步（Rail使用滑块当前值）", "INFO"))
+                                            self.root.after(0, lambda n=len(nums): self.log(f"收到{n}个数据（含 Rail），已同步全部滑块", "INFO"))
                                         else:
-                                            self.root.after(0, lambda: self.log(f"数据不足: {nums}", "WARN"))
+                                            self.root.after(0, lambda: self.log(f"数据不足（需 7 个: Rail + J1-J6）: {nums}", "WARN"))
                                 # 拦截 ok 触发下一条顺序发送（SEQ 模式下固件阻塞到位后回单字 ok）
                                 if getattr(self, "_pos_queue_running", False) and line == "ok":
                                     self._pos_queue_running = False
@@ -1512,13 +1472,7 @@ class RobotSerialAssistant:
             full_cmd = f"{cmd}\n"
             self.serial_port.write(full_cmd.encode('utf-8'))
             self.log(cmd, "TX")
-            # 入队类命令（> / @ / & / $）的响应是队列剩余空间（纯数字），
-            # 在 1 秒窗口内抑制该纯数字行，避免污染日志；
-            # 其他查询（如 !RGB_BRIGHT 返回 "100"）不会被误抑制。
             stripped = cmd.lstrip()
-            if stripped and stripped[0] in ('>', '@', '&', '$'):
-                self._expect_queue_reply = True
-                self._queue_reply_deadline_ms = time.time() * 1000.0 + 1000.0
             # UI1+UI2: 记录节点，供 500ms 后发查询命令用
             m = re.match(r'#(ACC_J|I_LIMIT_J)\s+(\d+)', stripped)
             if m:
@@ -1563,7 +1517,6 @@ class RobotSerialAssistant:
             current = float(self.ent_hand_current.get())
             if 0.05 <= current <= 2.0:
                 self.send_cmd(f"#I_LIMIT_J 8 {current}")
-                self.log(f"已发送 #I_LIMIT_J 8 {current}（夹爪电流限制）", "INFO")
             else:
                 messagebox.showerror("错误", "夹爪电流必须在 0.05~2.0A 之间")
         except ValueError:
@@ -1572,7 +1525,6 @@ class RobotSerialAssistant:
     def send_hand_zero(self):
         """发送 !HAND_ZERO 命令，将夹爪当前位置设为零点"""
         self.send_cmd("!HAND_ZERO")
-        self.log("已发送 !HAND_ZERO（夹爪标定）", "INFO")
 
     def send_home_offset_all(self):
         if not self.is_connected or not self.serial_port:
@@ -1581,7 +1533,6 @@ class RobotSerialAssistant:
         for j in range(1, 7):
             self.send_cmd(f"#OFFSET_J {j}")
             time.sleep(0.15)
-        self.log("已发送 #OFFSET_J 1~6（全部关节设为零点）", "INFO")
 
     def _rgb_light_on(self):
         """开灯：读取 Entry 当前值，应用亮度（不自动保存）"""
@@ -1590,19 +1541,16 @@ class RobotSerialAssistant:
             val = max(0, min(100, val))
             self.send_cmd(f"!RGB_BRIGHT {val}")
             self.scl_bright.set(val)
-            self.log(f"开灯: 亮度 {val}%", "INFO")
         except ValueError:
             messagebox.showerror("错误", "请输入 0~100 的整数")
 
     def _rgb_light_off(self):
         """关灯：发送亮度 0"""
         self.send_cmd("!RGB_BRIGHT 0")
-        self.log("关灯: 亮度 0%", "INFO")
 
     def _rgb_bright_query(self):
         """查询固件当前亮度值"""
         self.send_cmd("!RGB_BRIGHT")
-        self.log("已发送 !RGB_BRIGHT (查询)", "INFO")
 
     def _rgb_bright_apply(self):
         """应用亮度（临时，不保存）"""
@@ -1611,7 +1559,6 @@ class RobotSerialAssistant:
             val = max(0, min(100, val))
             self.send_cmd(f"!RGB_BRIGHT {val}")
             self.scl_bright.set(val)
-            self.log(f"亮度已应用: {val}%", "INFO")
         except ValueError:
             messagebox.showerror("错误", "请输入 0~100 的整数")
 
@@ -1624,7 +1571,6 @@ class RobotSerialAssistant:
             self.scl_bright.set(val)
             self.rgb_brightness = val
             self._save_config()
-            self.log(f"亮度已保存: {val}%", "INFO")
         except ValueError:
             messagebox.showerror("错误", "请输入 0~100 的整数")
 
@@ -1669,7 +1615,6 @@ class RobotSerialAssistant:
                 acc = 5000.0
             if node in (1, 2, 3, 4, 5, 6, 8, 9):
                 self.send_cmd(f"#ACC_J {node} {acc} &")
-                self.log(f"已保存节点{node} 加速度={acc} r/s² 到EEPROM", "INFO")
             else:
                 messagebox.showerror("错误", "节点必须为1-6/8/9")
         except ValueError:
@@ -1710,7 +1655,6 @@ class RobotSerialAssistant:
                 i_limit = 3.0
             if node in (1, 2, 3, 4, 5, 6, 8, 9):
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit} &")
-                self.log(f"已保存节点{node} 电流={i_limit}A 到EEPROM", "INFO")
             else:
                 messagebox.showerror("错误", "节点必须为1-6/8/9")
         except ValueError:
@@ -1723,25 +1667,12 @@ class RobotSerialAssistant:
     def set_rail_current(self, current):
         """设置地轨电机电流限制"""
         self.send_cmd(f"#I_LIMIT_J 9 {current}")
-        self.log(f"已设置地轨电流限制为 {current}A", "INFO")
 
     def query_rail_current(self):
         self.send_cmd("#GETI 9")
 
-    def apply_rail_current(self):
-        try:
-            current = float(self.ent_rail_current.get())
-            if current < 0.1:
-                current = 0.1
-            elif current > 3.0:
-                current = 3.0
-            self.send_cmd(f"#I_LIMIT_J 9 {current}")
-        except ValueError:
-            self.log("地轨电流值无效", "ERROR")
-
     def save_rail_current(self):
-        self.apply_rail_current()
-        self.log("地轨电流已应用（需固件支持Flash保存）", "INFO")
+        self.log("请用上方节点选择器(选节点9)查询/应用/保存电流", "WARN")
 
     def rail_move_left(self):
         if not self.is_connected:
@@ -1865,7 +1796,6 @@ class RobotSerialAssistant:
         """查询选中节点的 Kp/Kv/Ki/Kd（通过 CAN 回读）"""
         node = int(self.cb_pid_node.get())
         self.send_cmd(f"#GET_PID {node}")
-        self.log(f"已发送 #GET_PID {node}，等待电机 CAN 回传...", "INFO")
         # 500ms 超时兜底
         if hasattr(self, "_pid_query_timer") and self._pid_query_timer is not None:
             self.root.after_cancel(self._pid_query_timer)

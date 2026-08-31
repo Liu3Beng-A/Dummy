@@ -26,7 +26,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         if (s == "!STOP")
         {
             dummy.commandHandler.EmergencyStop();
-            Respond(_responseChannel, "Stopped ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s.find("!RGB_SET_START") == 0)
         {
@@ -73,22 +73,22 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         else if (s == "!START")
         {
             dummy.SetEnable(true);
-            Respond(_responseChannel, "Started ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s == "!HOME")
         {
             dummy.Homing();
-            Respond(_responseChannel, "Started ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s == "!RESET")
         {
             dummy.Resting();
-            Respond(_responseChannel, "Started ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s == "!DISABLE")
         {
             dummy.SetEnable(false);
-            Respond(_responseChannel, "Disabled ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s.find("!RAIL_L") == 0)
         {
@@ -323,7 +323,9 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         else if (s.find("PRINTPOSE") != std::string::npos)
         {
             /* 打印当前关节角和末端位姿（调试用） */
-            Respond(_responseChannel, "GETJPOS: %.2f %.2f %.2f %.2f %.2f %.2f",
+            /* 7 值顺序：Rail(mm), J1~J6(deg)，与 MoveJ 命令对齐 */
+            Respond(_responseChannel, "GETJPOS: %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
+                    dummy.currentRailPos,
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],
                     dummy.currentJoints.a[2], dummy.currentJoints.a[3],
                     dummy.currentJoints.a[4], dummy.currentJoints.a[5]);
@@ -342,7 +344,9 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 
         if (s.find("GETJPOS") != std::string::npos)
         {
-            Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f",
+            /* 7 值顺序：Rail(mm), J1~J6(deg)，与 MoveJ 命令对齐 */
+            Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
+                    dummy.currentRailPos,
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],
                     dummy.currentJoints.a[2], dummy.currentJoints.a[3],
                     dummy.currentJoints.a[4], dummy.currentJoints.a[5]);
@@ -723,7 +727,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         if (s == "!STOP")
         {
             dummy.commandHandler.EmergencyStop();
-            Respond(_responseChannel, "Stopped ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s.find("!RGB_SET_START") == 0)
         {
@@ -772,22 +776,22 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             dummy.SetEnable(true);
             /* 每次收到使能指令，强制切回默认位置控制模式，防止残留力矩模式 */
             dummy.SetCommandMode(dummy.DEFAULT_COMMAND_MODE);
-            Respond(_responseChannel, "Started ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s == "!HOME")
         {
             dummy.Homing();
-            Respond(_responseChannel, "Started ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s == "!RESET")
         {
             dummy.Resting();
-            Respond(_responseChannel, "Started ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s == "!DISABLE")
         {
             dummy.SetEnable(false);
-            Respond(_responseChannel, "Disabled ok");
+            Respond(_responseChannel, "ok");
         }
         else if (s.find("!CALIBRATION") == 0)
         {
@@ -996,7 +1000,9 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("PRINTPOSE") != std::string::npos)
         {
-            Respond(_responseChannel, "GETJPOS: %.2f %.2f %.2f %.2f %.2f %.2f",
+            /* 7 值顺序：Rail(mm), J1~J6(deg)，与 MoveJ 命令对齐 */
+            Respond(_responseChannel, "GETJPOS: %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
+                    dummy.currentRailPos,
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],
                     dummy.currentJoints.a[2], dummy.currentJoints.a[3],
                     dummy.currentJoints.a[4], dummy.currentJoints.a[5]);
@@ -1013,7 +1019,9 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
 
         if (s.find("GETJPOS") != std::string::npos)
         {
-            Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f",
+            /* 7 值顺序：Rail(mm), J1~J6(deg)，与 MoveJ 命令对齐 */
+            Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
+                    dummy.currentRailPos,
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],
                     dummy.currentJoints.a[2], dummy.currentJoints.a[3],
                     dummy.currentJoints.a[4], dummy.currentJoints.a[5]);
