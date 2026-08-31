@@ -283,11 +283,11 @@ void Motor::CloseLoopControlTick()
         }
         else
         {
-            const int32_t stallCurrentThr = controller->stallCurrentThreshold; // ratedCurrent * 75%
-            const int32_t stallVelocityThr = 30;    // 30 step/s（10 太严，30 容忍小幅抖动）
+            const int32_t stallCurrentThr = controller->stallCurrentThreshold; // ratedCurrent * 60%
+            const int32_t stallVelocityThr = 100;   // 100 step/s（30 太严，背隙/抖动导致误判；100 容忍加减速过渡）
             const int32_t stallErrorThr = 30;        // 30 步（堵转压紧后误差可能缩小到 <50）
-            const uint32_t stallDurationUs = 200000; // 200ms = 200000us
-            // 上升沿二次验证：200ms 后误差必须仍然存在（说明确实卡住，没"漏过去"）
+            const uint32_t stallDurationUs = 50000;  // 50ms = 50000us
+            // 上升沿二次验证：50ms 后误差必须仍然存在（说明确实卡住，没"漏过去"）
             const int32_t stallRecheckErrorThr = 20;
 
             int32_t current = abs(controller->focCurrent);
@@ -363,8 +363,8 @@ void Motor::CloseLoopControlTick()
             }
             else
             {
-                // 三条件不满足: 仅当电机确实在动 (> 100 step/s) 时才清零上升沿
-                if (abs(controller->estVelocity) > 100)
+                // 三条件不满足: 仅当电机确实在动 (> 200 step/s) 时才清零上升沿
+                if (abs(controller->estVelocity) > 200)
                 {
                     controller->stallDetectRisingEdge = false;
                     controller->stallStartTick = 0;
@@ -707,7 +707,7 @@ void Motor::Controller::Init()
     retreatTarget = 0;
     retreatDirection = 0;
     positionModeStartCycles = 0;
-    stallCurrentThreshold = (int32_t)(context->config.motionParams.ratedCurrent * 75 / 100);
+    stallCurrentThreshold = (int32_t)(context->config.motionParams.ratedCurrent * 60 / 100);
 
     config->pid.vError = 0;
     config->pid.vErrorLast = 0;

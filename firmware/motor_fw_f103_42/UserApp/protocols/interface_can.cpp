@@ -152,7 +152,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             motor.config.motionParams.ratedCurrent = (int32_t) (*(float*) RxData * 1000);
             boardConfig.currentLimit = motor.config.motionParams.ratedCurrent;
             // 更新堵转阈值：按新电流的 75% 计算
-            motor.controller->stallCurrentThreshold = motor.config.motionParams.ratedCurrent * 75 / 100;
+            motor.controller->stallCurrentThreshold = motor.config.motionParams.ratedCurrent * 60 / 100;
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
