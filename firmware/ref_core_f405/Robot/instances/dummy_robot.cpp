@@ -28,16 +28,40 @@ inline float AbsMaxOf6(DOF6Kinematic::Joint6D_t _joints, uint8_t &_index)
 }
 
 /**
- * @brief 7 轴同步抵达速度规划（D-Q3 决策，2026-08-26）
+ * @brief 单轴梯形速度曲线总时间（v2.7，与电机端 motion_planner.cpp PositionTracker 对齐）
+ * @param d 距离（电机端圈数）
+ * @param v 目标速度（匀速段速度，r/s）
+ * @param a 加速度（r/s²）
+ * @return 该轴按梯形曲线跑 d 距离的总时间（s）
+ * @note  距离太短（2×d_acc >= d）时退化为三角曲线：T = 2√(d/a)
+ */
+static float timeTrapezoid(float d, float v, float a)
+{
+    if (d < 1e-6f || v < 1e-6f || a < 1e-6f) return 0;
+    float d_acc = v * v / (2.0f * a);  // 单边加速距离
+    if (2.0f * d_acc >= d) {
+        // 三角曲线：距离太短，没匀速段
+        return 2.0f * sqrtf(d / a);
+    }
+    // 梯形曲线：T = 2v/a + (d - v²/a)/v
+    return 2.0f * v / a + (d - 2.0f * d_acc) / v;
+}
+
+/**
+ * @brief 7 轴同步抵达速度规划 v2.7（梯形曲线模型）
  * @param deltaRails[7] 各轴距离（地轨=mm，关节=°）
  * @param sliderCaps[7] 各轴电机轴 r/s 上限（地轨=30，关节=20）
+ * @param accel[7]      各轴加速度（r/s²，来自 jointAccRuntime，0 用 FALLBACK）
  * @param sliderSpeed   统一基础速度（slider × SLIDER_TO_RPS = r/s）
  * @param outSpeeds[7]  输出每轴最终电机轴 r/s
- * @return timeBudget   同步抵达总时间 (s)
- * @note 迭代收敛算法：用 sliderSpeed 算初始 timeBudget，再对每轴钳制到 cap，迭代直到稳定
+ * @return timeBudget   同步抵达总时间（s）
+ * @note  与电机端 motion_planner.cpp PositionTracker 公式一致：对称梯形加减速，
+ *        距离太短退化为三角曲线。上电后 jointAccRuntime[] 异步回填电机 EEPROM 值，
+ *        未回包的轴用 FALLBACK_JOINT_ACCELERATION 兜底。
  */
 static float ComputeSyncSpeeds(const float deltaRails[7], const float sliderCaps[7],
-                               float sliderSpeed, float outSpeeds[7])
+                               const float accel[7], float sliderSpeed,
+                               float outSpeeds[7])
 {
     // 步骤 1：各轴距离 → 电机轴转数
     float distMotor[7];
@@ -51,45 +75,54 @@ static float ComputeSyncSpeeds(const float deltaRails[7], const float sliderCaps
         }
     }
 
-    // 步骤 2：初始预算时间 = 最远轴用 sliderSpeed 跑的最快时间
+    // 步骤 2：初始预算时间 = 各轴在 sliderSpeed（钳制到 cap）下的梯形时间，取 max
     float timeBudget = 0;
     for (int i = 0; i < 7; i++) {
-        if (distMotor[i] < 0.001f) continue;
-        float t = distMotor[i] / sliderSpeed;
+        if (distMotor[i] < 1e-6f) continue;
+        float a = (accel[i] > 1e-6f) ? accel[i] : FALLBACK_JOINT_ACCELERATION;
+        float v = fminf(sliderSpeed, sliderCaps[i]);
+        float t = timeTrapezoid(distMotor[i], v, a);
         if (t > timeBudget) timeBudget = t;
     }
 
-    if (timeBudget < 0.001f) {
+    if (timeBudget < 1e-6f) {
         // 所有轴距离都 ≈ 0，不动
         for (int i = 0; i < 7; i++) outSpeeds[i] = 0;
         return 0.0f;
     }
 
     // 步骤 3：迭代收敛（最多 10 轮，一般 2~3 轮收敛）
+    // 解二次方程：v²/a - v*T + d = 0  →  v = (T - sqrt(T² - 4d/a)) × a / 2
+    // 该公式在梯形曲线约束下反推匀速段速度 v_needed；
+    // 然后用 cap 钳制、重新算 T_new 直到稳定。
     for (int iter = 0; iter < 10; iter++) {
         float newTimeBudget = 0;
         for (int i = 0; i < 7; i++) {
-            if (distMotor[i] < 0.001f) continue;
-            float speedNeeded = distMotor[i] / timeBudget;
-            float speedActual = fminf(speedNeeded, sliderCaps[i]);
-            float timeActual = distMotor[i] / speedActual;
-            if (timeActual > newTimeBudget) newTimeBudget = timeActual;
+            if (distMotor[i] < 1e-6f) {
+                outSpeeds[i] = 0;
+                continue;
+            }
+            float a  = (accel[i] > 1e-6f) ? accel[i] : FALLBACK_JOINT_ACCELERATION;
+            float vc = sliderCaps[i];
+            float disc = timeBudget * timeBudget - 4.0f * distMotor[i] / a;
+            float v;
+            if (disc < 0) {
+                // 时间太短，按 cap 跑（实际会超出 T，但仍取最大者更新基准）
+                v = vc;
+            } else {
+                v = (timeBudget - sqrtf(disc)) * a * 0.5f;
+                if (v > vc) v = vc;
+            }
+            outSpeeds[i] = v;
+            // 用 v 重算实际梯形时间，作为下一轮 T_new
+            float t = timeTrapezoid(distMotor[i], v, a);
+            if (t > newTimeBudget) newTimeBudget = t;
         }
-        if (fabsf(newTimeBudget - timeBudget) < 0.001f) {
+        if (fabsf(newTimeBudget - timeBudget) < 1e-3f) {
             timeBudget = newTimeBudget;
             break;
         }
         timeBudget = newTimeBudget;
-    }
-
-    // 步骤 4：输出每轴最终速度
-    for (int i = 0; i < 7; i++) {
-        if (distMotor[i] < 0.001f) {
-            outSpeeds[i] = 0;
-        } else {
-            float speedNeeded = distMotor[i] / timeBudget;
-            outSpeeds[i] = fminf(speedNeeded, sliderCaps[i]);
-        }
     }
     return timeBudget;
 }
@@ -339,8 +372,9 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, fl
     float sliderSpeed = _slider * SLIDER_TO_RPS;
     const float* sliderCaps = AXIS_MAX_RPS;
 
-    // 调用迭代收敛算法
-    ComputeSyncSpeeds(delta7, sliderCaps, sliderSpeed, dynamicJointSpeeds7.rps);
+    // 调用迭代收敛算法（v2.7: 加入加速度感知，复刻电机端梯形曲线模型）
+    ComputeSyncSpeeds(delta7, sliderCaps, jointAccRuntime, sliderSpeed,
+                      dynamicJointSpeeds7.rps);
 
     // 地轨速度写入 railSpeedRps（MoveJoints 会用到）
     railSpeedRps = dynamicJointSpeeds7.rps[0];

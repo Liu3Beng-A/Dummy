@@ -14,16 +14,18 @@
 static constexpr float SLIDER_TO_RPS = 0.30f;
 
 // 各轴电机轴 r/s 上限（用于钳制 slider 计算结果）
-// 地轨：直连丝杆 1605，物理上限 ~40 r/s，设 30 r/s = 150 mm/s（满速）
-// 关节：42/35 电机，电机端默认 30 r/s，设 20 r/s（保守）
+// v2.7: 关节 cap 从 20 提到 30，与电机端 boardConfig.velocityLimit=30 r/s 对齐
+// 之前 cap=20 导致 slider ≥ 67 后所有关节档位饱和为 20 r/s，体感非线性（70/80 没区别）
+// 修复后 slider 1~100 全段线性，每档关节递增 0.3 r/s
+// 地轨 cap=30 不变（丝杆 1605 物理上限 ~40 r/s，30 r/s = 150 mm/s 满速）
 static constexpr float AXIS_MAX_RPS[7] = {
     30.0f,   // 地轨
-    20.0f,   // J1
-    20.0f,   // J2
-    20.0f,   // J3
-    20.0f,   // J4
-    20.0f,   // J5
-    20.0f    // J6
+    30.0f,   // J1
+    30.0f,   // J2
+    30.0f,   // J3
+    30.0f,   // J4
+    30.0f,   // J5
+    30.0f    // J6
 };
 
 // 电机减速比（用于距离 → 电机转数换算）
@@ -34,16 +36,9 @@ static constexpr uint8_t MOTOR_REDUCTION[7] = {1, 50, 50, 50, 50, 50, 30};
 // 夹爪 CAN ID=8，使用35电机 reduction=16，输出轴速度 = 20/16 ≈ 1.25 r/s
 static constexpr float HAND_MAX_RPS = 20.0f;
 
-// 各轴 sliderSpeed 上限（电机轴 r/s）
-static constexpr float AXIS_SLIDER_RPS[7] = {
-    30.0f,   // 地轨
-    20.0f,   // J1
-    20.0f,   // J2
-    20.0f,   // J3
-    20.0f,   // J4
-    20.0f,   // J5
-    20.0f    // J6
-};
+// v2.7: jointAccRuntime[i]==0 时的兜底加速度（r/s²）
+// 与其他速度/减速比常量保持文件作用域，便于 ComputeSyncSpeeds 静态函数访问
+static constexpr float FALLBACK_JOINT_ACCELERATION = 10.0f;
 
 #include <cstdint>
 #include "rgb.hpp"
@@ -237,8 +232,9 @@ public:
 
     // v2.6 加速度单位统一：电机轴 r/s²（与 CAN 0x14 入参 float 完全一致）
     // 启动后通过 SyncAllMotorAcceleration() 从电机 EEPROM 读真实值回填
+    // FALLBACK_JOINT_ACCELERATION 已提升为文件作用域 constexpr（前面定义），
+    // 便于 ComputeSyncSpeeds 静态函数访问；此处不再重复声明。
     const float DEFAULT_JOINT_ACCELERATION = 150.0f;  // r/s²（电机端默认 1000）
-    const float FALLBACK_JOINT_ACCELERATION = 150.0f; // jointAccRuntime[i]==0 时 fallback
 
     // v2.6 缓存：每个电机轴当前生效加速度（r/s²），由 CAN 0x2C 回包更新
     // 索引: [0]=地轨(node=9), [1~6]=关节(node=1~6), [7]=夹爪(node=8)
