@@ -4,6 +4,11 @@
 extern DummyRobot dummy;
 extern RGB rgb;
 
+// ── 命令限流状态 ──
+// !STALL_STATUS: 两次查询间隔不得少于 500ms，避免 CAN 总线和 UART 被塞满
+static uint32_t _stall_status_last_tick = 0;
+#define STALL_STATUS_INTERVAL_MS 500
+
 /* ======================================================================
  * OnUsbAsciiCmd —— USB 通道 ASCII 协议指令处理
  *
@@ -155,9 +160,16 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
          */
         else if (s.find("STALL_STATUS") != std::string::npos)
         {
-            dummy.QueryStallStatus();
-            Respond(_responseChannel, "ok STALL_STATUS rail_en=1 j1_en=1 j2_en=1 j3_en=1 j4_en=1 j5_en=1 j6_en=1 \\");
-            Respond(_responseChannel, "                 rail_lock=0 j1_lock=0 j2_lock=0 j3_lock=0 j4_lock=0 j5_lock=0 j6_lock=0");
+            uint32_t now = HAL_GetTick();
+            if (now - _stall_status_last_tick < STALL_STATUS_INTERVAL_MS) {
+                Respond(_responseChannel, "warn STALL_STATUS rate-limited, try again in %lu ms",
+                        (unsigned long)(STALL_STATUS_INTERVAL_MS - (now - _stall_status_last_tick)));
+            } else {
+                _stall_status_last_tick = now;
+                dummy.QueryStallStatus();
+                Respond(_responseChannel, "ok STALL_STATUS rail_en=1 j1_en=1 j2_en=1 j3_en=1 j4_en=1 j5_en=1 j6_en=1 \\");
+                Respond(_responseChannel, "                 rail_lock=0 j1_lock=0 j2_lock=0 j3_lock=0 j4_lock=0 j5_lock=0 j6_lock=0");
+            }
         }
         else if (s.find("STALL_UNLOCK") != std::string::npos)
         {
@@ -878,9 +890,16 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("STALL_STATUS") != std::string::npos)
         {
-            dummy.QueryStallStatus();
-            Respond(_responseChannel, "ok STALL_STATUS rail_en=1 j1_en=1 j2_en=1 j3_en=1 j4_en=1 j5_en=1 j6_en=1 \\");
-            Respond(_responseChannel, "                 rail_lock=0 j1_lock=0 j2_lock=0 j3_lock=0 j4_lock=0 j5_lock=0 j6_lock=0");
+            uint32_t now = HAL_GetTick();
+            if (now - _stall_status_last_tick < STALL_STATUS_INTERVAL_MS) {
+                Respond(_responseChannel, "warn STALL_STATUS rate-limited, try again in %lu ms",
+                        (unsigned long)(STALL_STATUS_INTERVAL_MS - (now - _stall_status_last_tick)));
+            } else {
+                _stall_status_last_tick = now;
+                dummy.QueryStallStatus();
+                Respond(_responseChannel, "ok STALL_STATUS rail_en=1 j1_en=1 j2_en=1 j3_en=1 j4_en=1 j5_en=1 j6_en=1 \\");
+                Respond(_responseChannel, "                 rail_lock=0 j1_lock=0 j2_lock=0 j3_lock=0 j4_lock=0 j5_lock=0 j6_lock=0");
+            }
         }
         else if (s.find("STALL_UNLOCK") != std::string::npos)
         {

@@ -199,13 +199,12 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* CanHandle)
     uint8_t cmd = (RxHeader.StdId & 0x7F); // 7Bits CMD (0x00~0x4F普通, 0x50~0x7F广播)
 
     // ── 广播命令 (cmd 0x50~0x7F): 所有节点无条件响应 ──
-    // (0x50 以下保持原 0x00~0x4F 普通命令空间；0x50~0x7F 扩展为堵转检测广播命令空间，
-    //   避开高 7 位与低 7 位之间的位宽冲突: 例如 (nodeID=9)<<7 | 0x5A = 0x4DA,
-    //   解析后 id=9 cmd=0x5A, 落在广播区间; 若仍在 0x80~0xBF 区间则解析为 cmd=0x0A 错位)
-    if (cmd >= 0x50) {
+    //   注: 0x5C 是单播查询命令 (主控->单电机)，不走广播路径；
+    //   放在此处可避免所有节点同时回包造成总线冲突。
+    if (cmd >= 0x50 && cmd != 0x5C) {
         OnCanCmd(cmd, RxData, RxHeader.DLC);
     }
-    // ── 普通命令: 仅目标节点响应 ──
+    // ── 普通命令 / 0x5C 单播: 仅目标节点响应 ──
     else if (id == boardConfig.canNodeId) {
         OnCanCmd(cmd, RxData, RxHeader.DLC);
     }
