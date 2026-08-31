@@ -105,14 +105,13 @@ static float ComputeSyncSpeeds(const float deltaRails[7], const float sliderCaps
             float a  = (accel[i] > 1e-6f) ? accel[i] : FALLBACK_JOINT_ACCELERATION;
             float vc = sliderCaps[i];
             float disc = timeBudget * timeBudget - 4.0f * distMotor[i] / a;
-            float v;
-            if (disc < 0) {
-                // 时间太短，按 cap 跑（实际会超出 T，但仍取最大者更新基准）
-                v = vc;
-            } else {
-                v = (timeBudget - sqrtf(disc)) * a * 0.5f;
-                if (v > vc) v = vc;
-            }
+            // Bug1 修复：浮点临界抖动导致 disc 偶尔 <0 时，直接给 cap 会让短距离
+            // 运动突然飙到最大速度。改为钳到 0，让反推公式自然算出"刚够用"的速度。
+            if (disc < 0) disc = 0;
+            float v = (timeBudget - sqrtf(disc)) * a * 0.5f;
+            // 双钳制：物理上限 (vc) + 用户意图上限 (sliderSpeed)
+            if (v > vc) v = vc;
+            if (v > sliderSpeed) v = sliderSpeed;
             outSpeeds[i] = v;
             // 用 v 重算实际梯形时间，作为下一轮 T_new
             float t = timeTrapezoid(distMotor[i], v, a);
