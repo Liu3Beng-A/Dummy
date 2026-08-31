@@ -40,7 +40,7 @@ void Main()
             .defaultMode = Motor::MODE_COMMAND_POSITION,
             .currentLimit = 2 * 1000,    // 2A
             .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
-            .velocityAcc = 100 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
+            .velocityAcc = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2 首次烧录默认值
             .calibrationCurrent=2000,
             .dce_kp = 200,
             .dce_kv = 80,

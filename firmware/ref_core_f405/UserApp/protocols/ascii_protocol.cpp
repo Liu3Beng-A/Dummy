@@ -536,35 +536,16 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "error HOMEOFFSET MOTOR [%lu] is wrong", node);
             }
         }
-        else if (s.find("ACC_BASE_J") != std::string::npos)
+        // v2.6 新增 #SYNC_ACC：触发 8 个电机 0x2C 查询，回包会刷新 dummy.jointAccRuntime[]
+        // 必须放在 ACC_J 之前，避免被 s.find("ACC_J") 子串匹配抢先匹配到 ACC_J 分支
+        // （虽然 sscanf 会失败，但优先顺序更明确）。
+        else if (s.find("SYNC_ACC") != std::string::npos)
         {
-            float S;
-            uint32_t node;
-            sscanf(_cmd, "#ACC_BASE_J %lu %f", &node, &S);
-            if (node >= 1 && node <= 6)
-            {
-                if (S >= 1.0f && S <= 2000.0f)
-                {
-                    dummy.jointAccBases.a[node - 1] = S;
-                    dummy.SaveConfig();
-                    
-                    // 立即按当前模式重新应用加速度
-                    uint32_t currentMode = static_cast<uint32_t>(dummy.commandMode);
-                    dummy.SetCommandMode(currentMode); 
-
-                    Respond(_responseChannel, "ok SET MOTOR [%lu] BASE ACCELERATION [%f] AND SAVED", node, S);
-                }
-                else
-                {
-                    Respond(_responseChannel, "error ACC_BASE_J value must be in [1.0, 2000.0]");
-                }
-            }
-            else
-            {
-                Respond(_responseChannel,
-                        "error SET MOTOR [%lu] BASE ACCELERATION [%f] is wrong", node, S);
-            }
+            dummy.SyncAllMotorAcceleration();
+            Respond(_responseChannel, "ok SYNC_ACC dispatched (8 motors, async)");
         }
+        // v2.6 删除 #ACC_BASE_J：单位统一后不再需要"基准 × 百分比"双层语义，
+        // 直发 r/s² 用 #ACC_J 即可（见下方分支）。
         else if (s.find("ACC_J") != std::string::npos)
         {
             float S;
@@ -573,31 +554,33 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             int ret = sscanf(_cmd, "#ACC_J %lu %f %c", &node, &S, &saveFlag);
             if (ret >= 2)
             {
+                if (S < 0)        S = 0;
+                if (S > 5000.0f)  S = 5000.0f;
                 bool persist = (saveFlag == '&');
                 if (node == 9)
                 {
                     dummy.motorJ[0]->SetAcceleration_persist(S, persist);
-                    Respond(_responseChannel, "ok SET MOTOR [9] ACCELERATION [%f]", S);
+                    Respond(_responseChannel, "ok SET MOTOR [9] ACCELERATION [%.2f] r/s^2", S);
                 }
                 else if (node >= 1 && node <= 6)
                 {
                     dummy.motorJ[node]->SetAcceleration_persist(S, persist);
-                    Respond(_responseChannel, "ok SET MOTOR [%lu] ACCELERATION [%f]", node, S);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] ACCELERATION [%.2f] r/s^2", node, S);
                 }
                 else if (node == 8)
                 {
                     dummy.hand->SetAcceleration_persist(S, persist);
-                    Respond(_responseChannel, "ok SET MOTOR [8] ACCELERATION [%f] (夹爪)", S);
+                    Respond(_responseChannel, "ok SET MOTOR [8] ACCELERATION [%.2f] r/s^2 (夹爪)", S);
                 }
                 else
                 {
                     Respond(_responseChannel,
-                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong", node, S);
+                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong (use 9=rail, 1~6=joints, 8=gripper)", node, S);
                 }
             }
             else
             {
-                Respond(_responseChannel, "error ACC_J parse failed");
+                Respond(_responseChannel, "error ACC_J parse failed. Use: #ACC_J <node> <r/s^2> [&]");
             }
         }
         else if (s.find("SPEED_J") != std::string::npos)
@@ -615,21 +598,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "error SET MOTOR [%lu] SPEED [%f] is wrong", node, S);
             }
         }
-        else if (s.find("ACC_RAIL") != std::string::npos)
-        {
-            float acc;
-            char saveFlag;
-            if (sscanf(_cmd, "#ACC_RAIL %f %c", &acc, &saveFlag) >= 1)
-            {
-                bool persist = (saveFlag == '&');
-                dummy.motorJ[0]->SetAcceleration_persist(acc, persist);
-                Respond(_responseChannel, "ok rail acc set to %.1f", acc);
-            }
-            else
-            {
-                Respond(_responseChannel, "use #GETJACC 9 to query");
-            }
-        }
+        // v2.6 删除 #ACC_RAIL：单位统一后地轨走 #ACC_J 9 即可
         else if (s.find("I_LIMIT_J") != std::string::npos)
         {
             float I;
@@ -1065,46 +1034,19 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("ACC_BASE_J") != std::string::npos)
         {
-            float S;
-            uint32_t node;
-            sscanf(_cmd, "#ACC_BASE_J %lu %f", &node, &S);
-            if (node >= 1 && node <= 6)
-            {
-                if (S >= 1.0f && S <= 2000.0f)
-                {
-                    dummy.jointAccBases.a[node - 1] = S;
-                    dummy.SaveConfig();
-
-                    uint32_t currentMode = static_cast<uint32_t>(dummy.commandMode);
-                    dummy.SetCommandMode(currentMode);
-
-                    Respond(_responseChannel, "ok SET MOTOR [%lu] BASE ACCELERATION [%f] AND SAVED", node, S);
-                }
-                else
-                {
-                    Respond(_responseChannel, "error ACC_BASE_J value must be in [1.0, 2000.0]");
-                }
-            }
-            else
-            {
-                Respond(_responseChannel,
-                        "error SET MOTOR [%lu] BASE ACCELERATION [%f] is wrong", node, S);
-            }
+            // v2.6 删除 #ACC_BASE_J：单位统一后走 #ACC_J 即可
+            Respond(_responseChannel, "error ACC_BASE_J removed in v2.6, use #ACC_J <node> <r/s^2>");
         }
         else if (s.find("ACC_RAIL") != std::string::npos)
         {
-            float acc;
-            char saveFlag;
-            if (sscanf(_cmd, "#ACC_RAIL %f %c", &acc, &saveFlag) >= 1)
-            {
-                bool persist = (saveFlag == '&');
-                dummy.motorJ[0]->SetAcceleration_persist(acc, persist);
-                Respond(_responseChannel, "ok rail acc set to %.1f", acc);
-            }
-            else
-            {
-                Respond(_responseChannel, "use #GETJACC 9 to query");
-            }
+            // v2.6 删除 #ACC_RAIL：地轨走 #ACC_J 9 即可
+            Respond(_responseChannel, "error ACC_RAIL removed in v2.6, use #ACC_J 9 <r/s^2>");
+        }
+        else if (s.find("SYNC_ACC") != std::string::npos)
+        {
+            // v2.6 新增：触发 8 个电机 0x2C 查询，回包刷新 jointAccRuntime[]
+            dummy.SyncAllMotorAcceleration();
+            Respond(_responseChannel, "ok SYNC_ACC dispatched (9+1~6+8, async)");
         }
         else if (s.find("SET_DCE_KV") != std::string::npos)
         {
@@ -1288,27 +1230,39 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             int ret = sscanf(_cmd, "#ACC_J %lu %f %c", &node, &S, &saveFlag);
             if (ret >= 2)
             {
+                if (S < 0)        S = 0;
+                if (S > 5000.0f)  S = 5000.0f;
                 bool persist = (saveFlag == '&');
                 if (node == 9)
                 {
                     dummy.motorJ[0]->SetAcceleration_persist(S, persist);
-                    Respond(_responseChannel, "ok SET MOTOR [9] ACCELERATION [%f]", S);
+                    Respond(_responseChannel, "ok SET MOTOR [9] ACCELERATION [%.2f] r/s^2", S);
                 }
                 else if (node >= 1 && node <= 6)
                 {
                     dummy.motorJ[node]->SetAcceleration_persist(S, persist);
-                    Respond(_responseChannel, "ok SET MOTOR [%lu] ACCELERATION [%f]", node, S);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] ACCELERATION [%.2f] r/s^2", node, S);
+                }
+                else if (node == 8)
+                {
+                    dummy.hand->SetAcceleration_persist(S, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [8] ACCELERATION [%.2f] r/s^2 (夹爪)", S);
                 }
                 else
                 {
                     Respond(_responseChannel,
-                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong", node, S);
+                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong (use 9=rail, 1~6=joints, 8=gripper)", node, S);
                 }
             }
             else
             {
-                Respond(_responseChannel, "error ACC_J parse failed");
+                Respond(_responseChannel, "error ACC_J parse failed. Use: #ACC_J <node> <r/s^2> [&]");
             }
+        }
+        else if (s.find("SYNC_ACC") != std::string::npos)
+        {
+            dummy.SyncAllMotorAcceleration();
+            Respond(_responseChannel, "ok SYNC_ACC dispatched (9+1~6+8, async)");
         }
         else if (s.find("SPEED_J") != std::string::npos)
         {

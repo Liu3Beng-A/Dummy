@@ -46,7 +46,7 @@ void OnUart5AsciiCmd(const char* _cmd, size_t _len, StreamSink& _responseChannel
 template<typename ... TArgs>
 void Respond(StreamSink &output, const char *fmt, TArgs &&... args)
 {
-    char response[64];  // 定义一个字符数组用于存储格式化后的响应消息
+    char response[128];  // 定义一个字符数组用于存储格式化后的响应消息
     size_t len = snprintf(response, sizeof(response), fmt, std::forward<TArgs>(args)...);  // 格式化字符串，存入 response 中
     output.process_bytes((uint8_t *) response, len, nullptr);  // 通过输出通道发送格式化后的响应消息
     output.process_bytes((const uint8_t *) "\r\n", 2, nullptr);  // 发送换行符

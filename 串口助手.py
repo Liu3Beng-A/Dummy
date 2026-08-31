@@ -520,15 +520,21 @@ class RobotSerialAssistant:
         tk.Button(node_f, text="查电流", font=("Arial", 10), bg="#495057", fg="white",
                   relief=tk.FLAT, command=lambda: self.send_cmd(f"#GETI {self.cb_acc_node.get()}")
                   ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(node_f, text="同步所有", font=("Arial", 10, "bold"), bg="#1971c2", fg="white",
+                  relief=tk.FLAT, command=lambda: self.send_cmd("#SYNC_ACC")
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
+        # 加速度 v2.6：单位电机轴 r/s²，所有节点统一入口（地轨 9 / 关节 1~6 / 夹爪 8）
         acc_f = ttk.Frame(parent)
         acc_f.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(acc_f, text="加速度:", font=("Arial", 10)).pack(side=tk.LEFT)
+        ttk.Label(acc_f, text="加速度 (r/s²):", font=("Arial", 10)).pack(side=tk.LEFT)
         self.ent_acc_val = ttk.Entry(acc_f, width=7, font=("Arial", 10))
         self.ent_acc_val.insert(0, "150")
         self.ent_acc_val.pack(side=tk.LEFT, padx=4)
         tk.Button(acc_f, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
-                  relief=tk.FLAT, command=self.send_acc_base).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+                  relief=tk.FLAT, command=self.send_acc).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(acc_f, text="保存", font=("Arial", 10, "bold"), bg="#2b8a3e", fg="white",
+                  relief=tk.FLAT, command=self.save_acc).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         cur_f = ttk.Frame(parent)
         cur_f.pack(fill=tk.X, pady=(0, 6))
@@ -588,41 +594,8 @@ class RobotSerialAssistant:
 
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
 
-        # 地轨加速度
-        tk.Label(parent, text="地轨加速度 (#ACC_RAIL)", font=("Arial", 10, "bold")).pack(anchor="w")
-        raf = ttk.Frame(parent)
-        raf.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(raf, text="mm/s2:", font=("Arial", 10)).pack(side=tk.LEFT)
-        self.ent_rail_acc = ttk.Entry(raf, width=7, font=("Arial", 10))
-        self.ent_rail_acc.insert(0, "30")
-        self.ent_rail_acc.pack(side=tk.LEFT, padx=4)
-        self.scl_rail_acc = ttk.Scale(raf, from_=1, to=200, orient=tk.HORIZONTAL)
-        self.scl_rail_acc.set(30)
-        self.scl_rail_acc.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.lbl_rail_acc_val = ttk.Label(raf, text="30", width=6, font=("Arial", 10))
-        self.lbl_rail_acc_val.pack(side=tk.LEFT)
-
-        ra_btns = ttk.Frame(parent)
-        ra_btns.pack(fill=tk.X, pady=(0, 6))
-        tk.Button(ra_btns, text="查询", font=("Arial", 10), bg="#495057", fg="white",
-                  relief=tk.FLAT, command=self.query_rail_acc).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(ra_btns, text="应用", font=("Arial", 10), bg="#3b5bdb", fg="white",
-                  relief=tk.FLAT, command=self.apply_rail_acc).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(ra_btns, text="保存", font=("Arial", 10), bg="#2b8a3e", fg="white",
-                  relief=tk.FLAT, command=self.save_rail_acc).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-
-        def ursa(val):
-            v = int(float(val))
-            self.lbl_rail_acc_val.config(text=str(v))
-            if self.ent_rail_acc.get() != str(v):
-                self.ent_rail_acc.delete(0, tk.END)
-                self.ent_rail_acc.insert(0, str(v))
-        self.scl_rail_acc.config(command=ursa)
-        self.ent_rail_acc.bind("<Return>",
-            lambda e: self.scl_rail_acc.set(float(self.ent_rail_acc.get())))
-        self.ent_rail_acc.bind("<FocusOut>",
-            lambda e: self.scl_rail_acc.set(float(self.ent_rail_acc.get())))
-
+        # v2.6 删除独立"地轨加速度"块：地轨走上方统一块（节点=9，加速度值 r/s²）
+        # 保留：地轨电流（专用大块，物理对象不同）
         # 地轨电流 (#I_LIMIT_J 9)
         tk.Label(parent, text="地轨电流 (#I_LIMIT_J 9)", font=("Arial", 10, "bold")).pack(anchor="w")
         rcf = ttk.Frame(parent)
@@ -1669,7 +1642,8 @@ class RobotSerialAssistant:
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
-    def send_acc_base(self):
+    def send_acc(self):
+        """v2.6 统一入口：所有节点走 #ACC_J <node> <r/s^2>"""
         try:
             node = int(self.cb_acc_node.get())
             acc = float(self.ent_acc_val.get())
@@ -1677,14 +1651,25 @@ class RobotSerialAssistant:
                 acc = 1.0
             elif acc > 5000.0:
                 acc = 5000.0
-            if 1 <= node <= 6:
-                self.send_cmd(f"#ACC_BASE_J {node} {acc}")
-            elif node == 8:
-                # 夹爪没有 BASE 概念，直接发给电机做临时设置（ASCII 解析端会写夹爪)
+            if node in (1, 2, 3, 4, 5, 6, 8, 9):
                 self.send_cmd(f"#ACC_J {node} {acc}")
-            elif node == 9:
-                # 地轨 ACC_BASE 不存在，改用 ACC_RAIL
-                self.send_cmd(f"#ACC_RAIL {acc:.1f}")
+            else:
+                messagebox.showerror("错误", "节点必须为1-6/8/9")
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的数字")
+
+    def save_acc(self):
+        """v2.6 带 & 的加速度设置（写入电机EEPROM，掉电保持）"""
+        try:
+            node = int(self.cb_acc_node.get())
+            acc = float(self.ent_acc_val.get())
+            if acc < 1.0:
+                acc = 1.0
+            elif acc > 5000.0:
+                acc = 5000.0
+            if node in (1, 2, 3, 4, 5, 6, 8, 9):
+                self.send_cmd(f"#ACC_J {node} {acc} &")
+                self.log(f"已保存节点{node} 加速度={acc} r/s² 到EEPROM", "INFO")
             else:
                 messagebox.showerror("错误", "节点必须为1-6/8/9")
         except ValueError:
@@ -1732,32 +1717,8 @@ class RobotSerialAssistant:
             messagebox.showerror("错误", "请输入有效的数字")
 
     def send_rail_acc(self):
-        self.apply_rail_acc()
-
-    def apply_rail_acc(self):
-        try:
-            acc = float(self.ent_rail_acc.get())
-            if acc < 10:
-                acc = 10
-            elif acc > 5000:
-                acc = 5000
-            self.send_cmd(f"#ACC_RAIL {acc:.1f}")
-        except ValueError:
-            messagebox.showerror("错误", "请输入有效的数字")
-
-    def save_rail_acc(self):
-        try:
-            acc = float(self.ent_rail_acc.get())
-            if acc < 10:
-                acc = 10
-            elif acc > 5000:
-                acc = 5000
-            self.send_cmd(f"#ACC_RAIL {acc:.1f} &")
-        except ValueError:
-            messagebox.showerror("错误", "请输入有效的数字")
-
-    def query_rail_acc(self):
-        self.send_cmd("#GETJACC 9")
+        # v2.6 删除：地轨加速度走 send_acc + 节点=9
+        self.log("v2.6: 请用上方统一加速度块（节点选 9）", "WARN")
 
     def set_rail_current(self, current):
         """设置地轨电机电流限制"""

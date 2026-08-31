@@ -53,6 +53,11 @@ static constexpr float AXIS_SLIDER_RPS[7] = {
 
 /**
  * @brief 存储在 EEPROM 中的系统固化参数
+ *
+ * 注意 v2.6 起删除了 jointAccBases[6]（加速度单位统一为电机轴 r/s²，
+ * 不再走"基准 × 百分比"双层语义）。EEPROM 结构前移 24 字节，老设备
+ * 首次上电会因 magic 不匹配而自动走默认配置（rgbStateStart/Enable/
+ * Disable + 亮度），加速度全部以 DEFAULT_JOINT_ACCELERATION=150 起步。
  */
 struct EepromConfig {
     uint32_t magic;           // EEPROM 校验魔数，用于判定 Flash 数据是否有效
@@ -63,7 +68,6 @@ struct EepromConfig {
     uint32_t rgbStateStart;   // 设备开机启动时的默认灯效模式
     uint32_t rgbStateEnable;  // 机械臂激活/使能状态下的灯效模式
     uint32_t rgbStateDisable; // 机械臂断电/失能状态下的灯效模式
-    float jointAccBases[6];   // 各个关节电机基准加速度参数
 };
 
 /**
@@ -229,10 +233,17 @@ public:
 
     // 结构硬变量缺省状态与初始化约束池
     const DOF6Kinematic::Joint6D_t REST_POSE = {0, -75, 180, 0, 0, 0};
-    const float DEFAULT_JOINT_SPEED     = 80;    
-    DOF6Kinematic::Joint6D_t jointAccBases = {150, 150, 150, 150, 150, 150}; 
-    const float DEFAULT_JOINT_ACCELERATION_LOW  = 5;     
-    const float DEFAULT_JOINT_ACCELERATION_HIGH = 100;   
+    const float DEFAULT_JOINT_SPEED     = 80;
+
+    // v2.6 加速度单位统一：电机轴 r/s²（与 CAN 0x14 入参 float 完全一致）
+    // 启动后通过 SyncAllMotorAcceleration() 从电机 EEPROM 读真实值回填
+    const float DEFAULT_JOINT_ACCELERATION = 150.0f;  // r/s²（电机端默认 1000）
+    const float FALLBACK_JOINT_ACCELERATION = 150.0f; // jointAccRuntime[i]==0 时 fallback
+
+    // v2.6 缓存：每个电机轴当前生效加速度（r/s²），由 CAN 0x2C 回包更新
+    // 索引: [0]=地轨(node=9), [1~6]=关节(node=1~6), [7]=夹爪(node=8)
+    // 初值 0 表示未知，ComputeSyncSpeeds 等算法应使用 FALLBACK_JOINT_ACCELERATION
+    float jointAccRuntime[8] = {0};
     const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_SEQUENTIAL;
 
     // 系统位姿记忆变量与实时状态寄存层
@@ -259,6 +270,12 @@ public:
     void MoveRailRelative(float _delta_mm);
     void SetJointSpeed(float _speed);
     void SetJointAcceleration(float _acc);
+    /**
+     * @brief 向所有 8 个电机（地轨+6 关节+夹爪）发 CAN 0x2C 查询，
+     *        触发电机回包更新 jointAccRuntime[]（在 can_protocol.cpp 0x2C 处理里写）。
+     *        异步执行，不阻塞。回包延迟 ≤1 CAN 帧周期。
+     */
+    void SyncAllMotorAcceleration();
     void UpdateJointAngles();
     void UpdateJointAnglesCallback();
     void UpdateJointPose6D();
@@ -309,12 +326,12 @@ public:
 
         void Init()
         {
-            commandFifo = osMessageQueueNew(16, 64, nullptr);
+            commandFifo = osMessageQueueNew(32, 128, nullptr);
         }
 
-        uint32_t    Push(const std::string &_cmd);
-        std::string Pop(uint32_t timeout);
-        uint32_t    ParseCommand(const std::string &_cmd);
+        uint32_t    Push(const char *_cmd);
+        const char* Pop(uint32_t timeout);
+        uint32_t    ParseCommand(const char *_cmd);
         uint32_t    GetSpace();
         void        ClearFifo();
         void        EmergencyStop();
@@ -322,7 +339,7 @@ public:
     private:
         DummyRobot*         context;
         osMessageQueueId_t  commandFifo;
-        char                strBuffer[64]{};
+        char                strBuffer[128]{};
     };
     CommandHandler commandHandler = CommandHandler(this);
 

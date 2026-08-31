@@ -159,7 +159,10 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     }
                     break;
                 case 0x2C:
-                    printf("[ACC] MOTOR [9] = %.2f\r\n", *(float*)data);
+                    // v2.6: 缓存电机实际加速度到 dummy.jointAccRuntime[]，供同步抵达算法使用
+                    // v2.7: 同时打印 [ACC] MOTOR [N] = X.XX r/s²，让 #GETJACC <node> 能拿到值
+                    dummy.jointAccRuntime[0] = *(float*)data;
+                    printf("[ACC] MOTOR [9] = %.2f r/s^2\r\n", *(float*)data);
                     break;
                 case 0x2D:
                     printf("[I_LIMIT] MOTOR [9] = %.2f\r\n", *(float*)data);
@@ -276,7 +279,10 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     }
                     break;
                 case 0x2C:
-                    printf("[ACC] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
+                    // v2.6: 缓存电机实际加速度到 dummy.jointAccRuntime[i]
+                    // v2.7: 同时打印，让 #GETJACC <node> 拿到值
+                    dummy.jointAccRuntime[id] = *(float*)data;
+                    printf("[ACC] MOTOR [%d] = %.2f r/s^2\r\n", id, *(float*)data);
                     break;
                 case 0x2D:
                     printf("[I_LIMIT] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
@@ -389,7 +395,10 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     }
                     break;
                 case 0x2C:
-                    printf("[ACC] MOTOR [8] = %.2f\r\n", *(float*)data);
+                    // v2.6: 缓存夹爪实际加速度到 dummy.jointAccRuntime[7]
+                    // v2.7: 同时打印，让 #GETJACC 8 拿到值
+                    dummy.jointAccRuntime[7] = *(float*)data;
+                    printf("[ACC] MOTOR [8] = %.2f r/s^2\r\n", *(float*)data);
                     break;
                 case 0x2D:
                     printf("[I_LIMIT] MOTOR [8] = %.2f\r\n", *(float*)data);

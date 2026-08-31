@@ -115,9 +115,9 @@ void ThreadControlLoopUpdate(void* argument)
 {
     for (;;)
     {
-        dummy.commandHandler.ParseCommand(
-                dummy.commandHandler.Pop(osWaitForever)
-        );
+        const char* _cmd = dummy.commandHandler.Pop(osWaitForever);
+        if (_cmd != nullptr)
+            dummy.commandHandler.ParseCommand(_cmd);
     }
 }
 

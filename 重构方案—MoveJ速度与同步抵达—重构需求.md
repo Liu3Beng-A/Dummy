@@ -1110,7 +1110,282 @@ firmware/motor_fw_f103_gripper/Ctrl/Motor/rail_motor.h
 
 ---
 
-## 10. 引用文档
+
+## 9. 下一工作预告：7DOF 冗余机械臂逆解
+
+### 11.1 现状
+
+**问题**：当 slider 较高时（>50），即便各轴稳态速度匹配，由于加速度差异，仍存在明显异步抵达：
+- 地轨加速度默认 30 mm/s²，关节加速度 150~200 r/s²（差异 5~10 倍）
+- 关节需要加速时间短，地轨需要长，导致**地轨后到达**
+
+**当前架构**：
+- 主控 `jointAccBases[6]`（EEPROM 持久化），用于 `SetJointAcceleration()` 缩放
+- 电机固件 `ratedVelocityAcc`（已有 CAN 0x14 通道），主控通过 `#ACC_J` 下发
+- CAN 0x07 仅含 position + velocity，**不含加速度**
+- `ComputeSyncSpeeds` 仅按稳态速度规划，**忽略加速度**
+
+### 11.2 解决方案（用户拍板：方案 B — RAM 缓存 + 上电自动查询）
+
+**拍板决策（2026-08-28）**：
+
+| 原则 | 设计 |
+|------|------|
+| 存储位置 | **只存 RAM 缓存**，不存主控 EEPROM |
+| 数据来源 | 电机端 EEPROM 是唯一数据源，主控只做缓存 |
+| 初始值 | `jointAccRuntime[i] = jointAccBases[i]` |
+| 上电行为 | 自动发送 7 次 `QueryAcceleration()`（motorJ[0~6]） |
+| 查询结果 | 更新到 `jointAccRuntime[nodeID]` |
+| 超时处理 | 500ms 后仍未回包的轴，保持默认值（`jointAccBases[i]`） |
+| 手动触发 | `#SYNC_ACC` 重新查询所有轴 |
+| 查询结果回显 | 返回所有 7 轴加速度值 |
+
+**4 个改动**：
+1. **新增 `jointAccRuntime[7]`**：主控运行时加速度缓存（RAM）
+2. **`#SYNC_ACC` 命令**：手动触发查询 + 回显所有轴加速度
+3. **`#ACC_J <node> <val>` 扩展**：下发加速度到电机 + 更新主控缓存
+4. **`ComputeSyncSpeeds` 算法升级**：用梯形速度曲线模型算总时间
+
+**理由**：
+- 电机端 EEPROM 已是持久化数据源，主控没必要重复存储
+- 电机固件升级后自动同步新值，不会出现版本不一致
+- 简化逻辑，无需维护"两份 EEPROM 是否一致"的状态
+
+### 11.3 算法模型
+
+**梯形速度曲线总时间**：
+
+$$
+T = \frac{v}{a_{acc}} + \frac{d - \dfrac{v^2}{a}}{v} + \frac{v}{a_{dec}}
+$$
+
+其中 $a_{acc} = a_{dec} = a$（对称加减速，简化）：
+- 距离太小（$d < v^2/a$）时，退化为三角速度曲线
+- 距离为 0 时 $T = 0$
+
+**算法流程**：
+1. 给定 slider，得到初始 v_max = slider × SLIDER_TO_RPS（钳制到 AXIS_MAX_RPS）
+2. 计算各轴在 v_max 下的 T_total（用各轴加速度）
+3. 取所有轴 T_total 的 **max** 作为基准时间 T
+4. 各轴在 T 约束下，反求匀速段所需速度：v_needed = dist / (T - 2·√(dist/a))
+   - 若 v_needed > v_max → 该轴被钳制，T 必须增大
+   - 若 v_needed < v_max → 该轴可加速到 v_max，但被钳制（保持 v_max 不浪费）
+5. 迭代直到 |T_new - T_old| < 1e-3 或达 10 轮上限
+
+**目标**：保证**总运动时间近似一致**（不完全严格同步，但加速度小的轴会自动提速以补偿）。
+
+### 11.4 新增字段（dummy_robot.h）
+
+```cpp
+// ===== 运行时加速度缓存（RAM，仅此一份，不存 EEPROM）=====
+// 初始化时用 jointAccBases[i] 作为默认值，上电后从电机 EEPROM 查询同步
+// 索引 [0]=地轨, [1~6]=关节
+// 单位：电机轴 r/s²（与电机端 ratedVelocityAcc 换算后一致）
+float jointAccRuntime[7] = {150, 150, 150, 150, 150, 150, 150};
+```
+
+### 11.5 上电自动查询流程
+
+```cpp
+// 在 DummyRobot::Init() 末尾调用
+void DummyRobot::SyncAllMotorAcceleration() {
+    // 1. 发送查询命令到 7 个轴
+    for (int i = 0; i <= 6; i++) {
+        motorJ[i]->QueryAcceleration();  // CAN 0x2C
+    }
+    // 2. 启动 500ms 软定时器
+    // 3. 定时器到期后，未回包的轴保持默认值
+}
+
+// CAN 0x2C 回包回调（在 can_protocol.cpp 中调用）
+void DummyRobot::UpdateAccelerationCallback(uint8_t nodeID, float accel_rps2) {
+    // nodeID: 0=地轨, 1~6=关节
+    // accel_rps2: 电机回传的加速度值（已从 步/s² 转换为 r/s²）
+    if (nodeID <= 6) {
+        jointAccRuntime[nodeID] = accel_rps2;
+    }
+}
+```
+
+**CAN 0x2C 回包处理（can_protocol.cpp）**：
+```cpp
+case 0x2C: {  // Query Acceleration Response
+    float accel_rps2 = *(float*)RxData / (float)MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;  // 步/s² → r/s²
+    dummy.UpdateAccelerationCallback(nodeID, accel_rps2);
+    break;
+}
+```
+
+### 11.6 协议命令
+
+| 命令 | 功能 |
+|------|------|
+| `#SYNC_ACC` | 触发查询所有 7 轴加速度，回显结果 |
+| `#ACC_J <node> <val>` | 设置轴加速度，同时下发电机 + 更新主控缓存 |
+| `#GETJACC` | 查询当前主控缓存的加速度值（不查询电机） |
+
+**`#SYNC_ACC` 响应格式**：
+```
+ACC_SYNC: rail=150, J1=150, J2=300, J3=150, J4=150, J5=150, J6=150 r/s²
+```
+
+**`#ACC_J` 响应格式**：
+```
+ACC_J3: 200 r/s² (motor synced + cached)
+```
+
+### 11.7 ASCII 协议改动（ascii_protocol.cpp）
+
+**新增命令**：
+- `#SYNC_ACC` — 触发查询所有 7 轴加速度，回显结果
+- `#GETJACC` — 查询当前主控缓存的加速度值（不查询电机）
+
+**修改命令**：
+- `#ACC_J <node> <val>` — 已有 `SetAcceleration_persist` 调用 → 同步更新主控缓存 `jointAccRuntime[nodeID]`
+
+**生效时序**：
+- `#ACC_J` 改运行时值 → 下发到电机 + 更新 `jointAccRuntime[nodeID]`
+- `#SAVE` → 将 `jointAccBases[6]` 落 EEPROM（`jointAccRuntime` 不落 EEPROM）
+- `ComputeSyncSpeeds` → **永远读 `jointAccRuntime`**，不读 EEPROM
+
+### 11.8 ComputeSyncSpeeds 新签名
+
+```cpp
+// 旧：
+static float ComputeSyncSpeeds(const float deltaRails[7], const float sliderCaps[7],
+                               float sliderSpeed, float outSpeeds[7]);
+
+// 新：增加加速度参数
+struct AxisSpec { float distMotor; float vMax; float accel; };
+static float ComputeSyncSpeeds(const AxisSpec specs[7], float sliderSpeed,
+                               float outSpeeds[7]);
+```
+
+```cpp
+#include <math.h>
+
+// 计算梯形速度曲线总时间
+static float timeTrapezoid(float dist, float v, float acc) {
+    if (dist < 0.001f) return 0;
+    float tAcc = v / acc;                          // 加速段时间
+    float dAcc = 0.5f * acc * tAcc * tAcc;         // 加速段距离
+    if (dAcc * 2 >= dist) {                        // 三角曲线（距离太短）
+        return 2 * sqrtf(dist / acc);
+    }
+    float tConst = (dist - 2 * dAcc) / v;          // 匀速段时间
+    return 2 * tAcc + tConst;
+}
+
+float ComputeSyncSpeeds(const AxisSpec specs[7], float sliderSpeed,
+                        float outSpeeds[7]) {
+    // 1. 初始化 T = max(各轴在 vMax 下的总时间)
+    float T = 0;
+    for (int i = 0; i < 7; i++) {
+        float t = timeTrapezoid(specs[i].distMotor, specs[i].vMax, specs[i].accel);
+        if (t > T) T = t;
+    }
+    if (T < 1e-6f) {                               // 所有轴距离为 0
+        for (int i = 0; i < 7; i++) outSpeeds[i] = 0;
+        return T;
+    }
+
+    // 2. 迭代收敛：匀速段速度 = dist / (T - 加减速时间)
+    for (int iter = 0; iter < 10; iter++) {
+        float Tnew = 0;
+        for (int i = 0; i < 7; i++) {
+            float d = specs[i].distMotor;
+            float vMax = specs[i].vMax;
+            float a = specs[i].accel;
+            if (d < 1e-6f || T < 1e-6f) {
+                outSpeeds[i] = 0;
+                continue;
+            }
+            float tAcc = sqrtf(d / a);             // 加速到能跑 d/2 的最短时间
+            float tCruise = T - 2 * tAcc;           // 匀速段时间
+            float vCruise;
+            if (tCruise <= 0) {                     // T 太短，必须三角曲线
+                vCruise = sqrtf(a * d);             // 三角曲线峰值速度
+            } else {
+                vCruise = d / tCruise;
+            }
+            float vActual = (vCruise > vMax) ? vMax : vCruise;
+            outSpeeds[i] = vActual;
+            // 实际所需时间
+            float tActual = timeTrapezoid(d, vActual, a);
+            if (tActual > Tnew) Tnew = tActual;
+        }
+        if (fabsf(Tnew - T) < 1e-3f) break;        // 收敛
+        T = Tnew;
+    }
+    return T;
+}
+```
+
+### 11.9 验证测试
+
+| 测试场景 | 期望 |
+|---------|------|
+| 上电后 `#SYNC_ACC` | 返回 7 轴加速度，回包丢失的轴显示默认值 |
+| `#ACC_J 3 500` | 电机端 + 主控缓存都更新；`#GETJACC` 返回 200 |
+| 断电重启后 `#GETJACC` | 返回默认值 150（缓存不持久化） |
+| MoveJ 同步 | 各轴按梯形曲线模型计算总时间，加速度小的轴稳态速度自动降低 |
+
+### 11.10 不做
+
+- 不改电机固件（CAN 0x07 协议不变，加速度仍由电机内部 ratedVelocityAcc 主导）
+- 不引入"完美同步"（梯形曲线近似，减速响应仍由电机内部 S 曲线决定）
+- `jointAccRuntime` 不存主控 EEPROM（只存 RAM，电机 EEPROM 是唯一数据源）
+
+---
+
+## 12. v2.6 加速度单位统一 + SYNC_ACC 协议落地（2026-08-31 实施）
+
+按 `加速度单位与同步抵达Bug分析.md` 的诊断（§2-§6）+ 用户拍板的方案 D（见 chat 记录）落地。
+
+### 12.1 落地的改动
+
+**`dummy_robot.h`**：
+- 删 `jointAccBases` 字段（line ~233）
+- 删 `DEFAULT_JOINT_ACCELERATION_LOW` / `_HIGH` 常量
+- 删 `EepromConfig::jointAccBases[6]`（EEPROM 结构前移 24 字节）
+- 新增 `DEFAULT_JOINT_ACCELERATION = 150.0f`、`FALLBACK_JOINT_ACCELERATION = 150.0f`
+- 新增 `float jointAccRuntime[8] = {0}`（缓存电机真实加速度）
+- 新增 `void SyncAllMotorAcceleration()` 方法
+
+**`dummy_robot.cpp`**：
+- `LoadConfig` / `SaveConfig` 删 `jointAccBases` 读写
+- `SetJointAcceleration(_acc)` 重写为直发 r/s²（带 < 10 百分比兼容路径），下发后异步触发 `SyncAllMotorAcceleration`
+- `SetCommandMode` 三处改用 `DEFAULT_JOINT_ACCELERATION`（消除 `LOW=5` × `base=150` = 7.5 Bug）
+- `Init` 末尾调 `SyncAllMotorAcceleration()`，上电后立刻把 8 个电机真实加速度回填
+- 新增 `SyncAllMotorAcceleration()` 实现（顺序：地轨 9 → J1~J6 1~6 → 夹爪 8）
+
+**`can_protocol.cpp`**：
+- 三处 0x2C 回包处理（rail=9 / joint=1~6 / hand=8）填 `dummy.jointAccRuntime[i]`
+
+**`ascii_protocol.cpp`**：
+- `OnUsbAsciiCmd` `!` 块：新增 `#SYNC_ACC` 分支（line 542），删 `#ACC_BASE_J`（整段）、删 `#ACC_RAIL`（整段）、`#ACC_J` 增加夹爪 (8) 分支
+- `OnUart4AsciiCmd` `#` 块：`#ACC_BASE_J` / `#ACC_RAIL` 改为"error removed"软删除响应、新增 `#SYNC_ACC` 分支（line 1045）、`#ACC_J` 增加夹爪分支
+- `OnUart5AsciiCmd` `#` 块：升级 `#ACC_J` 增加夹爪分支、新增 `#SYNC_ACC` 分支（line 1262）
+
+**`串口助手.py`**：
+- `_build_motor_tab` 加速度设置合成一个块：节点选择 + 加速度值 (r/s²) + 应用 + 保存 + 同步所有按钮
+- 删除独立"地轨加速度"块（label + 滑块 + 应用/保存/查询 3按钮）
+- `send_acc_base` → `send_acc` + `save_acc`，所有节点统一走 `#ACC_J <node> <v>`（含 `&` 持久化）
+- 标签 "mm/s2" → "r/s²"，默认值 150 保持
+
+### 12.2 未做的（留待 v2.7）
+
+- §11.8 `ComputeSyncSpeeds` 梯形曲线算法实现——本次只把 `jointAccRuntime[]` 缓存层做好，算法层仍用旧的"线性+max"逻辑
+- `SetJointAcceleration(_acc) < 10 兼容百分比` 的兼容分支是为 `COMMAND_SERVO_J` 历史调用保留，未来若不再需要可删
+
+### 12.3 验证
+
+- 编译：`build/ninja` 0 errors，RAM 40.48% / FLASH 32.64%
+- EEPROM：旧设备刷新固件后 magic 不匹配 → `LoadConfig` 自动走默认配置（rgb 保留，加速度全 150 r/s²）
+
+---
+
+## 13. 引用文档
 
 | 文档 | 内容 |
 |---|---|
@@ -1118,3 +1393,4 @@ firmware/motor_fw_f103_gripper/Ctrl/Motor/rail_motor.h
 | `ISSUES.md` | P0~P3 问题清单 |
 | `TODO.md` | 功能路线图（含 7DOF 在 Phase 2 的位置） |
 | `PROJECT_CONTEXT.md` | 项目架构基线 |
+| `加速度单位与同步抵达Bug分析.md` | 加速度单位不统一问题的诊断与修复记录 |

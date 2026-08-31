@@ -17,7 +17,7 @@ public:
         config.motionParams.ratedCurrent = 2800;            // (mA) - 地轨电机 57hs5630A 需要 2.8A
         config.motionParams.ratedCurrentAcc = 50 * 1000;     // (mA/s) 50A/s — 0→2.8A 仅需 56ms
         config.motionParams.ratedVelocity = 30 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
-        config.motionParams.ratedVelocityAcc = 1000 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+        config.motionParams.ratedVelocityAcc = 0;    // 0=由main.cpp接管，避免冲突
 
         config.ctrlParams.stallProtectSwitch = true;
         config.ctrlParams.pid =

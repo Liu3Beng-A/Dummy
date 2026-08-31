@@ -17,7 +17,7 @@ public:
         config.motionParams.ratedCurrent = 1000;            // (mA)
         config.motionParams.ratedCurrentAcc = 2 * 1000;     // (mA/s)
         config.motionParams.ratedVelocity = 30 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
-        config.motionParams.ratedVelocityAcc = 1000 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+        config.motionParams.ratedVelocityAcc = 0;    // 0=由main.cpp接管，避免冲突
 
         config.ctrlParams.pid =
             Controller::PID_t{

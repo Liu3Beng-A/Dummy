@@ -136,8 +136,9 @@ DummyRobot::~DummyRobot()
 
 /**
  * @brief 连接 Flash 介质取用长期休眠前的运行变量存根
- * @note 读取灯效风格预设与核心运动关节平稳性保护加速度上限规范，
- *       若首次启动匹配不到特解标识字，会自动写回原始初始化表覆写空白位。
+ * @note 读取灯效风格预设。若首次启动匹配不到特解标识字，
+ *       会自动写回原始初始化表覆写空白位（v2.6 起 EepromConfig
+ *       不再包含 jointAccBases，加速度统一从 DEFAULT_JOINT_ACCELERATION 起步）。
  */
 void DummyRobot::LoadConfig()
 {
@@ -160,12 +161,6 @@ void DummyRobot::LoadConfig()
         if (config.rgbStateStart <= 9)   rgbStateStart = config.rgbStateStart;
         if (config.rgbStateEnable <= 9)  rgbStateEnable = config.rgbStateEnable;
         if (config.rgbStateDisable <= 9) rgbStateDisable = config.rgbStateDisable;
-
-        for (int i = 0; i < 6; i++)
-        {
-            if (config.jointAccBases[i] >= 1.0f && config.jointAccBases[i] <= 2000.0f)
-                jointAccBases.a[i] = config.jointAccBases[i];
-        }
     }
 }
 
@@ -187,11 +182,6 @@ void DummyRobot::SaveConfig()
     config.rgbStateEnable = rgbStateEnable;
     config.rgbStateDisable = rgbStateDisable;
 
-    for (int i = 0; i < 6; i++)
-    {
-        config.jointAccBases[i] = jointAccBases.a[i];
-    }
-
     EEPROM.put(0, config);
     EEPROM.commit();
 }
@@ -207,6 +197,10 @@ void DummyRobot::Init()
     SetRGBMode(rgbStateStart);
     SetCommandMode(DEFAULT_COMMAND_MODE);
     SetJointSpeed(DEFAULT_JOINT_SPEED);
+
+    // v2.6 上电后立刻向 8 个电机发 CAN 0x2C 查询，把真实加速度缓存到 jointAccRuntime[]
+    // 供后续 ComputeSyncSpeeds 算法使用。回包延迟 ≤1 帧 CAN 周期。
+    SyncAllMotorAcceleration();
 }
 
 /**
@@ -468,15 +462,41 @@ void DummyRobot::SetJointSpeed(float _slider)
 }
 
 /**
- * @brief 基于底层参数配给换算映射应用新加速度限制表尺
+ * @brief v2.6 单位统一：直接下发电机轴 r/s² 到电机端（与 CAN 0x14 入参 float 一致）
+ * @note  兼容 0~100 的旧 slider 入口（<10 时视为百分比遗留 → 兼容旧代码），
+ *        推荐外部始终传 r/s² 数值。带 persist=false（不写电机 EEPROM）。
+ *        下发后异步触发 SyncAllMotorAcceleration 让 jointAccRuntime[] 及时刷新。
  */
 void DummyRobot::SetJointAcceleration(float _acc)
 {
+    // 兼容旧 slider 入口：<10 视作百分比 → 映射到 DEFAULT_JOINT_ACCELERATION 比例
+    // 这条分支仅给 COMMAND_SERVO_J/历史调用使用，正常 r/s² 数值（>10）走下方直通
+    if (_acc <= 10.0f && _acc >= 0.0f)
+    {
+        _acc = (_acc / 100.0f) * DEFAULT_JOINT_ACCELERATION;
+    }
     if (_acc < 0)        _acc = 0;
-    else if (_acc > 100) _acc = 100;
+    if (_acc > 5000.0f)  _acc = 5000.0f;
 
     for (int i = 1; i <= 6; i++)
-        motorJ[i]->SetAcceleration_persist(_acc / 100.0f * jointAccBases.a[i - 1], false);
+        motorJ[i]->SetAcceleration_persist(_acc, false);
+
+    // 异步回填 runtime 缓存（不阻塞）
+    SyncAllMotorAcceleration();
+}
+
+/**
+ * @brief 向 8 个电机发 CAN 0x2C QueryAcceleration，触发回包更新 jointAccRuntime[]
+ * @note  顺序: 地轨(9) → J1~J6(1~6) → 夹爪(8)，与 ASCII "#SYNC_ACC" 协议一致。
+ *        回包处理在 can_protocol.cpp 0x2C 分支里完成。电机掉线则对应 runtime[i]
+ *        保持原值（不会清零），所以初值 0 与"未查询过"无法区分——这是已知设计。
+ */
+void DummyRobot::SyncAllMotorAcceleration()
+{
+    motorJ[0]->QueryAcceleration();   // 地轨  → runtime[0]
+    for (int i = 1; i <= 6; i++)
+        motorJ[i]->QueryAcceleration(); // J1~J6 → runtime[i]
+    hand->QueryAcceleration();          // 夹爪  → runtime[7]
 }
 
 /**
@@ -664,11 +684,13 @@ void DummyRobot::SetCommandMode(uint32_t _mode)
         case COMMAND_TARGET_POINT_SEQUENTIAL:
         case COMMAND_TARGET_POINT_INTERRUPTABLE:
             jointSpeedRatio = 1;
-            SetJointAcceleration(DEFAULT_JOINT_ACCELERATION_LOW);
+            // v2.7: 不再调用 SetJointAcceleration 覆盖电机端加速度，
+            // 由 SyncAllMotorAcceleration() 在 Init() 末尾从 EEPROM 读取真实值
             break;
 
         case COMMAND_CONTINUES_TRAJECTORY:
-            SetJointAcceleration(DEFAULT_JOINT_ACCELERATION_LOW);
+            // v2.7: 不再调用 SetJointAcceleration 覆盖电机端加速度，
+            // 由 SyncAllMotorAcceleration() 在 Init() 末尾从 EEPROM 读取真实值
             // jointSpeedRatio 不再自动减半，由 SetJointSpeed 直接用 slider × SLIDER_TO_RPS
             break;
 
@@ -679,7 +701,8 @@ void DummyRobot::SetCommandMode(uint32_t _mode)
             break;
 
         case COMMAND_SERVO_J:
-            SetJointAcceleration(100.0f); 
+            // v2.6: 100% 仍走 slider 兼容路径（<=10 视为百分比）→ 实际为 DEFAULT_JOINT_ACCELERATION
+            SetJointAcceleration(100.0f);
             break;
     }
 }
@@ -687,10 +710,10 @@ void DummyRobot::SetCommandMode(uint32_t _mode)
 /**
  * @brief 使用安全字节转移封包放入信道队列排位阻断越界爆破可能
  */
-uint32_t DummyRobot::CommandHandler::Push(const std::string &_cmd)
+uint32_t DummyRobot::CommandHandler::Push(const char *_cmd)
 {
-    char buf[64] = {0};
-    strncpy(buf, _cmd.c_str(), sizeof(buf) - 1);
+    char buf[128] = {0};
+    strncpy(buf, _cmd, sizeof(buf) - 1);
     osStatus_t status = osMessageQueuePut(commandFifo, buf, 0U, 0U);
     if (status == osOK)
         return osMessageQueueGetSpace(commandFifo);
@@ -717,10 +740,12 @@ void DummyRobot::CommandHandler::EmergencyStop()
 /**
  * @brief 在队列排布端向外吐出封存任务项
  */
-std::string DummyRobot::CommandHandler::Pop(uint32_t timeout)
+const char* DummyRobot::CommandHandler::Pop(uint32_t timeout)
 {
     osStatus_t status = osMessageQueueGet(commandFifo, strBuffer, nullptr, timeout);
-    return std::string{strBuffer};
+    if (status == osOK)
+        return strBuffer;
+    return nullptr;
 }
 
 /**
@@ -735,7 +760,7 @@ uint32_t DummyRobot::CommandHandler::GetSpace()
  * @brief ASCII 原生命令文本处理工厂
  * @note 提取包头前置标志分类送入多分支行为反应生成节点进行解包运作分配
  */
-uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
+uint32_t DummyRobot::CommandHandler::ParseCommand(const char *_cmd)
 {
     uint8_t argNum;
 
@@ -744,7 +769,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
     {
         // $c0(地轨),c1~c6(关节),c7(夹爪)
         float cur[7];
-        argNum = sscanf(_cmd.c_str(), "$%f,%f,%f,%f,%f,%f,%f",
+        argNum = sscanf(_cmd, "$%f,%f,%f,%f,%f,%f,%f",
                         &cur[0], &cur[1], &cur[2], &cur[3], &cur[4], &cur[5], &cur[6]);
 
         if (argNum == 7)
@@ -775,7 +800,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 float j7 = 0.0f;
                 float speed = 0.0f;
 
-                argNum = sscanf(_cmd.c_str(), (_cmd[0] == '>') ?
+                argNum = sscanf(_cmd, (_cmd[0] == '>') ?
                                 ">%f,%f,%f,%f,%f,%f,%f,%f" : "&%f,%f,%f,%f,%f,%f,%f,%f",
                                 joints, joints+1, joints+2, joints+3, joints+4, joints+5, &j7, &speed);
 
@@ -805,7 +830,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
             else if (_cmd[0] == '@')
             {
                 float pose[6], speed;
-                argNum = sscanf(_cmd.c_str(), "@%f,%f,%f,%f,%f,%f,%f", pose, pose+1, pose+2, pose+3, pose+4, pose+5, &speed);
+                argNum = sscanf(_cmd, "@%f,%f,%f,%f,%f,%f,%f", pose, pose+1, pose+2, pose+3, pose+4, pose+5, &speed);
                 if (argNum == 7) context->SetJointSpeed(speed);
                 if (argNum >= 6)
                 {
@@ -830,7 +855,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 float j7 = 0.0f;
                 float speed = 0.0f;
 
-                argNum = sscanf(_cmd.c_str(), (_cmd[0] == '>') ?
+                argNum = sscanf(_cmd, (_cmd[0] == '>') ?
                                 ">%f,%f,%f,%f,%f,%f,%f,%f" : "&%f,%f,%f,%f,%f,%f,%f,%f",
                                 joints, joints+1, joints+2, joints+3, joints+4, joints+5, &j7, &speed);
 
@@ -857,7 +882,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
             else if (_cmd[0] == '@')
             {
                 float pose[6], speed;
-                argNum = sscanf(_cmd.c_str(), "@%f,%f,%f,%f,%f,%f,%f", pose, pose+1, pose+2, pose+3, pose+4, pose+5, &speed);
+                argNum = sscanf(_cmd, "@%f,%f,%f,%f,%f,%f,%f", pose, pose+1, pose+2, pose+3, pose+4, pose+5, &speed);
                 if (argNum == 7) context->SetJointSpeed(speed);
                 if (argNum >= 6)
                 {
@@ -881,7 +906,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 float j7 = 0.0f;
                 float speed = 0.0f;
 
-                argNum = sscanf(_cmd.c_str(), (_cmd[0] == '>') ?
+                argNum = sscanf(_cmd, (_cmd[0] == '>') ?
                                 ">%f,%f,%f,%f,%f,%f,%f,%f" : "&%f,%f,%f,%f,%f,%f,%f,%f",
                                 joints, joints+1, joints+2, joints+3, joints+4, joints+5, &j7, &speed);
 
@@ -903,7 +928,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
             else if (_cmd[0] == '@')
             {
                 float pose[6], speed;
-                argNum = sscanf(_cmd.c_str(), "@%f,%f,%f,%f,%f,%f,%f", pose, pose+1, pose+2, pose+3, pose+4, pose+5, &speed);
+                argNum = sscanf(_cmd, "@%f,%f,%f,%f,%f,%f,%f", pose, pose+1, pose+2, pose+3, pose+4, pose+5, &speed);
                 
                 ClearFifo(); 
 
@@ -933,7 +958,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 // >j0(地轨),j1~j6(关节),j7(夹爪)
                 float joints[6];
                 float j7 = 0.0f;
-                argNum = sscanf(_cmd.c_str(), (_cmd[0] == '>') ?
+                argNum = sscanf(_cmd, (_cmd[0] == '>') ?
                                 ">%f,%f,%f,%f,%f,%f,%f" : "&%f,%f,%f,%f,%f,%f,%f",
                                 joints, joints+1, joints+2, joints+3, joints+4, joints+5, &j7);
 
