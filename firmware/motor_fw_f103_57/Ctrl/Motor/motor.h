@@ -128,7 +128,7 @@ public:
         uint32_t retreatStartTick{};     // 回退开始时刻（ms，2s超时用）
         int32_t retreatTarget{};          // 回退目标位置（触发瞬间快照）
         int32_t retreatDirection{};        // 回退方向（+1/-1，触发瞬间快照）
-        int32_t stallCurrentThreshold{};   // 电流阈值（ratedCurrent*60%）
+        int32_t stallCurrentThreshold{};   // 电流阈值（ratedCurrent*40%）
         uint32_t positionModeStartCycles{}; // 进入位置模式的起始周期（启动豁免期用）
         uint8_t stallBroadcastCmd{};       // 待发送广播命令 (0=无, 1=TRIGGER, 2=DONE, 3=TIMEOUT)
         bool stallDetectRisingEdge{};      // 堵转检测上升沿标记：true=三条件首次同时满足

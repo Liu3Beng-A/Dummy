@@ -282,12 +282,12 @@ void Motor::CloseLoopControlTick()
         }
         else
         {
-            const int32_t stallCurrentThr = controller->stallCurrentThreshold; // ratedCurrent * 60%
-            const int32_t stallVelocityThr = 100;   // 100 step/s（30 太严，背隙/抖动导致误判；100 容忍加减速过渡）
-            const int32_t stallErrorThr = 30;        // 30 步（堵转压紧后误差可能缩小到 <50）
-            const uint32_t stallDurationUs = 50000;  // 50ms = 50000us
-            // 上升沿二次验证：50ms 后误差必须仍然存在（说明确实卡住，没"漏过去"）
-            const int32_t stallRecheckErrorThr = 20;
+            const int32_t stallCurrentThr = controller->stallCurrentThreshold; // ratedCurrent * 40%
+            const int32_t stallVelocityThr = 50;    // 50 step/s（100→50: 放宽容忍加减速末段低速）
+            const int32_t stallErrorThr = 15;        // 15 步（30→15: 误差积累少也能触发）
+            const uint32_t stallDurationUs = 30000;  // 30ms = 30000us
+            // 上升沿二次验证：30ms 后误差必须仍然存在（说明确实卡住，没"漏过去"）
+            const int32_t stallRecheckErrorThr = 12;
 
             int32_t current = abs(controller->focCurrent);
 
@@ -317,7 +317,7 @@ void Motor::CloseLoopControlTick()
                         //   条件 B: |estError| 仍 >= 上升沿时刻误差的 50%（说明确实卡住，误差没缩回）
                         //   满足任一→ 触发堵转; 都满足 → 高置信度堵转
                         //   实际策略：只要条件 A 满足且误差 ≥ stallRecheckErrorThr 就触发
-                        bool recheckCurrentStillHigh = (current > stallCurrentThr * 8 / 10); // 放宽到 80%
+                        bool recheckCurrentStillHigh = (current > stallCurrentThr * 6 / 10); // 放宽到 60%
                         bool recheckErrorStillLarge = (abs(controller->estError) > stallRecheckErrorThr) ||
                                                      (abs(controller->estError) > controller->stallDetectRisingEstError / 2);
                         bool velocityStillLow = (abs(controller->estVelocity) < stallVelocityThr * 3); // 放宽 3 倍容忍
@@ -382,8 +382,8 @@ void Motor::CloseLoopControlTick()
             else
             {
                 // 三条件不满足: 仅当电机确实在动 (速度明显上升) 时才清零上升沿
-                // 防止小幅抖动 (estVelocity 在 100 周围跳动) 反复清零
-                if (abs(controller->estVelocity) > 200)
+                // 防止小幅抖动 (estVelocity 在 50 周围跳动) 反复清零
+                if (abs(controller->estVelocity) > 150)
                 {
                     // 电机确实在动 → 不是堵转，清零
                     controller->stallDetectRisingEdge = false;
@@ -725,7 +725,7 @@ void Motor::Controller::Init()
     retreatTarget = 0;
     retreatDirection = 0;
     positionModeStartCycles = 0;
-    stallCurrentThreshold = (int32_t)(context->config.motionParams.ratedCurrent * 60 / 100);
+    stallCurrentThreshold = (int32_t)(context->config.motionParams.ratedCurrent * 40 / 100);
 
     config->pid.vError = 0;
     config->pid.vErrorLast = 0;
