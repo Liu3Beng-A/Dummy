@@ -617,6 +617,12 @@ class RobotSerialAssistant:
         tk.Button(parent, text="发送力矩指令", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
                   relief=tk.FLAT, command=self.send_torque).pack(fill=tk.X, pady=(8, 0))
 
+        # 急停按钮（与顶栏同步，发送 !STOP）
+        tk.Button(parent, text="[!STOP 急停]", font=("Arial", 10, "bold"),
+                  bg="#c92a2a", fg="white", activebackground="#a02222",
+                  relief=tk.RAISED, padx=20, pady=6,
+                  command=lambda: self.send_cmd("!STOP")).pack(fill=tk.X, pady=(6, 0))
+
     def _build_pid_tab(self, parent):
         node_f = ttk.Frame(parent)
         node_f.pack(fill=tk.X, pady=(0, 4))

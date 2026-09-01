@@ -78,6 +78,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         else if (s == "!START")
         {
             dummy.SetEnable(true);
+            dummy.Resting();
             Respond(_responseChannel, "ok");
         }
         else if (s == "!HOME")
@@ -782,13 +783,6 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             {
                 Respond(_responseChannel, "error rgb disable format. Use !RGB_SET_DISABLE <0-9>");
             }
-        }
-        else if (s == "!START")
-        {
-            dummy.SetEnable(true);
-            /* 每次收到使能指令，强制切回默认位置控制模式，防止残留力矩模式 */
-            dummy.SetCommandMode(dummy.DEFAULT_COMMAND_MODE);
-            Respond(_responseChannel, "ok");
         }
         else if (s == "!HOME")
         {
