@@ -544,6 +544,8 @@ void DummyRobot::SetStallMode(int motorIndex)
 {
     // 切换 RGB 为红色心跳，视觉提示堵转
     SetRGBMode(RGB::RED_HEARTBEAT);
+    // 标记堵转状态，拦截后续运动指令直到用户发送 !START 或 !DISABLE
+    isStalled = true;
     // 停发新位置指令，保持当前位置（同步 targetAngle 避免误判）
     targetJoints = currentJoints;
     for (int j = 1; j <= 6; j++) {
@@ -623,10 +625,12 @@ void DummyRobot::SetEnable(bool _enable)
 {
     if (_enable)
     {
+        isStalled = false;  // !START 可解除堵转拦截状态
         SetRGBMode(rgbStateEnable);
     }
     else
     {
+        isStalled = false;  // !DISABLE 可解除堵转拦截状态
         SetRGBMode(rgbStateDisable);
 
         for (int i = 0; i < 6; i++)

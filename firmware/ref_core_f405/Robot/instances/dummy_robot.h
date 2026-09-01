@@ -279,6 +279,7 @@ public:
     void SetEnable(bool _enable);
     void SetStallMode();
     void SetStallMode(int motorIndex);
+    bool IsStalled() const { return isStalled; }
     void BroadcastUnlock();
     void QueryStallStatus();
     void Homing();
@@ -344,6 +345,7 @@ private:
     float jointSpeedRatio = 1;
     DOF6Kinematic* dof6Solver;
     bool     isEnabled    = false;
+    bool     isStalled    = false;
     uint32_t rgbMode      = 0;
 };
 

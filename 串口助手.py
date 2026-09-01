@@ -24,7 +24,7 @@ class RobotSerialAssistant:
         self._pos_queue_running = False  # 顺序发送运行标志
         self._pos_queue_pending = []     # 待发送队列
         self._pos_queue_idx = 0          # 当前发送索引
-        self._pos_queue_speed = 50       # 顺序发送速度
+        self._pos_queue_speed = 35       # 顺序发送速度
         # 主题与配色
         try:
             style = ttk.Style()
@@ -837,7 +837,7 @@ class RobotSerialAssistant:
                   relief=tk.FLAT, width=3, command=self.rail_move_right).pack(side=tk.LEFT, padx=2)
         ttk.Label(rail_ctrl, text="Speed:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(8, 2))
         self.ent_j_speed = ttk.Entry(rail_ctrl, width=5, font=("Arial", 9))
-        self.ent_j_speed.insert(0, "50")
+        self.ent_j_speed.insert(0, "35")
         self.ent_j_speed.pack(side=tk.LEFT)
         tk.Checkbutton(rail_ctrl, text="拖发", variable=self.movej_drag_enable,
                        bg=None, font=("Arial", 9)).pack(side=tk.LEFT, padx=6)
@@ -890,7 +890,7 @@ class RobotSerialAssistant:
         pos_bot.pack(fill=tk.X)
         ttk.Label(pos_bot, text="速度:", font=("Arial", 10)).pack(side=tk.LEFT)
         self.ent_pos_speed = ttk.Entry(pos_bot, width=6, font=("Arial", 10))
-        self.ent_pos_speed.insert(0, "50")
+        self.ent_pos_speed.insert(0, "35")
         self.ent_pos_speed.pack(side=tk.LEFT, padx=4)
         tk.Button(pos_bot, text="顺序发送全部→机械臂", font=("Arial", 10, "bold"), bg="#495057", fg="white",
                   relief=tk.FLAT, command=self.send_all_positions
@@ -903,7 +903,7 @@ class RobotSerialAssistant:
 
         self.ent_pose, self.scl_pose, self.lbl_pose = [], [], []
         labels = ['X', 'Y', 'Z', 'R', 'P', 'Yw']
-        defaults = [0, 0, 150, 0, 180, 0]
+        defaults = [150, 0, 250, 0, 180, 0]
         ranges = [(-250, 250), (-200, 200), (-50, 450), (-180, 180), (0, 360), (-180, 180)]
         self.movel_drag_enable = tk.BooleanVar(value=False)
         self.last_movel_send_time = 0
@@ -953,7 +953,7 @@ class RobotSerialAssistant:
         movel_ctrl.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(movel_ctrl, text="Speed:", font=("Arial", 10)).pack(side=tk.LEFT, padx=(0, 2))
         self.ent_l_speed = ttk.Entry(movel_ctrl, width=5, font=("Arial", 10))
-        self.ent_l_speed.insert(0, "50")
+        self.ent_l_speed.insert(0, "35")
         self.ent_l_speed.pack(side=tk.LEFT)
         tk.Checkbutton(movel_ctrl, text="拖发", variable=self.movel_drag_enable,
                        bg=None, font=("Arial", 10)).pack(side=tk.LEFT, padx=6)

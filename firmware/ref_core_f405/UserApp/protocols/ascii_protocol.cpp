@@ -78,16 +78,17 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         else if (s == "!START")
         {
             dummy.SetEnable(true);
-            dummy.Resting();
             Respond(_responseChannel, "ok");
         }
         else if (s == "!HOME")
         {
+            if (dummy.IsStalled()) { Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first"); return; }
             dummy.Homing();
             Respond(_responseChannel, "ok");
         }
         else if (s == "!RESET")
         {
+            if (dummy.IsStalled()) { Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first"); return; }
             dummy.Resting();
             Respond(_responseChannel, "ok");
         }
@@ -715,6 +716,11 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             Respond(_responseChannel, "error: robot not enabled, send !START first");
             return;
         }
+        if (dummy.IsStalled())
+        {
+            Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first");
+            return;
+        }
         /* 运动/力矩指令直接入队，返回队列剩余空间供上位机流控 */
         uint32_t freeSize = dummy.commandHandler.Push(_cmd);
         Respond(_responseChannel, "%d", freeSize);
@@ -786,11 +792,13 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s == "!HOME")
         {
+            if (dummy.IsStalled()) { Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first"); return; }
             dummy.Homing();
             Respond(_responseChannel, "ok");
         }
         else if (s == "!RESET")
         {
+            if (dummy.IsStalled()) { Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first"); return; }
             dummy.Resting();
             Respond(_responseChannel, "ok");
         }
@@ -1345,6 +1353,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         if (!dummy.IsEnabled())
         {
             Respond(_responseChannel, "error: robot not enabled, send !START first");
+            return;
+        }
+        if (dummy.IsStalled())
+        {
+            Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first");
             return;
         }
         uint32_t freeSize = dummy.commandHandler.Push(_cmd);
