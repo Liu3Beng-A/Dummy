@@ -654,50 +654,100 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s.find("GETJACC") != std::string::npos)
         {
+            // v3.0 (2026-09-01): 同步查询，避免与 CAN ISR 异步 printf 在 UART TX 上竞争
+            // 步骤: 记旧时间戳 → 发查询 → 轮询新时间戳(30ms) → 同步打印一行
+            // 索引映射: node=9 → idx=0; node=1~6 → idx=node; node=8 → idx=7
             uint32_t node;
             sscanf(_cmd, "#GETJACC %lu", &node);
-            if (node == 9)
+            int8_t idx = -1;
+            if (node == 9)        { idx = 0; }
+            else if (node >= 1 && node <= 6) { idx = (int8_t)node; }
+            else if (node == 8)   { idx = 7; }
+
+            if (idx < 0)
             {
-                dummy.motorJ[0]->QueryAcceleration();
-                Respond(_responseChannel, "ok QUERY ACC MOTOR [9]");
-            }
-            else if (node >= 1 && node <= 6)
-            {
-                dummy.motorJ[node]->QueryAcceleration();
-                Respond(_responseChannel, "ok QUERY ACC MOTOR [%lu]", node);
-            }
-            else if (node == 8)
-            {
-                dummy.hand->QueryAcceleration();
-                Respond(_responseChannel, "ok QUERY ACC MOTOR [8] (夹爪)");
+                Respond(_responseChannel, "error GET MOTOR [%lu] ACCELERATION is wrong", node);
             }
             else
             {
-                Respond(_responseChannel, "error GET MOTOR [%lu] ACCELERATION is wrong", node);
+                uint32_t old_ms = dummy.jointAccLastUpdateMs[idx];
+                // 触发 CAN 0x2C 查询
+                if (node == 9)        dummy.motorJ[0]->QueryAcceleration();
+                else if (node == 8)   dummy.hand->QueryAcceleration();
+                else                  dummy.motorJ[node]->QueryAcceleration();
+
+                // 轮询时间戳变化（典型回包延迟 1~3 ms，给 30 ms 兜底）
+                uint32_t waited = 0;
+                while (dummy.jointAccLastUpdateMs[idx] == old_ms && waited < 30) {
+                    osDelay(1);
+                    waited++;
+                }
+
+                if (dummy.jointAccLastUpdateMs[idx] != old_ms) {
+                    // 成功：单行同步输出，避免 UART TX 竞争
+                    if (node == 9) {
+                        Respond(_responseChannel, "ok ACC MOTOR [9] = %.2f r/s^2", dummy.jointAccRuntime[0]);
+                    } else if (node == 8) {
+                        Respond(_responseChannel, "ok ACC MOTOR [8] = %.2f r/s^2 (夹爪)", dummy.jointAccRuntime[7]);
+                    } else {
+                        Respond(_responseChannel, "ok ACC MOTOR [%lu] = %.2f r/s^2", node, dummy.jointAccRuntime[idx]);
+                    }
+                } else {
+                    // 超时：返回 error，不打印旧值（避免误导）
+                    if (node == 9) {
+                        Respond(_responseChannel, "error GETJACC [9] timeout (CAN no echo)");
+                    } else if (node == 8) {
+                        Respond(_responseChannel, "error GETJACC [8] timeout (CAN no echo)");
+                    } else {
+                        Respond(_responseChannel, "error GETJACC [%lu] timeout (CAN no echo)", node);
+                    }
+                }
             }
         }
         else if (s.find("GETI") != std::string::npos)
         {
+            // v3.0: 同步查询电流限制，与 GETJACC 同模式
             uint32_t node;
             sscanf(_cmd, "#GETI %lu", &node);
-            if (node == 9)
+            int8_t idx = -1;
+            if (node == 9)        idx = 0;
+            else if (node >= 1 && node <= 6) idx = (int8_t)node;
+            else if (node == 8)   idx = 7;
+
+            if (idx < 0)
             {
-                dummy.motorJ[0]->QueryCurrentLimit();
-                Respond(_responseChannel, "ok QUERY I_LIMIT MOTOR [9]");
-            }
-            else if (node >= 1 && node <= 6)
-            {
-                dummy.motorJ[node]->QueryCurrentLimit();
-                Respond(_responseChannel, "ok QUERY I_LIMIT MOTOR [%lu]", node);
-            }
-            else if (node == 8)
-            {
-                dummy.hand->QueryCurrentLimit();
-                Respond(_responseChannel, "ok QUERY I_LIMIT MOTOR [8] (夹爪)");
+                Respond(_responseChannel, "error GET MOTOR [%lu] CURRENT_LIMIT is wrong", node);
             }
             else
             {
-                Respond(_responseChannel, "error GET MOTOR [%lu] CURRENT_LIMIT is wrong", node);
+                uint32_t old_ms = dummy.jointCurrentLimitLastUpdateMs[idx];
+                if (node == 9)        dummy.motorJ[0]->QueryCurrentLimit();
+                else if (node == 8)   dummy.hand->QueryCurrentLimit();
+                else                  dummy.motorJ[node]->QueryCurrentLimit();
+
+                uint32_t waited = 0;
+                while (dummy.jointCurrentLimitLastUpdateMs[idx] == old_ms && waited < 30) {
+                    osDelay(1);
+                    waited++;
+                }
+
+                if (dummy.jointCurrentLimitLastUpdateMs[idx] != old_ms) {
+                    if (node == 9) {
+                        Respond(_responseChannel, "ok I_LIMIT MOTOR [9] = %.2f", dummy.jointCurrentLimitRuntime[0]);
+                    } else if (node == 8) {
+                        Respond(_responseChannel, "ok I_LIMIT MOTOR [8] = %.2f (夹爪)", dummy.jointCurrentLimitRuntime[7]);
+                    } else {
+                        Respond(_responseChannel, "ok I_LIMIT MOTOR [%lu] = %.2f", node, dummy.jointCurrentLimitRuntime[idx]);
+                    }
+                } else {
+                    if (node == 9) {
+                        Respond(_responseChannel, "error GETI [9] timeout (CAN no echo)");
+                    } else if (node == 8) {
+                        Respond(_responseChannel, "error GETI [8] timeout (CAN no echo)");
+                    } else {
+                        Respond(_responseChannel, "error GETI [%lu] timeout (CAN no echo)", node);
+                    }
+                }
             }
         }
         else

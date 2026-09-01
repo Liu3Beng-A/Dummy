@@ -159,13 +159,14 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     }
                     break;
                 case 0x2C:
-                    // v2.6: 缓存电机实际加速度到 dummy.jointAccRuntime[]，供同步抵达算法使用
-                    // v2.7: 同时打印 [ACC] MOTOR [N] = X.XX r/s²，让 #GETJACC <node> 能拿到值
+                    // v3.0: 缓存加速度值 + 写入时间戳，移除 ISR 内 printf（消除与 ASCII 任务的 UART TX 竞争）
                     dummy.jointAccRuntime[0] = *(float*)data;
-                    printf("[ACC] MOTOR [9] = %.2f r/s^2\r\n", *(float*)data);
+                    dummy.jointAccLastUpdateMs[0] = HAL_GetTick();
                     break;
                 case 0x2D:
-                    printf("[I_LIMIT] MOTOR [9] = %.2f\r\n", *(float*)data);
+                    // v3.0: 缓存电流限制值 + 时间戳，移除 ISR 内 printf
+                    dummy.jointCurrentLimitRuntime[0] = *(float*)data;
+                    dummy.jointCurrentLimitLastUpdateMs[0] = HAL_GetTick();
                     break;
                 case 0x5A:
                     // 电机堵转广播: data[0]=nodeID, data[1]=1=TRIGGER/2=DONE/3=TIMEOUT/4=HEARTBEAT
@@ -279,13 +280,14 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     }
                     break;
                 case 0x2C:
-                    // v2.6: 缓存电机实际加速度到 dummy.jointAccRuntime[i]
-                    // v2.7: 同时打印，让 #GETJACC <node> 拿到值
+                    // v3.0: 缓存加速度值 + 时间戳，移除 ISR 内 printf
                     dummy.jointAccRuntime[id] = *(float*)data;
-                    printf("[ACC] MOTOR [%d] = %.2f r/s^2\r\n", id, *(float*)data);
+                    dummy.jointAccLastUpdateMs[id] = HAL_GetTick();
                     break;
                 case 0x2D:
-                    printf("[I_LIMIT] MOTOR [%d] = %.2f\r\n", id, *(float*)data);
+                    // v3.0: 缓存电流限制值 + 时间戳，移除 ISR 内 printf
+                    dummy.jointCurrentLimitRuntime[id] = *(float*)data;
+                    dummy.jointCurrentLimitLastUpdateMs[id] = HAL_GetTick();
                     break;
                 case 0x5A:
                     // 电机堵转广播: data[0]=nodeID, data[1]=1=TRIGGER/2=DONE/3=TIMEOUT/4=HEARTBEAT
@@ -395,13 +397,14 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     }
                     break;
                 case 0x2C:
-                    // v2.6: 缓存夹爪实际加速度到 dummy.jointAccRuntime[7]
-                    // v2.7: 同时打印，让 #GETJACC 8 拿到值
+                    // v3.0: 缓存夹爪实际加速度 + 时间戳，移除 ISR 内 printf
                     dummy.jointAccRuntime[7] = *(float*)data;
-                    printf("[ACC] MOTOR [8] = %.2f r/s^2\r\n", *(float*)data);
+                    dummy.jointAccLastUpdateMs[7] = HAL_GetTick();
                     break;
                 case 0x2D:
-                    printf("[I_LIMIT] MOTOR [8] = %.2f\r\n", *(float*)data);
+                    // v3.0: 缓存夹爪电流限制 + 时间戳，移除 ISR 内 printf
+                    dummy.jointCurrentLimitRuntime[7] = *(float*)data;
+                    dummy.jointCurrentLimitLastUpdateMs[7] = HAL_GetTick();
                     break;
                 case 0x5A:
                     // 夹爪固件不支持堵转检测，忽略

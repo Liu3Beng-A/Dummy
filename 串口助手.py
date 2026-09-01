@@ -94,8 +94,6 @@ class RobotSerialAssistant:
         self.serial_port = None
         self.is_connected = False
         self._motor_enabled = False  # UI4: 电机使能状态
-        self._last_acc_node = None   # UI1+UI2: 上次设加速度的节点
-        self._last_i_node = None     # UI1+UI2: 上次设电流的节点
 
         # RGB 亮度配置（掉电保持），必须在 create_widgets 之前加载
         self.rgb_brightness = 100
@@ -517,7 +515,7 @@ class RobotSerialAssistant:
         tk.Button(node_f, text="查电流", font=("Arial", 10), bg="#495057", fg="white",
                   relief=tk.FLAT, command=lambda: self.send_cmd(f"#GETI {self.cb_acc_node.get()}")
                   ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-        tk.Button(node_f, text="同步所有", font=("Arial", 10, "bold"), bg="#1971c2", fg="white",
+        tk.Button(node_f, text="同步加速度至主控", font=("Arial", 9, "bold"), bg="#1971c2", fg="white",
                   relief=tk.FLAT, command=lambda: self.send_cmd("#SYNC_ACC")
                   ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
@@ -826,16 +824,7 @@ class RobotSerialAssistant:
         # 控制行
         rail_ctrl = ttk.Frame(parent)
         rail_ctrl.pack(fill=tk.X, pady=(6, 0))
-        ttk.Label(rail_ctrl, text="Rail:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(0, 4))
-        self.ent_rail_step = ttk.Entry(rail_ctrl, width=5, font=("Arial", 9))
-        self.ent_rail_step.insert(0, "10")
-        self.ent_rail_step.pack(side=tk.LEFT)
-        ttk.Label(rail_ctrl, text="mm", font=("Arial", 9)).pack(side=tk.LEFT, padx=(2, 8))
-        tk.Button(rail_ctrl, text="←", font=("Arial", 9, "bold"), bg="#495057", fg="white",
-                  relief=tk.FLAT, width=3, command=self.rail_move_left).pack(side=tk.LEFT, padx=2)
-        tk.Button(rail_ctrl, text="→", font=("Arial", 9, "bold"), bg="#495057", fg="white",
-                  relief=tk.FLAT, width=3, command=self.rail_move_right).pack(side=tk.LEFT, padx=2)
-        ttk.Label(rail_ctrl, text="Speed:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Label(rail_ctrl, text="Speed:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 2))
         self.ent_j_speed = ttk.Entry(rail_ctrl, width=5, font=("Arial", 9))
         self.ent_j_speed.insert(0, "35")
         self.ent_j_speed.pack(side=tk.LEFT)
@@ -1456,19 +1445,9 @@ class RobotSerialAssistant:
             pass
 
     def _query_acc_or_i(self, response_line):
-        if not self.is_connected:
-            return
-        try:
-            if response_line.startswith("[ACC]"):
-                node = getattr(self, "_last_acc_node", None)
-                if node is not None:
-                    self.send_cmd(f"#GETJACC {node}")
-            elif response_line.startswith("[I_LIMIT]"):
-                node = getattr(self, "_last_i_node", None)
-                if node is not None:
-                    self.send_cmd(f"#GETI {node}")
-        except Exception:
-            pass
+        # auto-polling 已移除 (2026-09-01)
+        # #ACC_J/#I_LIMIT_J 为同步设置命令，串口端无需收到回包后再次查询
+        pass
 
     def send_cmd(self, cmd):
         if not self.is_connected or not self.serial_port:
@@ -1478,14 +1457,6 @@ class RobotSerialAssistant:
             full_cmd = f"{cmd}\n"
             self.serial_port.write(full_cmd.encode('utf-8'))
             self.log(cmd, "TX")
-            stripped = cmd.lstrip()
-            # UI1+UI2: 记录节点，供 500ms 后发查询命令用
-            m = re.match(r'#(ACC_J|I_LIMIT_J)\s+(\d+)', stripped)
-            if m:
-                if m.group(1) == "ACC_J":
-                    self._last_acc_node = int(m.group(2))
-                else:
-                    self._last_i_node = int(m.group(2))
         except Exception as e:
             self.log(f"发送失败: {e}", "ERROR")
 
@@ -1679,40 +1650,6 @@ class RobotSerialAssistant:
 
     def save_rail_current(self):
         self.log("请用上方节点选择器(选节点9)查询/应用/保存电流", "WARN")
-
-    def rail_move_left(self):
-        if not self.is_connected:
-            self.log("未连接串口", "WARN")
-            return
-        try:
-            delta = float(self.ent_rail_step.get())
-            current_j7 = float(self.ent_j7.get())
-            new_j7 = current_j7 - delta
-            speed = float(self.ent_rail_speed.get())
-
-            # 读取当前 J1-J6 的值
-            joints = [float(ent.get()) for ent in self.ent_joints]
-            cmd = f">{joints[0]},{joints[1]},{joints[2]},{joints[3]},{joints[4]},{joints[5]},{new_j7},{speed}"
-            self.send_cmd(cmd)
-        except ValueError:
-            messagebox.showerror("错误", "请输入有效的数字")
-
-    def rail_move_right(self):
-        if not self.is_connected:
-            self.log("未连接串口", "WARN")
-            return
-        try:
-            delta = float(self.ent_rail_step.get())
-            current_j7 = float(self.ent_j7.get())
-            new_j7 = current_j7 + delta
-            speed = float(self.ent_rail_speed.get())
-
-            # 读取当前 J1-J6 的值
-            joints = [float(ent.get()) for ent in self.ent_joints]
-            cmd = f">{joints[0]},{joints[1]},{joints[2]},{joints[3]},{joints[4]},{joints[5]},{new_j7},{speed}"
-            self.send_cmd(cmd)
-        except ValueError:
-            messagebox.showerror("错误", "请输入有效的数字")
 
     def send_movej(self):
         try:

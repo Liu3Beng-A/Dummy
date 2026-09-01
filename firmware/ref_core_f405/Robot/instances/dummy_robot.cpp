@@ -495,20 +495,14 @@ void DummyRobot::SetJointSpeed(float _slider)
 }
 
 /**
- * @brief v2.6 单位统一：直接下发电机轴 r/s² 到电机端（与 CAN 0x14 入参 float 一致）
- * @note  兼容 0~100 的旧 slider 入口（<10 时视为百分比遗留 → 兼容旧代码），
- *        推荐外部始终传 r/s² 数值。带 persist=false（不写电机 EEPROM）。
+ * @brief 直接下发电机轴 r/s² 加速度到电机端（与 CAN 0x14 入参 float 一致）
+ * @param _acc 加速度值 (r/s²)，推荐范围 1~5000
+ * @note  带 persist=false（不写电机 EEPROM）。
  *        下发后异步触发 SyncAllMotorAcceleration 让 jointAccRuntime[] 及时刷新。
  */
 void DummyRobot::SetJointAcceleration(float _acc)
 {
-    // 兼容旧 slider 入口：<10 视作百分比 → 映射到 DEFAULT_JOINT_ACCELERATION 比例
-    // 这条分支仅给 COMMAND_SERVO_J/历史调用使用，正常 r/s² 数值（>10）走下方直通
-    if (_acc <= 10.0f && _acc >= 0.0f)
-    {
-        _acc = (_acc / 100.0f) * DEFAULT_JOINT_ACCELERATION;
-    }
-    if (_acc < 0)        _acc = 0;
+    if (_acc < 1.0f)     _acc = 1.0f;
     if (_acc > 5000.0f)  _acc = 5000.0f;
 
     for (int i = 1; i <= 6; i++)
@@ -738,8 +732,7 @@ void DummyRobot::SetCommandMode(uint32_t _mode)
             break;
 
         case COMMAND_SERVO_J:
-            // v2.6: 100% 仍走 slider 兼容路径（<=10 视为百分比）→ 实际为 DEFAULT_JOINT_ACCELERATION
-            SetJointAcceleration(100.0f);
+            SetJointAcceleration(DEFAULT_JOINT_ACCELERATION);
             break;
     }
 }

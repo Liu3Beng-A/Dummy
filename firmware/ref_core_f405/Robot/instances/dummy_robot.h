@@ -9,15 +9,11 @@
 // 单位体系：电机轴 r/s（与电机端 CAN 0x07 ratedVelocity 完全一致）
 // =====================================================================
 
-// 统一换算：slider (1~100) × 0.30 = 电机轴 r/s（未钳制前）
-// 钳制由 AXIS_MAX_RPS[] 负责（地轨 30 r/s，关节 20 r/s）
+// === slider → r/s 换算（slider 100 = 30 r/s）===
 static constexpr float SLIDER_TO_RPS = 0.30f;
 
-// 各轴电机轴 r/s 上限（用于钳制 slider 计算结果）
-// v2.7: 关节 cap 从 20 提到 30，与电机端 boardConfig.velocityLimit=30 r/s 对齐
-// 之前 cap=20 导致 slider ≥ 67 后所有关节档位饱和为 20 r/s，体感非线性（70/80 没区别）
-// 修复后 slider 1~100 全段线性，每档关节递增 0.3 r/s
-// 地轨 cap=30 不变（丝杆 1605 物理上限 ~40 r/s，30 r/s = 150 mm/s 满速）
+// === 各轴物理上限（r/s），与电机端 boardConfig.velocityLimit 对齐 ===
+// 注意：超过物理极限会失步/堵转，由电机端 FOC/EMF 约束
 static constexpr float AXIS_MAX_RPS[7] = {
     30.0f,   // 地轨
     30.0f,   // J1
@@ -240,6 +236,16 @@ public:
     // 索引: [0]=地轨(node=9), [1~6]=关节(node=1~6), [7]=夹爪(node=8)
     // 初值 0 表示未知，ComputeSyncSpeeds 等算法应使用 FALLBACK_JOINT_ACCELERATION
     float jointAccRuntime[8] = {0};
+    // v3.0 (2026-09-01): 与 jointAccRuntime[] 配对的"最后更新 ms 时间戳"
+    // 解决 #GETJACC 异步 printf 与 ASCII 任务 UART TX 竞争导致的合并怪行
+    // 同步查询通过比对时间戳判断 CAN 回包是否到达
+    uint32_t jointAccLastUpdateMs[8] = {0};
+
+    // v3.0: 新增 0x2D 电流限制回包缓存与时间戳（与加速度对称）
+    // ASCII #GETI 同步查询使用
+    float     jointCurrentLimitRuntime[8]      = {0};
+    uint32_t  jointCurrentLimitLastUpdateMs[8] = {0};
+
     const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_SEQUENTIAL;
 
     // 系统位姿记忆变量与实时状态寄存层
