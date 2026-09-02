@@ -840,13 +840,18 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const char *_cmd)
                     if (context->MoveJ(joints[0], joints[1], joints[2],
                                    joints[3], joints[4], joints[5], j7, speed))
                     {
+                        // [v2.8 修复] SEQUENTIAL 模式下，若电机还在转，丢弃新指令回 ok，
+                        // 保留"上一条做完再做下一条"的语义，但不阻塞 FIFO 消费线程。
+                        if (context->IsMoving() && context->IsEnabled())
+                        {
+                            Respond(*usbStreamOutputPtr,  "ok");
+                            Respond(*uart4StreamOutputPtr, "ok");
+                            break;
+                        }
                         context->MoveJoints(context->targetJoints);
                         // 地轨：MoveJ 已填入 railSpeedRps，直接下发
                         context->motorJ[0]->SetPositionWithMotorRps(
                             context->targetRailPos / 5.0f, context->railSpeedRps);
-
-                        while (context->IsMoving() && context->IsEnabled())
-                            osDelay(5);
 
                         Respond(*usbStreamOutputPtr,  "ok");
                         Respond(*uart4StreamOutputPtr, "ok");
@@ -866,7 +871,18 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const char *_cmd)
                 {
                     if (context->MoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]))
                     {
-                        while (context->IsMoving() && context->IsEnabled()) osDelay(5);
+                        // [v2.8 修复] MoveL 同样改为非阻塞，新轨迹若电机还在跑则丢弃
+                        if (context->IsMoving() && context->IsEnabled())
+                        {
+                            Respond(*usbStreamOutputPtr,  "ok");
+                            Respond(*uart4StreamOutputPtr, "ok");
+                            break;
+                        }
+                        context->MoveJoints(context->targetJoints);
+                        // MoveL 内部其实是 MoveJ，ra 处理同上
+                        context->motorJ[0]->SetPositionWithMotorRps(
+                            context->targetRailPos / 5.0f, context->railSpeedRps);
+
                         Respond(*usbStreamOutputPtr,  "ok"); Respond(*uart4StreamOutputPtr, "ok");
                     }
                     else
