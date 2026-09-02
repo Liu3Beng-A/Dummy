@@ -135,7 +135,7 @@ DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
     hcan(_hcan)
 {
     // motorJ[0]: 地轨（线性滑轨，直连丝杆1605，转1圈=5mm，行程 -250~250mm）
-    motorJ[0] = new CtrlStepMotor(_hcan, 9, false, 1, -250, 250);
+    motorJ[0] = new CtrlStepMotor(_hcan, 9, true, 1, -250, 250);
 
     motorJ[1] = new CtrlStepMotor(_hcan, 1, false, 50, -175, 175);
     motorJ[2] = new CtrlStepMotor(_hcan, 2, true,  50,  -75,  90);
