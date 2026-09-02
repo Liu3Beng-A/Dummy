@@ -97,32 +97,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             dummy.SetEnable(false);
             Respond(_responseChannel, "ok");
         }
-        else if (s.find("!RAIL_L") == 0)
-        {
-            float delta;
-            if (sscanf(_cmd, "!RAIL_L %f", &delta) == 1)
-            {
-                dummy.MoveRailRelative(-fabsf(delta));
-                Respond(_responseChannel, "ok rail left %.1f mm, target %.1f mm", fabsf(delta), dummy.targetRailPos);
-            }
-            else
-            {
-                Respond(_responseChannel, "error rail left - Use !RAIL_L <delta(mm)>");
-            }
-        }
-        else if (s.find("RAIL_R") != std::string::npos)
-        {
-            float delta;
-            if (sscanf(_cmd, "!RAIL_R %f", &delta) == 1)
-            {
-                dummy.MoveRailRelative(fabsf(delta));
-                Respond(_responseChannel, "ok rail right %.1f mm, target %.1f mm", fabsf(delta), dummy.targetRailPos);
-            }
-            else
-            {
-                Respond(_responseChannel, "error rail right - Use !RAIL_R <delta(mm)>");
-            }
-        }
+        else if (s.find("HAND_ZERO")
 
         /* ── 夹爪控制指令（hand，节点ID=8）──
          *
@@ -898,34 +873,6 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 dummy.motorJ[i]->ApplyPositionAsHome();
             }
             Respond(_responseChannel, "ok calibration done for all joints");
-        }
-        else if (s.find("RAIL_L") != std::string::npos)
-        {
-            /* !RAIL_L <delta>  地轨向左（负方向）移动 delta mm */
-            float delta;
-            if (sscanf(_cmd, "!RAIL_L %f", &delta) == 1)
-            {
-                dummy.MoveRailRelative(-fabsf(delta));
-                Respond(_responseChannel, "ok rail left %.1f mm, target %.1f mm", fabsf(delta), dummy.targetRailPos);
-            }
-            else
-            {
-                Respond(_responseChannel, "error rail left - Use !RAIL_L <delta(mm)>");
-            }
-        }
-        else if (s.find("RAIL_R") != std::string::npos)
-        {
-            /* !RAIL_R <delta>  地轨向右（正方向）移动 delta mm */
-            float delta;
-            if (sscanf(_cmd, "!RAIL_R %f", &delta) == 1)
-            {
-                dummy.MoveRailRelative(fabsf(delta));
-                Respond(_responseChannel, "ok rail right %.1f mm, target %.1f mm", fabsf(delta), dummy.targetRailPos);
-            }
-            else
-            {
-                Respond(_responseChannel, "error rail right - Use !RAIL_R <delta(mm)>");
-            }
         }
         else if (s.find("HAND_ZERO") != std::string::npos)
         {

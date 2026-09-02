@@ -257,26 +257,6 @@ void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t _joints)
     for (int j = 1; j <= 6; j++)
         motorJ[j]->SetAngleWithMotorRps(_joints.a[j - 1] - initPose.a[j - 1],
                                         dynamicJointSpeeds.a[j - 1]);
-}
-
-/**
- * @brief 下发地轨指令（mm → 圈）
- * @param _railPos_mm 地轨目标位置 (mm)
- * @note 地轨不纳入6-DOF运动学求解，单独管理
- * @note 电机固件 CAN 协议期望接收：位置(圈)、速度(圈/s)，内部乘以细分系数
- */
-void DummyRobot::MoveRailRelative(float _delta_mm)
-{
-    targetRailPos += _delta_mm;
-    // 硬限位保护，防止超出 [-250, 250]
-    if (targetRailPos > motorJ[0]->angleLimitMax)
-        targetRailPos = motorJ[0]->angleLimitMax;
-    if (targetRailPos < motorJ[0]->angleLimitMin)
-        targetRailPos = motorJ[0]->angleLimitMin;
-    float rail_laps = targetRailPos / 5.0f;
-    motorJ[0]->SetPositionWithMotorRps(rail_laps, railSpeedRps);
-}
-
 /**
  * @brief 解析空间六维坐标并令其映射入安全界域内化为电机目标偏角实现平稳直线位移
  * @param _x, _y, _z 工作空间末端探针位置参考系 (标准计度)

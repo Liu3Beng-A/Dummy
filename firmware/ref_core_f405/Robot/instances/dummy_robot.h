@@ -280,7 +280,6 @@ public:
     bool MoveL(float _x, float _y, float _z, float _a, float _b, float _c);
     bool ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm);
     void MoveJoints(DOF6Kinematic::Joint6D_t _joints);
-    void MoveRailRelative(float _delta_mm);
     void SetJointSpeed(float _speed);
     void SetJointAcceleration(float _acc);
     /**
