@@ -25,6 +25,9 @@ class RobotSerialAssistant:
         self._pos_queue_pending = []     # 待发送队列
         self._pos_queue_idx = 0          # 当前发送索引
         self._pos_queue_speed = 35       # 顺序发送速度
+        # 命令模式：True=阻塞 (mode=1, 等ok), False=非阻塞 (mode=2, 立即ok可打断)
+        self.cmd_block_mode_var = tk.BooleanVar(value=True)
+        self._on_cmd_block_toggle = self._make_cmd_block_toggle()
         # 主题与配色
         try:
             style = ttk.Style()
@@ -828,8 +831,21 @@ class RobotSerialAssistant:
         self.ent_j_speed = ttk.Entry(rail_ctrl, width=5, font=("Arial", 9))
         self.ent_j_speed.insert(0, "35")
         self.ent_j_speed.pack(side=tk.LEFT)
-        tk.Checkbutton(rail_ctrl, text="拖发", variable=self.movej_drag_enable,
-                       bg=None, font=("Arial", 9)).pack(side=tk.LEFT, padx=6)
+        self._make_toggle_button(
+            rail_ctrl, self.movej_drag_enable,
+            text_off="拖发 OFF", text_on="拖发 ON",
+            bg_off="#e9ecef", bg_on="#2b8a3e",
+            fg_off="#495057", fg_on="white",
+            side=tk.LEFT, padx=2,
+        )
+        self._make_toggle_button(
+            rail_ctrl, self.cmd_block_mode_var,
+            text_off="非阻塞", text_on="阻塞(等ok)",
+            bg_off="#3b5bdb", bg_on="#c92a2a",
+            fg_off="white", fg_on="white",
+            side=tk.LEFT, padx=2,
+            on_change=self._on_cmd_block_toggle,
+        )
         tk.Button(rail_ctrl, text="发送 MoveJ", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
                   relief=tk.FLAT, command=self.send_movej).pack(side=tk.RIGHT, padx=2)
 
@@ -944,8 +960,23 @@ class RobotSerialAssistant:
         self.ent_l_speed = ttk.Entry(movel_ctrl, width=5, font=("Arial", 10))
         self.ent_l_speed.insert(0, "35")
         self.ent_l_speed.pack(side=tk.LEFT)
-        tk.Checkbutton(movel_ctrl, text="拖发", variable=self.movel_drag_enable,
-                       bg=None, font=("Arial", 10)).pack(side=tk.LEFT, padx=6)
+        self._make_toggle_button(
+            movel_ctrl, self.movel_drag_enable,
+            text_off="拖发 OFF", text_on="拖发 ON",
+            bg_off="#e9ecef", bg_on="#2b8a3e",
+            fg_off="#495057", fg_on="white",
+            font=("Arial", 10, "bold"),
+            side=tk.LEFT, padx=2,
+        )
+        self._make_toggle_button(
+            movel_ctrl, self.cmd_block_mode_var,
+            text_off="非阻塞", text_on="阻塞(等ok)",
+            bg_off="#3b5bdb", bg_on="#c92a2a",
+            fg_off="white", fg_on="white",
+            font=("Arial", 10, "bold"),
+            side=tk.LEFT, padx=2,
+            on_change=self._on_cmd_block_toggle,
+        )
         tk.Button(movel_ctrl, text="发送 MoveL", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
                   relief=tk.FLAT, command=self.send_movel).pack(side=tk.RIGHT, padx=2)
 
@@ -1136,6 +1167,8 @@ class RobotSerialAssistant:
         ttk.Label(parent, text="开度:", font=("Arial", 10)).pack(anchor="w")
         hp_f = ttk.Frame(parent)
         hp_f.pack(fill=tk.X, pady=(0, 4))
+        self.hand_drag_enable = tk.BooleanVar(value=False)
+        self.last_hand_send_time = 0
         self.ent_hand_pos = ttk.Entry(hp_f, width=6, font=("Arial", 10))
         self.ent_hand_pos.insert(0, "50")
         self.ent_hand_pos.pack(side=tk.LEFT)
@@ -1144,6 +1177,13 @@ class RobotSerialAssistant:
         self.scl_hand.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         self.lbl_hand_val = ttk.Label(hp_f, text="50", width=3, font=("Arial", 10))
         self.lbl_hand_val.pack(side=tk.LEFT)
+        self._make_toggle_button(
+            hp_f, self.hand_drag_enable,
+            text_off="拖发 OFF", text_on="拖发 ON",
+            bg_off="#e9ecef", bg_on="#2b8a3e",
+            fg_off="#495057", fg_on="white",
+            side=tk.LEFT, padx=4,
+        )
         tk.Button(hp_f, text="发送", font=("Arial", 10), bg="#495057", fg="white",
                   relief=tk.FLAT, width=5, command=self.send_hand_pos).pack(side=tk.LEFT, padx=(4, 0))
 
@@ -1182,11 +1222,18 @@ class RobotSerialAssistant:
             if self.ent_hand_pos.get() != str(v):
                 self.ent_hand_pos.delete(0, tk.END)
                 self.ent_hand_pos.insert(0, str(v))
+            if self.hand_drag_enable.get():
+                now = time.time()
+                if now - self.last_hand_send_time > 0.1:
+                    self.last_hand_send_time = now
+                    self.root.after(1, self.send_hand_pos)
         self.scl_hand.config(command=update_hand_from_scale)
 
         def update_hand_from_entry(event):
             try:
                 self.scl_hand.set(int(self.ent_hand_pos.get()))
+                if self.hand_drag_enable.get():
+                    self.root.after(1, self.send_hand_pos)
             except ValueError:
                 pass
         self.ent_hand_pos.bind("<Return>", update_hand_from_entry)
@@ -1487,6 +1534,55 @@ class RobotSerialAssistant:
                 messagebox.showerror("错误", "夹爪开度必须在 0~100 之间")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
+
+    def _make_cmd_block_toggle(self):
+        """命令模式切换回调：True→阻塞(mode=1, 等ok), False→非阻塞(mode=2, 立即ok可打断)"""
+        def cb():
+            if self.cmd_block_mode_var.get():
+                self.send_cmd("#CMDMODE 1")
+                self.log("已切换 → 阻塞模式 (mode=1, 等 IsMoving 完成再回 ok)", "INFO")
+            else:
+                self.send_cmd("#CMDMODE 2")
+                self.log("已切换 → 非阻塞模式 (mode=2, 立即回 ok，新命令可打断)", "INFO")
+        return cb
+
+    def _make_toggle_button(self, parent, var, text_off, text_on,
+                            bg_off=None, bg_on="#2b8a3e",
+                            fg_off="black", fg_on="white",
+                            font=("Arial", 9, "bold"),
+                            side=tk.LEFT, padx=2, pady=2, fill=None,
+                            on_change=None):
+        """创建一个 toggle 风格按钮（按下/弹起自动切换文字与背景色）。
+
+        参数:
+            parent: 父容器
+            var   : tk.BooleanVar，True=ON 态，False=OFF 态
+            text_off / text_on: 弹起/按下时显示的文字
+            bg_off / bg_on   : 弹起/按下时的背景色（None 表示使用父容器背景）
+            fg_off / fg_on   : 弹起/按下时的前景色
+            on_change: 可选回调，仅在用户点击切换时触发（初始应用外观不触发）
+        """
+        def _apply(trigger_cb=False):
+            if var.get():
+                btn.configure(text=text_on, bg=bg_on if bg_on else parent.cget("bg"),
+                              fg=fg_on, activebackground=bg_on, relief=tk.SUNKEN)
+            else:
+                btn.configure(text=text_off, bg=bg_off if bg_off else parent.cget("bg"),
+                              fg=fg_off, activebackground=bg_off, relief=tk.RAISED)
+            if trigger_cb and on_change:
+                on_change()
+        btn = tk.Checkbutton(
+            parent, text=text_off, variable=var, indicatoron=False,
+            selectcolor=bg_on if bg_on else parent.cget("bg"),
+            font=font, relief=tk.RAISED, padx=6, pady=pady,
+            command=lambda: _apply(trigger_cb=True),
+        )
+        if fill:
+            btn.pack(side=side, padx=padx, pady=pady, fill=fill, expand=True)
+        else:
+            btn.pack(side=side, padx=padx)
+        _apply(trigger_cb=False)  # 初始应用外观，不触发回调
+        return btn
 
     def send_hand_current(self):
         """发送 #I_LIMIT_J 8 命令，设置夹爪电流限制"""

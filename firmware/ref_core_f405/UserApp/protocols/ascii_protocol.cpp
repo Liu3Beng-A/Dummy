@@ -126,24 +126,29 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 
         /* ── 夹爪控制指令（hand，节点ID=8）──
          *
-         * 夹爪控制说明：
+         * 夹爪控制说明（标定语义 2026-09-03 最终确认）：
          *   !CALIBRATION      → 关节零点标定（6轴同时应用零点）
-         *   !HAND_ZERO        → 夹爪标定（标定夹爪当前位置为零点）
-         *   !HAND_O           → 电流模式张开（-current 施加开夹力矩，注意方向已反转）
-         *   !HAND_C           → 电流模式闭合（+current 施加合夹力矩，注意方向已反转）
+         *   !HAND_ZERO        → 夹爪标定：记录当前位置为 pos0（闭合），标定后 pos0/pos100 即闭合/张开
+         *   !HAND_O           → 电流模式张开（-current 施加开夹力矩）
+         *   !HAND_C           → 电流模式闭合（+current 施加合夹力矩）
          *   !HAND_EN          → 使能夹爪电机
          *   !HAND_DIS         → 失能夹爪电机
-         *   !HAND_POS <0-100> → 位置模式：0=完全张开，100=完全闭合
+         *   !HAND_POS <0-100> → 位置模式：0=闭合（标定位置）, 100=正方向撞开限位=张开
          */
         else if (s.find("HAND_ZERO") != std::string::npos)
         {
-            /* 夹爪标定：将当前位置设为夹爪零点 */
+            /* 夹爪标定：先等待当前目标运动完成，再将当前位置设为零点
+             * 标定流程：失能电机 → 手动把夹爪掰到闭合位置 → 发此命令 */
+            uint32_t t_start = HAL_GetTick();
+            while (!dummy.hand->AllAtTarget(2.0f) && (HAL_GetTick() - t_start < 10000)) {
+                osDelay(50);
+            }
             dummy.hand->ApplyPositionAsHome();
-            Respond(_responseChannel, "ok hand zero calibrated");
+            Respond(_responseChannel, "ok hand zero calibrated at current position");
         }
         else if (s.find("HAND_O") != std::string::npos)
         {
-            /* 向张开方向施加电流（-1 × current，因为0是张开，100是闭合） */
+            /* 向张开方向施加电流（-1 × current） */
             dummy.hand->SetAngleWithCurrentLimit(-1);
             Respond(_responseChannel, "ok hand open");
         }
@@ -312,7 +317,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s.find("HAND_POS") != std::string::npos)
         {
-            /* 格式：!HAND_POS <0-100>，0=完全张开，100=完全闭合 */
+            /* 格式：!HAND_POS <0-100>，0=完全闭合，100=完全张开（物理实测 2026-09-02） */
             uint32_t pos;
             if (sscanf(_cmd, "!HAND_POS %lu", &pos) == 1)
             {
@@ -924,9 +929,15 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("HAND_ZERO") != std::string::npos)
         {
-            /* 夹爪标定：将当前位置设为夹爪零点 */
+            /* 夹爪标定：记录当前位置为主控端 pos0（闭合）
+             * 标定流程：!HAND_DIS → 手动掰到闭合 → 发此命令
+             * 标定后：pos0=当前位置（闭合）, pos100=正方向撞开限位（张开） */
+            uint32_t t_start = HAL_GetTick();
+            while (!dummy.hand->AllAtTarget(2.0f) && (HAL_GetTick() - t_start < 10000)) {
+                osDelay(50);
+            }
             dummy.hand->ApplyPositionAsHome();
-            Respond(_responseChannel, "ok hand zero calibrated");
+            Respond(_responseChannel, "ok hand zero calibrated (current pos = pos0/closed)");
         }
         else if (s.find("HAND_EN") != std::string::npos)
         {

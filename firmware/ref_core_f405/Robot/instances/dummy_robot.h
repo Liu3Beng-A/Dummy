@@ -67,24 +67,33 @@ struct EepromConfig {
 class StepHand : public CtrlStepMotor
 {
 public:
+    // inverse=true：电机正方向 = 闭合（第2版，2026-09-03）
+    // inverse=false：电机正方向 = 张开（第1版，当前行为与需求反了）
     StepHand(CAN_HandleTypeDef* hcan, uint8_t id)
-        : CtrlStepMotor(hcan, id, false, 16, -100, 100)
+        : CtrlStepMotor(hcan, id, true, 16, -100, 100)
     {
     }
 
-    float current     = 1.2f;   // 夹爪闭合或张开时允许的最大驱动电流幅值 (A)
-    // 电机角=0 → 夹爪完全张开（对应用户开度 100）
-    // 电机角=100 → 夹爪完全闭合（对应用户开度 0）
-    float OpenedAngle = 100.0f; // 用户开度 100 时电机应到达的目标角 → 实际夹爪闭合（与命名"张开"矛盾，固件物理特性如此）
-    float ClosedAngle = 0.0f;   // 用户开度 0 时电机应到达的目标角 → 实际夹爪张开（与命名"闭合"矛盾，固件物理特性如此）
+    float current          = 1.2f;   // 夹爪闭合或张开时允许的最大驱动电流幅值 (A)
+    // 标定语义（2026-09-03 用户最终确认）：
+    //   !HAND_ZERO 记录的位置 = 主控端 pos0（闭合）
+    //   pos100 → 沿正方向走 100 圈电机（撞开限位即为张开）
+    // 物理方向：motor 沿正方向 → 张开
+    // 工作流：!HAND_DIS → 手动掰到闭合 → !HAND_ZERO → pos100=张开 → pos0=闭合
+    float ClosedMotorAngle = 0.0f;   // 闭合电机角（pos0   时电机目标角 = 标定零点）
+    float OpenMotorAngle   = 100.0f; // 张开电机角（pos100 时电机目标角 = 正方向 100 圈）
 
     /**
      * @brief 基于速度规划的位置环夹爪控制
      * @param _angle 夹爪百分比开度 (0 = 完全闭合, 100 = 完全张开)
+     *
+     * 直接映射：用户开度 = 电机角（相对 HAND_ZERO 零点）
+     *   _angle=0   → motor=0   (闭合，HAND_ZERO 时的位置)
+     *   _angle=100 → motor=100 (正方向 100 圈，撞限位即为张开)
      */
     void SetAngleWithSpeedLimit(float _angle)
     {
-        float target_angle = OpenedAngle + (ClosedAngle - OpenedAngle) * (_angle / 100.0f);
+        float target_angle = ClosedMotorAngle + (OpenMotorAngle - ClosedMotorAngle) * (_angle / 100.0f);
         SetAngleWithMotorRps(target_angle, HAND_MAX_RPS);
     }
 
