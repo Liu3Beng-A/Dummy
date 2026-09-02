@@ -216,7 +216,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             }
             else
             {
-                Respond(_responseChannel, "%.0f", rgb.targetBrightness * 100.0f);
+                Respond(_responseChannel, "RGB_BRIGHT %.0f", rgb.targetBrightness * 100.0f);
             }
         }
         else if (s.find("RGB_MODE") != std::string::npos)
@@ -1016,7 +1016,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             }
             else
             {
-                Respond(_responseChannel, "%.0f", rgb.targetBrightness * 100.0f);
+                Respond(_responseChannel, "RGB_BRIGHT %.0f", rgb.targetBrightness * 100.0f);
             }
         }
         else if (s.find("RGB_MODE") != std::string::npos)
