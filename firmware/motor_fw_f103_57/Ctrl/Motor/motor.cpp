@@ -528,10 +528,19 @@ void Motor::Controller::SetCtrlMode(Motor::Mode_t _mode)
 
 void Motor::Controller::ResetGoalsToCurrentPosition()
 {
-    // 用于 enable/UNLOCKED 后让电机真的停在当前位置, 而不是被旧 goalPosition 驱动到堵转点
-    // 把 goalPosition 设为当前位置, 清零 goalVelocity/goalCurrent, 触发 softNewCurve
-    // 让 CalcSoftGoal 下次计算时 softPosition = currentGoal = estPosition, estError = 0
-    SetPositionSetPoint(estPosition);
+    /* v3.2 修复 (P1-2 解决 !START 抖动):
+     * 原代码: SetPositionSetPoint(estPosition) → goalPosition = estPosition + encoderHomeOffset
+     * 后果: 每次 !START 后电机被驱动到 (estPosition + offset) 位置
+     *       (因为 positionTracker.NewTask(estPosition) 已经把 trackPosition 设好,
+     *        所以 CalcSoftGoal(goalPosition) 算出 deltaPosition = offset → 电机走 offset 步)
+     *
+     * 修复: 直接用 estPosition 作为 goalPosition, 不 + offset
+     *       deltaPosition = estPosition - trackPosition = 0 → 电机保持不动
+     *
+     * 说明: SetPositionSetPoint 的 +offset 语义仍然保留,
+     *       那是给主控发"基于归零点的目标"用的 (MoveJ 0x05 等),
+     *       这里"保持当前位置"应该绕过 +offset, 直接用 estPosition。 */
+    goalPosition = estPosition;
     goalVelocity = 0;
     goalCurrent = 0;
     softNewCurve = true;
@@ -731,8 +740,25 @@ void Motor::Controller::Init()
 
 void Motor::Controller::ApplyPosAsHomeOffset()
 {
-    context->config.motionParams.encoderHomeOffset = realPosition %
-                                                     context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+    /* v3.2 修复 (核心):
+     * 原 bug：encoderHomeOffset = realPosition % SUBDIVIDE_STEPS 是 mod 后的值，
+     * 而 realPosition 是累计步数。GetPosition() = (realPosition - encoderHomeOffset) / SUBDIVIDE_STEPS
+     * 不等于 0，而是等于"电机转过的累计圈数"（mod 信息丢失）。
+     *
+     * 修复：归零时把 realPosition 同步到 encoderHomeOffset（单圈内编码器位置），
+     * 这样 GetPosition() 立即 = 0，后续累加也正确。
+     * encoderHomeOffset 仍保留 mod 值，确保过零点检测和 EEPROM 兼容性不变。 */
+    int32_t newOffset = realPosition % context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+    if (newOffset < 0) newOffset += context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+
+    context->config.motionParams.encoderHomeOffset = newOffset;
+
+    // 同步重置 realPosition（与 encoderHomeOffset 同一坐标系）
+    // 这样 diff = realPosition - encoderHomeOffset = 0 → GetPosition() 返回 0
+    realPosition = newOffset;
+    realPositionLast = newOffset;
+    realLapPosition = newOffset;
+    realLapPositionLast = newOffset;
 }
 
 

@@ -544,8 +544,25 @@ void Motor::Controller::Init()
 
 void Motor::Controller::ApplyPosAsHomeOffset()
 {
-    context->config.motionParams.encoderHomeOffset = realPosition %
-                                                     context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+    /* v3.2 修复 (核心):
+     * 原 bug：encoderHomeOffset = realPosition % SUBDIVIDE_STEPS 是 mod 后的值，
+     * 而 realPosition 是累计步数。GetPosition() = (realPosition - encoderHomeOffset) / SUBDIVIDE_STEPS
+     * 不等于 0，而是等于"电机转过的累计圈数"（mod 信息丢失）。
+     *
+     * 修复：归零时把 realPosition 同步到 encoderHomeOffset（单圈内编码器位置），
+     * 这样 GetPosition() 立即 = 0，后续累加也正确。
+     * encoderHomeOffset 仍保留 mod 值，确保过零点检测和 EEPROM 兼容性不变。 */
+    int32_t newOffset = realPosition % context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+    if (newOffset < 0) newOffset += context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+
+    context->config.motionParams.encoderHomeOffset = newOffset;
+
+    // 同步重置 realPosition（与 encoderHomeOffset 同一坐标系）
+    // 这样 diff = realPosition - encoderHomeOffset = 0 → GetPosition() 返回 0
+    realPosition = newOffset;
+    realPositionLast = newOffset;
+    realLapPosition = newOffset;
+    realLapPositionLast = newOffset;
 }
 
 

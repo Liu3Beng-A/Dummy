@@ -257,8 +257,8 @@ class RobotSerialAssistant:
             tk.Button(offset_j_row, text=f"J{j}", font=("Arial", 10), bg="#343a40", fg="white",
                      relief=tk.FLAT, pady=4, command=lambda j=j: self.send_cmd(f"#OFFSET_J {j}")
                      ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1, pady=1)
-        tk.Button(query_f, text="全部置零", font=("Arial", 10), bg="#e03131", fg="white",
-                  relief=tk.FLAT, pady=4, command=self.send_home_offset_all).pack(fill=tk.X, pady=(4, 0))
+        tk.Button(query_f, text="置零 all", font=("Arial", 10), bg="#c2255c", fg="white",
+                  relief=tk.FLAT, pady=4, command=self.send_home_offset_all_one).pack(fill=tk.X, padx=1, pady=(4, 0))
 
         # ==============================================
         # 中栏：Notebook 标签页（RGB / 电机 / 力矩 / PID）
@@ -1503,13 +1503,12 @@ class RobotSerialAssistant:
         """发送 !HAND_ZERO 命令，将夹爪当前位置设为零点"""
         self.send_cmd("!HAND_ZERO")
 
-    def send_home_offset_all(self):
+    def send_home_offset_all_one(self):
+        """一键置零：单条 #OFFSET_J all（v3.1 固件新增），比循环发 6 条快。"""
         if not self.is_connected or not self.serial_port:
             self.log("未连接串口", "WARN")
             return
-        for j in range(1, 7):
-            self.send_cmd(f"#OFFSET_J {j}")
-            time.sleep(0.15)
+        self.send_cmd("#OFFSET_J all")
 
     def _rgb_light_on(self):
         """开灯：读取 Entry 当前值，应用亮度（不自动保存）"""

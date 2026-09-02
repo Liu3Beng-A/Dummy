@@ -542,16 +542,42 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s.find("OFFSET_J") != std::string::npos)
         {
-            uint32_t node;
-            sscanf(_cmd, "#OFFSET_J %lu", &node);
+            char param[16] = {0};
+            if (sscanf(_cmd, "#OFFSET_J %15s", param) != 1)
+            {
+                Respond(_responseChannel, "error Usage: #OFFSET_J <1~6|all>");
+                return;
+            }
+
+            /* ── #OFFSET_J all: 一次性标定 j1~j6 ── */
+            if (param[0] == 'a' && param[1] == 'l' && param[2] == 'l' && param[3] == '\0')
+            {
+                for (int i = 1; i <= 6; i++)
+                {
+                    /* 仅下发归零命令，主控不做乐观同步。
+                     * 电机固件内部 ApplyPosAsHomeOffset 会重置 realPosition=encoderHomeOffset，
+                     * 这样 GetPosition() 立即返回 0，0x23 回包到来后主控更新状态。
+                     * (v3.2 修复：删除乐观同步，避免和 0x23 回包产生竞争) */
+                    dummy.motorJ[i]->ApplyPositionAsHome();
+                }
+                Respond(_responseChannel, "ok HOMEOFFSET j1~j6 done (REST_POSE)");
+                return;
+            }
+
+            /* ── #OFFSET_J <1~6>: 单轴标定 ── */
+            uint32_t node = 0;
+            for (int i = 0; param[i] >= '0' && param[i] <= '9' && i < 15; i++)
+                node = node * 10 + (uint32_t)(param[i] - '0');
+
             if (node >= 1 && node <= 6)
             {
+                /* 仅下发归零命令，由电机固件内部重置状态，主控等待 0x23 回包。 */
                 dummy.motorJ[node]->ApplyPositionAsHome();
                 Respond(_responseChannel, "ok HOMEOFFSET MOTOR [%lu]", node);
             }
             else
             {
-                Respond(_responseChannel, "error HOMEOFFSET MOTOR [%lu] is wrong", node);
+                Respond(_responseChannel, "error HOMEOFFSET [%s] wrong (use 1~6 or all)", param);
             }
         }
         // v2.6 新增 #SYNC_ACC：触发 8 个电机 0x2C 查询，回包会刷新 dummy.jointAccRuntime[]
@@ -859,7 +885,9 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("!CALIBRATION") == 0)
         {
-            /* 关节零点标定：对所有6个关节应用当前电机位置作为零点偏移 */
+            /* 关节零点标定：对所有6个关节应用当前电机位置作为零点偏移。
+             * v3.2 修复：删除主控侧 initPose/currentJoints 的乐观同步，
+             * 等待电机固件 0x23 回包确认后由 UpdateJointAnglesCallback 自动更新状态。 */
             for (int i = 1; i <= 6; i++)
             {
                 dummy.motorJ[i]->ApplyPositionAsHome();
@@ -1289,16 +1317,42 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("OFFSET_J") != std::string::npos)
         {
-            uint32_t node;
-            sscanf(_cmd, "#OFFSET_J %lu", &node);
+            char param[16] = {0};
+            if (sscanf(_cmd, "#OFFSET_J %15s", param) != 1)
+            {
+                Respond(_responseChannel, "error Usage: #OFFSET_J <1~6|all>");
+                return;
+            }
+
+            /* ── #OFFSET_J all: 一次性标定 j1~j6 ── */
+            if (param[0] == 'a' && param[1] == 'l' && param[2] == 'l' && param[3] == '\0')
+            {
+                for (int i = 1; i <= 6; i++)
+                {
+                    /* 仅下发归零命令，主控不做乐观同步。
+                     * 电机固件内部 ApplyPosAsHomeOffset 会重置 realPosition=encoderHomeOffset，
+                     * 这样 GetPosition() 立即返回 0，0x23 回包到来后主控更新状态。
+                     * (v3.2 修复：删除乐观同步，避免和 0x23 回包产生竞争) */
+                    dummy.motorJ[i]->ApplyPositionAsHome();
+                }
+                Respond(_responseChannel, "ok HOMEOFFSET j1~j6 done (REST_POSE)");
+                return;
+            }
+
+            /* ── #OFFSET_J <1~6>: 单轴标定 ── */
+            uint32_t node = 0;
+            for (int i = 0; param[i] >= '0' && param[i] <= '9' && i < 15; i++)
+                node = node * 10 + (uint32_t)(param[i] - '0');
+
             if (node >= 1 && node <= 6)
             {
+                /* 仅下发归零命令，由电机固件内部重置状态，主控等待 0x23 回包。 */
                 dummy.motorJ[node]->ApplyPositionAsHome();
                 Respond(_responseChannel, "ok HOMEOFFSET MOTOR [%lu]", node);
             }
             else
             {
-                Respond(_responseChannel, "error HOMEOFFSET MOTOR [%lu] is wrong", node);
+                Respond(_responseChannel, "error HOMEOFFSET [%s] wrong (use 1~6 or all)", param);
             }
         }
         else if (s.find("ACC_J") != std::string::npos)
