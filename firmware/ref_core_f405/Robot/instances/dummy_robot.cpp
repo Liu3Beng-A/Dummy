@@ -257,6 +257,8 @@ void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t _joints)
     for (int j = 1; j <= 6; j++)
         motorJ[j]->SetAngleWithMotorRps(_joints.a[j - 1] - initPose.a[j - 1],
                                         dynamicJointSpeeds.a[j - 1]);
+}
+
 /**
  * @brief 解析空间六维坐标并令其映射入安全界域内化为电机目标偏角实现平稳直线位移
  * @param _x, _y, _z 工作空间末端探针位置参考系 (标准计度)
