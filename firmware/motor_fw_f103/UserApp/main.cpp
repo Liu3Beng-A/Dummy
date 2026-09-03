@@ -33,7 +33,10 @@ void Main()
     eeprom.get(0, boardConfig);
     if (boardConfig.configStatus != CONFIG_OK) // use default settings
     {
-        // 42电机: 2A电流, kp=200, ki=300
+        // 关节电机 (35/42) 统一默认 PID: kp=200, ki=300 (2026-09 合并)
+        // - 35 电机原标定 kp=195，42 电机原标定 kp=200
+        // - 统一取 42 值；35 电机若发现轻微震荡，可在运行时通过串口/CAN 调整
+        // - kp 存于 EEPROM，烧一次后保持；首次烧录默认值仅在新芯片或 !STALL_RESET 后生效
         boardConfig = BoardConfig_t{
             .configStatus = CONFIG_OK,
             .encoderHomeOffset = 0,
@@ -127,7 +130,6 @@ extern "C" void Tim1Callback100Hz()
         if (stallBroadcastCnt >= 25)  // 25 × 10ms = 250ms
         {
             stallBroadcastCnt = 0;
-            // 再次发 STALL 广播
             CAN_TxHeaderTypeDef txHdr = {};
             txHdr.StdId = (boardConfig.canNodeId << 7) | 0x5A;
             txHdr.IDE = CAN_ID_STD;
@@ -139,7 +141,7 @@ extern "C" void Tim1Callback100Hz()
     }
     else
     {
-        stallBroadcastCnt = 0;  // 非 RETREATING 清零计数器
+        stallBroadcastCnt = 0;
     }
 
     // ── 堵转事件广播 (20kHz 设置标志，100Hz 这里发) ──
@@ -249,7 +251,6 @@ void OnButton2Event(Button::Event _event)
             break;
         case ButtonBase::CLICK:
             printf("KEY2\r\n");
-            // 重置堵转检测: 清零计时
             motor.controller->stallStartTick = 0;
             break;
     }
