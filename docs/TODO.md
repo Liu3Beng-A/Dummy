@@ -83,6 +83,63 @@ ClearFifo();  // ← while(IsMoving()) 根本不会进入，此行在电机还�
 
 ---
 
+### [BUG-4] `!STOP` 急停在空闲态下"看似停止"但电机还在减速收敛 🟡
+
+**状态**：待修复（2026-09-03，用户实测后录入）
+
+**与 [BUG-2] 的区别**：
+- [BUG-2]：`!STOP` 在 `!HOME` / `!RESET` 长轨迹运行中**完全无效**，机械臂跑完全程
+- [BUG-4]：`!STOP` 在**空闲态**（机械臂静止）下能立刻停，但 `EmergencyStop()` 内部的"覆盖新目标"路径会**改写 `targetAngle = currentAngle`**，导致 `IsMoving()` 在 lib 端立即返回 false
+
+**实测现象**：
+- 用户实测：`!STOP` 在空闲态/慢速运动下"电机能立刻停下"
+- 但是：`EmergencyStop()` 的 4 行实现走的是"新目标覆盖"路径，不是真急停
+- 结果：主控侧 `IsMoving()` 错误地报告"已停止"，但电机侧 CAN 0x23 回包仍在上报位置变化，电机侧 state 也还没回 FINISH
+
+**根因**：`EmergencyStop()` 的实现路径
+
+`DummyRobot::CommandHandler::EmergencyStop()`（`dummy_robot.cpp:739-755`）：
+```cpp
+void DummyRobot::CommandHandler::EmergencyStop()
+{
+    context->MoveJ(context->currentJoints.a[0], context->currentJoints.a[1], ...,
+                   context->currentRailPos, 10);  // 10 = 安全速度
+    context->MoveJoints(context->targetJoints);
+    context->motorJ[0]->SetPositionWithMotorRps(context->targetRailPos / 5.0f, context->railSpeedRps);
+    context->isEnabled = false;
+    ClearFifo();
+}
+```
+
+**问题清单**：
+1. **未发送 CAN 0x89 广播制动帧**：电机端有真急停制动逻辑（emergency profile），主控侧从不调用
+2. **`targetAngle` 被覆盖为 `currentAngle`**：导致位置误差归零，`IsMoving()` 立即返回 false，但电机仍可能处于减速收敛阶段（200ms~1s 窗口）
+3. **`isEnabled = false` 时机不对**：在 `MoveJ` 已经下发后才清使能，新目标帧可能没生效
+4. **没有等待所有电机 state != RUNNING**：机械臂"号称停止"但物理上还在动
+
+**期望行为**（参照 0x89 路径）：
+1. 调用方期望：`!STOP` 200ms 内物理停止，最多返回 `"ok"` 后才有后续命令
+2. 实际行为：电机走完 MoveJ 的微小距离后才停，外部代码看到 `IsMoving()` 立即 false 就以为停了
+
+**修复方向**：
+1. 主控侧**真正发送 CAN 0x89 广播急停帧**，让电机端走 emergency 制动（这是电机端已经实现的能力，目前未使用）
+2. `EmergencyStop()` 调用 `0x89` 后**轮询所有电机 `state != RUNNING`** 再返回 `"ok"`
+3. 或保留"覆盖新目标"路径但 `IsMoving()` 必须等待电机真实 state
+4. `isEnabled = false` 改成在 `0x89` 之后、或者直接由电机端在收到 `0x89` 时自动失能
+
+**验收标准**：
+- `!STOP` 在任何状态下（运动中/空闲）发出后 200ms 内电机实际停止（CAN 0x23 位置不再变化）
+- `EmergencyStop()` 返回 `"ok"` 时，**所有电机 state == FINISH 或 STOP**
+- 与 `!STALL_UNLOCK` 走 0x5B 路径一样，`!STOP` 也应该走 0x89 路径
+
+**相关代码**：
+- `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp:739-755` `DummyRobot::CommandHandler::EmergencyStop()`
+- `firmware/ref_core_f405/UserApp/protocols/cmd_protocol.cpp`（查找是否有 `0x89` 发送函数）
+- `firmware/ref_core_f405/Bsp/communication/interface_can.cpp`（CAN 发送层）
+- `firmware/motor_fw_f103_*/Ctrl/Motor/motor.cpp`（0x89 emergency 制动实现）
+
+---
+
 ### [BUG-3] `!STALL_STATUS` 响应硬编码、格式/通道不匹配 🔴
 
 **状态**：待修复（2026-09-01，发现于现场实测）
@@ -133,5 +190,50 @@ case 0x5C:
 - `firmware/ref_core_f405/Robot/actuators/ctrl_step/ctrl_step.cpp:424` `CtrlStepMotor::QueryStallStatus()`
 - `串口助手.py:1348` `ok STALL_STATUS` 拦截逻辑
 - `串口助手.py:1426` `_update_stall_status_from_response` 解析逻辑
+
+---
+
+### [CLEANUP-2] 删除 `!CALIBRATION` 标定命令 🟡
+
+**状态**：待清理（2026-09-03）
+
+**说明**：
+当前 `!CALIBRATION` 命令对 `motorJ[1..6]` 各发一次 `ApplyPositionAsHome()`（CAN 0x15）。经核实全工程无其他调用方，决定彻底删除该 ASCII handler。
+
+**代码现状**：
+- `firmware/ref_core_f405/UserApp/protocols/ascii_protocol.cpp:853-861` —— 唯一 handler
+- `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp` —— 无引用
+- `CtrlStepMotor::ApplyPositionAsHome()` —— **必须保留**（`!HAND_ZERO` 仍调用此方法标定夹爪零点）
+
+**删除步骤**：
+1. 删除 `ascii_protocol.cpp:853-861` 的 `else if (s.find("!CALIBRATION") == 0) { ... }` 整段
+2. 同步删除 `docs/README.md` 系统命令表中 `!CALIBRATION` 一行
+3. 同步删除 `.cursor/rules/PROJECT_GUIDANCE.mdc` 系统命令表中 `!CALIBRATION` 一行
+4. 重新编译并验证 0 errors
+5. 灰度：先注释 handler 一周观察无业务再彻底删除
+
+**不要碰**：
+- `CtrlStepMotor::ApplyPositionAsHome()`（夹爪标定需要）
+- `motor_fw_f103_*` 侧的 0x15 命令解析（电机端 CAN 命令仍需保留，夹爪用）
+
+---
+
+### [CLEANUP-1] 删除 CAN 0x7C 旧堵转兼容代码 🟡
+
+**状态**：待清理（2026-09-03）
+
+**说明**：
+电机固件已全面升级到 v3 堵转协议（使用 0x5A/0x5B/0x5C），主控 `can_protocol.cpp` 中残留 3 处 `case 0x7C:` 旧兼容分支不再需要，应删除。
+
+**待删除代码**：
+
+| 文件 | 行号 | 内容 |
+|------|------|------|
+| `can_protocol.cpp` | L204~208 | `case 0x7C:` 地轨 (id==9) 分支 |
+| `can_protocol.cpp` | L322~326 | `case 0x7C:` 关节 (id 1~6) 分支 |
+| `can_protocol.cpp` | L412~416 | `case 0x7C:` 夹爪 (id==8) 分支 |
+
+**相关代码**：
+- `firmware/ref_core_f405/UserApp/protocols/can_protocol.cpp`
 
 ---
