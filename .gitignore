@@ -26,3 +26,7 @@ __pycache__/
 
 # 二次开发参考源码备份（不入库，源仓库已归档在 gitlab/github）
 source code/
+
+# 临时分析产物（diff/工作草稿）
+temp_*.txt
+diff_*.txt
