@@ -106,7 +106,6 @@ python 串口助手.py
 | `!STOP` | 急停 |
 | `!HOME` | 归零姿态 |
 | `!RESET` | 待机姿态 |
-| `!CALIBRATION` | 标定零点偏移 |
 | `!STALL_EN` | 开启堵转检测 |
 | `!STALL_DIS` | 关闭堵转检测 |
 | `!HAND_O` | 打开夹爪 |
@@ -117,8 +116,8 @@ python 串口助手.py
 
 | 命令格式 | 功能 | 说明 |
 | --- | --- | --- |
-| `>j1,j2,j3,j4,j5,j6,j7,speed` | 阻塞 MoveJ | 等待到位后返回 "ok" |
-| `&j1,j2,j3,j4,j5,j6,j7,speed` | 非阻塞 MoveJ | 立即返回 "ok" |
+| `>j0(rail),j1,j2,j3,j4,j5,j6,speed` | 阻塞 MoveJ | 等待到位后返回 "ok" |
+| `&j0(rail),j1,j2,j3,j4,j5,j6,speed` | 非阻塞 MoveJ | 立即返回 "ok" |
 | `@x,y,z,a,b,c,speed` | MoveL | 笛卡尔空间运动 |
 | `$c0,c1,c2,c3,c4,c5,c6` | 力矩控制 | 电流值 (A) |
 

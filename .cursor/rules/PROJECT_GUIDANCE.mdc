@@ -5,18 +5,23 @@ alwaysApply: true
 
 # Dummy 7轴机械臂控制项目指南
 
+> **文档状态**：与固件代码同步（firmware read: 2026-09-03）
+> **重要变更**：README/TODO 已移至 `docs/` 目录；PROJECT_GUIDANCE 与 PROJECT_CONTEXT、user_preferences 已合并
+
+---
+
 ## 项目概述
 
-这是一个基于 **STM32F405 (主控) + 8×STM32F103 (电机驱动)** 的 **7轴机械臂 + 地轨 + 夹爪** 控制系统，运行 FreeRTOS 实时操作系统。
+这是一个基于 **STM32F405 (主控) + 8×STM32F103 (电机驱动)** 的 **6轴机械臂 + 地轨 + 夹爪** 控制系统，运行 FreeRTOS 实时操作系统。
 
 ### 关键文档索引
 
 | 文件 | 用途 |
 |------|------|
-| `README.md` | 项目主文档，包含完整功能说明和用户指南 |
-| `ISSUES.md` | 问题追踪，P0/P1/P2/P3 共 61 个问题及修复状态 |
-| `TODO.md` | 功能路线图，17 个计划开发功能及 6 个阶段规划 |
-| `PROJECT_CONTEXT.md` | 详细项目上下文（系统架构、CAN协议、命令格式、关键常量等） |
+| `docs/README.md` | 项目主文档，包含完整功能说明和用户指南 |
+| `docs/TODO.md` | 功能路线图（FEAT/BUG 待开发项） |
+
+---
 
 ## 系统组成速查
 
@@ -25,93 +30,388 @@ alwaysApply: true
 | 主控制器 | STM32F405RG, 168MHz, FreeRTOS | - |
 | 电机驱动板 | STM32F103CBT6, 72MHz, FOC | - |
 | 地轨 | 丝杆1605, -250~250mm | ID=9 (固定) |
-| 臂关节 J1~J6 | 42/35步进, 50:1减速 | ID=1~6 |
-| 夹爪 | 35步进, 16:1减速 | ID=8 (固定) |
+| 臂关节 J1~J6 | 42/35步进, 50:1 减速 | ID=1~6 |
+| 夹爪 | 35步进, 16:1 减速 | ID=8 (固定) |
 | 通信 | CAN1 500kbps, UART4 115200bps | - |
 
 ### 固件目录结构
 
 ```
 firmware/
-├── ref_core_f405/          # 主控制器固件 (FreeRTOS)
-│   ├── UserApp/main.cpp    # 入口
-│   ├── UserApp/protocols/  # ASCII/CMD/CAN协议
-│   ├── Robot/instances/    # DummyRobot 7轴实现
-│   ├── Robot/algorithms/   # 6-DOF FK/IK
-│   ├── Robot/actuators/    # CtrlStepMotor CAN接口
-│   └── Bsp/                # CAN/UART/OLED/MPU6050/RGB
-└── motor_fw_f103_all/      # 电机驱动固件 (推荐使用)
-    ├── UserApp/protocols/  # CAN命令解析
-    ├── Ctrl/Motor/         # FOC+motion_planner
-    ├── Ctrl/Driver/         # TB67H450 H桥
-    └── Ctrl/Sensor/Encoder/ # MT6816+标定
+├── ref_core_f405/              # 主控制器固件 (STM32F405, FreeRTOS)
+│   ├── UserApp/
+│   │   ├── main.cpp            # 入口, FreeRTOS任务
+│   │   └── protocols/
+│   │       ├── ascii_protocol.cpp   # USB/UART4 ASCII命令解析
+│   │       ├── can_protocol.cpp     # CAN回包路由 (v3.0, 堵转广播)
+│   │       └── cmd_protocol.cpp     # 内部命令协议
+│   ├── Robot/
+│   │   ├── instances/dummy_robot.cpp/.h   # 7轴机器人类 (v2.8)
+│   │   ├── algorithms/kinematic/           # FK/IK 求解器
+│   │   └── actuators/ctrl_step/ctrl_step.cpp/.h  # CtrlStepMotor CAN接口
+│   └── Bsp/
+│       ├── communication/interface_can.cpp   # CAN发送 (v3.0)
+│       └── memory/emulated_eeprom.cpp
+│
+├── motor_fw_f103_35/           # 35电机固件 (J4~J6, 夹爪)
+├── motor_fw_f103_42/           # 42电机固件 (J1~J3)
+├── motor_fw_f103_57/           # 57电机固件 (地轨)
+│   └── Ctrl/Motor/motor.cpp/.h    # FOC + 堵转检测 v3 (激进方案)
+└── motor_fw_f103_gripper/      # 夹爪独立固件 (35电机, ID=8)
 ```
 
-## 关键开发约定
+---
 
-### CAN ID 格式
+## CAN ID 系统（关键约定，禁止混淆）
 
 ```
 StdId = (nodeID << 7) | cmdCode
-  nodeID: 3 bits (0~7)
-  cmdCode: 0x00~0x7F (普通命令), 0x80~0xBF (广播)
+  nodeID: 7 bits (实际使用 1~6, 8, 9)
+  cmdCode: 0x00~0x7F 普通命令, 0x80~0xBF 广播命令
 ```
 
-### 运动命令速查
+### 物理轴与代码命名对照
 
-| 格式 | 功能 |
+| 物理轴 | MoveJ 参数位 | CAN ID | C++ 对象 | 说明 |
+|--------|------------|--------|----------|------|
+| 地轨 | 第1位 (mm) | **9** | `motorJ[0]` | 直连丝杆1605 |
+| 关节 J1 | 第2位 | **1** | `motorJ[1]` | inverse=false |
+| 关节 J2 | 第3位 | **2** | `motorJ[2]` | inverse=true |
+| 关节 J3 | 第4位 | **3** | `motorJ[3]` | inverse=true |
+| 关节 J4 | 第5位 | **4** | `motorJ[4]` | inverse=true |
+| 关节 J5 | 第6位 | **5** | `motorJ[5]` | inverse=true |
+| 关节 J6 | 第7位 | **6** | `motorJ[6]` | inverse=true |
+| 夹爪 | 单独 `!HAND_*` | **8** | `hand (StepHand)` | reduction=16 |
+
+**MoveJ 格式**：`>Rail,j1,j2,j3,j4,j5,j6,speed`（共 8 个值，第1位是地轨mm）
+
+**地轨别名公示（j0 ≡ Rail）**：
+- MoveJ / MoveL / 力矩 / 数组下标等**长数组**第 0 位均可称作 `j0`，与 `Rail` **等价**
+- CAN ID 永远为 **9**，与别名无关
+- C++ 中 `motorJ[0]` 的 `[0]` 只是数组下标，不代表关节编号
+- **唯一硬约束**：CAN ID 0 / 7 是无效节点号（保留/未使用），不得用于通信
+
+---
+
+## CAN 通信协议
+
+### 命令总表（主控 → 电机）
+
+| 命令码 | 方向 | 功能 | 数据格式 |
+|--------|------|------|---------|
+| 0x01 | TX | 使能/失能电机 | uint32_t (0/1) |
+| 0x02 | TX | 触发编码器标定 | - |
+| 0x03 | TX | 设置电流 (力矩模式) | float A |
+| 0x05 | TX | 设置位置 (梯形规划) | float rotations |
+| 0x07 | TX | 位置+速度限制 (MoveJ 用) | float pos + float vel |
+| 0x11 | TX | 设置 CAN ID 并存 EEPROM | uint32_t + persist |
+| 0x12 | TX | 设置电流限幅 | float A |
+| 0x13 | TX | 设置速度限幅 | float r/s |
+| 0x14 | TX | 设置加速度 | float r/s² |
+| 0x15 | TX | 应用当前位置为零点 | - |
+| 0x16 | TX | 设置上电自动使能 | uint32_t |
+| 0x17~0x1A | TX | 设置 DCE Kp/Kv/Ki/Kd | int32_t |
+| 0x1B | TX | 开关堵转保护 (临时) | uint32_t (0/1) |
+| 0x7D | TX | 使能温度监视 | - |
+| 0x7E | TX | 擦除 EEPROM 配置 | - |
+| 0x7F | TX | 复位电机 | - |
+| **0x89** | TX | **广播急停** (电机端已实现制动，主控**未发送**) | 8B 全0 |
+
+### 电机 → 主控 响应
+
+| 命令码 | 功能 | 数据格式 |
+|--------|------|---------|
+| 0x21~0x22 | 查询电流/速度 | float + isFinished |
+| **0x23** | 查询位置 (主控轮询) | float pos + isFinished |
+| 0x24 | 查询零点偏移 | int32_t |
+| 0x25 | 查询温度 | uint32_t |
+| 0x28~0x2B | 查询 DCE Kp/Kv/Ki/Kd | int32_t |
+| **0x2C** | 查询加速度 | float r/s² (电机→主控缓存) |
+| **0x2D** | 查询电流限幅 | float A (电机→主控缓存) |
+| **0x5A** | **堵转广播** (v3) | Data[0]=nodeID, Data[1]=cmd |
+| **0x5B** | **全局解锁广播** (v3) | 全0 |
+| **0x5C** | **查询堵转状态** | Data[0]=queryType, Data[1]=value |
+
+
+### 0x5A 堵转广播子命令
+
+| Data[1] | 含义 |
+|---------|------|
+| 1 | TRIGGER：堵转刚触发，电机进入 RETREATING |
+| 2 | DONE：回退完成，进入 LOCKED |
+| 3 | TIMEOUT：回退超时，进入 LOCKED |
+| 4 | HEARTBEAT：RETREATING 期间心跳 (忽略) |
+
+### 0x23 响应格式 (8字节)
+
+```
+Byte 0-3: float position   // 物理位置 (rotations)
+Byte 4-5: int16_t current  // FOC 相电流 × 1000 (mA)
+Byte 6:    uint8_t errorCode // 0=OK, 1=Stall, 4=EStop
+Byte 7:    uint8_t isFinished // 0=运动中, 1=到位
+```
+
+---
+
+## ASCII 命令协议
+
+### 系统命令 (`!` 前缀)
+
+| 命令 | 功能 |
 |------|------|
-| `>j1,j2,j3,j4,j5,j6,j7,speed` | 阻塞MoveJ |
-| `&j1,j2,j3,j4,j5,j6,j7,speed` | 非阻塞MoveJ |
-| `@x,y,z,a,b,c,speed` | MoveL (笛卡尔) |
-| `$c1,c2,c3,c4,c5,c6,c7` | 力矩模式，**整数mA** |
-| `!START/DISABLE/STOP/HOME/RESET` | 系统命令 |
-| `#GETJPOS` / `#GETLPOS` | 查询 |
+| `!START` | 使能机器人 |
+| `!DISABLE` | 失能机器人（清零力矩电流） |
+| `!STOP` | 急停（用当前位置作为新目标下发 `MoveJ(...)`，电机走普通梯形规划收敛；**未发送 CAN 0x89 广播制动帧**） |
+| `!HOME` | 归零姿态 `HOME_POSE = {0, 0, 0, 90, 0, 0, 0}` (rail+j1~j6 共 7 个) → `MoveJ(..., 10)` |
+| `!RESET` | 待机姿态 `REST_POSE = {0, 0, -75, 180, 0, 0, 0}` (rail+j1~j6 共 7 个) |
+| `!STALL_EN` | 开启所有电机堵转检测 |
+| `!STALL_DIS` | 关闭所有电机堵转检测 |
+| `!STALL_STATUS` | 查询各电机堵转状态 (CAN 0x5C) |
+| `!STALL_UNLOCK` | 广播解锁 (CAN 0x5B ×3) |
+| `!HAND_ZERO` | 夹爪标定零点 |
+| `!HAND_EN` / `!HAND_DIS` | 夹爪使能/失能 |
+| `!HAND_POS <0-100>` | 夹爪位置控制 (0=闭合, 100=张开) |
+| `!HAND_O` / `!HAND_C` | 夹爪张开/闭合 (力矩模式) |
+| `!RGB_MODE <0-9>` | 切换灯效模式 |
+| `!RGB_BRIGHT [<0-100>] [&]` | 查询/设置亮度，&保存 |
+| `!RGB_COLOR <idx> <r> <g> <b>` | 设置静态颜色 |
+| `!PRINTPOSE` | 打印关节角 + 末端位姿 |
 
-### 地轨步数
+### 运动命令
 
-`1mm = 40960 步` (丝杆1605直连, 200步×256微步/5mm导程)
+| 命令格式 | 功能 | 说明 |
+|----------|------|------|
+| `>j0(rail),j1,j2,j3,j4,j5,j6,speed` | 阻塞 MoveJ | 电机到位后返回 "ok" |
+| `&j0(rail),j1,j2,j3,j4,j5,j6,speed` | 非阻塞 MoveJ | 立即返回 "ok" |
+| `@x,y,z,a,b,c,speed` | MoveL (笛卡尔) | 需 IK 求解 |
+| `$c0,c1,c2,c3,c4,c5,c6` | 力矩控制 | float A；c0=地轨电流，c1~c6=关节电流 |
+| `#GETJPOS` | 查询关节角度 | 格式: `Rail(mm) J1~J6(°)` |
+| `#GETLPOS` | 查询末端位姿 | 格式: `X Y Z A B C` (mm/°) |
 
-## ⚠️ P0 关键问题 (上电前必读)
+### 查询/配置命令 (`#` 前缀)
 
-以下问题均为 **Critical** 级别，修复前上电存在安全风险：
+| 命令 | 功能 |
+|------|------|
+| `#CMDMODE <1-6>` | 切换指令模式 |
+| `#SET_DCE_KV <node> <val>` | 设置 DCE Kv |
+| `#SET_PID <node> <kp> <kv> <ki> <kd>` | 一次性设4个 PID |
+| `#GET_PID <node>` | 查询电机 PID |
+| `#ACC_J <node> <r/s²> [&]` | 设置加速度，&持久化 |
+| `#I_LIMIT_J <node> <A> [&]` | 设置电流限幅，&持久化 |
+| `#GETJACC <node>` | 同步查询加速度 (v3.0) |
+| `#GETI <node>` | 同步查询电流限幅 (v3.0) |
+| `#OFFSET_J <1~6\|all>` | 单轴或全轴归零 |
+| `#REBOOT <node>` | 重启指定电机 |
+| `#SYNC_ACC` | 触发所有电机加速度同步查询 |
 
-### P0 关键问题 (上电前必读)
+---
 
-> P0-1 ✅ 已修复 (2026-05-30)，其余待修复。详见 `ISSUES.md`。
+## 指令模式 (CommandMode)
 
-### P0-2 ~ P0-10 (待修复)
+| 值 | 名称 | 行为 |
+|----|------|------|
+| 1 | SEQ (SEQUENTIAL) | 上一指令到位后才执行下一条 |
+| 2 | INT (INTERRUPTABLE) | 新指令直接清队列并覆盖 |
+| 3 | TRJ (CONTINUES TRAJECTORY) | 连续轨迹，不减速衔接 |
+| 4 | TUN (MOTOR_TUNING) | 扫频正弦激励 |
+| 5 | TRQ (TORQUE_CONTROL) | 力矩透传模式 |
+| 6 | SRV (SERVO_J) | 高频伺服随动 (5kHz 下发) |
 
-| ID | 问题 | 文件 | 风险 |
-|----|------|------|------|
-| P0-2 | 力矩模式Disable后电流未清零 | ref_core_f405/dummy_robot.cpp | 电机持续通电 |
-| P0-3 | CAN中断与5kHz环数据竞争 | ref_core_f405/can_protocol.cpp | 数据损坏 |
-| P0-4 | Python力矩命令发float而非int mA | 串口助手.py L893 | 力矩只有1/1000 |
-| P0-5 | 急停只滑行不制动 | motor_fw/interface_can.cpp L250 | 无快速停止 |
-| P0-6 | sqrtf负数参数 (ARM CMSIS返回NaN) | motor_fw/motor.cpp L449 | 计算异常 |
-| P0-7 | ApplyPositionAsHome未初始化CAN缓冲区 | ref_core_f405/ctrl_step.cpp L178 | 垃圾数据上CAN |
-| P0-8 | SetEnable设置 `state=FINISH` 而非 `IDLE` | ref_core_f405/ctrl_step.cpp L22 | 状态语义错误 |
-| P0-9 | 磁铁脱落检测到但无处理 | motor_fw/mt6816_base.cpp L52 | 位置反馈错误 |
-| P0-10 | Flash写入后无读取验证 | motor_fw/encoder_calibrator_base.cpp L291 | 校准数据损坏 |
+---
 
-详见 `ISSUES.md` 完整问题列表。
+## 主控固件 (ref_core_f405)
 
-## 功能路线图优先级
+### FreeRTOS 线程架构
 
-开发新功能前先修复 P0/P1 问题。计划功能详见 `TODO.md`，按阶段分为：
+| 线程名 | 优先级 | 频率 | 职责 |
+|--------|--------|------|------|
+| `ControlLoopFixUpdateTask` | osPriorityRealtime | 5kHz (TIM7 200μs) | 实时下发电机指令 |
+| `ControlLoopUpdateTask` | osPriorityNormal | 事件触发 | 解析并执行 ASCII 命令 |
+| `OledTask` | osPriorityNormal | ~60Hz | OLED 显示刷新 |
+| `RGBTask` | osPriorityNormal | 33Hz | RGB LED 灯效 |
 
-- **Phase 1**: 稳定性与安全加固 (ISSUES.md P0/P1)
-- **Phase 2**: 用户体验增强 (示教编程、夹爪力矩、Python工具改进)
-- **Phase 3**: 感知与安全 (碰撞检测、硬件限位)
-- **Phase 4**: 轨迹与运动规划 (S型曲线、多组队列)
-- **Phase 5**: 扩展接口 (ROS2、云端OTA)
-- **Phase 6**: 高级功能 (视觉抓取、多机协作)
+### 5kHz 实时环 (TIM7) 各模式行为
+
+| 模式 | 位置下发频率 | 说明 |
+|------|-------------|------|
+| SEQ/INT/TRJ | **50Hz** | 降频下发避免总线拥堵 |
+| ServoJ | 5kHz | 高频全速下发 |
+| Torque | 100Hz | 直接下发电流 |
+| Tuning | 100Hz | 扫频信号发生器 |
+
+### 电机对象初始化 (dummy_robot.cpp)
+
+```cpp
+motorJ[0] = new CtrlStepMotor(hcan, 9, true,  1,  -250,  250);  // 地轨(inverse=true)
+motorJ[1] = new CtrlStepMotor(hcan, 1, false, 50, -175,  175);  // J1
+motorJ[2] = new CtrlStepMotor(hcan, 2, true,  50,  -75,   90);  // J2
+motorJ[3] = new CtrlStepMotor(hcan, 3, true,  50,    0,  180);  // J3
+motorJ[4] = new CtrlStepMotor(hcan, 4, true,  50, -270,  270);  // J4
+motorJ[5] = new CtrlStepMotor(hcan, 5, true,  50, -100,  100);  // J5
+motorJ[6] = new CtrlStepMotor(hcan, 6, true,  30, -180,  180);  // J6
+hand     = new StepHand(hcan, 8);                                 // 夹爪
+```
+
+### 关键常量
+
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `RAIL_STEPS_PER_MM` | **40960** | 地轨步数当量 (丝杆1605直连, 200步×256微步/5mm) |
+| `SLIDER_TO_RPS` | **0.30** | slider 100 → 30 r/s |
+| `AXIS_MAX_RPS[7]` | 全部 30.0 r/s | 各轴物理上限 |
+| `MOTOR_REDUCTION[7]` | {1,50,50,50,50,50,30} | 各轴减速比 |
+| `DEFAULT_JOINT_SPEED` | 80.0f | slider 默认值 |
+| `REST_POSE` | `{0, 0, -75, 180, 0, 0, 0}` | 待机姿态 (rail+j1~j6 共 7 个) |
+| `HOME_POSE` | `{0, 0, 0, 90, 0, 0, 0}` | 归零姿态 (rail+j1~j6 共 7 个) |
+| `FALLBACK_JOINT_ACCELERATION` | 10.0 r/s² | 未查到的电机加速度兜底值 |
+
+### IsMoving() 实现 (v2.8 纯位置误差判定)
+
+```cpp
+// 地轨：|currentRailPos - targetRailPos| > 0.5mm → 运动中
+// 关节：|angle - targetAngle| > 1.0° → 运动中
+// 不再依赖 jointsStateFlag 或电机 state 字段
+```
+
+### v2.7 同步抵达速度规划 (ComputeSyncSpeeds)
+
+7轴同步抵达的梯形速度规划算法（与电机端 motion_planner.cpp 对齐）：
+
+1. 各轴距离 → 电机轴转数（地轨 mm/5mm·圈，关节 °×reduction/360）
+2. 计算各轴在 sliderSpeed 下的梯形时间，取最大值作为预算
+3. 迭代反推（解二次方程 `v²/a - v*T + d = 0`），收敛到统一时间
+4. 短距离退化为三角曲线（`T = 2√(d/a)`）
+
+---
+
+## 电机固件 (motor_fw_f103_*)
+
+### 双定时器架构
+
+| 定时器 | 频率 | 职责 |
+|--------|------|------|
+| TIM1 | 100Hz | 按钮去抖、LED状态、温度采集、堵转广播 |
+| TIM4 | 20kHz | 电机 FOC 控制环 + 堵转检测 |
+
+### 堵转检测机制 v3（激进方案）
+
+> 代码：`firmware/motor_fw_f103_35|42|57/Ctrl/Motor/motor.cpp`
+> 定稿：2026-08-30，三轮调参
+
+**检测条件（三条件同时满足 + 持续 30ms + 200ms recheck）**：
+
+| 条件 | 首触发 | recheck（30ms后） |
+|------|--------|-------------------|
+| 电流 | > `ratedCurrent × 40%` | > `ratedCurrent × 24%` |
+| 速度 | < 50 step/s | < 150 step/s |
+| 位置误差 | > 15 step | > 12 step |
+| 持续时间 | 30ms | 再 30ms 兜底 |
+
+**进入 RETREATING**：30ms 后 recheck 通过 → 电机反向移动约 0.7 圈 → 进入 LOCKED
+**清除条件**：检测到电机确实在动 `|estVelocity| > 150 step/s` → 清零上升沿
+**启动豁免期**：进入位置模式后前 100ms (2000 cycles @ 20kHz) 不检测
+
+### 堵转主控处理 (can_protocol.cpp)
+
+```
+电机 0x5A(TRIGGER) → dummy.SetStallMode() → RGB变红, 清队列, 锁定目标
+电机 0x5A(DONE)    → dummy.SetStallMode() → 同上
+电机 0x5A(TIMEOUT) → dummy.SetStallMode() → 同上
+!STALL_EN          → motor.SetEnableStallProtect(true)
+!STALL_DIS         → motor.SetEnableStallProtect(false)
+!STALL_UNLOCK      → BroadcastUnlock() → 0x5B 广播 ×3 → 所有 LOCKED → IDLE
+```
+
+### 电机固件默认参数
+
+| 参数 | 35电机 | 42电机 | 57电机 |
+|------|--------|--------|--------|
+| 电流限幅 | 2A | - | - |
+| 速度限幅 | 30 r/s | - | - |
+| DCE Kp | 195 | - | - |
+| DCE Kv | 80 | - | - |
+| DCE Ki | 300 | - | - |
+| DCE Kd | 250 | - | - |
+| 堵转保护 | 默认开启 | 默认开启 | 默认开启 |
+
+---
+
+## 固件编译
+
+### 主控固件 (ref_core_f405)
+
+```bash
+cd firmware/ref_core_f405/build
+ninja
+# 产物: build/Core-STM32F4-fw.bin / .hex / .elf
+```
+
+### 电机驱动固件 (motor_fw_f103_*)
+
+```bash
+cd firmware/motor_fw_f103_35/build   # 35电机 (J4~J6, 夹爪)
+# cd firmware/motor_fw_f103_42/build  # 42电机 (J1~J3)
+# cd firmware/motor_fw_f103_57/build  # 57电机 (地轨)
+ninja
+```
+
+### 编译后检查
+
+1. 确认 0 errors
+2. 检查 RAM/Flash 使用率
+3. 产物路径：
+   - 主控：`firmware/ref_core_f405/build/Core-STM32F4-fw.bin`
+   - 35电机：`firmware/motor_fw_f103_35/build/*.elf` 等
+
+---
+
+## 关键文件索引
+
+| 功能 | 文件路径 |
+|------|----------|
+| 主控入口 | `firmware/ref_core_f405/UserApp/main.cpp` |
+| 7轴机器人类 | `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp` |
+| 关节 CAN 接口 | `firmware/ref_core_f405/Robot/actuators/ctrl_step/ctrl_step.cpp` |
+| CAN 协议 | `firmware/ref_core_f405/UserApp/protocols/can_protocol.cpp` |
+| ASCII 协议 | `firmware/ref_core_f405/UserApp/protocols/ascii_protocol.cpp` |
+| CAN 发送层 | `firmware/ref_core_f405/Bsp/communication/interface_can.cpp` |
+| 电机控制核心 | `firmware/motor_fw_f103_35/Ctrl/Motor/motor.cpp` |
+| 电机 CAN 解析 | `firmware/motor_fw_f103_35/UserApp/protocols/interface_can.cpp` |
+
+---
 
 ## 工作时行为指引
 
-1. **修改固件前**先确认目标文件属于哪个模块 (主控 ref_core_f405 / 电机驱动 motor_fw)
-2. **修改电机固件**记得通过 `configurations.h` 选择正确的电机类型 (35/42/57)
-3. **修改 CAN 协议**时注意 StdId 格式和广播命令范围
-4. **修改 Python 工具**注意线程安全 (Tkinter 非线程安全)
-5. **不要修改** `PROJECT_CONTEXT.md`，该文件由 AI 自动维护
-6. **不要修改** esp32/ 目录下的示例代码（非生产代码）
+### 修改政策
+
+**未经用户明确同意，绝不修改任何代码、配置或项目文件（任何类型）。**
+
+修改前必须：
+1. 明确说明将修改哪些文件
+2. 解释修改内容及作用
+3. 等待用户确认后再执行
+
+### 系统环境
+
+- **Windows + PowerShell**：版本 5.1，`&&` 不支持，命令串接用分号 `;`
+- **Ninja 构建**：所有固件均用 Ninja，在 `build/` 目录下运行 `ninja`
+- **Python**：版本 3.x，用于调试工具（`docs/串口助手.py`）
+
+### 修改代码前的习惯
+
+- **修改固件前**：确认目标文件属于哪个模块（主控 ref_core_f405 / 电机驱动 motor_fw）
+- **修改电机固件**：确认 `configurations.h` 选中的电机类型（35/42/57）
+- **修改 CAN 协议**：注意 StdId 格式 `(nodeID << 7) | cmdCode`
+- **修改 Python 工具**：注意 Tkinter 非线程安全，UI 更新用 `root.after()`
+- **修改 UI 布局**：改 grid 布局后必须读取实际文件验证
+
+### Git 提交
+
+- agent 执行 `git commit` 时必须使用仓库本地的 `user.name` 和 `user.email`
+- **禁止**使用 agent 自己的身份
+- 分支命名建议：`fix-bug/`、`feat/` 前缀
+
+### 其他注意事项
+
+- **不要修改** `esp32/` 目录下的示例代码（非生产代码）
+- 项目文档集中存放于 `docs/` 目录
