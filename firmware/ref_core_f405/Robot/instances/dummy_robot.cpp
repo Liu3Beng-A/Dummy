@@ -367,10 +367,11 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, fl
     for (int j = 1; j <= 6; j++)
         dynamicJointSpeeds.a[j - 1] = dynamicJointSpeeds7.rps[j];
 
-    // 写入目标角度（纯位置误差判定用）
-    for (int j = 1; j <= 6; j++) {
-        motorJ[j]->targetAngle = targetJointsTmp.a[j - 1] - initPose.a[j - 1];
-    }
+    // [A3 修复] 不再写 motorJ[j]->targetAngle（给 IsMoving 用，已废弃）
+    // ★ 必须保留复位：电机使能后 STOP 状态会把 flag 置 1（按 A1 新方向），
+    //   必须在下发新目标时清零，否则 IsMoving() 永远返回 true 导致 !HOME 死循环。
+    //   地轨位 bit0 恒为 0 不受影响，flag 复位不影响地轨逻辑。
+    jointsStateFlag = 0;
 
     return true;
 }
@@ -412,10 +413,10 @@ bool DummyRobot::ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, f
     targetJoints = targetJointsTmp;
     targetRailPos = _j7_mm;  // 存储地轨目标位置
 
-    // 写入目标角度（ServoJ 也用纯位置误差判定）
-    for (int j = 1; j <= 6; j++) {
-        motorJ[j]->targetAngle = targetJointsTmp.a[j - 1] - initPose.a[j - 1];
-    }
+    // [A3 修复] 不再写 motorJ[j]->targetAngle（给 IsMoving 用，已废弃）
+    // ★ 必须保留复位：同 MoveJ，ServoJ 下发新目标时清零 flag，
+    //   防止电机使能后 STOP 状态把 flag 置 1（按 A1 新方向），导致 IsMoving 永远 true。
+    jointsStateFlag = 0;
 
     return true;
 }
@@ -456,6 +457,16 @@ void DummyRobot::UpdateJointAnglesCallback()
     for (int i = 1; i <= 6; i++)
     {
         currentJoints.a[i - 1] = motorJ[i]->angle + initPose.a[i - 1];
+        // [A1 修复] CAN 0x23 回包时同步更新 jointsStateFlag：
+        //   FINISH → 置位（bit i = 1 表示该轴到位）
+        //   其余   → 清位（RUNNING/STOP/STALL 都算"未到位"）
+        // 配合 A3 修复，IsMoving() 基于 jointsStateFlag != 0b1111110 判定，
+        //   7 轴全部 FINISH 时 flag = 0b1111110（bit1-6=1, bit0=0 地轨位恒 0），
+        //   IsMoving() 返回 false，阻塞解除。
+        if (motorJ[i]->state == CtrlStepMotor::FINISH)
+            jointsStateFlag |= (1 << i);
+        else
+            jointsStateFlag &= ~(1 << i);
     }
     // 地轨回包：motorJ[0]->angle 是"伪°"（= 圈×360，reduction=1）
     // 反推 mm：mm = angle / 360 × 5
@@ -613,7 +624,10 @@ void DummyRobot::SetEnable(bool _enable)
             targetCurrents[i] = 0.0f;
 
         SetCommandMode(DEFAULT_COMMAND_MODE);
-        targetJoints = currentJoints; 
+        // [A3 修复] 不再写 targetJoints = currentJoints；
+        //         jointsStateFlag 方案下，电机 STOP 时 jointsStateFlag 自动全置位
+        //         (UpdateAngleCallback 收到 isFinished=0 → |= (1<<i))，
+        //         IsMoving() 行为符合"等电机真实状态"的语义。
     }
 
     for (int i = 1; i <= 6; i++)
@@ -651,26 +665,16 @@ void DummyRobot::UpdateJointPose6D()
 }
 
 /**
- * @brief 利用纯位置误差判定所有关节是否已完成收敛
- * @note 废弃 jointsStateFlag 和电机 state 字段的双层判定。
- *       直接比较 motorJ[i]->angle（实测）和 motorJ[i]->targetAngle（目标）。
- *       当 |实测 - 目标| <= 1.0° 时认为该轴到位。
+ * @brief 利用 jointsStateFlag 判定所有关节是否已完成收敛
+ * @note [A3 修复] 改回旧版基于 jointsStateFlag 的判定，配合 A1 修复的位运算写入。
+ *       bit=1 表示该轴已 FINISH 到位（电机端 CAN 0x23 回包 isFinished=1），
+ *       bit=0 表示该轴仍在运动/STOP/STALL。
+ *       地轨位 bit0 恒为 0（UpdateJointAnglesCallback 只处理 i=1~6）。
+ *       7 轴全部到位时：flag = 0b01111110（bit1-6=1，bit0=0），故用 `!= 0b1111110`。
  */
 bool DummyRobot::IsMoving()
 {
-    static constexpr float EPSILON_DEG = 1.0f;
-    static constexpr float EPSILON_MM  = 0.5f;
-
-    // 地轨判定：currentRailPos vs targetRailPos
-    if (fabsf(currentRailPos - targetRailPos) > EPSILON_MM)
-        return true;
-
-    // 关节判定
-    for (int i = 1; i <= 6; i++) {
-        if (fabsf(motorJ[i]->angle - motorJ[i]->targetAngle) > EPSILON_DEG)
-            return true;
-    }
-    return false;
+    return jointsStateFlag != 0b1111110;
 }
 
 /**
@@ -735,16 +739,21 @@ uint32_t DummyRobot::CommandHandler::Push(const char *_cmd)
 
 /**
  * @brief 清仓强制切断挂载流任务并施下锁盘制动保全安全边界
+ * @note [A4 修复] 改走 CAN 0x89 广播急停，所有电机立即 SetBrake(true) 抱闸
+ *       锁死在当前位置，不再走 MoveJ(currentJoints) 的"伪急停"（v2.7 旧版会让
+ *       电机继续梯形规划"收敛"到当前点，语义不清且响应慢）。
+ *       抱闸后电机端 state = STATE_STOP → 0x23 回包 isFinished=0 →
+ *       主控 jointsStateFlag |= (1<<i) → IsMoving=true，所以这里手动清零
+ *       flag（物理已停），并清 FIFO + isEnabled=false。
  */
 void DummyRobot::CommandHandler::EmergencyStop()
 {
-    context->MoveJ(context->currentJoints.a[0], context->currentJoints.a[1],
-                   context->currentJoints.a[2], context->currentJoints.a[3],
-                   context->currentJoints.a[4], context->currentJoints.a[5],
-                   context->currentRailPos, 10);  // 10 = 安全速度
-    context->MoveJoints(context->targetJoints);
-    // 地轨：直接下发（railSpeedRps 默认 30 r/s）
-    context->motorJ[0]->SetPositionWithMotorRps(context->targetRailPos / 5.0f, context->railSpeedRps);
+    // 1. 发 0x89 广播（通过任意一个 motor 对象，CAN 总线相同）
+    context->motorJ[1]->BroadcastEStop();
+    // 2. 清零 jointsStateFlag：电机已被抱闸锁死，物理上"全部到位"
+    //    避免 !STOP 后 IsMoving() 永远返回 true 阻塞后续 SEQUENTIAL 指令
+    context->jointsStateFlag = 0;
+    // 3. 标记失能 + 清指令队列
     context->isEnabled = false;
     ClearFifo();
 }

@@ -22,8 +22,7 @@ CtrlStepMotor::CtrlStepMotor(CAN_HandleTypeDef* _hcan, uint8_t _id, bool _invers
 void CtrlStepMotor::SetEnable(bool _enable)
 {
     state = _enable ? FINISH : STOP;
-    if (!_enable)
-        targetAngle = 0;   // 禁用时清目标，避免残留导致误判
+    // [A3 修复] 不再清 targetAngle，jointsStateFlag 方案不再依赖 targetAngle 字段
 
     uint8_t mode = 0x01;
     txHeader.StdId = nodeID << 7 | mode;
@@ -417,6 +416,17 @@ void CtrlStepMotor::BroadcastUnlock()
 {
     // 广播 UNLOCKED: StdId = (0 << 7) | 0x5B = 0x5B (落入电机端广播区间 0x50~0x7F)
     txHeader.StdId = 0x5B;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::BroadcastEStop()
+{
+    // [A4 新增] 广播 Emergency Stop: StdId = (0 << 7) | 0x89 = 0x89
+    //   落入电机端广播区间 0x80~0xBF，所有电机节点无条件响应
+    //   电机端收到后会：requestMode = MODE_STOP + SetBrake(true) + 清速度/电流
+    //   物理上立即抱闸锁死在当前位置，不再继续梯形规划
+    txHeader.StdId = 0x89;
     uint8_t buf[8] = {0};
     CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
 }

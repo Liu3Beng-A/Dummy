@@ -69,6 +69,7 @@ public:
     uint32_t GetTemp();
     void EraseConfigs();
     void BroadcastUnlock();   // 广播 UNLOCKED (0x5B)
+    void BroadcastEStop();    // [A4 新增] 广播急停 (0x89)
     void QueryStallStatus(uint8_t queryType); // 查询 stall 状态 (0x5C), type=1=en, type=2=lock
 
     void UpdateAngle();

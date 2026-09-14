@@ -5,7 +5,6 @@ alwaysApply: true
 
 # Dummy 7轴机械臂控制项目指南
 
-> **文档状态**：与固件代码同步（firmware read: 2026-09-03）
 > **重要变更**：README/TODO 已移至 `docs/` 目录；PROJECT_GUIDANCE 与 PROJECT_CONTEXT、user_preferences 已合并
 
 ---
@@ -20,6 +19,8 @@ alwaysApply: true
 |------|------|
 | `docs/README.md` | 项目主文档，包含完整功能说明和用户指南 |
 | `docs/TODO.md` | 功能路线图（FEAT/BUG 待开发项） |
+| `firmware` | 正在开发的新版本固件 |
+| `source code` | 开发前保存的旧版本固件 |
 
 ---
 
