@@ -75,13 +75,13 @@ StdId = (nodeID << 7) | cmdCode
 
 | 物理轴 | MoveJ 参数位 | CAN ID | C++ 对象 | 说明 |
 |--------|------------|--------|----------|------|
-| 地轨 | 第1位 (mm) | **9** | `motorJ[0]` | 直连丝杆1605 |
 | 关节 J1 | 第2位 | **1** | `motorJ[1]` | inverse=false |
 | 关节 J2 | 第3位 | **2** | `motorJ[2]` | inverse=true |
 | 关节 J3 | 第4位 | **3** | `motorJ[3]` | inverse=true |
 | 关节 J4 | 第5位 | **4** | `motorJ[4]` | inverse=true |
 | 关节 J5 | 第6位 | **5** | `motorJ[5]` | inverse=true |
 | 关节 J6 | 第7位 | **6** | `motorJ[6]` | inverse=true |
+| 地轨 | 第1位 (mm) | **9** | `motorJ[0]` | 直连丝杆1605 |
 | 夹爪 | 单独 `!HAND_*` | **8** | `hand (StepHand)` | reduction=16 |
 
 **MoveJ 格式**：`>Rail,j1,j2,j3,j4,j5,j6,speed`（共 8 个值，第1位是地轨mm）
