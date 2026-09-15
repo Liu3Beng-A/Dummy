@@ -84,7 +84,7 @@ StdId = (nodeID << 7) | cmdCode
 | 地轨 | 第1位 (mm) | **9** | `motorJ[0]` | 直连丝杆1605 |
 | 夹爪 | 单独 `!HAND_*` | **8** | `hand (StepHand)` | reduction=16 |
 
-**MoveJ 格式**：`>Rail,j1,j2,j3,j4,j5,j6,speed`（共 8 个值，第1位是地轨mm）
+**MoveJ 格式**：`>j1,j2,j3,j4,j5,j6,rail,speed`（共 8 个值，第1位是地轨mm）
 
 **地轨别名公示（j0 ≡ Rail）**：
 - MoveJ / MoveL / 力矩 / 数组下标等**长数组**第 0 位均可称作 `j0`，与 `Rail` **等价**

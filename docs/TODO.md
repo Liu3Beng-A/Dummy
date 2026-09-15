@@ -32,111 +32,105 @@
 
 ---
 
-### [BUG-2] `!HOME` / `!RESET` 执行中 `!STOP` 急停无效 🔴
+### [BUG-ESTOP] `!STOP` 急停指令电机无响应（合并自 [BUG-2] + [BUG-4]） 🔴
 
-**状态**：待修复（2026-09-01）
+**状态**：待修复（2026-09-15 合并）
 
-**现象**：
-- 执行 `!HOME` 或 `!RESET` 时（此时 `Homing()` / `Resting()` 中的 `while(IsMoving())` 等待循环正在运行）
-- 发送 `!STOP` → 急停命令到达，`EmergencyStop()` 被调用，`"ok"` 立即返回
-- 但机械臂继续运动到 home/rest 姿态才停下，`!STOP` 毫无作用
+**现象 A — 空闲态发 `!STOP`**：
+- 机械臂静止时（电机已 FINISH）发 `!STOP`
+- `EmergencyStop()` 立即返回 `"ok"`
+- 表面"急停成功"，实际电机本来就在 FINISH 状态，`!STOP` 没起任何作用
+- 这种"假成功"掩盖了真实 bug
 
-**根因**：`IsMoving()` 使用**位置误差**判断运动状态，完全忽略电机真实 `state` 字段。
+**现象 B — `!HOME` / `!RESET` 中发 `!STOP`**：
+- 机械臂在长轨迹运行中（电机 RUNNING）发 `!STOP`
+- `EmergencyStop()` 立即返回 `"ok"`
+- 但电机物理上继续移动到 home/rest 姿态才停下
+- 用户观察到"`!STOP` 完全无效"
 
-`DummyRobot::IsMoving()`（`dummy_robot.cpp:679`）：
-```
-return fabsf(motorJ[i]->angle - motorJ[i]->targetAngle) > EPSILON_DEG
-```
-- `targetAngle` 在 `MoveJ()` / `MoveJoints()` 中被设为**新目标**
-- `angle` 是从电机 CAN 反馈的**实测角度**（存在 CAN 通信延迟）
-- 当新目标与当前位置差值 < 1° 时，`IsMoving()` **立即返回 false**，退出 `while` 循环
+**根因 1：`BroadcastEStop()` 发出的 CAN 帧被所有电机静默丢弃**
 
-崩溃路径（以 `Homing()` 为例）：
-1. `MoveJ(0,0,90,...)` 下发新目标 → `targetAngle` 更新
-2. `while(IsMoving())` 检查：`fabsf(angle - targetAngle)` → 若 < 1° → **立即退出循环**
-3. `Homing()` 函数返回，机械臂还在运动中
-4. 后续任何命令（`!STOP` 等）都直接执行，`ClearFifo()` 已在函数结束后调用，无效
+`CtrlStepMotor::BroadcastEStop()`（`ctrl_step.cpp:423-429`）发送 `StdId = 0x89`：
 
-`EmergencyStop()` 的问题更大：
-```
-context->MoveJ(context->currentJoints.a[0], ...);  // ← 设 targetAngle = angle（误差归零）
-context->isEnabled = false;
-ClearFifo();  // ← while(IsMoving()) 根本不会进入，此行在电机还在跑时就被跳过
-```
-
-**`CtrlStepMotor::state` 字段被完全忽略：**
-- `UpdateAngleCallback()` 从电机 CAN 反馈中更新 `state`（`RUNNING`/`FINISH`/`STOP`）
-- 但 `IsMoving()` 从不检查这个字段
-
-**修复方向**：
-1. `IsMoving()` 同时检查 `state == RUNNING`（最可靠）
-2. `EmergencyStop()` 等待所有电机 `state != RUNNING` 后再 `ClearFifo()`
-3. 或：`Homing()` / `Resting()` 中的 `while(IsMoving())` 改为等待 `state` 全部非 `RUNNING`
-
-**相关代码**：
-- `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp:679` `DummyRobot::IsMoving()`
-- `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp:585` `DummyRobot::Homing()`
-- `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp:603` `DummyRobot::Resting()`
-- `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp:760` `DummyRobot::CommandHandler::EmergencyStop()`
-- `firmware/ref_core_f405/Robot/actuators/ctrl_step/ctrl_step.hpp:13` `CtrlStepMotor::State`（`RUNNING`/`FINISH`/`STOP`）
-- `firmware/ref_core_f405/Robot/actuators/ctrl_step/ctrl_step.cpp` `UpdateAngleCallback()`（更新 state 字段）
-
----
-
-### [BUG-4] `!STOP` 急停在空闲态下"看似停止"但电机还在减速收敛 🟡
-
-**状态**：待修复（2026-09-03，用户实测后录入）
-
-**与 [BUG-2] 的区别**：
-- [BUG-2]：`!STOP` 在 `!HOME` / `!RESET` 长轨迹运行中**完全无效**，机械臂跑完全程
-- [BUG-4]：`!STOP` 在**空闲态**（机械臂静止）下能立刻停，但 `EmergencyStop()` 内部的"覆盖新目标"路径会**改写 `targetAngle = currentAngle`**，导致 `IsMoving()` 在 lib 端立即返回 false
-
-**实测现象**：
-- 用户实测：`!STOP` 在空闲态/慢速运动下"电机能立刻停下"
-- 但是：`EmergencyStop()` 的 4 行实现走的是"新目标覆盖"路径，不是真急停
-- 结果：主控侧 `IsMoving()` 错误地报告"已停止"，但电机侧 CAN 0x23 回包仍在上报位置变化，电机侧 state 也还没回 FINISH
-
-**根因**：`EmergencyStop()` 的实现路径
-
-`DummyRobot::CommandHandler::EmergencyStop()`（`dummy_robot.cpp:739-755`）：
 ```cpp
-void DummyRobot::CommandHandler::EmergencyStop()
+void CtrlStepMotor::BroadcastEStop()
 {
-    context->MoveJ(context->currentJoints.a[0], context->currentJoints.a[1], ...,
-                   context->currentRailPos, 10);  // 10 = 安全速度
-    context->MoveJoints(context->targetJoints);
-    context->motorJ[0]->SetPositionWithMotorRps(context->targetRailPos / 5.0f, context->railSpeedRps);
-    context->isEnabled = false;
-    ClearFifo();
+    txHeader.StdId = 0x89;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
 }
 ```
 
-**问题清单**：
-1. **未发送 CAN 0x89 广播制动帧**：电机端有真急停制动逻辑（emergency profile），主控侧从不调用
-2. **`targetAngle` 被覆盖为 `currentAngle`**：导致位置误差归零，`IsMoving()` 立即返回 false，但电机仍可能处于减速收敛阶段（200ms~1s 窗口）
-3. **`isEnabled = false` 时机不对**：在 `MoveJ` 已经下发后才清使能，新目标帧可能没生效
-4. **没有等待所有电机 state != RUNNING**：机械臂"号称停止"但物理上还在动
+电机 Rx 路由（`motor_fw_f103_35/Core/Src/can.c:189-211`，35/42/57/gripper 同构）解析：
 
-**期望行为**（参照 0x89 路径）：
-1. 调用方期望：`!STOP` 200ms 内物理停止，最多返回 `"ok"` 后才有后续命令
-2. 实际行为：电机走完 MoveJ 的微小距离后才停，外部代码看到 `IsMoving()` 立即 false 就以为停了
+```c
+uint8_t id  = (RxHeader.StdId >> 7);   // 0x89 >> 7  = 1
+uint8_t cmd = (RxHeader.StdId & 0x7F); // 0x89 & 0x7F = 0x09  ← 关键
 
-**修复方向**：
-1. 主控侧**真正发送 CAN 0x89 广播急停帧**，让电机端走 emergency 制动（这是电机端已经实现的能力，目前未使用）
-2. `EmergencyStop()` 调用 `0x89` 后**轮询所有电机 `state != RUNNING`** 再返回 `"ok"`
-3. 或保留"覆盖新目标"路径但 `IsMoving()` 必须等待电机真实 state
-4. `isEnabled = false` 改成在 `0x89` 之后、或者直接由电机端在收到 `0x89` 时自动失能
+if (cmd >= 0x50 && cmd != 0x5C) {       // cmd=0x09 < 0x50, 不进广播分支
+    OnCanCmd(cmd, RxData, RxHeader.DLC);
+}
+else if (id == boardConfig.canNodeId) { // 只有 id==nodeID 才进单播分支
+    OnCanCmd(cmd, RxData, RxHeader.DLC);
+}
+```
 
-**验收标准**：
-- `!STOP` 在任何状态下（运动中/空闲）发出后 200ms 内电机实际停止（CAN 0x23 位置不再变化）
-- `EmergencyStop()` 返回 `"ok"` 时，**所有电机 state == FINISH 或 STOP**
-- 与 `!STALL_UNLOCK` 走 0x5B 路径一样，`!STOP` 也应该走 0x89 路径
+对 `StdId=0x89` 的实际处理结果：
+- 实际广播区间是 `0x50~0x7F`（不是 `0x80~0xBF`），0x09 不在范围内
+- J1（canNodeId=1）：id==nodeID → 调 `OnCanCmd(0x09)`，但 `case 0x09` 在 `interface_can.cpp` 不存在 → **J1 也丢弃**
+- J2~J6 / 地轨 / 夹爪：id≠nodeID → **全部丢弃**
+- 结果：**0 个电机收到 STOP 命令**
+
+**根因 2：代码注释与实现自相矛盾**
+
+`BroadcastEStop()` 注释写"落入电机端广播区间 0x80~0xBF，所有电机节点无条件响应"，但电机实际代码用 `cmd >= 0x50` 判断广播。这是编码设计错误——11-bit StdId 用 `(nodeID<<7)|cmd` 编码时 cmd 只有 7 bit（0x00~0x7F），根本不存在 0x80~0xBF 区间。
+
+**对比参考 — `BroadcastUnlock()` 的成功路径**：
+
+```cpp
+void CtrlStepMotor::BroadcastUnlock()
+{
+    txHeader.StdId = 0x5B;  // (0<<7)|0x5B,cmd=0x5B ∈ 广播区间 0x50~0x7F
+    // ...
+}
+```
+0x5B 的 cmd=0x5B 真正落在广播区间，所有电机响应 `case 0x5B`，UNLOCK 能正常工作。
+
+**根因 3：`EmergencyStop()` 后续 3 行的副作用**
+
+```cpp
+void DummyRobot::CommandHandler::EmergencyStop()  // dummy_robot.cpp:749-757
+{
+    context->motorJ[1]->BroadcastEStop();  // 0x89 帧（已被电机丢弃，见根因 1）
+    context->jointsStateFlag = 0;          // ← 掩盖电机真实状态，IsMoving() 假返 false
+    context->isEnabled = false;             // ← 停止 5kHz 实时环下发新位置，但不直接抱闸电机
+    ClearFifo();                            // ← 清指令队列
+}
+```
+
+- `isEnabled=false` 只让 5kHz 实时环（`main.cpp:35-58`，检查 `dummy.IsEnabled()`）不再下发新位置命令
+- 但电机继续执行**最后一次下发的位置命令**——这解释了"现象 B"中机械臂仍跑到 home/rest 才停
+- `jointsStateFlag=0` 让 `IsMoving()` 返回 false，掩盖电机真实运行状态
+
+**当前 `IsMoving()` 逻辑**（`dummy_robot.cpp:675-677`）：
+
+```cpp
+bool DummyRobot::IsMoving()
+{
+    return jointsStateFlag != 0b1111110;
+}
+```
+
+已不是位置误差判断，而是基于 `jointsStateFlag` 位运算（v2.7 A3 修复后）。`jointsStateFlag` 在 0x23 回包中由 `UpdateAngleCallback` 维护，但 `EmergencyStop()` 手动清零后让 IsMoving 失去意义。
 
 **相关代码**：
-- `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp:739-755` `DummyRobot::CommandHandler::EmergencyStop()`
-- `firmware/ref_core_f405/UserApp/protocols/cmd_protocol.cpp`（查找是否有 `0x89` 发送函数）
-- `firmware/ref_core_f405/Bsp/communication/interface_can.cpp`（CAN 发送层）
-- `firmware/motor_fw_f103_*/Ctrl/Motor/motor.cpp`（0x89 emergency 制动实现）
+- `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp:749-757` `DummyRobot::CommandHandler::EmergencyStop()`
+- `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp:675-677` `DummyRobot::IsMoving()`
+- `firmware/ref_core_f405/Robot/actuators/ctrl_step/ctrl_step.cpp:423-429` `CtrlStepMotor::BroadcastEStop()`
+- `firmware/ref_core_f405/Robot/actuators/ctrl_step/ctrl_step.cpp:415-419` `CtrlStepMotor::BroadcastUnlock()`（对比参考）
+- `firmware/ref_core_f405/UserApp/main.cpp:35-58` 5kHz 实时环 `IsEnabled()` 检查点
+- `firmware/motor_fw_f103_35/Core/Src/can.c:189-211` 电机 Rx 路由（35/42/57/gripper 同构，文件名 `motor_fw_f103_XX/Core/Src/can.c`）
+- `firmware/motor_fw_f103_35/UserApp/protocols/interface_can.cpp:358-369` 电机 `case 0x89` 急停处理（35/42/57/gripper 同构，文件名 `motor_fw_f103_XX/UserApp/protocols/interface_can.cpp`）
 
 ---
 
