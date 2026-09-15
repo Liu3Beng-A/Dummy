@@ -241,7 +241,7 @@ public:
     // 启动后通过 SyncAllMotorAcceleration() 从电机 EEPROM 读真实值回填
     // FALLBACK_JOINT_ACCELERATION 已提升为文件作用域 constexpr（前面定义），
     // 便于 ComputeSyncSpeeds 静态函数访问；此处不再重复声明。
-    const float DEFAULT_JOINT_ACCELERATION = 150.0f;  // r/s²（电机端默认 1000）
+    const float DEFAULT_JOINT_ACCELERATION = 150.0f;  
 
     // v2.6 缓存：每个电机轴当前生效加速度（r/s²），由 CAN 0x2C 回包更新
     // 索引: [0]=地轨(node=9), [1~6]=关节(node=1~6), [7]=夹爪(node=8)
