@@ -61,17 +61,17 @@ static CAN_TxHeaderTypeDef txHeader =
 extern DummyRobot dummy;
 
 // ── PID 合并回包状态（修复 P2） ──
-// motorDceKps[8] 索引: [0]=地轨(node=9), [1~6]=关节(node=1~6), [7]=夹爪(node=8)
+// [v3.1] PID 缓存索引: [0]=空闲(ALL代理, 无电机), [1..6]=J1~J6(node=1~6), [7]=J7/地轨(node=7), [8]=夹爪(node=8)
 // 为每个节点维护一个计数器，收到 0x28(Kp)/0x29(Kv)/0x2A(Ki)/0x2B(Kd) 之一就+1，
 // 4个都到后 printf() 合并回包（走 _write 到 USB+UART4）。
-static int32_t _pid_tmp_kp[8] = {0}, _pid_tmp_kv[8] = {0};
-static int32_t _pid_tmp_ki[8] = {0}, _pid_tmp_kd[8] = {0};
-static uint8_t _pid_rcv_cnt[8] = {0};
+static int32_t _pid_tmp_kp[9] = {0}, _pid_tmp_kv[9] = {0};
+static int32_t _pid_tmp_ki[9] = {0}, _pid_tmp_kd[9] = {0};
+static uint8_t _pid_rcv_cnt[9] = {0};
 
 // 辅助：将 CAN nodeID 转为 motorDceKps[] 数组索引
 static inline int _pid_node_to_idx(uint8_t nodeId) {
-    if (nodeId == 9) return 0;      // 地轨
-    if (nodeId == 8) return 7;      // 夹爪
+    if (nodeId == 7) return 7;      // [v3.1] J7/地轨（nodeID 9→7）
+    if (nodeId == 8) return 8;      // [v3.1] 夹爪（避免与 J7 共享 idx=7）
     return (int)nodeId;              // 关节 1~6 → 索引 1~6
 }
 
@@ -88,19 +88,19 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
         uint8_t id = rxHeader->StdId >> 7; // 7Bits ID (0~127)
         uint8_t cmd = rxHeader->StdId & 0x7F; // 7Bits CMD (0x00~0x7F普通, 0x80~0xBF广播)
 
-        // ── 地轨电机 (nodeID=9) 的 CAN 回包处理 ──
-        if (id == 9)
+        // ── J7/地轨电机 (nodeID=7) 的 CAN 回包处理 ──
+        if (id == 7)
         {
             switch (cmd)
             {
                 case 0x23:
-                    dummy.motorJ[0]->UpdateAngleCallback(*(float*)(data), data[4]);
+                    dummy.motorJ[7]->UpdateAngleCallback(*(float*)(data), data[4]);
                     // 更新地轨位置（角度 → mm）
                     // angle = 圈数 × 360°，丝杆 1605 = 5mm/圈
-                    dummy.currentRailPos = dummy.motorJ[0]->angle / 360.0f * 5.0f;
+                    dummy.currentRailPos = dummy.motorJ[7]->angle / 360.0f * 5.0f;
                     break;
                 case 0x25:
-                    memcpy(&dummy.motorJ[0]->temperature, data, sizeof(uint32_t));
+                    memcpy(&dummy.motorJ[7]->temperature, data, sizeof(uint32_t));
                     break;
                 case 0x28:
                     {
@@ -160,13 +160,14 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     break;
                 case 0x2C:
                     // v3.0: 缓存加速度值 + 写入时间戳，移除 ISR 内 printf（消除与 ASCII 任务的 UART TX 竞争）
-                    dummy.jointAccRuntime[0] = *(float*)data;
-                    dummy.jointAccLastUpdateMs[0] = HAL_GetTick();
+                    // [v3.1] J7/地轨 → runtime[7]（runtime[0] 留给 ALL 代理空闲槽）
+                    dummy.jointAccRuntime[7] = *(float*)data;
+                    dummy.jointAccLastUpdateMs[7] = HAL_GetTick();
                     break;
                 case 0x2D:
                     // v3.0: 缓存电流限制值 + 时间戳，移除 ISR 内 printf
-                    dummy.jointCurrentLimitRuntime[0] = *(float*)data;
-                    dummy.jointCurrentLimitLastUpdateMs[0] = HAL_GetTick();
+                    dummy.jointCurrentLimitRuntime[7] = *(float*)data;
+                    dummy.jointCurrentLimitLastUpdateMs[7] = HAL_GetTick();
                     break;
                 case 0x5A:
                     // 电机堵转广播: data[0]=nodeID, data[1]=1=TRIGGER/2=DONE/3=TIMEOUT/4=HEARTBEAT
@@ -203,8 +204,9 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     break;
                 case 0x7C:
                     // 旧堵转上报 (兼容旧固件)
+                    // [v3.1] J7/地轨 nodeID 9→7
                     if (data[1] == 1)
-                        dummy.SetStallMode(9);
+                        dummy.SetStallMode(7);
                     break;
                 default:
                     break;
@@ -398,13 +400,14 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     break;
                 case 0x2C:
                     // v3.0: 缓存夹爪实际加速度 + 时间戳，移除 ISR 内 printf
-                    dummy.jointAccRuntime[7] = *(float*)data;
-                    dummy.jointAccLastUpdateMs[7] = HAL_GetTick();
+                    // [v3.1] 夹爪迁移到 runtime[8]（runtime[7] 留给 J7/地轨）
+                    dummy.jointAccRuntime[8] = *(float*)data;
+                    dummy.jointAccLastUpdateMs[8] = HAL_GetTick();
                     break;
                 case 0x2D:
                     // v3.0: 缓存夹爪电流限制 + 时间戳，移除 ISR 内 printf
-                    dummy.jointCurrentLimitRuntime[7] = *(float*)data;
-                    dummy.jointCurrentLimitLastUpdateMs[7] = HAL_GetTick();
+                    dummy.jointCurrentLimitRuntime[8] = *(float*)data;
+                    dummy.jointCurrentLimitLastUpdateMs[8] = HAL_GetTick();
                     break;
                 case 0x5A:
                     // 夹爪固件不支持堵转检测，忽略

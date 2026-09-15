@@ -508,7 +508,7 @@ class RobotSerialAssistant:
         node_f.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(node_f, text="节点:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
         self.cb_acc_node = ttk.Combobox(node_f, width=6,
-                                         values=[str(i) for i in [9, 1, 2, 3, 4, 5, 6, 8]],
+                                         values=[str(i) for i in [1, 2, 3, 4, 5, 6, 7, 8]],
                                          state="readonly")
         self.cb_acc_node.current(0)
         self.cb_acc_node.pack(side=tk.LEFT, padx=4)
@@ -522,7 +522,7 @@ class RobotSerialAssistant:
                   relief=tk.FLAT, command=lambda: self.send_cmd("#SYNC_ACC")
                   ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
-        # 加速度 v2.6：单位电机轴 r/s²，所有节点统一入口（地轨 9 / 关节 1~6 / 夹爪 8）
+        # 加速度 v2.6：单位电机轴 r/s²，所有节点统一入口（地轨 7 / 关节 1~6 / 夹爪 8）
         acc_f = ttk.Frame(parent)
         acc_f.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(acc_f, text="加速度 (r/s²):", font=("Arial", 10)).pack(side=tk.LEFT)
@@ -629,7 +629,7 @@ class RobotSerialAssistant:
         node_f.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(node_f, text="节点:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
         self.cb_pid_node = ttk.Combobox(node_f, width=5,
-                                        values=[str(i) for i in [9, 1, 2, 3, 4, 5, 6, 8]],
+                                        values=[str(i) for i in [1, 2, 3, 4, 5, 6, 7, 8]],
                                         state="readonly")
         self.cb_pid_node.current(0)
         self.cb_pid_node.pack(side=tk.LEFT, padx=4)
@@ -644,9 +644,9 @@ class RobotSerialAssistant:
 
         self.ent_pid, self.scl_pid, self.lbl_pid_val = {}, {}, {}
         # 建议参数：来自 #GET_PID 实测值（2026-08-13），按节点独立记录。
-        # 地轨(node=9) / 关节(node=1~6) / 夹爪(node=8) 查询后自动回显到界面控件。
+        # 地轨(node=7) / 关节(node=1~6) / 夹爪(node=8) 查询后自动回显到界面控件。
         pid_defaults = {
-            9:  {"kp": 180,  "kv": 600, "ki": 30,  "kd": 300},
+            7:  {"kp": 180,  "kv": 600, "ki": 30,  "kd": 300},
             1:  {"kp": 200,  "kv": 500, "ki": 300, "kd": 250},
             2:  {"kp": 200,  "kv": 500, "ki": 300, "kd": 250},
             3:  {"kp": 200,  "kv": 500, "ki": 300, "kd": 250},
@@ -714,7 +714,7 @@ class RobotSerialAssistant:
         ttk.Label(tbl, text="Ki",    font=hdr_font, width=6, anchor="center").grid(row=0, column=3, padx=1, pady=1)
         ttk.Label(tbl, text="Kd",    font=hdr_font, width=6, anchor="center").grid(row=0, column=4, padx=1, pady=1)
         # 数据行
-        node_names = {9: "地轨", 1: "J1", 2: "J2", 3: "J3", 4: "J4", 5: "J5", 6: "J6", 8: "夹爪"}
+        node_names = {7: "地轨", 1: "J1", 2: "J2", 3: "J3", 4: "J4", 5: "J5", 6: "J6", 8: "夹爪"}
         for row_i, (node, name) in enumerate(node_names.items(), start=1):
             bg = "#f1f3f5" if row_i % 2 == 0 else "white"
             ttk.Label(tbl, text=name, font=cell_font, width=6, anchor="center",
@@ -1669,10 +1669,10 @@ class RobotSerialAssistant:
                 acc = 1.0
             elif acc > 5000.0:
                 acc = 5000.0
-            if node in (1, 2, 3, 4, 5, 6, 8, 9):
+            if node in (1, 2, 3, 4, 5, 6, 7, 8):
                 self.send_cmd(f"#ACC_J {node} {acc}")
             else:
-                messagebox.showerror("错误", "节点必须为1-6/8/9")
+                messagebox.showerror("错误", "节点必须为1-8（7=地轨）")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
@@ -1685,10 +1685,10 @@ class RobotSerialAssistant:
                 acc = 1.0
             elif acc > 5000.0:
                 acc = 5000.0
-            if node in (1, 2, 3, 4, 5, 6, 8, 9):
+            if node in (1, 2, 3, 4, 5, 6, 7, 8):
                 self.send_cmd(f"#ACC_J {node} {acc} &")
             else:
-                messagebox.showerror("错误", "节点必须为1-6/8/9")
+                messagebox.showerror("错误", "节点必须为1-8（7=地轨）")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
@@ -1705,10 +1705,10 @@ class RobotSerialAssistant:
             if i_limit > 3.0:
                 i_limit = 3.0
             # 1~6关节/地轨/夹爪均可设置电流限制（应用：不写入EEPROM）
-            if node in (1, 2, 3, 4, 5, 6, 8, 9):
+            if node in (1, 2, 3, 4, 5, 6, 7, 8):
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit}")
             else:
-                messagebox.showerror("错误", "节点必须为1-6/8/9")
+                messagebox.showerror("错误", "节点必须为1-8（7=地轨）")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
@@ -1725,26 +1725,28 @@ class RobotSerialAssistant:
                 return
             if i_limit > 3.0:
                 i_limit = 3.0
-            if node in (1, 2, 3, 4, 5, 6, 8, 9):
+            if node in (1, 2, 3, 4, 5, 6, 7, 8):
                 self.send_cmd(f"#I_LIMIT_J {node} {i_limit} &")
             else:
-                messagebox.showerror("错误", "节点必须为1-6/8/9")
+                messagebox.showerror("错误", "节点必须为1-8（7=地轨）")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
 
     def send_rail_acc(self):
-        # v2.6 删除：地轨加速度走 send_acc + 节点=9
-        self.log("v2.6: 请用上方统一加速度块（节点选 9）", "WARN")
+        # v2.6 删除：地轨加速度走 send_acc + 节点=7
+        self.log("v3.1: 请用上方统一加速度块（节点选 7=地轨）", "WARN")
 
     def set_rail_current(self, current):
         """设置地轨电机电流限制"""
-        self.send_cmd(f"#I_LIMIT_J 9 {current}")
+        # [v3.1] 地轨 CAN ID 从 9 改为 7
+        self.send_cmd(f"#I_LIMIT_J 7 {current}")
 
     def query_rail_current(self):
-        self.send_cmd("#GETI 9")
+        # [v3.1] 地轨 CAN ID 从 9 改为 7
+        self.send_cmd("#GETI 7")
 
     def save_rail_current(self):
-        self.log("请用上方节点选择器(选节点9)查询/应用/保存电流", "WARN")
+        self.log("请用上方节点选择器(选节点7=地轨)查询/应用/保存电流", "WARN")
 
     def send_movej(self):
         try:
@@ -1770,10 +1772,10 @@ class RobotSerialAssistant:
             rail_current = float(self.ent_rail_torque.get())
             torques = [float(ent.get()) for ent in self.ent_torques]  # J1~J6
             gripper_current = float(self.ent_gripper_torque.get())
-            # $c0(地轨),c1~c6(关节) — 夹爪用 !HAND_I 单独控制
-            cmd = f"${rail_current:.2f},{torques[0]:.2f},{torques[1]:.2f},{torques[2]:.2f},{torques[3]:.2f},{torques[4]:.2f},{torques[5]:.2f}"
+            # [v3.1] 新格式：$c1,c2,c3,c4,c5,c6,c7(rail) — j7(rail) 移到第7位，夹爪用 !HAND_I 单独控制
+            cmd = f"${torques[0]:.2f},{torques[1]:.2f},{torques[2]:.2f},{torques[3]:.2f},{torques[4]:.2f},{torques[5]:.2f},{rail_current:.2f}"
             self.send_cmd(cmd)
-            self.log(f"已发送力矩: Rail={rail_current}A, J1~J6={torques[0]:.2f}~{torques[5]:.2f}A, Gripper={gripper_current}A (!HAND_I)", "INFO")
+            self.log(f"已发送力矩: J1~J6={torques[0]:.2f}~{torques[5]:.2f}A, Rail(地轨)={rail_current}A, Gripper={gripper_current}A (!HAND_I)", "INFO")
             # 夹爪力矩单独发 !HAND_I
             if gripper_current > 0:
                 self.send_cmd(f"!HAND_I {gripper_current:.2f}")
@@ -1817,8 +1819,8 @@ class RobotSerialAssistant:
             error_j1 = target_j1 - current_j1_pos
             current_j1_pos += error_j1 * kp
 
-            # MoveJ: >Rail,j1~j6,speed  (7个值)
-            cmd = f">{rail_pos:.2f},{current_j1_pos:.2f},{base_joints[0]},{base_joints[1]},{base_joints[2]},{base_joints[3]},{speed}"
+            # [v3.1] 新格式 MoveJ: >j1,j2,j3,j4,j5,j6,j7(rail),speed  (8 个值, j7/地轨在第7位)
+            cmd = f">{current_j1_pos:.2f},{base_joints[0]},{base_joints[1]},{base_joints[2]},{base_joints[3]},{base_joints[4]},{rail_pos:.2f},{speed}"
             try:
                 self.serial_port.write((cmd + "\n").encode('utf-8'))
                 if int(t * 50) % 20 == 0:

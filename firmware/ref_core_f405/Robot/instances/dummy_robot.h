@@ -13,20 +13,22 @@
 static constexpr float SLIDER_TO_RPS = 0.30f;
 
 // === 各轴物理上限（r/s），与电机端 boardConfig.velocityLimit 对齐 ===
+// [v3.1] index [0]=ALL代理, [1]=J1, [2]=J2, [3]=J3, [4]=J4, [5]=J5, [6]=J6, [7]=J7/地轨
 // 注意：超过物理极限会失步/堵转，由电机端 FOC/EMF 约束
-static constexpr float AXIS_MAX_RPS[7] = {
-    30.0f,   // 地轨
+static constexpr float AXIS_MAX_RPS[8] = {
+    0.0f,    // ALL 代理（不参与速度规划）
     30.0f,   // J1
     30.0f,   // J2
     30.0f,   // J3
     30.0f,   // J4
     30.0f,   // J5
-    30.0f    // J6
+    30.0f,   // J6
+    30.0f    // J7/地轨（直连丝杆1605）
 };
 
 // 电机减速比（用于距离 → 电机转数换算）
-// index [0]=地轨 (reduction=1, 直连), [1~5]=J1~J5 (50), [6]=J6 (30)
-static constexpr uint8_t MOTOR_REDUCTION[7] = {1, 50, 50, 50, 50, 50, 30};
+// [v3.1] index [0]=ALL代理(无减速), [1~6]=J1~J6(50), [7]=J7/地轨(1, 直连丝杆1605)
+static constexpr uint8_t MOTOR_REDUCTION[8] = {1, 50, 50, 50, 50, 50, 30, 1};
 
 // 夹爪速度上限（电机轴 r/s，与35关节电机一致）
 // 夹爪 CAN ID=8，使用35电机 reduction=16，输出轴速度 = 20/16 ≈ 1.25 r/s
@@ -168,11 +170,11 @@ public:
 
     float targetCurrents[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
-    // CAN 回传的电机 PID 参数缓存（用于查询）
-    int32_t motorDceKps[8] = {0};
-    int32_t motorDceKvs[8] = {0};
-    int32_t motorDceKis[8] = {0};
-    int32_t motorDceKds[8] = {0};
+    // [v3.1] CAN 回传的电机 PID 参数缓存（用于查询，未来启用时已扩维到 9）
+    int32_t motorDceKps[9] = {0};
+    int32_t motorDceKvs[9] = {0};
+    int32_t motorDceKis[9] = {0};
+    int32_t motorDceKds[9] = {0};
 
 public:
     explicit DummyRobot(CAN_HandleTypeDef* _hcan);
@@ -243,19 +245,17 @@ public:
     // 便于 ComputeSyncSpeeds 静态函数访问；此处不再重复声明。
     const float DEFAULT_JOINT_ACCELERATION = 150.0f;  
 
-    // v2.6 缓存：每个电机轴当前生效加速度（r/s²），由 CAN 0x2C 回包更新
-    // 索引: [0]=地轨(node=9), [1~6]=关节(node=1~6), [7]=夹爪(node=8)
-    // 初值 0 表示未知，ComputeSyncSpeeds 等算法应使用 FALLBACK_JOINT_ACCELERATION
-    float jointAccRuntime[8] = {0};
+    // [v3.1] runtime 索引: [1..7]=J1~J7/地轨, [8]=夹爪
+    float jointAccRuntime[9] = {0};
     // v3.0 (2026-09-01): 与 jointAccRuntime[] 配对的"最后更新 ms 时间戳"
     // 解决 #GETJACC 异步 printf 与 ASCII 任务 UART TX 竞争导致的合并怪行
     // 同步查询通过比对时间戳判断 CAN 回包是否到达
-    uint32_t jointAccLastUpdateMs[8] = {0};
+    uint32_t jointAccLastUpdateMs[9] = {0};
 
     // v3.0: 新增 0x2D 电流限制回包缓存与时间戳（与加速度对称）
     // ASCII #GETI 同步查询使用
-    float     jointCurrentLimitRuntime[8]      = {0};
-    uint32_t  jointCurrentLimitLastUpdateMs[8] = {0};
+    float     jointCurrentLimitRuntime[9]      = {0};
+    uint32_t  jointCurrentLimitLastUpdateMs[9] = {0};
 
     const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_SEQUENTIAL;
 
@@ -270,8 +270,8 @@ public:
     uint32_t lastServoTime = 0;                            
 
     // 分布式通讯执行器操作列表
-    // motorJ 包含 7 个空间: index[0] 作为广播掩码，index[1-6] 为 6个活动物理自由度
-    CtrlStepMotor* motorJ[7] = {nullptr};
+    // [v3.1] motorJ[0]=ALL 广播代理 (ID=0, 占位), motorJ[1..7]=J1~J7(含地轨 ID=7)
+    CtrlStepMotor* motorJ[8] = {nullptr};
     StepHand* hand = {nullptr};
 
     // 系统调度与控制函数对外调用面板

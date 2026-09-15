@@ -147,13 +147,15 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s.find("STALL_EN") != std::string::npos)
         {
-            for (int i = 0; i < 7; i++)
+            // [v3.1] motorJ[0]=ALL代理不参与，i 从 1 遍历到 7（含 J7/地轨）
+            for (int i = 1; i <= 7; i++)
                 dummy.motorJ[i]->SetEnableStallProtect(true);
             Respond(_responseChannel, "ok stall protect enabled");
         }
         else if (s.find("STALL_DIS") != std::string::npos)
         {
-            for (int i = 0; i < 7; i++)
+            // [v3.1] motorJ[0]=ALL代理不参与，i 从 1 遍历到 7（含 J7/地轨）
+            for (int i = 1; i <= 7; i++)
                 dummy.motorJ[i]->SetEnableStallProtect(false);
             Respond(_responseChannel, "ok stall protect disabled");
         }
@@ -344,10 +346,10 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             uint32_t kv, node;
             sscanf(_cmd, "#SET_DCE_KV %lu %lu", &node, &kv);
-            /* 修复 P4: node=9(地轨) 走 motorJ[0], node=0 改为报错, 关节范围改为 1~6 */
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKv(kv);
-                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KV [%lu]", kv);
+            /* [v3.1] node=7(J7/地轨) 走 motorJ[7], node=0 改为报错, 关节范围 1~6 */
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKv(kv);
+                Respond(_responseChannel, "ok SET MOTOR [7] DCE_KV [%lu]", kv);
             }
             else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKv(kv);
@@ -358,16 +360,16 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "ok SET MOTOR [8] DCE_KV [%lu]", kv);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV wrong (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KP") != std::string::npos)
         {
             uint32_t kp, node;
             sscanf(_cmd, "#SET_DCE_KP %lu %lu", &node, &kp);
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKp(kp);
-                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KP [%lu]", kp);
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKp(kp);
+                Respond(_responseChannel, "ok SET MOTOR [7] DCE_KP [%lu]", kp);
             }
             else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKp(kp);
@@ -378,16 +380,16 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "ok SET MOTOR [8] DCE_KP [%lu]", kp);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP wrong (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KI") != std::string::npos)
         {
             uint32_t ki, node;
             sscanf(_cmd, "#SET_DCE_KI %lu %lu", &node, &ki);
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKi(ki);
-                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KI [%lu]", ki);
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKi(ki);
+                Respond(_responseChannel, "ok SET MOTOR [7] DCE_KI [%lu]", ki);
             }
             else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKi(ki);
@@ -398,16 +400,16 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "ok SET MOTOR [8] DCE_KI [%lu]", ki);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI wrong (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KD") != std::string::npos)
         {
             uint32_t kd, node;
             sscanf(_cmd, "#SET_DCE_KD %lu %lu", &node, &kd);
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKd(kd);
-                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KD [%lu]", kd);
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET MOTOR [7] DCE_KD [%lu]", kd);
             }
             else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKd(kd);
@@ -418,7 +420,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "ok SET MOTOR [8] DCE_KD [%lu]", kd);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD wrong (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_PID") != std::string::npos)
@@ -426,12 +428,12 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             /* 新命令: 一次性设置 4 个 PID 参数 */
             uint32_t node, kp, kv, ki, kd;
             sscanf(_cmd, "#SET_PID %lu %lu %lu %lu %lu", &node, &kp, &kv, &ki, &kd);
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKp(kp);
-                dummy.motorJ[0]->SetDceKv(kv);
-                dummy.motorJ[0]->SetDceKi(ki);
-                dummy.motorJ[0]->SetDceKd(kd);
-                Respond(_responseChannel, "ok SET PID [9] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKp(kp);
+                dummy.motorJ[7]->SetDceKv(kv);
+                dummy.motorJ[7]->SetDceKi(ki);
+                dummy.motorJ[7]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [7] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
             } else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKp(kp);
                 dummy.motorJ[node]->SetDceKv(kv);
@@ -445,20 +447,20 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 dummy.hand->SetDceKd(kd);
                 Respond(_responseChannel, "ok SET PID [8] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
             } else {
-                Respond(_responseChannel, "error SET PID [%lu] wrong node (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET PID [%lu] wrong node (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("GET_PID") != std::string::npos)
         {
             uint32_t node;
             sscanf(_cmd, "#GET_PID %lu", &node);
-            if (node == 9)
+            if (node == 7)
             {
-                dummy.motorJ[0]->QueryDceKp();
-                dummy.motorJ[0]->QueryDceKv();
-                dummy.motorJ[0]->QueryDceKi();
-                dummy.motorJ[0]->QueryDceKd();
-                Respond(_responseChannel, "ok QUERY PID RAIL [9]");
+                dummy.motorJ[7]->QueryDceKp();
+                dummy.motorJ[7]->QueryDceKv();
+                dummy.motorJ[7]->QueryDceKi();
+                dummy.motorJ[7]->QueryDceKd();
+                Respond(_responseChannel, "ok QUERY PID RAIL [7]");
             }
             else if (node >= 1 && node <= 6)
             {
@@ -478,17 +480,17 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             }
             else
             {
-                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 9 for rail, 1~6 for joints, 8 for gripper)", node);
+                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 7 for rail, 1~6 for joints, 8 for gripper)", node);
             }
         }
         else if (s.find("REBOOT") != std::string::npos)
         {
             uint32_t node;
             sscanf(_cmd, "#REBOOT %lu", &node);
-            if (node == 9)
+            if (node == 7)
             {
-                dummy.motorJ[0]->Reboot();
-                Respond(_responseChannel, "ok REBOOT RAIL [9]");
+                dummy.motorJ[7]->Reboot();
+                Respond(_responseChannel, "ok REBOOT RAIL [7]");
             }
             else if (node >= 1 && node <= 6)
             {
@@ -568,10 +570,10 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 if (S < 0)        S = 0;
                 if (S > 5000.0f)  S = 5000.0f;
                 bool persist = (saveFlag == '&');
-                if (node == 9)
+                if (node == 7)
                 {
-                    dummy.motorJ[0]->SetAcceleration_persist(S, persist);
-                    Respond(_responseChannel, "ok SET MOTOR [9] ACCELERATION [%.2f] r/s^2", S);
+                    dummy.motorJ[7]->SetAcceleration_persist(S, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [7] ACCELERATION [%.2f] r/s^2", S);
                 }
                 else if (node >= 1 && node <= 6)
                 {
@@ -586,7 +588,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 else
                 {
                     Respond(_responseChannel,
-                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong (use 9=rail, 1~6=joints, 8=gripper)", node, S);
+                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong (use 7=rail, 1~6=joints, 8=gripper)", node, S);
                 }
             }
             else
@@ -609,7 +611,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "error SET MOTOR [%lu] SPEED [%f] is wrong", node, S);
             }
         }
-        // v2.6 删除 #ACC_RAIL：单位统一后地轨走 #ACC_J 9 即可
+        // v2.6 删除 #ACC_RAIL：单位统一后地轨走 #ACC_J 7 即可
         else if (s.find("I_LIMIT_J") != std::string::npos)
         {
             float I;
@@ -619,10 +621,10 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             if (ret >= 2)
             {
                 bool persist = (saveFlag == '&');
-                if (node == 9)
+                if (node == 7)
                 {
-                    dummy.motorJ[0]->SetCurrentLimit_persist(I, persist);
-                    Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
+                    dummy.motorJ[7]->SetCurrentLimit_persist(I, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [7] CURRENT_LIMIT [%f] (地轨)", I);
                 }
                 else if (node >= 1 && node <= 6)
                 {
@@ -649,13 +651,13 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             // v3.0 (2026-09-01): 同步查询，避免与 CAN ISR 异步 printf 在 UART TX 上竞争
             // 步骤: 记旧时间戳 → 发查询 → 轮询新时间戳(30ms) → 同步打印一行
-            // 索引映射: node=9 → idx=0; node=1~6 → idx=node; node=8 → idx=7
+            // [v3.1] 索引映射: node=7(J7/地轨) → idx=7; node=1~6 → idx=node; node=8 → idx=8
             uint32_t node;
             sscanf(_cmd, "#GETJACC %lu", &node);
             int8_t idx = -1;
-            if (node == 9)        { idx = 0; }
-            else if (node >= 1 && node <= 6) { idx = (int8_t)node; }
-            else if (node == 8)   { idx = 7; }
+            if (node >= 1 && node <= 6) { idx = (int8_t)node; }
+            else if (node == 7)         { idx = 7; }
+            else if (node == 8)         { idx = 8; }
 
             if (idx < 0)
             {
@@ -665,7 +667,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             {
                 uint32_t old_ms = dummy.jointAccLastUpdateMs[idx];
                 // 触发 CAN 0x2C 查询
-                if (node == 9)        dummy.motorJ[0]->QueryAcceleration();
+                if (node == 7)        dummy.motorJ[7]->QueryAcceleration();
                 else if (node == 8)   dummy.hand->QueryAcceleration();
                 else                  dummy.motorJ[node]->QueryAcceleration();
 
@@ -678,17 +680,17 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 
                 if (dummy.jointAccLastUpdateMs[idx] != old_ms) {
                     // 成功：单行同步输出，避免 UART TX 竞争
-                    if (node == 9) {
-                        Respond(_responseChannel, "ok ACC MOTOR [9] = %.2f r/s^2", dummy.jointAccRuntime[0]);
+                    if (node == 7) {
+                        Respond(_responseChannel, "ok ACC MOTOR [7] = %.2f r/s^2", dummy.jointAccRuntime[7]);
                     } else if (node == 8) {
-                        Respond(_responseChannel, "ok ACC MOTOR [8] = %.2f r/s^2 (夹爪)", dummy.jointAccRuntime[7]);
+                        Respond(_responseChannel, "ok ACC MOTOR [8] = %.2f r/s^2 (夹爪)", dummy.jointAccRuntime[8]);
                     } else {
                         Respond(_responseChannel, "ok ACC MOTOR [%lu] = %.2f r/s^2", node, dummy.jointAccRuntime[idx]);
                     }
                 } else {
                     // 超时：返回 error，不打印旧值（避免误导）
-                    if (node == 9) {
-                        Respond(_responseChannel, "error GETJACC [9] timeout (CAN no echo)");
+                    if (node == 7) {
+                        Respond(_responseChannel, "error GETJACC [7] timeout (CAN no echo)");
                     } else if (node == 8) {
                         Respond(_responseChannel, "error GETJACC [8] timeout (CAN no echo)");
                     } else {
@@ -700,12 +702,13 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         else if (s.find("GETI") != std::string::npos)
         {
             // v3.0: 同步查询电流限制，与 GETJACC 同模式
+            // [v3.1] 索引映射: node=7(J7/地轨) → idx=7; node=1~6 → idx=node; node=8 → idx=8
             uint32_t node;
             sscanf(_cmd, "#GETI %lu", &node);
             int8_t idx = -1;
-            if (node == 9)        idx = 0;
-            else if (node >= 1 && node <= 6) idx = (int8_t)node;
-            else if (node == 8)   idx = 7;
+            if (node >= 1 && node <= 6) idx = (int8_t)node;
+            else if (node == 7)         idx = 7;
+            else if (node == 8)         idx = 8;
 
             if (idx < 0)
             {
@@ -714,7 +717,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             else
             {
                 uint32_t old_ms = dummy.jointCurrentLimitLastUpdateMs[idx];
-                if (node == 9)        dummy.motorJ[0]->QueryCurrentLimit();
+                if (node == 7)        dummy.motorJ[7]->QueryCurrentLimit();
                 else if (node == 8)   dummy.hand->QueryCurrentLimit();
                 else                  dummy.motorJ[node]->QueryCurrentLimit();
 
@@ -725,16 +728,16 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 }
 
                 if (dummy.jointCurrentLimitLastUpdateMs[idx] != old_ms) {
-                    if (node == 9) {
-                        Respond(_responseChannel, "ok I_LIMIT MOTOR [9] = %.2f", dummy.jointCurrentLimitRuntime[0]);
+                    if (node == 7) {
+                        Respond(_responseChannel, "ok I_LIMIT MOTOR [7] = %.2f", dummy.jointCurrentLimitRuntime[7]);
                     } else if (node == 8) {
-                        Respond(_responseChannel, "ok I_LIMIT MOTOR [8] = %.2f (夹爪)", dummy.jointCurrentLimitRuntime[7]);
+                        Respond(_responseChannel, "ok I_LIMIT MOTOR [8] = %.2f (夹爪)", dummy.jointCurrentLimitRuntime[8]);
                     } else {
                         Respond(_responseChannel, "ok I_LIMIT MOTOR [%lu] = %.2f", node, dummy.jointCurrentLimitRuntime[idx]);
                     }
                 } else {
-                    if (node == 9) {
-                        Respond(_responseChannel, "error GETI [9] timeout (CAN no echo)");
+                    if (node == 7) {
+                        Respond(_responseChannel, "error GETI [7] timeout (CAN no echo)");
                     } else if (node == 8) {
                         Respond(_responseChannel, "error GETI [8] timeout (CAN no echo)");
                     } else {
@@ -933,13 +936,15 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("STALL_EN") != std::string::npos)
         {
-            for (int i = 0; i < 7; i++)
+            // [v3.1] motorJ[0]=ALL代理不参与，i 从 1 遍历到 7（含 J7/地轨）
+            for (int i = 1; i <= 7; i++)
                 dummy.motorJ[i]->SetEnableStallProtect(true);
             Respond(_responseChannel, "ok stall protect enabled");
         }
         else if (s.find("STALL_DIS") != std::string::npos)
         {
-            for (int i = 0; i < 7; i++)
+            // [v3.1] motorJ[0]=ALL代理不参与，i 从 1 遍历到 7（含 J7/地轨）
+            for (int i = 1; i <= 7; i++)
                 dummy.motorJ[i]->SetEnableStallProtect(false);
             Respond(_responseChannel, "ok stall protect disabled");
         }
@@ -1091,23 +1096,23 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("ACC_RAIL") != std::string::npos)
         {
-            // v2.6 删除 #ACC_RAIL：地轨走 #ACC_J 9 即可
-            Respond(_responseChannel, "error ACC_RAIL removed in v2.6, use #ACC_J 9 <r/s^2>");
+            // v2.6 删除 #ACC_RAIL：地轨走 #ACC_J 7 即可
+            Respond(_responseChannel, "error ACC_RAIL removed in v2.6, use #ACC_J 7 <r/s^2>");
         }
         else if (s.find("SYNC_ACC") != std::string::npos)
         {
             // v2.6 新增：触发 8 个电机 0x2C 查询，回包刷新 jointAccRuntime[]
             dummy.SyncAllMotorAcceleration();
-            Respond(_responseChannel, "ok SYNC_ACC dispatched (9+1~6+8, async)");
+            Respond(_responseChannel, "ok SYNC_ACC dispatched (7+1~6+8, async)");
         }
         else if (s.find("SET_DCE_KV") != std::string::npos)
         {
             uint32_t kv, node;
             sscanf(_cmd, "#SET_DCE_KV %lu %lu", &node, &kv);
-            /* 修复 P4: node=9(地轨) 走 motorJ[0], node=0 改为报错, 关节范围改为 1~6 */
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKv(kv);
-                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KV [%lu]", kv);
+            /* [v3.1] node=7(J7/地轨) 走 motorJ[7], node=0 改为报错, 关节范围 1~6 */
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKv(kv);
+                Respond(_responseChannel, "ok SET MOTOR [7] DCE_KV [%lu]", kv);
             }
             else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKv(kv);
@@ -1118,16 +1123,16 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 Respond(_responseChannel, "ok SET MOTOR [8] DCE_KV [%lu]", kv);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV wrong (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KP") != std::string::npos)
         {
             uint32_t kp, node;
             sscanf(_cmd, "#SET_DCE_KP %lu %lu", &node, &kp);
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKp(kp);
-                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KP [%lu]", kp);
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKp(kp);
+                Respond(_responseChannel, "ok SET MOTOR [7] DCE_KP [%lu]", kp);
             }
             else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKp(kp);
@@ -1138,16 +1143,16 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 Respond(_responseChannel, "ok SET MOTOR [8] DCE_KP [%lu]", kp);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP wrong (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KI") != std::string::npos)
         {
             uint32_t ki, node;
             sscanf(_cmd, "#SET_DCE_KI %lu %lu", &node, &ki);
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKi(ki);
-                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KI [%lu]", ki);
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKi(ki);
+                Respond(_responseChannel, "ok SET MOTOR [7] DCE_KI [%lu]", ki);
             }
             else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKi(ki);
@@ -1158,16 +1163,16 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 Respond(_responseChannel, "ok SET MOTOR [8] DCE_KI [%lu]", ki);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI wrong (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_DCE_KD") != std::string::npos)
         {
             uint32_t kd, node;
             sscanf(_cmd, "#SET_DCE_KD %lu %lu", &node, &kd);
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKd(kd);
-                Respond(_responseChannel, "ok SET MOTOR [9] DCE_KD [%lu]", kd);
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET MOTOR [7] DCE_KD [%lu]", kd);
             }
             else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKd(kd);
@@ -1178,7 +1183,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 Respond(_responseChannel, "ok SET MOTOR [8] DCE_KD [%lu]", kd);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD wrong (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD wrong (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("SET_PID") != std::string::npos)
@@ -1186,12 +1191,12 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             /* 新命令: 一次性设置 4 个 PID 参数 */
             uint32_t node, kp, kv, ki, kd;
             sscanf(_cmd, "#SET_PID %lu %lu %lu %lu %lu", &node, &kp, &kv, &ki, &kd);
-            if (node == 9) {
-                dummy.motorJ[0]->SetDceKp(kp);
-                dummy.motorJ[0]->SetDceKv(kv);
-                dummy.motorJ[0]->SetDceKi(ki);
-                dummy.motorJ[0]->SetDceKd(kd);
-                Respond(_responseChannel, "ok SET PID [9] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
+            if (node == 7) {
+                dummy.motorJ[7]->SetDceKp(kp);
+                dummy.motorJ[7]->SetDceKv(kv);
+                dummy.motorJ[7]->SetDceKi(ki);
+                dummy.motorJ[7]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [7] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
             } else if (node >= 1 && node <= 6) {
                 dummy.motorJ[node]->SetDceKp(kp);
                 dummy.motorJ[node]->SetDceKv(kv);
@@ -1205,20 +1210,20 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 dummy.hand->SetDceKd(kd);
                 Respond(_responseChannel, "ok SET PID [8] kp=%lu kv=%lu ki=%lu kd=%lu", kp, kv, ki, kd);
             } else {
-                Respond(_responseChannel, "error SET PID [%lu] wrong node (use 9=rail, 1~6=joints, 8=gripper)", node);
+                Respond(_responseChannel, "error SET PID [%lu] wrong node (use 7=rail, 1~6=joints, 8=gripper)", node);
             }
         }
         else if (s.find("GET_PID") != std::string::npos)
         {
             uint32_t node;
             sscanf(_cmd, "#GET_PID %lu", &node);
-            if (node == 9)
+            if (node == 7)
             {
-                dummy.motorJ[0]->QueryDceKp();
-                dummy.motorJ[0]->QueryDceKv();
-                dummy.motorJ[0]->QueryDceKi();
-                dummy.motorJ[0]->QueryDceKd();
-                Respond(_responseChannel, "ok QUERY PID RAIL [9]");
+                dummy.motorJ[7]->QueryDceKp();
+                dummy.motorJ[7]->QueryDceKv();
+                dummy.motorJ[7]->QueryDceKi();
+                dummy.motorJ[7]->QueryDceKd();
+                Respond(_responseChannel, "ok QUERY PID RAIL [7]");
             }
             else if (node >= 1 && node <= 6)
             {
@@ -1238,17 +1243,17 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             }
             else
             {
-                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 9 for rail, 1~6 for joints, 8 for gripper)", node);
+                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 7 for rail, 1~6 for joints, 8 for gripper)", node);
             }
         }
         else if (s.find("REBOOT") != std::string::npos)
         {
             uint32_t node;
             sscanf(_cmd, "#REBOOT %lu", &node);
-            if (node == 9)
+            if (node == 7)
             {
-                dummy.motorJ[0]->Reboot();
-                Respond(_responseChannel, "ok REBOOT RAIL [9]");
+                dummy.motorJ[7]->Reboot();
+                Respond(_responseChannel, "ok REBOOT RAIL [7]");
             }
             else if (node >= 1 && node <= 6)
             {
@@ -1311,10 +1316,10 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 if (S < 0)        S = 0;
                 if (S > 5000.0f)  S = 5000.0f;
                 bool persist = (saveFlag == '&');
-                if (node == 9)
+                if (node == 7)
                 {
-                    dummy.motorJ[0]->SetAcceleration_persist(S, persist);
-                    Respond(_responseChannel, "ok SET MOTOR [9] ACCELERATION [%.2f] r/s^2", S);
+                    dummy.motorJ[7]->SetAcceleration_persist(S, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [7] ACCELERATION [%.2f] r/s^2", S);
                 }
                 else if (node >= 1 && node <= 6)
                 {
@@ -1329,7 +1334,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 else
                 {
                     Respond(_responseChannel,
-                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong (use 9=rail, 1~6=joints, 8=gripper)", node, S);
+                            "error SET MOTOR [%lu] ACCELERATION [%f] is wrong (use 7=rail, 1~6=joints, 8=gripper)", node, S);
                 }
             }
             else
@@ -1340,7 +1345,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         else if (s.find("SYNC_ACC") != std::string::npos)
         {
             dummy.SyncAllMotorAcceleration();
-            Respond(_responseChannel, "ok SYNC_ACC dispatched (9+1~6+8, async)");
+            Respond(_responseChannel, "ok SYNC_ACC dispatched (7+1~6+8, async)");
         }
         else if (s.find("SPEED_J") != std::string::npos)
         {
@@ -1366,10 +1371,10 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             if (ret >= 2)
             {
                 bool persist = (saveFlag == '&');
-                if (node == 9)
+                if (node == 7)
                 {
-                    dummy.motorJ[0]->SetCurrentLimit_persist(I, persist);
-                    Respond(_responseChannel, "ok SET MOTOR [9] CURRENT_LIMIT [%f] (地轨)", I);
+                    dummy.motorJ[7]->SetCurrentLimit_persist(I, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [7] CURRENT_LIMIT [%f] (地轨)", I);
                 }
                 else if (node >= 1 && node <= 6)
                 {
