@@ -212,6 +212,57 @@ case 0x5C:
 
 ---
 
+### [FEAT-2] 新增「RGB 动态灯效 + 串口可配」 🟡
+
+**状态**：待开发（2026-09-16）
+
+**功能描述**：
+1. 在 `RGB` 类中新增 **极光效果**（多频 sin/cos 叠加 + HSV 调色）
+2. 设计 **参数化预设灯效槽位** 机制，每种灯效的关键参数（色相/速度/亮度/饱和度/对比度）可调
+3. 通过 ASCII 串口协议新增指令族 `!RGB_*`，允许用户在运行时：
+   - 切换灯效模式
+   - 修改当前灯效的参数
+   - 保存/加载参数预设槽位
+
+**设计考量**：
+- 算力充裕：STM32F405 @ 168MHz + FPU，RGBTask 周期 30ms，极光效果算力占用 <0.15% 一帧
+- 安全隔离：RGB类只暴露 `SetXxx()` 方法给 ASCII 解析路径，防止越权操作硬件
+- 参数限幅：所有用户输入值须做合理性检查
+- 临界区保护：ASCII 写入路径与 RGBTask 读取路径需互斥
+- 演进路径：先做"预设参数槽位"，留出空间给后续"完全自定义脚本"（算式解析）
+
+**方案选型**：
+| 方案 | 改动量 | 推荐度 |
+|------|------|------|
+| A. 仅新增极光灯效（不做串口配置） | ~80行 | ★★ |
+| B. 仅做串口参数配置（不改灯效算法） | ~150行 | ★★ |
+| **C. 极光灯效 + 参数槽位 + ASCII 指令族** | **~250行** | **★★★★（推荐）** |
+
+**ASCII 指令草案**：
+```
+!RGB_MODE 6                        # 切换灯效 (0~9, 99=ALL_OFF)
+!RGB_PRESET 0 HUE=180 SPD=70 BRI=200 SAT=180 CONT=150  # 配置预设0
+!RGB_APPLY 0                       # 应用预设0
+!RGB_SHOW                          # 列出所有预设
+!RGB_DEFAULT                       # 恢复出厂预设
+```
+
+**实施步骤**：
+1. 在 `docs/` 新建设计文档（参考现有 `重构—*.md` 模板）
+2. `rgb.hpp`：新增 `RgbPreset` 结构体 + 极光灯效成员函数 + HSV→RGB 工具函数
+3. `rgb.cpp`：实现极光算法 + 把现有灯效改为读取预设参数
+4. `ascii_protocol.cpp`：新增 `!RGB_*` 指令族 handler（USB 与 UART4 双通道同步）
+5. `main.cpp`：新增临界区保护
+6. 编译验证 0 errors，文档归档
+
+**相关代码**：
+- `firmware/ref_core_f405/Bsp/gpio/rgb.hpp` — RGB类与灯效枚举
+- `firmware/ref_core_f405/Bsp/gpio/rgb.cpp` — 灯效实现
+- `firmware/ref_core_f405/UserApp/protocols/ascii_protocol.cpp` — ASCII 协议解析
+- `firmware/ref_core_f405/UserApp/main.cpp:279-291` — `ThreadRGBUpdate` 任务入口
+
+---
+
 ### [CLEANUP-1] 删除 CAN 0x7C 旧堵转兼容代码 🟡
 
 **状态**：待清理（2026-09-03）
