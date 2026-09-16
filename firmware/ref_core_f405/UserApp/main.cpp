@@ -12,6 +12,11 @@ extern volatile uint8_t _stall_status_type;
 extern volatile uint8_t _stall_status_val;
 
 /* ======================================================================
+ * [PID 修复] PID 合并打印 poll（由 OledTask 调用，定义见 can_protocol.cpp）
+ * ====================================================================== */
+extern "C" void PollPidPrint();
+
+/* ======================================================================
  * 系统硬件外设层资源静态分配实例
  * ====================================================================== */
 SSD1306 oled(&hi2c0);              // I2C 128x64 状态监视与参数绘制屏幕面板
@@ -245,6 +250,10 @@ void ThreadOledUpdate(void* argument)
             const char* type_str = (type == 1) ? "en" : "lock";
             printf("[STALL_STATUS] node=%d %s=%d\r\n", node, type_str, val);
         }
+
+        // [PID 修复] PID 合并打印 poll（避免 ISR 内 printf 影响 CAN RX ISR）
+        // 详见 can_protocol.cpp PollPidPrint()
+        PollPidPrint();
     }
 }
 

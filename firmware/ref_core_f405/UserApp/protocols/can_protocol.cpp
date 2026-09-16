@@ -71,13 +71,17 @@ volatile uint8_t _stall_status_val = 0;   // 0/1
 
 extern DummyRobot dummy;
 
-// ── PID 合并回包状态（修复 P2） ──
+// ── PID 合并回包状态 ──
 // [v3.1] PID 缓存索引: [0]=空闲(ALL代理, 无电机), [1..6]=J1~J6(node=1~6), [7]=J7/地轨(node=7), [8]=夹爪(node=8)
 // 为每个节点维护一个计数器，收到 0x28(Kp)/0x29(Kv)/0x2A(Ki)/0x2B(Kd) 之一就+1，
-// 4个都到后 printf() 合并回包（走 _write 到 USB+UART4）。
+// 4个都到后 ISR 仅设 print_pending=1，主线程 (OledTask) poll 后清 0 + printf。
+// 避免 ISR 内 printf 阻塞 UART DMA / 与 ASCII 线程产生 UART TX 竞争。
 static int32_t _pid_tmp_kp[9] = {0}, _pid_tmp_kv[9] = {0};
 static int32_t _pid_tmp_ki[9] = {0}, _pid_tmp_kd[9] = {0};
 static uint8_t _pid_rcv_cnt[9] = {0};
+// [PID 修复] 合并完成待打印标志（单字节读写在 ARM Cortex-M4 上原子）
+static volatile uint8_t _pid_print_pending[9] = {0};
+static volatile uint8_t _pid_pending_node[9] = {0};  // 触发合并的节点 ID（用于显示）
 
 // 辅助：将 CAN nodeID 转为 motorDceKps[] 数组索引
 static inline int _pid_node_to_idx(uint8_t nodeId) {
@@ -89,6 +93,20 @@ static inline int _pid_node_to_idx(uint8_t nodeId) {
 // CAN nodeID → 打印时显示的节点号（用户可见）
 static inline int _pid_node_to_disp(uint8_t nodeId) {
     return (int)nodeId;
+}
+
+// [PID 修复] 主线程 poll PID 合并回包（由 OledTask 调用，详见 main.cpp）
+// 遍历 9 个 slot；先清 pending 再读 tmp（防止主线程读期间 ISR 又写一轮）
+extern "C" void PollPidPrint() {
+    for (int idx = 1; idx <= 8; idx++) {
+        if (_pid_print_pending[idx]) {
+            _pid_print_pending[idx] = 0;  // 先清，再读（原子单字节写）
+            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
+                   _pid_node_to_disp(_pid_pending_node[idx]),
+                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
+                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+        }
+    }
 }
 
 void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* data)
@@ -119,10 +137,9 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_kp[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            // [PID 修复] ISR 只设标志，主线程 poll 后 printf
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -133,10 +150,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_kv[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -147,10 +162,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_ki[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -161,10 +174,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_kd[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -237,10 +248,9 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_kp[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            // [PID 修复] ISR 只设标志，主线程 poll 后 printf
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -251,10 +261,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_kv[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -265,10 +273,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_ki[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -279,10 +285,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_kd[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -352,10 +356,9 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_kp[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            // [PID 修复] ISR 只设标志，主线程 poll 后 printf
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -366,10 +369,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_kv[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -380,10 +381,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_ki[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
@@ -394,10 +393,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                         _pid_tmp_kd[idx] = *(int32_t*)data;
                         _pid_rcv_cnt[idx]++;
                         if (_pid_rcv_cnt[idx] == 4) {
-                            printf("ok PID %d kp=%ld kv=%ld ki=%ld kd=%ld\r\n",
-                                   _pid_node_to_disp(id),
-                                   (long)_pid_tmp_kp[idx], (long)_pid_tmp_kv[idx],
-                                   (long)_pid_tmp_ki[idx], (long)_pid_tmp_kd[idx]);
+                            _pid_print_pending[idx] = 1;
+                            _pid_pending_node[idx] = id;
                             _pid_rcv_cnt[idx] = 0;
                         }
                     }
