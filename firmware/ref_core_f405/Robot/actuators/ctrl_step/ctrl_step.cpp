@@ -30,7 +30,6 @@ void CtrlStepMotor::SetEnable(bool _enable)
     uint8_t mode = 0x01;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Int to Bytes
     uint32_t val = _enable ? 1 : 0;
     auto* b = (unsigned char*) &val;
     for (int i = 0; i < 4; i++)
@@ -44,7 +43,6 @@ void CtrlStepMotor::SetEnableTemp(bool _enable)
     uint8_t mode = 0x7d;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Int to Bytes
     uint32_t val = _enable ? 1 : 0;
     auto* b = (unsigned char*) &val;
     for (int i = 0; i < 4; i++)
@@ -61,7 +59,6 @@ void CtrlStepMotor::SetCurrentSetPoint(float _val)
     uint8_t mode = 0x03;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Float to Bytes
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
@@ -77,7 +74,6 @@ void CtrlStepMotor::SetVelocitySetPoint(float _val)
     uint8_t mode = 0x04;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Float to Bytes
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
@@ -91,11 +87,10 @@ void CtrlStepMotor::SetPositionSetPoint(float _val)
     uint8_t mode = 0x05;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Float to Bytes
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need ACK
+    canBuf[4] = 1;
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
@@ -129,11 +124,10 @@ void CtrlStepMotor::SetNodeID(uint32_t _id)
     uint8_t mode = 0x11;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Int to Bytes
     auto* b = (unsigned char*) &_id;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    canBuf[4] = 1;
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
@@ -144,7 +138,6 @@ void CtrlStepMotor::SetCurrentLimit(float _val)
     uint8_t mode = 0x12;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Float to Bytes
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
@@ -172,11 +165,10 @@ void CtrlStepMotor::SetVelocityLimit(float _val)
     uint8_t mode = 0x13;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Float to Bytes
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    canBuf[4] = 1;
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
@@ -187,7 +179,6 @@ void CtrlStepMotor::SetAcceleration(float _val)
     uint8_t mode = 0x14;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Float to Bytes
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
@@ -241,12 +232,11 @@ void CtrlStepMotor::SetEnableOnBoot(bool _enable)
     uint8_t mode = 0x16;
     txHeader.StdId = nodeID << 7 | mode;
 
-    // Int to Bytes
     uint32_t val = _enable ? 1 : 0;
     auto* b = (unsigned char*) &val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    canBuf[4] = 1;
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
@@ -261,7 +251,7 @@ void CtrlStepMotor::SetEnableStallProtect(bool _enable)
     auto* b = (unsigned char*) &val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    canBuf[4] = 1;
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
@@ -335,7 +325,7 @@ void CtrlStepMotor::SetDceKp(int32_t _val)
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    canBuf[4] = 1;
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
@@ -349,7 +339,7 @@ void CtrlStepMotor::SetDceKv(int32_t _val)
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    canBuf[4] = 1;
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
@@ -363,7 +353,7 @@ void CtrlStepMotor::SetDceKi(int32_t _val)
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    canBuf[4] = 1;
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
@@ -377,7 +367,7 @@ void CtrlStepMotor::SetDceKd(int32_t _val)
     auto* b = (unsigned char*) &_val;
     for (int i = 0; i < 4; i++)
         canBuf[i] = *(b + i);
-    canBuf[4] = 1; // Need save to EEPROM or not
+    canBuf[4] = 1;
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }

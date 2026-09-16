@@ -305,7 +305,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s.find("PRINTPOSE") != std::string::npos)
         {
-            /* 打印当前关节角和末端位姿（调试用） */
             /* 7 值顺序：Rail(mm), J1~J6(deg)，与 MoveJ 命令对齐 */
             Respond(_responseChannel, "GETJPOS: %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
                     dummy.currentRailPos,
@@ -425,7 +424,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s.find("SET_PID") != std::string::npos)
         {
-            /* 新命令: 一次性设置 4 个 PID 参数 */
             uint32_t node, kp, kv, ki, kd;
             sscanf(_cmd, "#SET_PID %lu %lu %lu %lu %lu", &node, &kp, &kv, &ki, &kd);
             if (node == 7) {
@@ -1184,7 +1182,6 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s.find("SET_PID") != std::string::npos)
         {
-            /* 新命令: 一次性设置 4 个 PID 参数 */
             uint32_t node, kp, kv, ki, kd;
             sscanf(_cmd, "#SET_PID %lu %lu %lu %lu %lu", &node, &kp, &kv, &ki, &kd);
             if (node == 7) {

@@ -533,7 +533,7 @@ void DummyRobot::SetStallMode(int motorIndex)
     // MoveRail(targetRailPos) 仍按堵转前目标下发，enable 退出 LOCKED 后会覆盖
     // 电机端 ResetGoalsToCurrentPosition() 设置，导致再次向堵转点推进 → 死循环
     targetRailPos = currentRailPos;
-    (void)motorIndex;  // 未来可用于区分哪个电机堵转并做针对性处理
+    (void)motorIndex;
 }
 
 void DummyRobot::BroadcastUnlock()
@@ -541,7 +541,7 @@ void DummyRobot::BroadcastUnlock()
     // 连续 3 次 UNLOCKED 广播，间隔 100ms 防丢包
     for (int i = 0; i < 3; i++)
     {
-        motorJ[1]->BroadcastUnlock();  // 使用 motorJ[1] 作为 CAN 总线发送口
+        motorJ[1]->BroadcastUnlock();
         osDelay(100);
     }
     printf("[UNLOCK] broadcast x3 sent\r\n");

@@ -47,7 +47,6 @@
 #include "common_inc.h"
 
 
-// Used for response CAN message.
 static CAN_TxHeaderTypeDef txHeader =
     {
         .StdId = 0,
@@ -111,10 +110,9 @@ extern "C" void PollPidPrint() {
 
 void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* data)
 {
-    // Common CAN message callback, uses ID 32~0x7FF.
     if (canCtx->handle->Instance == CAN1)
     {
-        uint8_t id = rxHeader->StdId >> 7; // 7Bits ID (0~127)
+        uint8_t id = rxHeader->StdId >> 7;
         uint8_t cmd = rxHeader->StdId & 0x7F; // 7Bits CMD (0x00~0x7F普通, 0x80~0xBF广播)
 
         // ── J7/地轨电机 (nodeID=7) 的 CAN 回包处理 ──
@@ -124,7 +122,6 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
             {
                 case 0x23:
                     dummy.motorJ[7]->UpdateAngleCallback(*(float*)(data), data[4]);
-                    // 更新地轨位置（角度 → mm）
                     // angle = 圈数 × 360°，丝杆 1605 = 5mm/圈
                     dummy.currentRailPos = dummy.motorJ[7]->angle / 360.0f * 5.0f;
                     break;

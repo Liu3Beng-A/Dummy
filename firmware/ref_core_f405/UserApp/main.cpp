@@ -19,12 +19,12 @@ extern "C" void PollPidPrint();
 /* ======================================================================
  * 系统硬件外设层资源静态分配实例
  * ====================================================================== */
-SSD1306 oled(&hi2c0);              // I2C 128x64 状态监视与参数绘制屏幕面板
-MPU6050 mpu6050(&hi2c1);           // 基于硬线 I2C 通道链接的位姿感知计算元件
-Timer timerCtrlLoop(&htim7, 200);  // 调度全局实时运算的主心跳时钟：200us 等效配置主频高达 5000Hz 
-PWM pwm(21000, 21000);             // 外围设备与强流附件供电调制系统输出占空载波器
-RGB rgb(0);                        // 底盘高亮环形跑马系统灯带映射驱动
-DummyRobot dummy(&hcan1);          // 基于 CAN1 高速控制局域网接管骨架的核心机械大脑实例对象
+SSD1306 oled(&hi2c0);
+MPU6050 mpu6050(&hi2c1);
+Timer timerCtrlLoop(&htim7, 200);
+PWM pwm(21000, 21000);
+RGB rgb(0);
+DummyRobot dummy(&hcan1);
 
 /* ======================================================================
  * 自由实时操作系统 (FreeRTOS) 任务流调度指引针
@@ -85,7 +85,6 @@ void ThreadControlLoopFixUpdate(void* argument)
 
                 // [工程标定模式: 单关节信号辨识发生器]
                 case DummyRobot::COMMAND_MOTOR_TUNING:
-                    // 限定在 100Hz 时隙施加对应特性的谐振测试频标指令
                     if (updateCounter % 50 == 0) {
                         dummy.tuningHelper.Tick(10);
                     }
@@ -97,7 +96,6 @@ void ThreadControlLoopFixUpdate(void* argument)
 
                 // [特种应用模式: 粗暴力矩纯压输入操控]
                 case DummyRobot::COMMAND_TORQUE_CONTROL:
-                    // 限流强下发频宽为 100Hz 不做冗余位姿修调直接发至驱动环中枢
                     if (updateCounter % 50 == 0) {
                         for (int i = 1; i <= 6; i++) {
                             dummy.motorJ[i]->SetCurrentSetPoint(dummy.targetCurrents[i-1]);
@@ -148,7 +146,6 @@ void ThreadOledUpdate(void* argument)
     uint32_t lastImuUpdate = 0;
     char buf[16];
 
-    // 为不同操控模式配备醒目四字头简称索引标尺
     char cmdModeNames[6][4] = {"SEQ", "INT", "TRJ", "TUN", "TRQ", "SRV"};
 
     for (;;)
