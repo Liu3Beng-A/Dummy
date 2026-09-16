@@ -17,6 +17,18 @@ extern volatile uint8_t _stall_status_val;
 extern "C" void PollPidPrint();
 
 /* ======================================================================
+ * [DIAG-2026-09-16] 4 边界心跳计数器
+ * 用于定位 "发送就卡死" 故障层级 —— 详见 docs/发送就卡死—心跳定位排查方案—2026-09-16.md
+ * ====================================================================== */
+volatile uint32_t g_byte_in        = 0;  // ASCII 字节接收 (每字节 +1)
+volatile uint32_t g_line_ready     = 0;  // ASCII 行完成 (每行 +1)
+volatile uint32_t g_cmd_in         = 0;  // 命令 handler 入口 (每个命令 +1)
+volatile uint32_t g_cmd_out        = 0;  // 命令 handler 出口 (每个命令 +1)
+volatile uint32_t g_realtime_tick  = 0;  // 5kHz 实时环 tick
+volatile uint32_t g_oled_tick      = 0;  // OLED 任务 tick
+volatile uint32_t g_rgb_tick       = 0;  // RGB 任务 tick
+
+/* ======================================================================
  * 系统硬件外设层资源静态分配实例
  * ====================================================================== */
 SSD1306 oled(&hi2c0);
@@ -42,8 +54,9 @@ void ThreadControlLoopFixUpdate(void* argument)
 {
     for (;;)
     {
+        g_realtime_tick++;  // [DIAG-2026-09-16] 5kHz 心跳
         static uint32_t updateCounter = 0;
-        
+
         // 堵塞当前任务状态，直至 TIM7 送出调度准行号志
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
@@ -55,14 +68,17 @@ void ThreadControlLoopFixUpdate(void* argument)
                 case DummyRobot::COMMAND_TARGET_POINT_SEQUENTIAL:
                 case DummyRobot::COMMAND_TARGET_POINT_INTERRUPTABLE:
                 case DummyRobot::COMMAND_CONTINUES_TRAJECTORY:
-                    // 为了规避高频堵塞带宽问题, 将动作同步压频至 50Hz 更新发送至总线
+                    // [总线节流] 50 Hz 下发 (总线 1 Mbps / 8B DLC ≈ 7700 fps,
+                    //   7 电机 × 50 Hz = 350 fps, 富余 ~22 倍; 5 kHz 直发会到
+                    //   35 000 fps 撞爆总线, 实时环在 sem 上死等 3.85× tick
+                    //   周期, 饿死 Normal 优先级 OLED/RGB/ASCII 任务)
                     if (updateCounter % 100 == 0) {
                         dummy.MoveJoints(dummy.targetJoints);
-                        // [v3.1] J7/地轨：直接下发（railSpeedRps 由 MoveJ 计算填入）
+                        // [v3.1] J7/地轨: 直接下发 (railSpeedRps 由 MoveJ 计算填入)
                         dummy.motorJ[7]->SetPositionWithMotorRps(
                             dummy.targetRailPos / 5.0f, dummy.railSpeedRps);
                     }
-                    // 以 100Hz 的抽样频段穿插捕获下挂驱动节点的轴端原位映射偏角
+                    // [方案C] 单播轮询, 100 Hz / 7 轴 ≈ 14 Hz/电机
                     if (updateCounter % 50 == 25) {
                         dummy.UpdateJointAngles();
                     }
@@ -150,6 +166,7 @@ void ThreadOledUpdate(void* argument)
 
     for (;;)
     {
+        g_oled_tick++;  // [DIAG-2026-09-16] OLED 心跳 (per-iteration)
         uint32_t currentTime = HAL_GetTick();
 
         // 强行约束 IMU I2C 外设的数据检索轮询耗时频率在 100Hz 最大边界内
@@ -210,24 +227,18 @@ void ThreadOledUpdate(void* argument)
         oled.printf("[ABC]:");
 
         // 【综合状态横幅通知】提供设备使能以及指令落实执行同步标记进度显示
-        oled.setFont(u8g2_font_10x20_tr);
+        // 【心跳探针面板】[DIAG-2026-09-16] 4 边界 + 3 任务探针 + 关节完成标志
+        oled.setFont(u8g2_font_5x8_tr);
+        oled.setCursor(0, 62);
+        oled.printf("FLAG:0x%02X/%02X", dummy.jointsStateFlag, 0x7E);
+        oled.setCursor(0, 70);
+        oled.printf("RT:%lu OL:%lu RGB:%lu",
+                    g_realtime_tick, g_oled_tick, g_rgb_tick);
         oled.setCursor(0, 78);
-
-        uint8_t modeIdx = (dummy.commandMode >= 1 && dummy.commandMode <= 6)
-                          ? (dummy.commandMode - 1) : 0;
-
-        if (dummy.IsEnabled())
-        {
-            for (int i = 1; i <= 6; i++)
-                buf[i - 1] = (dummy.jointsStateFlag & (1 << i)) ? '*' : '_';
-            buf[6] = 0;
-
-            oled.printf("[%s] %s", cmdModeNames[modeIdx], buf);
-        }
-        else
-        {
-            oled.printf("[%s] %s", cmdModeNames[modeIdx], "======");
-        }
+        oled.printf("B:%lu L:%lu I:%lu O:%lu",
+                    g_byte_in, g_line_ready, g_cmd_in, g_cmd_out);
+        // 旧的 cmdMode/joints 横幅已由心跳探针取代
+        // （调试阶段不需要 [SRV] __*__*_ 样式，恢复方法：见文档 §四.6）
 
         oled.sendBuffer();
 
@@ -282,6 +293,7 @@ void ThreadRGBUpdate(void* argument)
 
     for (;;)
     {
+        g_rgb_tick++;  // [DIAG-2026-09-16] RGB 心跳 (per-iteration)
         // 先检查 DMA 状态：DMA 空闲才执行灯效；DMA 忙则跳过本帧
         if (rgb.UpdateLoop())
         {

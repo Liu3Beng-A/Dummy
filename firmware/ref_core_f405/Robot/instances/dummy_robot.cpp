@@ -430,13 +430,17 @@ bool DummyRobot::ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, f
 
 /**
  * @brief 利用抽屉分时循环结构避让单点查询打满 CAN 信道容量引发断线隐患
- * @note [v3.2] ALL 代理：1 帧 StdId=(0<<7)|0x23=0x23 触发 7 个电机（J1~J7/地轨）同时回包
- *       总线仲裁由 0x5C 例外（阶段 1）+ 电机端 0x23 单次回包解决
- *       回包全部走 UpdateJointAnglesCallback，bit1~6 写入 jointsStateFlag
+ * @note [v3.2] 方案C修复：改回单播轮询，每帧只查一个电机（J1~J7循环），避免7节点同时回包导致总线冲突
+ *       轮询查询每个电机，100Hz采样频率下每轴约14Hz查询速率，足够刷新状态
  */
 void DummyRobot::UpdateJointAngles()
 {
-    motorJ[ALL]->UpdateAngle();
+    static int currentIndex = 1;  // 轮询索引，1~7（J1~J7）
+    
+    // 轮询查询每个电机
+    motorJ[currentIndex]->UpdateAngle();
+    currentIndex++;
+    if (currentIndex > 7) currentIndex = 1;  // J1~J7循环
 }
 
 /**
@@ -567,8 +571,29 @@ void DummyRobot::Homing()
     MoveJoints(targetJoints);
     // [v3.1] J7/地轨：直接下发（railSpeedRps 默认 30 r/s）
     motorJ[7]->SetPositionWithMotorRps(0, railSpeedRps);
+
+    /* [DIAG-2026-09-16] 30s 兜底超时：避免某电机永远不到位时 handler 永久挂死
+     * 原 bug：while(IsMoving()) 永真 → !HOME handler 永远不返回（I=2 O=1）。
+     * 根因：见 docs/发送就卡死—心跳定位排查方案—2026-09-16.md */
+    uint32_t _home_t0 = HAL_GetTick();
     while (IsMoving())
+    {
+        if (HAL_GetTick() - _home_t0 > 30000U)  // 30s 兜底
+            break;
         osDelay(10);
+    }
+
+    /* 超时调试输出：哪个 bit 没就位 */
+    if (IsMoving())
+    {
+        printf("[HOME TIMEOUT] jointsStateFlag=0x%02X (expected 0x7E)\n",
+               (unsigned)jointsStateFlag);
+        for (int i = 1; i <= 6; i++)
+        {
+            printf("  J%d: state=%d (0=STOP,1=RUN,2=FINISH,3=STALL)\n",
+                   i, (int)motorJ[i]->state);
+        }
+    }
 
     SetJointSpeed(lastSlider);  // 还原用户原 slider
 }
@@ -586,8 +611,29 @@ void DummyRobot::Resting()
     MoveJoints(targetJoints);
     // [v3.1] J7/地轨：直接下发（railSpeedRps 默认 30 r/s）
     motorJ[7]->SetPositionWithMotorRps(0, railSpeedRps);
+
+    /* [DIAG-2026-09-16] 30s 兜底超时：与 Homing() 保持一致
+     * 原 bug：while(IsMoving()) 永真 → !RESET handler 永远不返回（I=2 O=1）。
+     * 根因：见 docs/发送就卡死—心跳定位排查方案—2026-09-16.md */
+    uint32_t _rest_t0 = HAL_GetTick();
     while (IsMoving())
+    {
+        if (HAL_GetTick() - _rest_t0 > 30000U)  // 30s 兜底
+            break;
         osDelay(10);
+    }
+
+    /* 超时调试输出：哪个 bit 没就位 */
+    if (IsMoving())
+    {
+        printf("[REST TIMEOUT] jointsStateFlag=0x%02X (expected 0x7E)\n",
+               (unsigned)jointsStateFlag);
+        for (int i = 1; i <= 6; i++)
+        {
+            printf("  J%d: state=%d (0=STOP,1=RUN,2=FINISH,3=STALL)\n",
+                   i, (int)motorJ[i]->state);
+        }
+    }
 
     SetJointSpeed(lastSlider);
 }

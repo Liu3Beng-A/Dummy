@@ -4,6 +4,18 @@
 extern DummyRobot dummy;
 extern RGB rgb;
 
+/* 声明 7 个心跳计数器（定义在 main.cpp）*/
+extern volatile uint32_t g_byte_in;
+extern volatile uint32_t g_line_ready;
+extern volatile uint32_t g_cmd_in;
+extern volatile uint32_t g_cmd_out;
+
+/* [DIAG-2026-09-16] handler 出口 RAII 哨兵：函数返回时自动 ++g_cmd_out
+ * 覆盖所有 return 路径（正常 return / 提前 return），无需在每个 return 前 ++ */
+struct CmdExitGuard {
+    ~CmdExitGuard() { g_cmd_out++; }
+};
+
 // ── 命令限流状态 ──
 // !STALL_STATUS: 两次查询间隔不得少于 500ms，避免 CAN 总线和 UART 被塞满
 static uint32_t _stall_status_last_tick = 0;
@@ -22,6 +34,8 @@ static uint32_t _stall_status_last_tick = 0;
  * ====================================================================== */
 void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
+    CmdExitGuard _diag_guard;  // [DIAG-2026-09-16] 析构时 ++g_cmd_out
+    g_cmd_in++;                // [DIAG-2026-09-16] handler 入口
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
     if (_cmd[0] == '!')
     {
@@ -789,6 +803,8 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
  * ====================================================================== */
 void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
+    CmdExitGuard _diag_guard;  // [DIAG-2026-09-16] 析构时 ++g_cmd_out
+    g_cmd_in++;                // [DIAG-2026-09-16] handler 入口
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
     if (_cmd[0] == '!')
     {

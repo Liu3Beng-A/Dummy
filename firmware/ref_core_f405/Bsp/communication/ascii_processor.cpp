@@ -17,6 +17,9 @@
 /* 私有类型定义 -----------------------------------------------------------*/
 /* 全局常量数据 ---------------------------------------------------------*/
 /* 全局变量 -------------------------------------------------------------*/
+/* [DIAG-2026-09-16] 声明心跳计数器（定义在 main.cpp）*/
+extern volatile uint32_t g_byte_in;
+extern volatile uint32_t g_line_ready;
 /* 私有常量数据 ----------------------------------------------------------*/
 /* 私有变量 -------------------------------------------------------------*/
 /* 私有函数原型声明 -------------------------------------------------------*/
@@ -68,13 +71,16 @@ void ASCII_protocol_parse_stream(const uint8_t* buffer, size_t len, StreamSink &
 
         // 获取下一个字符
         uint8_t c = *(buffer++);
+        g_byte_in++;  // [DIAG-2026-09-16] 每字节 +1
         bool is_end_of_line = (c == '\r' || c == '\n');  // 判断当前字符是否是行结束符（回车或换行）
 
         if (is_end_of_line)
         {
             // 如果当前行有效，处理该行命令
-            if (read_active)
+            if (read_active) {
+                g_line_ready++;  // [DIAG-2026-09-16] 每完成一行 +1
                 ASCII_protocol_process_line(parse_buffer, parse_buffer_idx, response_channel);
+            }
             parse_buffer_idx = 0;  // 重置缓冲区索引，准备接收下一行命令
             read_active = true;  // 恢复读取状态
         } else
