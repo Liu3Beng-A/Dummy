@@ -236,15 +236,31 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
 
 void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader)
 {
+    // 加固#1：发送前查 mailbox 空闲（最多 5ms）
+    uint32_t startTick = HAL_GetTick();
+    while (HAL_CAN_GetTxMailboxesFreeLevel(canCtx->handle) == 0) {
+        if (HAL_GetTick() - startTick > 5) return;
+    }
+
+    // 加固#2：10ms 超时（取代 osWaitForever）
     osStatus semaphore_status;
     if (canCtx->handle->Instance == CAN1)
-        semaphore_status = osSemaphoreAcquire(sem_can1_tx, osWaitForever);
+        semaphore_status = osSemaphoreAcquire(sem_can1_tx, 10);
     else if (canCtx->handle->Instance == CAN2)
-        semaphore_status = osSemaphoreAcquire(sem_can2_tx, osWaitForever);
+        semaphore_status = osSemaphoreAcquire(sem_can2_tx, 10);
     else
         return;
 
-    if (semaphore_status == osOK)
-        HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData, &canCtx->last_heartbeat_mailbox);
+    if (semaphore_status == osOK) {
+        HAL_StatusTypeDef ret = HAL_CAN_AddTxMessage(
+            canCtx->handle, txHeader, txData, &canCtx->last_heartbeat_mailbox);
+        // 加固#3：失败时释放信号量
+        if (ret != HAL_OK) {
+            if (canCtx->handle->Instance == CAN1)
+                osSemaphoreRelease(sem_can1_tx);
+            else if (canCtx->handle->Instance == CAN2)
+                osSemaphoreRelease(sem_can2_tx);
+        }
+    }
 }
 

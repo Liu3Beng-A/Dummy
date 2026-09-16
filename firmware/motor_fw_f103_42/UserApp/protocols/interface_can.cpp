@@ -354,8 +354,8 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             boardConfig.enableTempWatch = true;
             break;
 
-        // ── 广播急停命令 (0x80~0xBF 区间): 所有电机节点无条件响应 ──
-        case 0x89:  // Broadcast Emergency Stop
+        // ── ALL 广播急停 (id==0, cmd=0x09): 所有节点无条件响应 ──
+        case 0x09:  // Broadcast Emergency Stop (id==0, cmd=0x09，由 ALL 代理 motorJ[0] 触发)
         {
             extern Motor motor;
             motor.controller->requestMode = Motor::MODE_STOP;

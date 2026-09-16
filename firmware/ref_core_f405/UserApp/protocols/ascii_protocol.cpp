@@ -483,23 +483,30 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "error GET_PID [%lu] wrong (use 7 for rail, 1~6 for joints, 8 for gripper)", node);
             }
         }
-        else if (s.find("REBOOT") != std::string::npos)
+        else if (s == "#REBOOT")
         {
+            // [v3.2] 无参：重启所有电机 + 主控 reset（经 ALL 代理 1 帧）
+            dummy.Reboot();
+            Respond(_responseChannel, "ok REBOOT all motors + main reset");
+        }
+        else if (s.find("#REBOOT ") == 0)
+        {
+            // [v3.2] 带参：重启指定节点（J1~J6 或 J7/地轨）
             uint32_t node;
             sscanf(_cmd, "#REBOOT %lu", &node);
             if (node == 7)
             {
                 dummy.motorJ[7]->Reboot();
-                Respond(_responseChannel, "ok REBOOT RAIL [7]");
+                Respond(_responseChannel, "ok REBOOT motor 7 (J7/rail)");
             }
             else if (node >= 1 && node <= 6)
             {
                 dummy.motorJ[node]->Reboot();
-                Respond(_responseChannel, "ok REBOOT MOTOR [%lu]", node);
+                Respond(_responseChannel, "ok REBOOT motor %lu", node);
             }
             else
             {
-                Respond(_responseChannel, "error REBOOT MOTOR [%lu] is wrong", node);
+                Respond(_responseChannel, "error invalid node %lu (use 1~7)", node);
             }
         }
         else if (s.find("CMDMODE") != std::string::npos)
@@ -852,17 +859,6 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             dummy.SetEnable(false);
             Respond(_responseChannel, "ok");
-        }
-        else if (s.find("!CALIBRATION") == 0)
-        {
-            /* 关节零点标定：对所有6个关节应用当前电机位置作为零点偏移。
-             * v3.2 修复：删除主控侧 initPose/currentJoints 的乐观同步，
-             * 等待电机固件 0x23 回包确认后由 UpdateJointAnglesCallback 自动更新状态。 */
-            for (int i = 1; i <= 6; i++)
-            {
-                dummy.motorJ[i]->ApplyPositionAsHome();
-            }
-            Respond(_responseChannel, "ok calibration done for all joints");
         }
         else if (s.find("HAND_ZERO") != std::string::npos)
         {
@@ -1246,23 +1242,30 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                 Respond(_responseChannel, "error GET_PID [%lu] wrong (use 7 for rail, 1~6 for joints, 8 for gripper)", node);
             }
         }
-        else if (s.find("REBOOT") != std::string::npos)
+        else if (s == "#REBOOT")
         {
+            // [v3.2] 无参：重启所有电机 + 主控 reset（经 ALL 代理 1 帧）
+            dummy.Reboot();
+            Respond(_responseChannel, "ok REBOOT all motors + main reset");
+        }
+        else if (s.find("#REBOOT ") == 0)
+        {
+            // [v3.2] 带参：重启指定节点（J1~J6 或 J7/地轨）
             uint32_t node;
             sscanf(_cmd, "#REBOOT %lu", &node);
             if (node == 7)
             {
                 dummy.motorJ[7]->Reboot();
-                Respond(_responseChannel, "ok REBOOT RAIL [7]");
+                Respond(_responseChannel, "ok REBOOT motor 7 (J7/rail)");
             }
             else if (node >= 1 && node <= 6)
             {
                 dummy.motorJ[node]->Reboot();
-                Respond(_responseChannel, "ok REBOOT MOTOR [%lu]", node);
+                Respond(_responseChannel, "ok REBOOT motor %lu", node);
             }
             else
             {
-                Respond(_responseChannel, "error REBOOT MOTOR [%lu] is wrong", node);
+                Respond(_responseChannel, "error invalid node %lu (use 1~7)", node);
             }
         }
         else if (s.find("OFFSET_J") != std::string::npos)

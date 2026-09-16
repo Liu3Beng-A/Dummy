@@ -4,6 +4,13 @@
 #include "algorithms/kinematic/6dof_kinematic.h"
 #include "actuators/ctrl_step/ctrl_step.hpp"
 #include "string"
+
+// =====================================================================
+// [v3.2] ALL 代理索引：motorJ[ALL] 等价于 motorJ[0]（CAN ID=0 的广播占位对象）
+// 用于 1 帧 StdId=(0<<7)|cmd 触发所有电机（J1~J7/地轨）同时响应
+// 电机端 Rx 路由通过 `id == 0 && cmd != 0x5C` 识别为 ALL 广播
+// =====================================================================
+#define ALL 0
 // =====================================================================
 // MoveJ 速度重构（D-Q1/D-Q2/D-Q4 已拍板，2026-08-27 修订）
 // 单位体系：电机轴 r/s（与电机端 CAN 0x07 ratedVelocity 完全一致）
@@ -265,6 +272,13 @@ public:
     DOF6Kinematic::Joint6D_t initPose       = REST_POSE;  // 装配或上电标定时的机械零点偏移补偿映射表
     DOF6Kinematic::Pose6D_t  currentPose6D  = {};         // 当前设备工作空间笛卡尔位姿坐标投影信息 (系统自动解算保持更新)
     volatile uint8_t jointsStateFlag = 0b00000000;        // 每一位(bit)严格监控和指示对应关节底层的轨迹插补到位触发状况
+
+    // [v3.2] jointsStateFlag 全置位标记 = bit1~6 全 1，bit0/7 恒 0；ALL 代理永久不回包
+    //   bit1~6 = J1~J6 FINISH 状态位（UpdateJointAnglesCallback 写入）
+    //   bit0   = 地轨占位但恒为 0（地轨不在 UpdateJointAnglesCallback 处理范围）
+    //   bit7   = 未使用恒为 0
+    // EmergencyStop 后置此值短路 IsMoving()，避免 !STOP 后阻塞 SEQUENTIAL 队列
+    static constexpr uint8_t ALL_FINISH_FLAG = 0x7E;  // 0b01111110
 
     CommandMode commandMode = DEFAULT_COMMAND_MODE;        
     uint32_t lastServoTime = 0;                            

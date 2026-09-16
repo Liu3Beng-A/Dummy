@@ -422,11 +422,13 @@ void CtrlStepMotor::BroadcastUnlock()
 
 void CtrlStepMotor::BroadcastEStop()
 {
-    // [A4 新增] 广播 Emergency Stop: StdId = (0 << 7) | 0x89 = 0x89
-    //   落入电机端广播区间 0x80~0xBF，所有电机节点无条件响应
-    //   电机端收到后会：requestMode = MODE_STOP + SetBrake(true) + 清速度/电流
+    // [v3.2] 广播 Emergency Stop: StdId = (nodeID << 7) | 0x09
+    //   motorJ[ALL] (nodeID=0) 调用时 → StdId = (0<<7)|0x09 = 0x09（普通命令空间）
+    //   由电机端 `id == 0` 路由（阶段 1）识别为 ALL 广播
+    //   电机端收到后（case 0x09）：requestMode = MODE_STOP + SetBrake(true) + 清速度/电流
     //   物理上立即抱闸锁死在当前位置，不再继续梯形规划
-    txHeader.StdId = 0x89;
+    //   旧版用硬编码 0x89 会被电机端广播区间 0x80~0xBF 路由抢走，与 ALL 代理不兼容
+    txHeader.StdId = (nodeID << 7) | 0x09;
     uint8_t buf[8] = {0};
     CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
 }

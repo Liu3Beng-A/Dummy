@@ -198,10 +198,9 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* CanHandle)
     uint8_t id  = (RxHeader.StdId >> 7);   // 7Bits ID (0~127)
     uint8_t cmd = (RxHeader.StdId & 0x7F); // 7Bits CMD (0x00~0x4F普通, 0x50~0x7F广播)
 
-    // ── 广播命令 (cmd 0x50~0x7F): 所有节点无条件响应 ──
-    //   注: 0x5C 是单播查询命令 (主控->单电机)，不走广播路径；
-    //   放在此处可避免所有节点同时回包造成总线冲突。
-    if (cmd >= 0x50 && cmd != 0x5C) {
+    // ── ALL 广播代理 (id==0, 排除 0x5C 单播查询): 所有节点无条件响应任意 cmd ──
+    //   0x5C 仍走单播，避免 7 节点同时回包造成总线冲突。
+    if (id == 0 && cmd != 0x5C) {
         OnCanCmd(cmd, RxData, RxHeader.DLC);
     }
     // ── 普通命令 / 0x5C 单播: 仅目标节点响应 ──

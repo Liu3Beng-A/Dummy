@@ -243,13 +243,14 @@ void DummyRobot::Init()
 
 /**
  * @brief 群发全局急停保护且指令微控制器彻底脱壳软重启
- * @note [v3.1] motorJ[0]=ALL代理不参与重启，循环覆盖 motorJ[1..7]=J1~J7/地轨
+ * @note [v3.2] ALL 代理 1 帧 + 夹爪 1 帧 = 2 帧
+ *       motorJ[ALL] (nodeID=0) → StdId=(0<<7)|0x7F = 0x7F，所有 J1~J7/地轨电机接收后自重启
+ *       hand (nodeID=8)        → StdId=(8<<7)|0x7F
  */
 void DummyRobot::Reboot()
 {
-    for (int i = 1; i <= 7; i++)
-        motorJ[i]->Reboot();
-    hand->Reboot();
+    motorJ[ALL]->Reboot();  // StdId = (0<<7)|0x7F = 0x7F，所有 J1~J7/地轨电机同时重启
+    hand->Reboot();         // StdId = (8<<7)|0x7F
     osDelay(500);
     HAL_NVIC_SystemReset();
 }
@@ -429,30 +430,13 @@ bool DummyRobot::ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, f
 
 /**
  * @brief 利用抽屉分时循环结构避让单点查询打满 CAN 信道容量引发断线隐患
+ * @note [v3.2] ALL 代理：1 帧 StdId=(0<<7)|0x23=0x23 触发 7 个电机（J1~J7/地轨）同时回包
+ *       总线仲裁由 0x5C 例外（阶段 1）+ 电机端 0x23 单次回包解决
+ *       回包全部走 UpdateJointAnglesCallback，bit1~6 写入 jointsStateFlag
  */
 void DummyRobot::UpdateJointAngles()
 {
-    static uint8_t group = 0;
-
-    switch (group) {
-        case 0:
-            motorJ[1]->UpdateAngle();   // J1
-            motorJ[2]->UpdateAngle();   // J2
-            break;
-        case 1:
-            motorJ[3]->UpdateAngle();   // J3
-            motorJ[4]->UpdateAngle();   // J4
-            break;
-        case 2:
-            motorJ[5]->UpdateAngle();   // J5
-            motorJ[6]->UpdateAngle();   // J6
-            break;
-        case 3:
-            motorJ[7]->UpdateAngle();   // J7/地轨（ID=7）
-            break;
-    }
-
-    group = (group + 1) % 4;
+    motorJ[ALL]->UpdateAngle();
 }
 
 /**
@@ -466,8 +450,8 @@ void DummyRobot::UpdateJointAnglesCallback()
         // [A1 修复] CAN 0x23 回包时同步更新 jointsStateFlag：
         //   FINISH → 置位（bit i = 1 表示该轴到位）
         //   其余   → 清位（RUNNING/STOP/STALL 都算"未到位"）
-        // 配合 A3 修复，IsMoving() 基于 jointsStateFlag != 0b1111110 判定，
-        //   7 轴全部 FINISH 时 flag = 0b1111110（bit1-6=1, bit0=0 地轨位恒 0），
+        // 配合 [v3.2] ALL 代理，IsMoving() 基于 jointsStateFlag != ALL_FINISH_FLAG 判定，
+        //   7 轴全部 FINISH 时 flag = ALL_FINISH_FLAG = 0x7E（bit1-6=1, bit0=0 地轨位恒 0），
         //   IsMoving() 返回 false，阻塞解除。
         if (motorJ[i]->state == CtrlStepMotor::FINISH)
             jointsStateFlag |= (1 << i);
@@ -635,10 +619,9 @@ void DummyRobot::SetEnable(bool _enable)
         //         IsMoving() 行为符合"等电机真实状态"的语义。
     }
 
-    // [v3.1] J1~J7/地轨全部使能（motorJ[7]=地轨，motorJ[0]=ALL代理不参与）
-    for (int i = 1; i <= 7; i++)
-        motorJ[i]->SetEnable(_enable);
-    hand->SetEnable(_enable);       // 夹爪
+    // [v3.2] ALL 代理 1 帧 + 夹爪 1 帧 = 2 帧
+    motorJ[ALL]->SetEnable(_enable);  // StdId=(0<<7)|0x01，所有 J1~J7/地轨电机接收
+    hand->SetEnable(_enable);         // StdId=(8<<7)|0x01
     isEnabled = _enable;
 }
 
@@ -671,15 +654,18 @@ void DummyRobot::UpdateJointPose6D()
 
 /**
  * @brief 利用 jointsStateFlag 判定所有关节是否已完成收敛
- * @note [A3 修复] 改回旧版基于 jointsStateFlag 的判定，配合 A1 修复的位运算写入。
+ * @note [v3.2] 失能短路：!DISABLE 后 isEnabled=false，IsMoving() 必须返回 false，
+ *       否则后续 SEQUENTIAL 队列会被堵死。
  *       bit=1 表示该轴已 FINISH 到位（电机端 CAN 0x23 回包 isFinished=1），
  *       bit=0 表示该轴仍在运动/STOP/STALL。
  *       地轨位 bit0 恒为 0（UpdateJointAnglesCallback 只处理 i=1~6）。
- *       7 轴全部到位时：flag = 0b01111110（bit1-6=1，bit0=0），故用 `!= 0b1111110`。
+ *       7 轴全部到位时：flag = ALL_FINISH_FLAG = 0x7E（bit1-6=1，bit0=0）。
  */
 bool DummyRobot::IsMoving()
 {
-    return jointsStateFlag != 0b1111110;
+    // [v3.2] 失能短路：!DISABLE 后 isEnabled=false，IsMoving() 必须返回 false
+    if (!isEnabled) return false;
+    return jointsStateFlag != ALL_FINISH_FLAG;  // 0x7E = bit1~6 全置位
 }
 
 /**
@@ -744,21 +730,23 @@ uint32_t DummyRobot::CommandHandler::Push(const char *_cmd)
 
 /**
  * @brief 清仓强制切断挂载流任务并施下锁盘制动保全安全边界
- * @note [A4 修复] 改走 CAN 0x89 广播急停，所有电机立即 SetBrake(true) 抱闸
+ * @note [v3.2] ALL 代理 1 帧急停 + 短路 IsMoving
+ *       改走 CAN (0<<7)|0x09=0x09 广播急停，所有电机立即 SetBrake(true) 抱闸
  *       锁死在当前位置，不再走 MoveJ(currentJoints) 的"伪急停"（v2.7 旧版会让
  *       电机继续梯形规划"收敛"到当前点，语义不清且响应慢）。
  *       抱闸后电机端 state = STATE_STOP → 0x23 回包 isFinished=0 →
- *       主控 jointsStateFlag |= (1<<i) → IsMoving=true，所以这里手动清零
- *       flag（物理已停），并清 FIFO + isEnabled=false。
+ *       主控 jointsStateFlag |= (1<<i) → IsMoving=true，所以这里手动置
+ *       flag=ALL_FINISH_FLAG（物理已停），并清 FIFO + isEnabled=false
+ *       短路 IsMoving()。
  */
 void DummyRobot::CommandHandler::EmergencyStop()
 {
-    // 1. 发 0x89 广播（通过任意一个 motor 对象，CAN 总线相同）
-    context->motorJ[1]->BroadcastEStop();
-    // 2. 清零 jointsStateFlag：电机已被抱闸锁死，物理上"全部到位"
+    // 1. 发 0x09 广播（通过 motorJ[ALL]，StdId=(0<<7)|0x09=0x09，被电机端 `id==0` 路由识别）
+    context->motorJ[ALL]->BroadcastEStop();
+    // 2. 置 jointsStateFlag = ALL_FINISH_FLAG：电机已被抱闸锁死，物理上"全部到位"
     //    避免 !STOP 后 IsMoving() 永远返回 true 阻塞后续 SEQUENTIAL 指令
-    context->jointsStateFlag = 0;
-    // 3. 标记失能 + 清指令队列
+    context->jointsStateFlag = ALL_FINISH_FLAG;  // 0x7E = bit1~6 全置位
+    // 3. 标记失能 + 清指令队列（短路 IsMoving）
     context->isEnabled = false;
     ClearFifo();
 }

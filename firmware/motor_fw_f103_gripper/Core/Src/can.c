@@ -202,6 +202,12 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* CanHandle)
     if (cmd >= 0x80 && cmd <= 0xBF) {
         OnCanCmd(cmd, RxData, RxHeader.DLC);
     }
+    // ── ALL 广播代理 (id==0, 普通命令 0x00~0x7F): 所有节点无条件响应 ──
+    //   gripper 用例：暂时只让急停 (0x09) 等特殊小 cmd 走广播；
+    //   如果未来需要支持其他小 cmd 广播，可放开 cmd 上限为 0x7F
+    else if (id == 0 && cmd < 0x80) {
+        OnCanCmd(cmd, RxData, RxHeader.DLC);
+    }
     // ── 普通命令: 仅目标节点响应 ──
     else if (id == boardConfig.canNodeId) {
         OnCanCmd(cmd, RxData, RxHeader.DLC);
