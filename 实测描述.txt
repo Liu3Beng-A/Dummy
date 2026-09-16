@@ -2,9 +2,10 @@
 问题A的触发条件有很多，可以查看log
 
 
-所有的固件都烧录E:\Dummy-code\source code这个旧版本的话，功能都是正常的，可以正常使用
-主控烧录E:\Dummy-code\source code\dummy-ref-core-fw旧版本；全部电机烧录新版本固件的话，就会出现之前描述的问题A（以下统称为问题A）
-全部都烧录新版本的话也存在问题A
+形式A：所有的固件都烧录E:\Dummy-code\source code这个旧版本的话，功能都是正常的，可以正常使用
+形式B：主控烧录E:\Dummy-code\source code\dummy-ref-core-fw旧版本；全部电机烧录新版本固件的话，就会出现之前描述的问题A（以下统称为问题A）
+形式C：电机烧录旧版固件、主控烧录新版固件，地轨电机不接入can总线时问题A依旧存在，发送start可以使能，但是一发送home就卡死
+形式D：全部都烧录新版本E:\Dummy-code\firmware也存在问题A
 
 针对问题A我尝试过非常多的方案，但是目前依旧没有解决；以下文档是解决的过程和内容； fix-bug分支就是解决问题A的分支
 E:\Dummy-code\docs\主控固件回归—9-14真凶收尾详细规划—2026-09-16.md
@@ -12,6 +13,15 @@ E:\Dummy-code\docs\主控固件回归—2026-09-14实测根因复盘.md
 E:\Dummy-code\docs\主控固件退化修复—全面重构需求.md
 E:\Dummy-code\docs\主控固件重构—地轨改为J7(CAN_ID7)—2026-09-15.md
 E:\Dummy-code\docs\主控固件重构—ALL代理整合方案—2026-09-16.md
+
+
+git版本
+63b4b16c84065f1aa01577b4113ea51e194435d0——这个版本是正常的
+f229db494d4277fad9dc1de8133e01a6d869aecd——这个版本开始出现的问题A至今没有解决
+
+
+
+
 
 
 以下是测试时的log与描述
@@ -42,16 +52,7 @@ log：
 [20:56:31] [RX] ok
 [20:56:32] [TX] !HOME
 [20:56:45] [ERROR] 发送失败: Write timeout
-[20:56:46] [ERROR] 同步超时，请确认机械臂已使能并处于模式1
-[20:56:59] [ERROR] 发送失败: Write timeout
-[20:57:02] [RX] [HOME TIMEOUT] jointsStateFlag=0x76 (expected 0x7E)
-[20:57:02] [RX] J1: state=1 (0=STOP,1=RUN,2=FINISH,3=STALL)
-[20:57:02] [RX] J2: state=1 (0=STOP,1=RUN,2=FINISH,3=STALL)
-[20:57:02] [RX] J3: state=0 (0=STOP,1=RUN,2=FINISH,3=STALL)
-[20:57:02] [RX] J4: state=1 (0=STOP,1=RUN,2=FINISH,3=STALL)
-[20:57:02] [RX] J5: state=1 (0=STOP,1=RUN,2=FINISH,3=STALL)
-[20:57:02] [RX] J6: state=1 (0=STOP,1=RUN,2=FINISH,3=STALL)
-[20:57:02] [RX] ok
+
 
 
 日期：2026-9-16 
