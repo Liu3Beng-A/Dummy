@@ -58,6 +58,17 @@ static CAN_TxHeaderTypeDef txHeader =
         .TransmitGlobalTime = DISABLE
     };
 
+// ── 堵转事件标志（修复 F4）──
+// ISR 内只设标志，主线程（OledTask）poll 后清 0 + printf
+// 使用 volatile uint8_t 保证 ARM Cortex-M4 单字节读写原子性
+volatile uint8_t _stall_event_flag = 0;   // 0=无事件, 1=有事件
+volatile uint8_t _stall_event_node = 0;   // 堵转节点 ID
+volatile uint8_t _stall_event_cmd = 0;    // 1=TRIGGER, 2=DONE, 3=TIMEOUT
+volatile uint8_t _stall_status_flag = 0;  // 0=无响应, 1=有响应
+volatile uint8_t _stall_status_node = 0;  // 查询响应节点 ID
+volatile uint8_t _stall_status_type = 0;  // 1=en, 2=lock
+volatile uint8_t _stall_status_val = 0;   // 0/1
+
 extern DummyRobot dummy;
 
 // ── PID 合并回包状态（修复 P2） ──
@@ -174,31 +185,26 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     {
                         uint8_t stallNodeId = data[0];
                         uint8_t stallCmd = data[1];
-                        if (stallCmd == 1) {
-                            // TRIGGER: 堵转刚触发
+                        // [F4 修复] ISR 只设标志，主线程 poll 后 printf
+                        if (stallCmd >= 1 && stallCmd <= 3) {
                             dummy.SetStallMode((int)stallNodeId);
-                            printf("[STALL] node=%d TRIGGER\r\n", stallNodeId);
-                        } else if (stallCmd == 2) {
-                            // DONE: 回退完成
-                            dummy.SetStallMode((int)stallNodeId);
-                            printf("[STALL] node=%d done\r\n", stallNodeId);
-                        } else if (stallCmd == 3) {
-                            // TIMEOUT: 回退超时
-                            dummy.SetStallMode((int)stallNodeId);
-                            printf("[STALL] node=%d timeout\r\n", stallNodeId);
+                            _stall_event_flag = 1;
+                            _stall_event_node = stallNodeId;
+                            _stall_event_cmd = stallCmd;
                         }
                         // state==4 (HEARTBEAT): RETREATING 期间心跳，忽略
                     }
                     break;
                 case 0x5C:
-                    // 0x5C 查询响应: data[0]=queryType(1=en/2=lock), data[1]=value(0/1)
                     {
+                        // [F4 修复] ISR 只设标志，主线程 poll 后 printf
                         uint8_t qtype = data[0];
                         uint8_t qval = data[1];
-                        if (qtype == 1) {
-                            printf("[STALL_STATUS] node=%d en=%d\r\n", id, qval);
-                        } else if (qtype == 2) {
-                            printf("[STALL_STATUS] node=%d lock=%d\r\n", id, qval);
+                        if (qtype == 1 || qtype == 2) {
+                            _stall_status_flag = 1;
+                            _stall_status_node = id;
+                            _stall_status_type = qtype;
+                            _stall_status_val = qval;
                         }
                     }
                     break;
@@ -296,28 +302,26 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     {
                         uint8_t stallNodeId = data[0];
                         uint8_t stallCmd = data[1];
-                        if (stallCmd == 1) {
+                        // [F4 修复] ISR 只设标志，主线程 poll 后 printf
+                        if (stallCmd >= 1 && stallCmd <= 3) {
                             dummy.SetStallMode((int)stallNodeId);
-                            printf("[STALL] node=%d TRIGGER\r\n", stallNodeId);
-                        } else if (stallCmd == 2) {
-                            dummy.SetStallMode((int)stallNodeId);
-                            printf("[STALL] node=%d done\r\n", stallNodeId);
-                        } else if (stallCmd == 3) {
-                            dummy.SetStallMode((int)stallNodeId);
-                            printf("[STALL] node=%d timeout\r\n", stallNodeId);
+                            _stall_event_flag = 1;
+                            _stall_event_node = stallNodeId;
+                            _stall_event_cmd = stallCmd;
                         }
                         // state==4 (HEARTBEAT): RETREATING 期间心跳，忽略
                     }
                     break;
                 case 0x5C:
-                    // 0x5C 查询响应: data[0]=queryType(1=en/2=lock), data[1]=value(0/1)
                     {
+                        // [F4 修复] ISR 只设标志，主线程 poll 后 printf
                         uint8_t qtype = data[0];
                         uint8_t qval = data[1];
-                        if (qtype == 1) {
-                            printf("[STALL_STATUS] node=%d en=%d\r\n", id, qval);
-                        } else if (qtype == 2) {
-                            printf("[STALL_STATUS] node=%d lock=%d\r\n", id, qval);
+                        if (qtype == 1 || qtype == 2) {
+                            _stall_status_flag = 1;
+                            _stall_status_node = id;
+                            _stall_status_type = qtype;
+                            _stall_status_val = qval;
                         }
                     }
                     break;

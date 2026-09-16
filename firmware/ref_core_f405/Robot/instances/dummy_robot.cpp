@@ -533,8 +533,6 @@ void DummyRobot::SetStallMode(int motorIndex)
     // MoveRail(targetRailPos) 仍按堵转前目标下发，enable 退出 LOCKED 后会覆盖
     // 电机端 ResetGoalsToCurrentPosition() 设置，导致再次向堵转点推进 → 死循环
     targetRailPos = currentRailPos;
-    // 清空指令队列，防止残留指令堆积
-    commandHandler.ClearFifo();
     (void)motorIndex;  // 未来可用于区分哪个电机堵转并做针对性处理
 }
 
@@ -623,6 +621,11 @@ void DummyRobot::SetEnable(bool _enable)
     motorJ[ALL]->SetEnable(_enable);  // StdId=(0<<7)|0x01，所有 J1~J7/地轨电机接收
     hand->SetEnable(_enable);         // StdId=(8<<7)|0x01
     isEnabled = _enable;
+
+    // [F1 配套] enable 后预发 UpdateAngle，避免 jointsStateFlag 在电机回包前错填
+    if (_enable) {
+        motorJ[ALL]->UpdateAngle();  // 1 帧触发 7 电机回包，等首次 0x23 自动纠正 state
+    }
 }
 
 /**
@@ -777,6 +780,15 @@ uint32_t DummyRobot::CommandHandler::GetSpace()
 uint32_t DummyRobot::CommandHandler::ParseCommand(const char *_cmd)
 {
     uint8_t argNum;
+
+    // [F2 修复] 堵转期间精确丢弃：运动指令（>/&/@）丢，控制指令（!START/!DISABLE/!STOP 等）放行
+    if (context->isStalled) {
+        if (_cmd[0] == '>' || _cmd[0] == '&' || _cmd[0] == '@') {
+            Respond(*usbStreamOutputPtr,  "ok");
+            Respond(*uart4StreamOutputPtr, "ok");
+            return osMessageQueueGetSpace(commandFifo);
+        }
+    }
 
     // [分支拦截] $ 高频投递的力控透传包剥离拦截，规避无意义繁杂判决延宕
     if (_cmd[0] == '$')

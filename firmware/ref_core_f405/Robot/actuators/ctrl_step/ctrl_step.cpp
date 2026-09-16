@@ -21,7 +21,10 @@ CtrlStepMotor::CtrlStepMotor(CAN_HandleTypeDef* _hcan, uint8_t _id, bool _invers
 
 void CtrlStepMotor::SetEnable(bool _enable)
 {
-    state = _enable ? FINISH : STOP;
+    // [F1 修复] enable 时不再同步 state=FINISH（避免与 A1 方向冲突）
+    // 等待电机端首次 0x23 回包自动纠正 state。
+    // disable 时同步 STOP，让 IsMoving() 在 disable 后能正确返回 false。
+    if (!_enable) state = STOP;
     // [A3 修复] 不再清 targetAngle，jointsStateFlag 方案不再依赖 targetAngle 字段
 
     uint8_t mode = 0x01;
