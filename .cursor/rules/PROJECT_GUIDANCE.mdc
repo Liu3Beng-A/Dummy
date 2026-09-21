@@ -15,10 +15,8 @@ alwaysApply: true
 
 | 文件 | 用途 |
 |------|------|
-| `docs/README.md` | 项目主文档，包含完整功能说明和用户指南 |
-| `docs/TODO.md` | 功能路线图（FEAT/BUG 待开发项） |
 | `firmware` | 正在开发的新版本固件 |
-| `source code` | 开发前保存的旧版本固件 |
+| `firmware_old` | 开发前保存的旧版本固件 |
 
 ---
 
@@ -79,23 +77,6 @@ firmware/
 | ServoJ | 5kHz | 高频全速下发 |
 | Torque | 100Hz | 直接下发电流 |
 | Tuning | 100Hz | 扫频信号发生器 |
-
-
-### 关键常量
-
-| 常量 | 值 | 说明 |
-|------|-----|------|
-| `RAIL_STEPS_PER_MM` | **40960** | 地轨步数当量 (丝杆1605直连, 200步×256微步/5mm) |
-| `SLIDER_TO_RPS` | **0.30** | slider 100 → 30 r/s |
-| `AXIS_MAX_RPS[7]` | 全部 30.0 r/s | 各轴物理上限 |
-| `MOTOR_REDUCTION[7]` | {1,50,50,50,50,50,30} | 各轴减速比 |
-| `DEFAULT_JOINT_SPEED` | 80.0f | slider 默认值 |
-| `DEFAULT_JOINT_ACCELERATION` | 150.0 r/s² | 关节加速度默认值（电机端默认 1000） |
-| `REST_POSE` | `{0,-75,180,0,0,0}` | 待机姿态 J1~J6（°，不含地轨） |
-| `REST_POSE_RAIL` | **0.0f** mm | 待机姿态地轨位置 |
-| `HOME_POSE` | `{0,0,0,90,0,0}` | 归零姿态 J1~J6（°，不含地轨） |
-| `HOME_POSE_RAIL` | **0.0f** mm | 归零姿态地轨位置 |
-| `FALLBACK_JOINT_ACCELERATION` | 10.0 r/s² | 未查到的电机加速度兜底值 |
 
 
 

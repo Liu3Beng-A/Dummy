@@ -14,7 +14,7 @@
 
 ### 1.1 命令清单
 
-| Cmd | 方向 | 名称 | 旧固件 | 新 35/42/57 | 新 gripper | 标记 | 閲嶆柊瀹炵幇鏂规 |
+| Cmd | 方向 | 名称 | 旧固件 | 新 35/42/57 | 新 gripper | 标记 | new |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `0x01` | 主→电 | Enable Motor | 切 `requestMode` 到 VELOCITY/STOP | **重构**：联动 `stallMode` 状态机；LOCKED→IDLE + ResetGoals + 启动豁免复位 | 同旧 | **重构** |  |
 | `0x02` | 主→电 | Do Calibration | 触发编码器校准 | 同 | 同 | — |  |
@@ -52,7 +52,7 @@
 
 ### 1.2 协议帧格式约定
 
-| Cmd | TxData[0..3] | TxData[4..7] | 閲嶆柊瀹炵幇鏂规 |
+| Cmd | TxData[0..3] | TxData[4..7] | new |
 | --- | --- | --- | --- |
 | `0x03/0x04/0x05/0x07` 前半 | float pos / cur / vel | (见下) |  |
 | `0x06` | float pos（圈） | float time（秒） |  |
