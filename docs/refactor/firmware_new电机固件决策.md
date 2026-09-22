@@ -1,4 +1,4 @@
-﻿# 电机固件对比 — `firmware_old` → `firmware` 迁移参考
+﻿# 电机固件 — `firmware_old` → `firmware_new迁移`
 
 > **范围**：仅电机固件（STM32F103，4 套：`motor_fw_f103_35` / `_42` / `_57` / `_gripper`）。
 > **基线对比**：`firmware_old/dummy-35motor-fw` 与 `firmware_old/dummy-42motor-fw`（旧）；`firmware/motor_fw_f103_`*（新）。
@@ -34,7 +34,7 @@
 | `0x04`        | 主→电    | Set Velocity                  | 切 `MODE_COMMAND_VELOCITY` + `SetVelocitySetPoint(r/s×SUBDIVIDE)` | 同                                                                                     | 同                       | —              | 同旧                                                        |
 | `0x05`        | 主→电    | Set Position                  | 切 POSITION 模式 + `SetPositionSetPoint(圈×SUBDIVIDE)`；可选 FINISH ACK | 切 POSITION 模式 + `SetPositionSetPoint`（LOCKED/RETREATING 丢弃是 stall 专属，退回旧）             | 同旧（gripper 无 stallMode） | **重构（退回旧）**    | **退回旧**                                                   |
 | `0x06`        | 主→电    | Set Pos w/ Time               | `SetPositionSetPointWithTime(pos, T)`；可选 FINISH ACK              | **微调**：`sqrtf` 加 `fmaxf(0, discriminant)` 兜底防负数；其余同                                   | 同旧（无 fmaxf 保护）          | **微调**         | **保留新fmaxf 防 crash 是安全增强**                                |
-| `0x07`        | 主→电    | Set Pos w/ VelLimit           | 写 `ratedVelocity` + `SetPositionSetPoint`；**总是**立即发 FINISH ACK   | 写 `ratedVelocity` + `SetPositionSetPoint`（LOCKED 丢弃 + 取消立即 FINISH ACK 是 stall 专属，退回旧） | 同旧（无 LOCKED 丢弃）         | **重构（退回旧）**    | **退回旧：LOCKED 丢弃 + 取消立即 ACK 仅服务于 stall 检测；不实现 stall 时应删除** |
+| `0x07`        | 主→电    | Set Pos w/ VelLimit           | 写 `ratedVelocity` + `SetPositionSetPoint`；**总是**立即发 FINISH ACK   | 写 `ratedVelocity` + `SetPositionSetPoint`（LOCKED 丢弃 + 取消立即 FINISH ACK 是 stall 专属，退回旧） | 同旧（无 LOCKED 丢弃）         | **重构（退回旧）**    | **保留新：去掉立即 FINISH ACK，LOCKED 状态丢弃**                       |
 | `0x09`        | 主→ALL  | Broadcast EStop               | ❌                                                                | **新增**：`requestMode=STOP` + `SetBrake(true)` + Cur/Vel=0                              | **新增**                  | **新增**         | **保留新：安全急停功能保留**                                          |
 | `0x11`        | 主→电    | Set NodeID + EPP              | 写 `canNodeId` + 可选持久化                                            | 同                                                                                     | 同                       | —              | 同旧                                                        |
 | `0x12`        | 主→电    | Set I-Limit + EPP             | 写 `ratedCurrent = A×1000` + `currentLimit` + 持久化                 | 写 `ratedCurrent` + `currentLimit` + 持久化（同步 `stallCurrentThreshold` 是 stall 专属，退回旧）    | 同旧（无 stall 阈值更新）        | **重构（退回旧）**    | **退回旧：**`stallCurrentThreshold` **仅服务于 stall 检测，应删除**     |
@@ -87,33 +87,33 @@
 ### 2.1 Controller 类方法对比
 
 
-| 方法签名                                                  | 旧固件                                              | 新固件                                                                                     | 标记          | new（手动标记）                                                               |
-| ----------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------- | ----------- | ----------------------------------------------------------------------- |
-| `Tick20kHz()`                                         | 编码器采样 + 控制环                                      | 同                                                                                       | —           | 同旧：控制环框架无变化                                                             |
-| `CloseLoopControlTick()`                              | 19kHz 控制环                                        | 19kHz 控制环（增加 stall 检测 + LOCKED 维持 + 状态输出是 stall 专属，退回旧）                                 | **重构（退回旧）** | **退回旧：stall 检测 + LOCKED 维持是 stall 专属；不实现 stall 时应删除**                   |
-| `CalcCurrentToOutput(int32_t)`                        | FOC 电流环                                          | 同                                                                                       | —           | 同旧：FOC 电流环无变化                                                           |
-| `CalcPidToOutput(int32_t)`                            | PID 速度环                                          | 同                                                                                       | —           | 同旧：PID 速度环无变化                                                           |
-| `CalcDceToOutput(int32_t,int32_t)`                    | DCE 位置环                                          | 同                                                                                       | —           | 同旧：DCE 位置环无变化                                                           |
-| `SetCtrlMode(Mode_t)`                                 | 写 `requestMode`                                  | 同                                                                                       | —           | 同旧：模式切换无变化                                                              |
-| `SetPositionSetPoint(int32_t)`                        | `goalPosition = _pos + encoderHomeOffset`        | 同                                                                                       | —           | 同旧：位置设定无变化                                                              |
-| `SetPositionSetPointWithTime(int32_t,float)` → `bool` | 算 pMax = acc·T²/4；超限返回 false + 用 `velocityLimit` | **微调**：`sqrtf` 加 `fmaxf(0, discriminant)` 兜底（防 sqrt 负数）；其余同                             | **微调**      | **保留新：fmaxf 防 crash 是安全增强**                                             |
-| `SetVelocitySetPoint(int32_t)`                        | 限幅到 `±ratedVelocity`                             | 同                                                                                       | —           | 同旧：速度限幅无变化                                                              |
-| `SetCurrentSetPoint(int32_t)`                         | 限幅到 `±ratedCurrent`                              | 同                                                                                       | —           | 同旧：电流限幅无变化                                                              |
-| `SetDisable(bool)`                                    | 写 `goalDisable`                                  | 同                                                                                       | —           | 同旧：失能控制无变化                                                              |
-| `SetBrake(bool)`                                      | 写 `goalBrake`                                    | 同                                                                                       | —           | 同旧：刹车控制无变化                                                              |
-| `AddTrajectorySetPoint`                               | 同时设位置 + 速度                                       | 同                                                                                       | —           | 同旧：轨迹设定无变化                                                              |
-| `GetPosition(bool=false)`                             | `(realPosition - offset) / SUBDIVIDE`            | 同                                                                                       | —           | 同旧：位置获取无变化                                                              |
-| `GetVelocity()`                                       | `estVelocity / SUBDIVIDE`                        | 同                                                                                       | —           | 同旧：速度获取无变化                                                              |
-| `GetFocCurrent()`                                     | `focCurrent / 1000`                              | 同                                                                                       | —           | 同旧：电流获取无变化                                                              |
-| `CompensateAdvancedAngle(int32_t)`                    | 5 段查表                                            | 同                                                                                       | —           | 同旧：角度补偿无变化                                                              |
-| `Init()`                                              | 状态变量全部清零                                         | 状态变量全部清零（新增 stall 字段清零是 stall 专属，退回旧）                                                   | **重构（退回旧）** | **退回旧：不实现 stall 时，stall 状态字段不存在，无需额外清零**                                |
-| `AttachConfig(Config_t*)`                             | 绑 config                                         | 同                                                                                       | —           | 同旧：配置绑定无变化                                                              |
-| `ClearIntegral() const`                               | 清 PID/DCE `integralRound/outputKi`               | 清 PID/DCE `integralRound/outputKi`（仅清 estimator 状态是新 stall 专属，退回旧）                      | **重构（退回旧）** | **退回旧：旧逻辑清 PID/DCE 积分是已知行为；新逻辑服务于 stall estimator 状态机，不实现 stall 时应退回旧** |
-| `ClearStallFlag()`                                    | 重置 `stalledTime + isStalled`                     | 保留（不删除）                                                                                 | —           | **退回旧：不实现 stall 检测时，**`ClearStallFlag()` **仍可保留用于清除旧固件遗留状态**            |
-| `ApplyPosAsHomeOffset()`                              | `encoderHomeOffset = realPosition % SUBDIVIDE`   | **Bug 修复**：除改 offset 外，**同步** `realPosition = encoderHomeOffset`，让 `GetPosition()` 立即归零 | **重构**      | **保留新：Bug 修复，必须保留；旧固件归零后 GetPosition() 不归零**                            |
-| `ResetGoalsToCurrentPosition()`                       | ❌                                                | ❌（删除）                                                                                   | —           | **退回旧：此方法仅服务于 stall 检测的 LOCKED→IDLE 退出；不实现 stall 时应删除**                 |
-| `GetEstPosition()`                                    | ❌                                                | ❌（删除）                                                                                   | —           | **退回旧：此方法仅服务于 stall 检测状态机；不实现 stall 时应删除**                              |
-| `GetEstVelocity()`                                    | ❌                                                | ❌（删除）                                                                                   | —           | **退回旧：此方法仅服务于 stall 检测状态机；不实现 stall 时应删除**                              |
+| 方法签名                                                  | 旧固件                                              | 新固件                                                                                     | 标记          | new（手动标记）                                                         |
+| ----------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------- | ----------- | ----------------------------------------------------------------- |
+| `Tick20kHz()`                                         | 编码器采样 + 控制环                                      | 同                                                                                       | —           | 同旧：控制环框架无变化                                                       |
+| `CloseLoopControlTick()`                              | 19kHz 控制环                                        | 19kHz 控制环（增加 stall 检测 + LOCKED 维持 + 状态输出是 stall 专属，退回旧）                                 | **重构（退回旧）** | **退回旧：删除 stall v3 检测逻辑；LOCKED 维持删除（firmware_new 无此状态）**             |
+| `CalcCurrentToOutput(int32_t)`                        | FOC 电流环                                          | 同                                                                                       | —           | 同旧：FOC 电流环无变化                                                     |
+| `CalcPidToOutput(int32_t)`                            | PID 速度环                                          | 同                                                                                       | —           | 同旧：PID 速度环无变化                                                     |
+| `CalcDceToOutput(int32_t,int32_t)`                    | DCE 位置环                                          | 同                                                                                       | —           | 同旧：DCE 位置环无变化                                                     |
+| `SetCtrlMode(Mode_t)`                                 | 写 `requestMode`                                  | 同                                                                                       | —           | 同旧：模式切换无变化                                                        |
+| `SetPositionSetPoint(int32_t)`                        | `goalPosition = _pos + encoderHomeOffset`        | 同                                                                                       | —           | 同旧：位置设定无变化                                                        |
+| `SetPositionSetPointWithTime(int32_t,float)` → `bool` | 算 pMax = acc·T²/4；超限返回 false + 用 `velocityLimit` | **微调**：`sqrtf` 加 `fmaxf(0, discriminant)` 兜底（防 sqrt 负数）；其余同                             | **微调**      | **保留新：fmaxf 防 crash 是安全增强**                                       |
+| `SetVelocitySetPoint(int32_t)`                        | 限幅到 `±ratedVelocity`                             | 同                                                                                       | —           | 同旧：速度限幅无变化                                                        |
+| `SetCurrentSetPoint(int32_t)`                         | 限幅到 `±ratedCurrent`                              | 同                                                                                       | —           | 同旧：电流限幅无变化                                                        |
+| `SetDisable(bool)`                                    | 写 `goalDisable`                                  | 同                                                                                       | —           | 同旧：失能控制无变化                                                        |
+| `SetBrake(bool)`                                      | 写 `goalBrake`                                    | 同                                                                                       | —           | 同旧：刹车控制无变化                                                        |
+| `AddTrajectorySetPoint`                               | 同时设位置 + 速度                                       | 同                                                                                       | —           | 同旧：轨迹设定无变化                                                        |
+| `GetPosition(bool=false)`                             | `(realPosition - offset) / SUBDIVIDE`            | 同                                                                                       | —           | 同旧：位置获取无变化                                                        |
+| `GetVelocity()`                                       | `estVelocity / SUBDIVIDE`                        | 同                                                                                       | —           | 同旧：速度获取无变化                                                        |
+| `GetFocCurrent()`                                     | `focCurrent / 1000`                              | 同                                                                                       | —           | 同旧：电流获取无变化                                                        |
+| `CompensateAdvancedAngle(int32_t)`                    | 5 段查表                                            | 同                                                                                       | —           | 同旧：角度补偿无变化                                                        |
+| `Init()`                                              | 状态变量全部清零                                         | 状态变量全部清零（新增 stall 字段清零是 stall 专属，退回旧）                                                   | **重构（退回旧）** | **退回旧：删除 stall v3 字段清零（firmware_new 源码中无 stall v3 字段）**                          |
+| `AttachConfig(Config_t*)`                             | 绑 config                                         | 同                                                                                       | —           | 同旧：配置绑定无变化                                                        |
+| `ClearIntegral() const`                               | 清 PID/DCE `integralRound/outputKi`               | 清 PID/DCE `integralRound/outputKi`（仅清 estimator 状态是新 stall 专属，退回旧）                      | **重构（退回旧）** | **保留新：改为非 const，只清 estVelocityIntegral / estError（estimator 状态）** |
+| `ClearStallFlag()`                                    | 重置 `stalledTime + isStalled`                     | 保留（不删除）                                                                                 | —           | **退回旧：不实现 stall 检测时，**`ClearStallFlag()` **仍可保留用于清除旧固件遗留状态**      |
+| `ApplyPosAsHomeOffset()`                              | `encoderHomeOffset = realPosition % SUBDIVIDE`   | **Bug 修复**：除改 offset 外，**同步** `realPosition = encoderHomeOffset`，让 `GetPosition()` 立即归零 | **重构**      | **保留新：Bug 修复，必须保留；旧固件归零后 GetPosition() 不归零**                      |
+| `ResetGoalsToCurrentPosition()`                       | ❌                                                | ❌（删除）                                                                                   | —           | **新增：用于 !BACKHOME 回退时停在当前位置，不继承旧目标**                              |
+| `GetEstPosition()`                                    | ❌                                                | ❌（删除）                                                                                   | —           | **退回旧：firmware_new 无此方法（无 stall v3 estimator），无需删除**              |
+| `GetEstVelocity()`                                    | ❌                                                | ❌（删除）                                                                                   | —           | **退回旧：firmware_new 无此方法（无 stall v3 estimator），无需删除**              |
 
 
 ### 2.2 状态机变化
@@ -212,22 +212,34 @@
 
 ## 五、`main.cpp` 默认值对比（`UserApp/main.cpp`）
 
-> `main()` 函数中首次烧录的 `boardConfig` 实始化块（`EEPROM.get` 检测 `configStatus != CONFIG_OK` 时执行）。
+> `main()` 函数中首次烧录的 `boardConfig` 初始化块（`EEPROM.get` 检测 `configStatus != CONFIG_OK` 时执行）。
+> **参数值与** `firmware_new电机固件实施.md` **§四.1 保持一致。**
+
+> ⚠️ **内部数据一致性说明**：`dce_kp` 在不同来源中有两处来源：
+>
+> - `motor.h` 构造函数默认值：35=200（旧固件实测值）
+> - `main.cpp` 首次烧录值：35=195（`dce_kp` 字段）
+> 两处含义不同（构造初始值 vs EEPROM 烧录值），以 `main.cpp` 的 195 为准。
+> `dce_kp` 从 200→195 对 35 电机有实际影响，后续确认是否同步修正 `motor.h` 构造值。
 
 
-| 字段                        | 旧 35     | 旧 42     | 新 35     | 新 42     | 新 57     | 新 gripper | new（手动标记）                                                                  |
-| ------------------------- | -------- | -------- | -------- | -------- | -------- | --------- | -------------------------------------------------------------------------- |
-| `currentLimit` (mA)       | **1000** | **1000** | **1000** | **1000** | **1000** | 1200      | **退回旧：不实现 stall v3 时，电流保持旧固件默认值；新固件 2A/2.5A 是为 stall 检测服务的，不采用**           |
-| `velocityLimit` (r/s)     | 30       | 30       | 30       | 30       | 30       | 30        | 同旧：速度限幅无变化                                                                 |
-| `velocityAcc` (r/s²)      | **100**  | **100**  | **100**  | **100**  | **100**  | **100**   | **退回旧：不实现 stall v3 时，加速度保持旧固件默认值 100 r/s²；新固件 30 r/s² 是为 stall 检测服务的，不采用** |
-| `calibrationCurrent` (mA) | 2000     | 2000     | 2000     | 2000     | 2000     | 1200      | 同旧：35/42/57 一致；gripper=1200 符合低功耗设计                                        |
-| `dce_kp`                  | 195      | 200      | 195      | 200      | 300      | 195       | 同旧：35/42/gripper 一致；57=300 适配更大电机                                          |
-| `dce_kv`                  | 80       | 80       | 80       | 80       | 120      | 80        | 同旧：35/42/gripper 一致；57=120 适配更大电机                                          |
-| `dce_ki`                  | 300      | 300      | 300      | 300      | 150      | 300       | 同旧：35/42/gripper 一致；57=150 适配更大电机                                          |
-| `dce_kd`                  | 250      | 250      | 250      | 250      | 50       | 250       | 同旧：35/42/gripper 一致；57=50 适配更大电机                                           |
-| `enableMotorOnBoot`       | false    | false    | false    | false    | false    | false     | 同旧：上电使能无变化                                                                 |
-| `enableStallProtect`      | false    | false    | false    | false    | false    | ❌         | **退回旧：不实现 stall v3 时，堵转保护默认关闭；与旧固件一致**                                     |
-| `enableTempWatch`         | false    | false    | false    | false    | false    | false     | 同旧：温度监控无变化                                                                 |
+| 字段                        | 旧 35  | 旧 42  | 新 35     | 新 42     | 新 57      | 新 gripper | new（手动标记）                              |
+| ------------------------- | ----- | ----- | -------- | -------- | --------- | --------- | -------------------------------------- |
+| `currentLimit` (mA)       | 1000  | 1000  | **2500** | **2500** | **3000**  | **2500**  | 35/42/gripper=2500，57=3000             |
+| `velocityLimit` (r/s)     | 30    | 30    | 30       | 30       | 30        | 30        | 同旧：速度限幅无变化                             |
+| `velocityAcc` (r/s²)      | 100   | 100   | **30**   | **30**   | **30**    | **30**    | 改为 30 r/s²（与旧固件 100 r/s² 不同，需确认兼容性）    |
+| `calibrationCurrent` (mA) | 2000  | 2000  | 2000     | 2000     | 2000      | **2000**  | 统一 2000 mA（gripper 原值 1200 已废弃）        |
+| `dce_kp`                  | 195   | 200   | **200**  | 200      | **300**   | **200**   | 35/42/gripper=200，57=300               |
+| `dce_kv`                  | 80    | 80    | 80       | 80       | **120**   | 80        | 35/42/gripper=80，57=120                |
+| `dce_ki`                  | 300   | 300   | 300      | 300      | **150**   | 300       | 35/42/gripper=300，57=150               |
+| `dce_kd`                  | 250   | 250   | 250      | 250      | **50**    | 250       | 35/42/gripper=250，57=50                |
+| `pid_kp`                  | —     | —     | **5**    | **5**    | **15**    | **5**     | PID 速度环增益（57 明显更大）                     |
+| `pid_ki`                  | —     | —     | **30**   | **30**   | **80**    | **30**    | 同上                                     |
+| `pid_kd`                  | —     | —     | **0**    | **0**    | **10**    | **0**     | 同上                                     |
+| `ratedCurrentAcc` (mA/s)  | —     | —     | **2000** | **2000** | **50000** | **2000**  | 57=50×1000 爬升更缓，其余统一 2×1000            |
+| `enableMotorOnBoot`       | false | false | false    | false    | false     | false     | 同旧：上电使能无变化                             |
+| `enableStallProtect`      | false | false | false    | false    | false     | ❌         | **退回旧：不实现 stall v3 时，堵转保护默认关闭；与旧固件一致** |
+| `enableTempWatch`         | false | false | false    | false    | false     | false     | 同旧：温度监控无变化                             |
 
 
 `canNodeId` **决定方式（运行时行为）**：
@@ -271,11 +283,11 @@
 
 | 类别                           | 旧固件支持       | 新 35/42/57  | 新 gripper           | new（手动标记）                                             |
 | ---------------------------- | ----------- | ----------- | ------------------- | ----------------------------------------------------- |
-| 基本控制 `0x01`-`0x07`           | ✅           | ✅           | ✅                   | 同旧：基本控制命令退回旧固件行为（删除 stall 专属逻辑）                       |
+| 基本控制 `0x01`-`0x07`           | ✅           | ✅           | ✅                   | 同旧：基本控制命令退回旧固件行为（firmware_new 源码中无 stall v3 字段）                       |
 | 参数写入 `0x11`-`0x1A`           | ✅           | ✅           | ✅（gripper 缺 `0x1B`） | 同旧：参数写入退回旧固件（删除 stallCurrentThreshold 联动）             |
 | Stall 开关 `0x1B`              | ✅（写 EEPROM） | ✅（写 EEPROM） | ❌                   | **退回旧：不实现 stall v3 时，堵转保护开关无意义；退回旧固件行为（写 EEPROM）或删除** |
 | 基本查询 `0x21`-`0x25`           | ✅           | ✅           | ✅                   | 同旧：基本查询无变化                                            |
-| DCE/Acc/Cur 查询 `0x28`-`0x2D` | ❌           | ❌（删除）       | ❌（删除）               | **退回旧：不实现 stall 时查询能力非必需；建议删除以保持最小改动**                |
+| DCE/Acc/Cur 查询 `0x28`-`0x2D` | ❌           | ✅       | ✅               | **保留新**                |
 | 急停广播 `0x09`                  | ❌           | ✅           | ✅                   | **保留新：安全急停功能，不依赖 stall 检测，建议保留**                      |
 | 堵转协议 `0x5A/0x5B/0x5C`        | ❌           | ❌（删除）       | ❌                   | **退回旧：整个 stall v3 协议全部删除**                            |
 | 系统命令 `0x7D`-`0x7F`           | ✅           | ✅           | ✅                   | 同旧：系统命令无变化                                            |
@@ -296,7 +308,7 @@
 5. CAN `0x2B` Get DCE Kd —— GET 查询命令，仅读参数
 6. CAN `0x2C` Get Acceleration —— GET 查询命令，仅读参数
 7. CAN `0x2D` Get Current-Limit —— GET 查询命令，仅读参数
-8. `SetPositionSetPointWithTime()` 安全增强 —— `sqrtf` 加 `fmaxf(0, discriminant)` 兜底防负数 crash
+8. ClearIntegral()**改为非 const**，只清estVelocityIntegral / estError（estimator 状态）
 9. 旧固件 `ApplyPosAsHomeOffset()` Bug 修复 —— 同步 `realPosition = encoderHomeOffset`，让 `GetPosition()` 立即归零
 
 ### 8.2 删除的新增（7 项）
@@ -316,8 +328,8 @@
 3. `0x07 Set Pos w/ VelLimit` → **退回旧**：删除 LOCKED 丢弃 + 恢复立即 FINISH ACK
 4. `0x12 Set I-Limit` → **退回旧**：删除 `stallCurrentThreshold` 同步
 5. `0x1B Stall-Protect` → **退回旧**：恢复写 EEPROM 行为（或删除命令）
-6. `CloseLoopControlTick()` → **退回旧**：删除 stall v3 检测块、LOCKED 维持、STATE_STALL 输出
-7. `Init()` → **退回旧**：删除 stall 字段清零
+6. `CloseLoopControlTick()` → 退回旧：删除 stall v3 检测块（firmware_new 源码中无此代码块）
+7. `Init()` → 退回旧：firmware_new 源码无 stall v3 字段，无需清零
 8. `ClearIntegral()` → **退回旧**：恢复清 PID/DCE 积分的旧逻辑
 
 ### 8.4 保留旧固件的元素（不改动）
@@ -330,3 +342,4 @@
 6. `Mode_t` (9 个模式)
 7. 所有基本控制/查询/参数命令（`0x01`-`0x07`、`0x11`-`0x16`、`0x17`-`0x1A`、`0x21`-`0x25`、`0x7D`-`0x7F`）
 8. 旧固件默认值（`currentLimit=1000mA`、`velocityAcc=100r/s²`、`enableStallProtect=false`）
+
