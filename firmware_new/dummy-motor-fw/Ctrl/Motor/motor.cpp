@@ -340,9 +340,9 @@ void Motor::Controller::CalcCurrentToOutput(int32_t current)
     focCurrent = current;
 
     if (focCurrent > 0)
-        focPosition = estPosition + context->SOFT_DIVIDE_NUM; // ahead phase of 90°
+        focPosition = estPosition + Motor::SOFT_DIVIDE_NUM; // ahead phase of 90°
     else if (focCurrent < 0)
-        focPosition = estPosition - context->SOFT_DIVIDE_NUM; // behind phase of 90°
+        focPosition = estPosition - Motor::SOFT_DIVIDE_NUM; // behind phase of 90°
     else focPosition = estPosition;
 
     context->driver->SetFocCurrentVector(focPosition, focCurrent);
@@ -473,16 +473,16 @@ float Motor::Controller::GetPosition(bool _isLap)
 {
     return _isLap ?
            (float) (realLapPosition - context->config.motionParams.encoderHomeOffset) /
-           (float) (context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS)
+           (float) (Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS)
                   :
            (float) (realPosition - context->config.motionParams.encoderHomeOffset) /
-           (float) (context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+           (float) (Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
 }
 
 
 float Motor::Controller::GetVelocity()
 {
-    return (float) estVelocity / (float) context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+    return (float) estVelocity / (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 }
 
 
@@ -617,7 +617,7 @@ void Motor::Controller::ApplyPosAsHomeOffset()
 {
     // 计算新的 home offset（realPosition 单圈内余数）
     context->config.motionParams.encoderHomeOffset = realPosition %
-                                                     context->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+                                                     Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
     // 关键 v3.2 修复：同步归零 realPosition 和 realLapPosition，
     // 让 GetPosition() 立即返回 0 / 设定偏移
     realPosition = context->config.motionParams.encoderHomeOffset;

@@ -40,29 +40,29 @@ void Main()
             .defaultMode = Motor::MODE_COMMAND_POSITION,
 #if MOTOR_TYPE == 35
             .currentLimit = 2500,                    // mA
-            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
-            .velocityAcc = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
+            .velocityLimit = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
+            .velocityAcc = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
             .calibrationCurrent = 2000,
             .dce_kp = 200, .dce_kv = 80, .dce_ki = 300, .dce_kd = 250,
             .motor_temperature = 0.0,
 #elif MOTOR_TYPE == 42
             .currentLimit = 2500,
-            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
-            .velocityAcc = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
+            .velocityLimit = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
+            .velocityAcc = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
             .calibrationCurrent = 2000,
             .dce_kp = 200, .dce_kv = 80, .dce_ki = 300, .dce_kd = 250,
             .motor_temperature = 0.0,
 #elif MOTOR_TYPE == 57
             .currentLimit = 3000,
-            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
-            .velocityAcc = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
+            .velocityLimit = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
+            .velocityAcc = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
             .calibrationCurrent = 2000,
             .dce_kp = 300, .dce_kv = 120, .dce_ki = 150, .dce_kd = 50,
             .motor_temperature = 0.0,
 #elif MOTOR_TYPE == 8
             .currentLimit = 2500,
-            .velocityLimit = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
-            .velocityAcc = 30 * motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
+            .velocityLimit = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
+            .velocityAcc = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
             .calibrationCurrent = 2000,
             .dce_kp = 200, .dce_kv = 80, .dce_ki = 300, .dce_kd = 250,
             .motor_temperature = 0.0,

@@ -74,9 +74,6 @@ file(GLOB_RECURSE SOURCES
 
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/STM32F103CBTx_FLASH.ld)
 
-add_link_options(-mcpu=cortex-m3 -mthumb -mthumb-interwork)
-add_link_options(-T ${LINKER_SCRIPT})
-
 # Define motor types and their corresponding MOTOR_TYPE values
 set(MOTOR_TARGETS motor-35 motor-42 motor-57 motor-gripper)
 set(MOTOR_TYPES 35 42 57 8)
@@ -92,15 +89,21 @@ foreach(i RANGE 0 ${NUM_TARGETS})
     set(TARGET_HEX ${PROJECT_BINARY_DIR}/${TARGET_NAME}.hex)
     set(TARGET_BIN ${PROJECT_BINARY_DIR}/${TARGET_NAME}.bin)
     set(TARGET_MAP ${PROJECT_BINARY_DIR}/${TARGET_NAME}.map)
-    
+
     # Create target-specific compile options
     set(TARGET_COMPILE_DEFS -DMOTOR_TYPE=${MOTOR_TYPE_VAL})
-    
+
     add_executable(${TARGET_NAME}.elf ${SOURCES} ${LINKER_SCRIPT})
     target_compile_definitions(${TARGET_NAME}.elf PRIVATE ${TARGET_COMPILE_DEFS})
-    
-    add_link_options(-Wl,-gc-sections,--print-memory-usage,-Map=${TARGET_MAP})
-    
+    # Target-scope link options so each motor-N.elf gets its own
+    # -T linker script, -mcpu, -Wl,-Map=... (was directory-scope add_link_options,
+    # which accumulated across the foreach loop and made the linker overwrite
+    # motor-35.map with motor-42's contents, etc.)
+    target_link_options(${TARGET_NAME}.elf PRIVATE
+        -mcpu=cortex-m3 -mthumb -mthumb-interwork
+        -T ${LINKER_SCRIPT}
+        -Wl,-gc-sections,--print-memory-usage,-Map=${TARGET_MAP})
+
     add_custom_command(TARGET ${TARGET_NAME}.elf POST_BUILD
             COMMAND ${CMAKE_OBJCOPY} -Oihex $<TARGET_FILE:${TARGET_NAME}.elf> ${TARGET_HEX}
             COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${TARGET_NAME}.elf> ${TARGET_BIN}

@@ -27,7 +27,7 @@ void OnUartCmd(uint8_t* _data, uint16_t _len)
                 motor.controller->SetCtrlMode(Motor::MODE_COMMAND_VELOCITY);
             }
             motor.controller->SetVelocitySetPoint(
-                (int32_t) (vel * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
+                (int32_t) (vel * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
             break;
         case 'p':
             token = strtok((char*) _data, "p");
@@ -36,7 +36,7 @@ void OnUartCmd(uint8_t* _data, uint16_t _len)
                 motor.controller->requestMode = Motor::MODE_COMMAND_POSITION;
 
             motor.controller->SetPositionSetPoint(
-                (int32_t) (pos * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
+                (int32_t) (pos * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
             break;
         default:
             printf("Only support [c] [v] [p] commands!\r\n");

@@ -16,7 +16,7 @@ int32_t EncoderCalibratorBase::CycleDataAverage(const uint16_t* _data, uint16_t 
         diffData = (int32_t) _data[i];
         subData = (int32_t) _data[i] - (int32_t) _data[0];
         if (subData > (_cyc >> 1)) diffData = (int32_t) _data[i] - _cyc;
-        if (subData < (-_cyc >> 1)) diffData = (int32_t) _data[i] + _cyc;
+        if (subData < -(_cyc >> 1)) diffData = (int32_t) _data[i] + _cyc;
         sumData += diffData;
     }
 
@@ -141,7 +141,7 @@ void EncoderCalibratorBase::Tick20kHz()
             if (isTriggered)
             {
                 motor->driver->SetFocCurrentVector(goPosition, motor->config.motionParams.caliCurrent);
-                goPosition = motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+                goPosition = Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
                 sampleCount = 0;
                 state = CALI_FORWARD_PREPARE;
                 errorCode = CALI_NO_ERROR;
@@ -150,20 +150,20 @@ void EncoderCalibratorBase::Tick20kHz()
         case CALI_FORWARD_PREPARE:
             goPosition += AUTO_CALIB_SPEED;
             motor->driver->SetFocCurrentVector(goPosition, motor->config.motionParams.caliCurrent);
-            if (goPosition == 2 * motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS)
+            if (goPosition == 2 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS)
             {
-                goPosition = motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+                goPosition = Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
                 state = CALI_FORWARD_MEASURE;
             }
             break;
         case CALI_FORWARD_MEASURE:
-            if ((goPosition % motor->SOFT_DIVIDE_NUM) == 0)
+            if ((goPosition % Motor::SOFT_DIVIDE_NUM) == 0)
             {
                 sampleDataRaw[sampleCount++] = motor->encoder->angleData.rawAngle;
                 if (sampleCount == EncoderCalibratorBase::SAMPLE_COUNTS_PER_STEP)
                 {
-                    sampleDataAverageForward[(goPosition - motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS) /
-                                             motor->SOFT_DIVIDE_NUM]
+                    sampleDataAverageForward[(goPosition - Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS) /
+                                             Motor::SOFT_DIVIDE_NUM]
                         = CycleDataAverage(sampleDataRaw, EncoderCalibratorBase::SAMPLE_COUNTS_PER_STEP,
                                            motor->encoder->RESOLUTION);
 
@@ -177,7 +177,7 @@ void EncoderCalibratorBase::Tick20kHz()
 
             motor->driver->SetFocCurrentVector(goPosition, motor->config.motionParams.caliCurrent);
 
-            if (goPosition > (2 * motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS))
+            if (goPosition > (2 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS))
             {
                 state = CALI_BACKWARD_RETURN;
             }
@@ -187,7 +187,7 @@ void EncoderCalibratorBase::Tick20kHz()
             motor->driver->SetFocCurrentVector(goPosition, motor->config.motionParams.caliCurrent);
 
             if (goPosition ==
-                (2 * motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS + motor->SOFT_DIVIDE_NUM * 20))
+                (2 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS + Motor::SOFT_DIVIDE_NUM * 20))
             {
                 state = CALI_BACKWARD_GAP_DISMISS;
             }
@@ -195,19 +195,19 @@ void EncoderCalibratorBase::Tick20kHz()
         case CALI_BACKWARD_GAP_DISMISS:
             goPosition -= FINE_TUNE_CALIB_SPEED;
             motor->driver->SetFocCurrentVector(goPosition, motor->config.motionParams.caliCurrent);
-            if (goPosition == (2 * motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS))
+            if (goPosition == (2 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS))
             {
                 state = CALI_BACKWARD_MEASURE;
             }
             break;
         case CALI_BACKWARD_MEASURE:
-            if ((goPosition % motor->SOFT_DIVIDE_NUM) == 0)
+            if ((goPosition % Motor::SOFT_DIVIDE_NUM) == 0)
             {
                 sampleDataRaw[sampleCount++] = motor->encoder->angleData.rawAngle;
                 if (sampleCount == EncoderCalibratorBase::SAMPLE_COUNTS_PER_STEP)
                 {
-                    sampleDataAverageBackward[(goPosition - motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS) /
-                                              motor->SOFT_DIVIDE_NUM]
+                    sampleDataAverageBackward[(goPosition - Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS) /
+                                              Motor::SOFT_DIVIDE_NUM]
                         = CycleDataAverage(sampleDataRaw, EncoderCalibratorBase::SAMPLE_COUNTS_PER_STEP,
                                            motor->encoder->RESOLUTION);
 
@@ -219,7 +219,7 @@ void EncoderCalibratorBase::Tick20kHz()
                 goPosition -= FINE_TUNE_CALIB_SPEED;
             }
             motor->driver->SetFocCurrentVector(goPosition, motor->config.motionParams.caliCurrent);
-            if (goPosition < motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS)
+            if (goPosition < Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS)
             {
                 state = CALI_CALCULATING;
             }
@@ -275,29 +275,29 @@ void EncoderCalibratorBase::TickMainLoop()
 
         if (goDirection)
         {
-            for (stepX = rcdX; stepX < rcdX + motor->MOTOR_ONE_CIRCLE_HARD_STEPS + 1; stepX++)
+            for (stepX = rcdX; stepX < rcdX + Motor::MOTOR_ONE_CIRCLE_HARD_STEPS + 1; stepX++)
             {
                 dataI32 = CycleSubtract(
-                        sampleDataAverageForward[CycleMod(stepX + 1, motor->MOTOR_ONE_CIRCLE_HARD_STEPS)],
-                        sampleDataAverageForward[CycleMod(stepX, motor->MOTOR_ONE_CIRCLE_HARD_STEPS)],
+                        sampleDataAverageForward[CycleMod(stepX + 1, Motor::MOTOR_ONE_CIRCLE_HARD_STEPS)],
+                        sampleDataAverageForward[CycleMod(stepX, Motor::MOTOR_ONE_CIRCLE_HARD_STEPS)],
                         motor->encoder->RESOLUTION);
                 if (stepX == rcdX)
                 {
                     for (stepY = rcdY; stepY < dataI32; stepY++)
                     {
-                        dataU16 = CycleMod(motor->SOFT_DIVIDE_NUM * stepX +
-                                           motor->SOFT_DIVIDE_NUM * stepY / dataI32,
-                                           motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+                        dataU16 = CycleMod(Motor::SOFT_DIVIDE_NUM * stepX +
+                                           Motor::SOFT_DIVIDE_NUM * stepY / dataI32,
+                                           Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
                         WriteFlash16bitsAppend(dataU16);
                         resultNum++;
                     }
-                } else if (stepX == rcdX + motor->MOTOR_ONE_CIRCLE_HARD_STEPS)
+                } else if (stepX == rcdX + Motor::MOTOR_ONE_CIRCLE_HARD_STEPS)
                 {
                     for (stepY = 0; stepY < rcdY; stepY++)
                     {
-                        dataU16 = CycleMod(motor->SOFT_DIVIDE_NUM * stepX +
-                                           motor->SOFT_DIVIDE_NUM * stepY / dataI32,
-                                           motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+                        dataU16 = CycleMod(Motor::SOFT_DIVIDE_NUM * stepX +
+                                           Motor::SOFT_DIVIDE_NUM * stepY / dataI32,
+                                           Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
                         WriteFlash16bitsAppend(dataU16);
                         resultNum++;
                     }
@@ -305,9 +305,9 @@ void EncoderCalibratorBase::TickMainLoop()
                 {
                     for (stepY = 0; stepY < dataI32; stepY++)
                     {
-                        dataU16 = CycleMod(motor->SOFT_DIVIDE_NUM * stepX +
-                                           motor->SOFT_DIVIDE_NUM * stepY / dataI32,
-                                           motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+                        dataU16 = CycleMod(Motor::SOFT_DIVIDE_NUM * stepX +
+                                           Motor::SOFT_DIVIDE_NUM * stepY / dataI32,
+                                           Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
                         WriteFlash16bitsAppend(dataU16);
                         resultNum++;
                     }
@@ -315,20 +315,20 @@ void EncoderCalibratorBase::TickMainLoop()
             }
         } else
         {
-            for (stepX = rcdX + motor->MOTOR_ONE_CIRCLE_HARD_STEPS; stepX > rcdX - 1; stepX--)
+            for (stepX = rcdX + Motor::MOTOR_ONE_CIRCLE_HARD_STEPS; stepX > rcdX - 1; stepX--)
             {
                 dataI32 = CycleSubtract(
-                        sampleDataAverageForward[CycleMod(stepX, motor->MOTOR_ONE_CIRCLE_HARD_STEPS)],
-                        sampleDataAverageForward[CycleMod(stepX + 1, motor->MOTOR_ONE_CIRCLE_HARD_STEPS)],
+                        sampleDataAverageForward[CycleMod(stepX, Motor::MOTOR_ONE_CIRCLE_HARD_STEPS)],
+                        sampleDataAverageForward[CycleMod(stepX + 1, Motor::MOTOR_ONE_CIRCLE_HARD_STEPS)],
                         motor->encoder->RESOLUTION);
-                if (stepX == rcdX + motor->MOTOR_ONE_CIRCLE_HARD_STEPS)
+                if (stepX == rcdX + Motor::MOTOR_ONE_CIRCLE_HARD_STEPS)
                 {
                     for (stepY = rcdY; stepY < dataI32; stepY++)
                     {
                         dataU16 = CycleMod(
-                                motor->SOFT_DIVIDE_NUM * (stepX + 1) -
-                                motor->SOFT_DIVIDE_NUM * stepY / dataI32,
-                                motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+                                Motor::SOFT_DIVIDE_NUM * (stepX + 1) -
+                                Motor::SOFT_DIVIDE_NUM * stepY / dataI32,
+                                Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
                         WriteFlash16bitsAppend(dataU16);
                         resultNum++;
                     }
@@ -337,9 +337,9 @@ void EncoderCalibratorBase::TickMainLoop()
                     for (stepY = 0; stepY < rcdY; stepY++)
                     {
                         dataU16 = CycleMod(
-                                motor->SOFT_DIVIDE_NUM * (stepX + 1) -
-                                motor->SOFT_DIVIDE_NUM * stepY / dataI32,
-                                motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+                                Motor::SOFT_DIVIDE_NUM * (stepX + 1) -
+                                Motor::SOFT_DIVIDE_NUM * stepY / dataI32,
+                                Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
                         WriteFlash16bitsAppend(dataU16);
                         resultNum++;
                     }
@@ -348,9 +348,9 @@ void EncoderCalibratorBase::TickMainLoop()
                     for (stepY = 0; stepY < dataI32; stepY++)
                     {
                         dataU16 = CycleMod(
-                                motor->SOFT_DIVIDE_NUM * (stepX + 1) -
-                                motor->SOFT_DIVIDE_NUM * stepY / dataI32,
-                                motor->MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+                                Motor::SOFT_DIVIDE_NUM * (stepX + 1) -
+                                Motor::SOFT_DIVIDE_NUM * stepY / dataI32,
+                                Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
                         WriteFlash16bitsAppend(dataU16);
                         resultNum++;
                     }
@@ -395,7 +395,7 @@ int32_t EncoderCalibratorBase::CycleSubtract(int32_t _a, int32_t _b, int32_t _cy
 
     sub_data = _a - _b;
     if (sub_data > (_cyc >> 1)) sub_data -= _cyc;
-    if (sub_data < (-_cyc >> 1)) sub_data += _cyc;
+    if (sub_data < -(_cyc >> 1)) sub_data += _cyc;
     return sub_data;
 }
 

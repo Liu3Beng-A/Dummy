@@ -42,9 +42,9 @@ public:
     }
 
 
-    const int32_t MOTOR_ONE_CIRCLE_HARD_STEPS = 200; // for 1.8° step-motors
-    const int32_t SOFT_DIVIDE_NUM = 256;
-    const int32_t MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS = MOTOR_ONE_CIRCLE_HARD_STEPS * SOFT_DIVIDE_NUM;
+    static constexpr int32_t MOTOR_ONE_CIRCLE_HARD_STEPS = 200; // for 1.8° step-motors
+    static constexpr int32_t SOFT_DIVIDE_NUM = 256;
+    static constexpr int32_t MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS = MOTOR_ONE_CIRCLE_HARD_STEPS * SOFT_DIVIDE_NUM;
 
     typedef enum
     {

@@ -52,7 +52,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             }
             motor.controller->SetVelocitySetPoint(
                 (int32_t) (*(float*) RxData *
-                           (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
+                           (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
             break;
         case 0x05:  // Set Position SetPoint
             if (motor.controller->modeRunning != Motor::MODE_COMMAND_POSITION)
@@ -61,7 +61,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
                 motor.controller->SetCtrlMode(Motor::MODE_COMMAND_POSITION);
             }
             motor.controller->SetPositionSetPoint(
-                (int32_t) (*(float*) RxData * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
+                (int32_t) (*(float*) RxData * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
             printf("SET MOTOR[0x05] POSITION[]\r\n");
             if (_data[4]) // Need Position & Finished ACK
             {
@@ -78,7 +78,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             if (motor.controller->modeRunning != Motor::MODE_COMMAND_POSITION)
                 motor.controller->SetCtrlMode(Motor::MODE_COMMAND_POSITION);
             motor.controller->SetPositionSetPointWithTime(
-                (int32_t) (*(float*) RxData * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS),
+                (int32_t) (*(float*) RxData * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS),
                 *(float*) (RxData + 4));
             if (_data[4]) // Need Position & Finished ACK
             {
@@ -99,9 +99,9 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
                 motor.controller->SetCtrlMode(Motor::MODE_COMMAND_POSITION);
             }
             motor.config.motionParams.ratedVelocity =
-                (int32_t) (*(float*) (RxData + 4) * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+                (int32_t) (*(float*) (RxData + 4) * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
             motor.controller->SetPositionSetPoint(
-                (int32_t) (*(float*) RxData * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
+                (int32_t) (*(float*) RxData * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));
             // Always Need Position & Finished ACK
             tmpF = motor.controller->GetPosition();
             auto* b = (unsigned char*) &tmpF;
@@ -116,7 +116,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             // 0x10~0x1F CMDs with Memory
 #if MOTOR_TYPE == 8
         case 0x11:  // Set Node-ID and Store to EEPROM (no-op for gripper)
-            // gripper 硬编码 ID=8，启动时已被 main.cpp 强制覆盖
+            // gripper 硬编�?ID=8，启动时已被 main.cpp 强制覆盖
             break;
 #else
         case 0x11:  // Set Node-ID and Store to EEPROM
@@ -134,13 +134,13 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         case 0x13:  // Set Velocity-Limit and Store to EEPROM
             motor.config.motionParams.ratedVelocity =
                 (int32_t) (*(float*) RxData *
-                           (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+                           (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
             boardConfig.velocityLimit = motor.config.motionParams.ratedVelocity;
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
-        case 0x14:  // Set Acceleration （and Store to EEPROM）
-            tmpF = *(float*) RxData * (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+        case 0x14:  // Set Acceleration （and Store to EEPROM�?
+            tmpF = *(float*) RxData * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 
             motor.config.motionParams.ratedVelocityAcc = (int32_t) tmpF;
             motor.motionPlanner.velocityTracker.SetVelocityAcc((int32_t) tmpF);
@@ -152,7 +152,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         case 0x15:  // Apply Home-Position and Store to EEPROM
             motor.controller->ApplyPosAsHomeOffset();
             boardConfig.encoderHomeOffset = motor.config.motionParams.encoderHomeOffset %
-                                            motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+                                            Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
             boardConfig.configStatus = CONFIG_COMMIT;
             break;
         case 0x16:  // Set Auto-Enable and Store to EEPROM
@@ -186,7 +186,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
         #if MOTOR_TYPE == 8
         case 0x1B:  // Set Enable Stall-Protect (no-op for gripper)
-            // gripper 没有 stall 保护；保持 EEPROM 字段不变
+            // gripper 没有 stall 保护；保�?EEPROM 字段不变
             break;
 #else
         case 0x1B:  // Set Enable Stall-Protect
@@ -303,7 +303,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
         case 0x2C: // Get Acceleration (r/s²)
         {
-            tmpF = (float) boardConfig.velocityAcc / (float) motor.MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+            tmpF = (float) boardConfig.velocityAcc / (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
             auto* b = (unsigned char*) &tmpF;
             for (int i = 0; i < 4; i++)
                 _data[i] = *(b + i);
