@@ -150,22 +150,25 @@ static void UartServerTask(void* ctx)
         // Fetch the circular buffer "write pointer", where it would write next
         new_rcv_idx = UART_RX_BUFFER_SIZE - huart5.hdmarx->Instance->NDTR;
 
-        // deadline_ms = timeout_to_deadline(PROTOCOL_SERVER_TIMEOUT_MS);
         // Process bytes in one or two chunks (two in case there was a wrap)
         if (new_rcv_idx < dma_last_rcv_idx[1])
         {
-            uart4_stream_input.process_bytes(dma_rx_buffer[1] + dma_last_rcv_idx[1],
+            /* 修复 Bug：原代码误用 uart4_stream_input 处理 UART5 数据，
+             * 导致 UART5 收到的 Fibre 二进制协议数据被注入 UART4 解析器，
+             * 两路通信互相污染。改为正确的 uart5_stream_input。 */
+            uart5_stream_input.process_bytes(dma_rx_buffer[1] + dma_last_rcv_idx[1],
                                              UART_RX_BUFFER_SIZE - dma_last_rcv_idx[1],
-                                             nullptr); // TODO: use process_all
+                                             nullptr);
             ASCII_protocol_parse_stream(dma_rx_buffer[1] + dma_last_rcv_idx[1],
                                         UART_RX_BUFFER_SIZE - dma_last_rcv_idx[1], uart5_stream_output);
             dma_last_rcv_idx[1] = 0;
         }
         if (new_rcv_idx > dma_last_rcv_idx[1])
         {
-            uart4_stream_input.process_bytes(dma_rx_buffer[1] + dma_last_rcv_idx[1],
+            /* 同上：UART5 的 Fibre 数据应送入 uart5_stream_input */
+            uart5_stream_input.process_bytes(dma_rx_buffer[1] + dma_last_rcv_idx[1],
                                              new_rcv_idx - dma_last_rcv_idx[1],
-                                             nullptr); // TODO: use process_all
+                                             nullptr);
             ASCII_protocol_parse_stream(dma_rx_buffer[1] + dma_last_rcv_idx[1],
                                         new_rcv_idx - dma_last_rcv_idx[1], uart5_stream_output);
             dma_last_rcv_idx[1] = new_rcv_idx;
