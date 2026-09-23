@@ -21,12 +21,12 @@
 
 ```
 firmware_new/
-├── dummy-35motor-fw/      ← 已存在，内容是 firmware_old 的副本
+├── dummy-motor-fw/      ← 已存在，内容是 firmware_old 的副本
 ├── dummy-42motor-fw/       ← 已存在，内容是 firmware_old 的副本
 └── dummy-ref-core-fw/      ← 主控固件（不在本文范围）
 ```
 
-> `firmware_new/dummy-35motor-fw/` 下只有**一套源码（42和35）**，通过 `MOTOR_TYPE` 宏（35/42/57/8=gripper）切参数，编译出 4 个 ELF。**不创建独立的** `dummy-57motor-fw/` **或** `dummy-gripper-fw/` 目录。
+> `firmware_new/dummy-motor-fw/` 下只有**一套源码（42和35）**，通过 `MOTOR_TYPE` 宏（35/42/57/8=gripper）切参数，编译出 4 个 ELF。**不创建独立的** `dummy-57motor-fw/` **或** `dummy-gripper-fw/` 目录。
 
 ### 1.2 已经实现的功能（直接来自 firmware_old，无需修改）
 
@@ -70,18 +70,25 @@ firmware_new/
 ### 【P0-1】4 个 build 共用 1 套源码（35/42/57/gripper），更新 CMakeLists.txt
 
 **做什么**：
-- 电机固件是**唯一一套源码**（`dummy-35motor-fw/`），通过 `MOTOR_TYPE` 宏切换参数，编译出 4 个 ELF
+- 电机固件是**唯一一套源码**，通过 `MOTOR_TYPE` 宏切换参数，编译出 4 个 ELF
+- **目录合并**：将现有 `dummy-42motor-fw/` 内容合并进 `dummy-motor-fw/`，合并后**重命名为 `dummy-motor-fw/`**（避免命名误导，因为源码已统一）
 - 在 CMakeLists.txt 中定义 4 个 target，共用同一套源文件
 - 每个 target 在编译参数里加 `-DMOTOR_TYPE=35` / `42` / `57` / `8`（gripper=8）
 - **不创建独立的** `dummy-57motor-fw/` **或** `dummy-gripper-fw/` **目录**
 
 **改哪些文件**：
-- `firmware_new/dummy-35motor-fw/CMakeLists.txt` — 添加 4 个 target
-- `firmware_new/dummy-35motor-fw/UserApp/configurations.h` — 条件编译，`MOTOR_TYPE` 决定 `canNodeId` 默认值（35/42=拨码，57=7，gripper=8）
+- `firmware_new/dummy-motor-fw/CMakeLists.txt` — 添加 4 个 target
+- `firmware_new/dummy-motor-fw/UserApp/configurations.h`：
+  - 条件编译，`MOTOR_TYPE` 决定 `canNodeId` 默认值（35/42=拨码，57/gripper=硬编码）
+  - **新增硬编码宏**：`RAIL_FIXED_NODE_ID = 7`（57 用）、`GRIPPER_FIXED_NODE_ID = 8`（gripper 用）
+- `firmware_new/dummy-motor-fw/UserApp/main.cpp`：
+  - 首次烧录时按 `MOTOR_TYPE` 决定 `boardConfig.canNodeId` 初值
+  - **新增启动覆盖逻辑**：`MOTOR_TYPE == 57` 时强制 `canNodeId = RAIL_FIXED_NODE_ID`；`MOTOR_TYPE == 8` 时强制 `canNodeId = GRIPPER_FIXED_NODE_ID`；无视 EEPROM 中的旧值（保证 57/gripper 板子 ID 唯一性）
 
 **验证**：
-- `cd firmware_new/dummy-35motor-fw/build && ninja` → 产出 `motor-35.elf/.hex/.bin`、`motor-42.*`、`motor-57.*`、`motor-gripper.*`
+- `cd firmware_new/dummy-motor-fw/build && ninja` → 产出 `motor-35.elf/.hex/.bin`、`motor-42.*`、`motor-57.*`、`motor-gripper.*`
 - 4 个 ELF 中 `canNodeId` 默认值正确：35/42 拨码默认、57=7、gripper=8
+- 57 / gripper 板子刷固件后无论 EEPROM 旧值是什么，CAN ID 都是 7 / 8
 
 ---
 
@@ -89,16 +96,18 @@ firmware_new/
 
 **做什么**：
 - 在 `interface_can.cpp` 中添加 `case 0x09`：
-  - 所有电机收到后：`requestMode = STOP`，`SetBrake(true)`，`SetCurrent/VelocitySetPoint(0)`
+  - 所有电机（含 gripper）收到后：`requestMode = STOP`，`SetBrake(true)`，`SetCurrent/VelocitySetPoint(0)`
   - **不操作堵转状态机**（0x09 是急停，纯粹制动）
 - 主控侧（`firmware_new/dummy-ref-core-fw/`）的 `EmergencyStop()` 改发 0x09，不再发 0x89
+- **参考纪律**：实施时**禁止参考** `firmware/motor_fw_f103_*/UserApp/protocols/interface_can.cpp` 中任何 stall 相关代码（`0x5A/0x5B/0x5C` 命令处理、`StallMode_t` 状态机），firmware_new 源码中不应出现这些符号
 
 **改哪些文件**：
-- `firmware_new/dummy-35motor-fw/UserApp/protocols/interface_can.cpp`
+- `firmware_new/dummy-motor-fw/UserApp/protocols/interface_can.cpp`
 - （后续主控固件任务中改 `can_protocol.cpp`）
 
 **验证**：
-- 发 0x09，所有电机立即停止，不发任何 ACK
+- 发 0x09，所有电机（含 gripper）立即停止，不发任何 ACK
+- `grep -r "0x5A\|0x5B\|0x5C\|StallMode_t" firmware_new/dummy-motor-fw/` 无结果（防 stall v3 误移植）
 
 ---
 
@@ -109,7 +118,7 @@ firmware_new/
 - 修复后：改 `encoderHomeOffset` 的同时，同步 `realPosition = encoderHomeOffset`，让 `GetPosition()` 立即返回 0
 
 **改哪些文件**：
-- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.cpp` 中的 `ApplyPosAsHomeOffset()` 方法
+- `firmware_new/dummy-motor-fw/Ctrl/Motor/motor.cpp` 中的 `ApplyPosAsHomeOffset()` 方法
 - 参考 firmware `motor_fw_f103_35/Ctrl/Motor/motor.cpp` 中 v3.2 的实现思路（只看不抄，自己写）
 
 **验证**：
@@ -119,7 +128,7 @@ firmware_new/
 
 ### 【P1-1】新增 6 条 CAN 查询命令（0x28~0x2D）
 
-**做什么**：在 `interface_can.cpp` 的 `case 0x21` 后添加 6 个 case：
+**做什么**：在 `interface_can.cpp` 的 `case 0x21` 后添加 6 个 case，**4 个 build 全部支持**（35/42/57 + gripper）：
 
 | Cmd | 行为 | 回包 |
 |---|---|---|
@@ -130,11 +139,13 @@ firmware_new/
 | `0x2C` Get Acceleration | 回 `velocityAcc / SUBDIVIDE`（float r/s²） | float |
 | `0x2D` Get Current-Limit | 回 `currentLimit / 1000`（float A） | float |
 
+> **注**：gripper 也支持这 6 条查询，便于主控统一诊断接口（gripper 的 DCE 参数与 35 一致，回包值合理）。
+
 **改哪些文件**：
-- `firmware_new/dummy-35motor-fw/UserApp/protocols/interface_can.cpp`
+- `firmware_new/dummy-motor-fw/UserApp/protocols/interface_can.cpp`
 
 **验证**：
-- 主控发 0x28~0x2D，电机回对应值
+- 主控对 4 个 build 任意节点发 0x28~0x2D，都能回对应值
 
 ---
 
@@ -148,43 +159,52 @@ firmware_new/
 - 35/42/57/gripper 的 `ratedCurrentAcc`（电流爬升斜率）
 - 4 个 build 共用的 `velocityAcc` 从 100 r/s² 改为 30 r/s²
 
+**特别留意**：决策 §四 已记录历史坑——`dce_kp` 在 `motor.h` 构造默认值（35=200）和 `main.cpp` 首次烧录值（35=195，旧固件遗留）不一致。**本次重构统一改为 200**（与 §四.1 表格对齐）。
+
 **改哪些文件**：
-- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.h`（类构造函数的默认值）
-- `firmware_new/dummy-35motor-fw/UserApp/main.cpp`（首次烧录的 `boardConfig` 初始化）
-- `firmware_new/dummy-35motor-fw/UserApp/configurations.h`（条件编译 `MOTOR_TYPE` 决定不同数值）
+- `firmware_new/dummy-motor-fw/Ctrl/Motor/motor.h`（类构造函数的默认值）
+- `firmware_new/dummy-motor-fw/UserApp/main.cpp`（首次烧录的 `boardConfig` 初始化，包括 dce_kp 195→200）
+- `firmware_new/dummy-motor-fw/UserApp/configurations.h`（条件编译 `MOTOR_TYPE` 决定不同数值）
 
 **验证**：
 - 4 个 build 分别编译，查看 ELF 中常量段确认数值正确
+- 重点确认：35 build 的 `dce_kp` 在 `motor.h` 和 `main.cpp` 两处都是 200
 
 ---
 
-### 【P1-4】gripper build 模式下 `0x1B` 改为 no-op
+### 【P1-4】gripper build 模式下 `0x1B` / `0x11` 改为 no-op
 
 **做什么**：
 - 4 个 build 共用同一套源码，gripper 通过 `MOTOR_TYPE == 8` 在 `interface_can.cpp` 中条件编译
-- `case 0x1B` 在 gripper 模式下直接 `break`（no-op，不响应 Set Stall-Protect）
+- **`case 0x1B` (Set Stall-Protect)**：gripper 模式下直接 `break`（no-op，与决策 §8.3 #5 一致）
+- **`case 0x11` (Set NodeID + EPP)**：gripper 模式下也改为 no-op——gripper 硬编码 ID=8，收到写 NodeID 命令应拒绝，避免污染 EEPROM 中 `canNodeId` 字段（虽然启动时会被宏覆盖，但 EEPROM 数据应保持一致）
 - **不删除** `BoardConfig_t::enableStallProtect` 字段（保留字段定义以保证 EEPROM 兼容性，见决策 §九）
 
 **改哪些文件**：
-- `firmware_new/dummy-35motor-fw/UserApp/protocols/interface_can.cpp` — `case 0x1B` 加 `#if MOTOR_TYPE != 8 ... #endif`，gripper 分支 no-op
+- `firmware_new/dummy-motor-fw/UserApp/protocols/interface_can.cpp`：
+  - `case 0x1B` 加 `#if MOTOR_TYPE != 8 ... #endif`，gripper 分支 no-op
+  - `case 0x11` 同样加条件编译，gripper 分支 no-op（不动 `canNodeId`，不发 ACK 或发错误码）
 
 **验证**：
-- 35/42/57 build 仍响应 0x1B（写 EEPROM）；gripper build 无效（收到 0x1B 后静默忽略）
+- 35/42/57 build 仍响应 0x1B / 0x11（写 EEPROM）；gripper build 两个命令均无效（静默忽略或返回错误）
 - 4 个 build 中 `BoardConfig_t::enableStallProtect` 字段定义仍存在（grep 全源码命中 1 处，仅 `interface_can.cpp` 中的 gripper 条件分支屏蔽）
+- gripper build 烧录后，用 `0x7E` 擦除再上电，EEPROM 中 `canNodeId` 仍是 8（未被 0x11 污染）
 
 ---
 
-### 【P2-4】`SetPositionSetPointWithTime()` 在 0x06 中调用
+### 【P2-4】`SetPositionSetPointWithTime()` 在 `case 0x06` 中调用
 
 **做什么**：
-- firmware_new 的 `motor.cpp` 中 `SetPositionSetPointWithTime()` 方法应该已经存在
-- 确认 `interface_can.cpp` 的 `case 0x06` 正确调用了该方法
+- 读 `firmware_new/dummy-motor-fw/UserApp/protocols/interface_can.cpp` 的 `case 0x06`，**确认当前是否已调用 `SetPositionSetPointWithTime(pos, T)`**
+- 若已调用：本任务无操作（验证即可）
+- 若未调用（旧固件可能直接用 `SetPositionSetPoint`）：补上调用，确保带时间约束的位置命令走 `SetPositionSetPointWithTime()` 路径
 
 **改哪些文件**：
-- `firmware_new/dummy-35motor-fw/UserApp/protocols/interface_can.cpp` 的 `case 0x06`
+- `firmware_new/dummy-motor-fw/UserApp/protocols/interface_can.cpp` 的 `case 0x06`（仅在未调用时改）
 
 **验证**：
-- 发带时间参数的位置命令，电机按时间约束运动
+- 发带时间参数的位置命令（`0x06` + float pos + float time），电机按时间约束运动
+- `case 0x06` 中确认看到 `SetPositionSetPointWithTime(` 调用
 
 ---
 
@@ -196,7 +216,7 @@ firmware_new/
 - `discriminant < 0` 时自动取 0，按 `velocityLimit` 兜底（不 crash，返回 false）
 
 **改哪些文件**：
-- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.cpp`
+- `firmware_new/dummy-motor-fw/Ctrl/Motor/motor.cpp`
 
 **验证**：
 - 构造极小 `T`（如 T=0）使 `discriminant < 0`，调用 `SetPositionSetPointWithTime()` 不 crash
@@ -207,7 +227,7 @@ firmware_new/
 ## 三、实施顺序建议
 
 ```
-第 1 步（P0）：CMake + 4 个 build target（共用 1 套源码，合并 dummy-35motor-fw/ 和 dummy-42motor-fw/，重命名为 dummy-motor-fw/）
+第 1 步（P0）：CMake + 4 个 build target（共用 1 套源码，合并 dummy-motor-fw/ 和 dummy-42motor-fw/，重命名为 dummy-motor-fw/）
 第 2 步（P0）：0x09 急停广播
 第 3 步（P0）：ApplyPosAsHomeOffset() v3.2 修复
 第 4 步（P1）：6 条 CAN 查询（0x28~0x2D）
@@ -274,7 +294,7 @@ firmware_new/
 
 | # | 验收条件 | 检查方法 |
 |---|---|---|
-| 1 | 4 个 build 都能编译通过 | `cd firmware_new/dummy-35motor-fw/build && ninja` → 产出 4 个 ELF |
+| 1 | 4 个 build 都能编译通过 | `cd firmware_new/dummy-motor-fw/build && ninja` → 产出 4 个 ELF |
 | 2 | 4 个 ELF 同时产出 .hex 和 .bin | 检查 build 目录 |
 | 3 | 57 CAN ID = 7，gripper CAN ID = 8 | 看代码中硬编码的值 |
 | 4 | 0x09 急停：发命令后所有电机立即停止 | 模拟测试或实机 |
@@ -296,8 +316,8 @@ firmware_new/
 | [`重构需求—firmware_old迁移到firmware功能清单—2026-09-19.md`](./重构需求—firmware_old迁移到firmware功能清单—2026-09-19.md) | 完整功能清单电机部分，§1.1 和 §1.1.1 和 §1.1.2 |
 | [`电机固件对比—firmware_old迁移到firmware—2026-09-21.md`](./电机固件对比—firmware_old迁移到firmware—2026-09-21.md) | 详细的 CAN 协议 diff、motor.cpp diff、默认参数对比 |
 | [`重建需求草稿—firmware_new—2026-09-21.md`](./重建需求草稿—firmware_new—2026-09-21.md) | 总体需求草稿（电机 + 主控 + 协议 + RGB） |
-| `firmware_new/dummy-35motor-fw/UserApp/protocols/interface_can.cpp` | 当前 firmware_new 电机 CAN 协议实现 |
-| `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.cpp` | 当前 firmware_new 电机控制实现 |
-| `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.h` | 当前 firmware_new 电机类定义 |
+| `firmware_new/dummy-motor-fw/UserApp/protocols/interface_can.cpp` | 当前 firmware_new 电机 CAN 协议实现 |
+| `firmware_new/dummy-motor-fw/Ctrl/Motor/motor.cpp` | 当前 firmware_new 电机控制实现 |
+| `firmware_new/dummy-motor-fw/Ctrl/Motor/motor.h` | 当前 firmware_new 电机类定义 |
 | `firmware/motor_fw_f103_35/Ctrl/Motor/motor.cpp` | **参考**（只看不抄）：v3.2 ApplyPosAsHomeOffset() 修复、ResetGoalsToCurrentPosition() 实现 |
 | `firmware/motor_fw_f103_35/UserApp/protocols/interface_can.cpp` | **参考**（只看不抄）：0x09/0x28~0x2D 实现 |
