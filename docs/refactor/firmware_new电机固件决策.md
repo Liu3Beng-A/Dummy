@@ -7,11 +7,13 @@
 >
 > ### ⚠️ 核心迁移原则
 >
-> **firmware_new 不复刻堵转检测功能。** 所有与堵转检测（stall）相关的改动，一律退回 old 或删除。
+> **firmware_new 不复刻堵转检测功能。** 所有与堵转检测（stall）相关的改动，一律复用 firmware_old 或删除。
 >
 > - 堵转检测 v3 协议（`StallMode_t` 状态机、`0x5A/0x5B/0x5C`、回退机制等）**全部删除**
 > - 旧固件已有的 `State_t::STATE_STALL` 和 `isStalled` 字段**保留**
 > - 旧固件的 `ClearStallFlag()` 方法**保留**
+> - **`!BACKHOME` 命令不实现**（其状态机思路依赖 stall v3 检测，旧固件亦无此命令）
+> - **`ResetGoalsToCurrentPosition()` 不实现**（仅服务于 stall v3 LOCKED→IDLE 退出，旧固件亦无此方法）
 > - 迁移原则：在保证功能可用（位置控制、速度控制、电流控制、EEPROM 持久化）的前提下，**改动量最小化**
 >
 > **本迁移的目标**：firmware_new ≈ firmware_old + 必要的 Bug 修复 + 新增的无害查询命令
@@ -21,29 +23,29 @@
 ## 一、CAN 协议对比（`UserApp/protocols/interface_can.cpp`）
 
 > 所有 cmd 由 `OnCanCmd(_cmd, _data, _len)` 解析。CAN ID 格式：`(nodeID<<7) | cmdCode`，8 字节数据。
-> 旧固件共 26 条 cmd（35/42 各一份，内容一致）。新固件退回旧后共 **27 条**（删除 0x5A/0x5B/0x5C 共 3 条，保留 0x28-0x2D）；夹爪 26 条（删除 0x5A/0x5B/0x5C 共 3 条，保留 0x28-0x2D）。
+> 旧固件共 26 条 cmd（35/42 各一份，内容一致）。新固件同旧固件后共 **27 条**（删除 0x5A/0x5B/0x5C 共 3 条，保留 0x28-0x2D）；夹爪 26 条（删除 0x5A/0x5B/0x5C 共 3 条，保留 0x28-0x2D）。
 
 ### 1.1 命令清单
 
 
 | Cmd           | 方向     | 名称                            | 旧固件                                                              | 新 35/42/57                                                                            | 新 gripper               | 标记             | new（手动标记）                                                 |
 | ------------- | ------ | ----------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------- | -------------- | --------------------------------------------------------- |
-| `0x01`        | 主→电    | Enable Motor                  | 切 `requestMode` 到 VELOCITY/STOP                                  | 切 `requestMode` 到 VELOCITY/STOP（新增 LOCKED→IDLE + ResetGoals + 启动豁免复位是 stall 专属，退回旧）   | 同旧                      | **重构（退回旧）**    | **退回旧**                                                   |
+| `0x01`        | 主→电    | Enable Motor                  | 切 `requestMode` 到 VELOCITY/STOP                                  | 切 `requestMode` 到 VELOCITY/STOP（LOCKED→IDLE + ResetGoals + 启动豁免复位是 stall v3 专属，旧固件无此逻辑，同旧固件）   | 同旧                      | **同旧固件**    | **同旧固件**                                                   |
 | `0x02`        | 主→电    | Do Calibration                | 触发编码器校准                                                          | 同                                                                                     | 同                       | —              | 同旧                                                        |
 | `0x03`        | 主→电    | Set Current                   | 切 `MODE_COMMAND_CURRENT` + `SetCurrentSetPoint(A×1000)`          | 同                                                                                     | 同                       | —              | 同旧                                                        |
 | `0x04`        | 主→电    | Set Velocity                  | 切 `MODE_COMMAND_VELOCITY` + `SetVelocitySetPoint(r/s×SUBDIVIDE)` | 同                                                                                     | 同                       | —              | 同旧                                                        |
-| `0x05`        | 主→电    | Set Position                  | 切 POSITION 模式 + `SetPositionSetPoint(圈×SUBDIVIDE)`；可选 FINISH ACK | 切 POSITION 模式 + `SetPositionSetPoint`（LOCKED/RETREATING 丢弃是 stall 专属，退回旧）             | 同旧（gripper 无 stallMode） | **重构（退回旧）**    | **退回旧**                                                   |
+| `0x05`        | 主→电    | Set Position                  | 切 POSITION 模式 + `SetPositionSetPoint(圈×SUBDIVIDE)`；可选 FINISH ACK | 切 POSITION 模式 + `SetPositionSetPoint`（LOCKED/RETREATING 丢弃逻辑是 stall v3 专属，旧固件无此状态，同旧固件）             | 同旧（无 stallMode） | **同旧固件**    | **同旧固件**                                                   |
 | `0x06`        | 主→电    | Set Pos w/ Time               | `SetPositionSetPointWithTime(pos, T)`；可选 FINISH ACK              | **微调**：`sqrtf` 加 `fmaxf(0, discriminant)` 兜底防负数；其余同                                   | 同旧（无 fmaxf 保护）          | **微调**         | **保留新fmaxf 防 crash 是安全增强**                                |
-| `0x07`        | 主→电    | Set Pos w/ VelLimit           | 写 `ratedVelocity` + `SetPositionSetPoint`；**总是**立即发 FINISH ACK   | 写 `ratedVelocity` + `SetPositionSetPoint`（LOCKED 丢弃 + 取消立即 FINISH ACK 是 stall 专属，退回旧） | 同旧（无 LOCKED 丢弃）         | **重构（退回旧）**    | **保留新：去掉立即 FINISH ACK，LOCKED 状态丢弃**                       |
+| `0x07`        | 主→电    | Set Pos w/ VelLimit           | 写 `ratedVelocity` + `SetPositionSetPoint`；**总是**立即发 FINISH ACK   | 写 `ratedVelocity` + `SetPositionSetPoint`（LOCKED 丢弃逻辑是 stall v3 专属，旧固件无此状态，立即 ACK 是旧固件行为，同旧固件） | 同旧（无 LOCKED 丢弃）         | **同旧固件**    | **同旧固件：旧固件无 LOCKED 状态，立即 ACK 行为即为最终行为**                       |
 | `0x09`        | 主→ALL  | Broadcast EStop               | ❌                                                                | **新增**：`requestMode=STOP` + `SetBrake(true)` + Cur/Vel=0                              | **新增**                  | **新增**         | **保留新：安全急停功能保留**                                          |
 | `0x11`        | 主→电    | Set NodeID + EPP              | 写 `canNodeId` + 可选持久化                                            | 同                                                                                     | 同                       | —              | 同旧                                                        |
-| `0x12`        | 主→电    | Set I-Limit + EPP             | 写 `ratedCurrent = A×1000` + `currentLimit` + 持久化                 | 写 `ratedCurrent` + `currentLimit` + 持久化（同步 `stallCurrentThreshold` 是 stall 专属，退回旧）    | 同旧（无 stall 阈值更新）        | **重构（退回旧）**    | **退回旧：**`stallCurrentThreshold` **仅服务于 stall 检测，应删除**     |
+| `0x12`        | 主→电    | Set I-Limit + EPP             | 写 `ratedCurrent = A×1000` + `currentLimit` + 持久化                 | 写 `ratedCurrent` + `currentLimit` + 持久化（同步 `stallCurrentThreshold` 是 stall 专属，同旧固件）    | 同旧（无 stall 阈值更新）        | **重构（同旧固件）**    | **同旧固件：**`stallCurrentThreshold` **仅服务于 stall 检测，应删除**     |
 | `0x13`        | 主→电    | Set V-Limit + EPP             | 写 `ratedVelocity` + `velocityLimit` + 持久化                        | 同                                                                                     | 同                       | —              | 同旧：速度限幅无变化                                                |
 | `0x14`        | 主→电    | Set Accel + EPP               | 写 `ratedVelocityAcc` + 同步两个 tracker                              | 同                                                                                     | 同                       | —              | 同旧：加速度设置无变化                                               |
 | `0x15`        | 主→电    | Apply Home + EPP              | **Bug**：仅改 `encoderHomeOffset`，`GetPosition()` 不归零               | **Bug 修复**：同步 `realPosition = encoderHomeOffset`，`GetPosition()` 立即归零                 | 同新                      | **重构**         | **保留新：Bug 修复，必须保留；旧固件归零后 GetPosition() 不归零**              |
 | `0x16`        | 主→电    | Set Auto-Enable + EPP         | 写 `enableMotorOnBoot`                                            | 同                                                                                     | 同                       | —              | 同旧：上电使能无变化                                                |
 | `0x17`-`0x1A` | 主→电    | Set DCE Kp/Kv/Ki/Kd           | 写 `dce.{kp,kv,ki,kd}` + 持久化                                      | 同                                                                                     | 同                       | —              | 同旧：PID 参数设置无变化                                            |
-| `0x1B`        | 主→电    | Set Stall-Protect             | 写 `stallProtectSwitch` + `enableStallProtect` + 持久化              | 写 `stallProtectSwitch` + `enableStallProtect` + 持久化（不实现 stall 时此命令可删除或保留为占位）          | ❌ 无此命令                  | **重构（退回旧/删除）** | **退回旧：不实现 stall 检测时，堵转保护开关无意义；建议删除此命令或退回旧固件行为（写 EEPROM）** |
+| `0x1B`        | 主→电    | Set Stall-Protect             | 写 `stallProtectSwitch` + `enableStallProtect` + 持久化              | 写 `stallProtectSwitch` + `enableStallProtect` + 持久化（不实现 stall 时此命令可删除或保留为占位）          | ❌ 无此命令                  | **重构（同旧固件/删除）** | **同旧固件：不实现 stall 检测时，堵转保护开关无意义；建议删除此命令或同旧固件固件行为（写 EEPROM）** |
 | `0x21`        | 主→电    | Get Current                   | 回 float A                                                        | 同                                                                                     | 同                       | —              | 同旧：电流查询无变化                                                |
 | `0x22`        | 主→电    | Get Velocity                  | 回 float r/s                                                      | 同                                                                                     | 同                       | —              | 同旧：速度查询无变化                                                |
 | `0x23`        | 主→电    | Get Position                  | 回 float 圈 + finish 标志                                            | 同                                                                                     | 同                       | —              | 同旧：位置查询无变化                                                |
@@ -55,9 +57,9 @@
 | `0x2B`        | 主→电    | Get DCE Kd                    | ❌                                                                | **新增**：回 int32 `boardConfig.dce_kd`                                                   | **新增**                  | **新增**         | **保留新：GET 查询命令，仅读参数**                                     |
 | `0x2C`        | 主→电    | Get Acceleration              | ❌                                                                | **新增**：回 float `velocityAcc / SUBDIVIDE`（r/s²）                                        | **新增**                  | **新增**         | **保留新：GET 查询命令，仅读参数**                                     |
 | `0x2D`        | 主→电    | Get Current-Limit（FOC 电流硬限幅值） | ❌                                                                | **新增**：回 float `currentLimit / 1000`（A）                                               | **新增**                  | **新增**         | **保留新：GET 查询命令，仅读参数**                                     |
-| `0x5A`        | 触发电→他机 | STALL Broadcast               | ❌                                                                | **新增**：stall 协作广播（触发/完成/超时）；其他电机收 → LOCKED + ClearIntegral                            | ❌                       | **新增（删除）**     | **退回旧：整个 0x5A 是 stall 专属，不实现 stall 时必须删除**                |
-| `0x5B`        | 主→ALL  | UNLOCKED Broadcast            | ❌                                                                | **新增**：所有 LOCKED 电机 → IDLE + ResetGoals + 启动豁免复位                                      | ❌                       | **新增（删除）**     | **退回旧：整个 0x5B 是 stall 专属，不实现 stall 时必须删除**                |
-| `0x5C`        | 主→单电   | Stall Query                   | ❌                                                                | **新增**：stall 状态查询                                                                     | ❌                       | **新增（删除）**     | **退回旧：整个 0x5C 是 stall 专属，不实现 stall 时必须删除**                |
+| `0x5A`        | 触发电→他机 | STALL Broadcast               | ❌                                                                | **新增**：stall 协作广播（触发/完成/超时）；其他电机收 → LOCKED + ClearIntegral                            | ❌                       | **新增（删除）**     | **同旧固件：整个 0x5A 是 stall 专属，不实现 stall 时必须删除**                |
+| `0x5B`        | 主→ALL  | UNLOCKED Broadcast            | ❌                                                                | **新增**：所有 LOCKED 电机 → IDLE + ResetGoals + 启动豁免复位                                      | ❌                       | **新增（删除）**     | **同旧固件：整个 0x5B 是 stall 专属，不实现 stall 时必须删除**                |
+| `0x5C`        | 主→单电   | Stall Query                   | ❌                                                                | **新增**：stall 状态查询                                                                     | ❌                       | **新增（删除）**     | **同旧固件：整个 0x5C 是 stall 专属，不实现 stall 时必须删除**                |
 | `0x7D`        | 主→电    | Enable Temp Watch             | TIM1 启动 1Hz 温度采集                                                 | 同                                                                                     | 同                       | —              | 同旧：温度监控无变化                                                |
 | `0x7E`        | 主→电    | Erase Configs                 | `configStatus = CONFIG_RESTORE` → SystemReset                    | 同                                                                                     | 同                       | —              | 同旧：配置擦除无变化                                                |
 | `0x7F`        | 主→电    | Reboot                        | `HAL_NVIC_SystemReset()`                                         | 同                                                                                     | 同                       | —              | 同旧：重启无变化                                                  |
@@ -76,8 +78,8 @@
 | `0x12`-`0x14` ACK 时      | 回 float (A / r/s / r/s²)       | data[4]=0                | 同旧                       |
 | `0x21`-`0x25` ACK 时      | 回 float 当前值                    | data[4]=STATE_FINISH 标志  | 同旧                       |
 | `0x28`-`0x2B` ACK 时      | int32 PID 分量                   | —                        | 同旧                       |
-| `0x5A`                   | data[0]=srcNodeId, data[1]=cmd | —                        | **退回旧：0x5A 整体删除，帧格式不移植** |
-| `0x5C`                   | data[0]=queryType (1/2)        | —                        | **退回旧：0x5C 整体删除，帧格式不移植** |
+| `0x5A`                   | data[0]=srcNodeId, data[1]=cmd | —                        | **同旧固件：0x5A 整体删除，帧格式不移植** |
+| `0x5C`                   | data[0]=queryType (1/2)        | —                        | **同旧固件：0x5C 整体删除，帧格式不移植** |
 
 
 ---
@@ -90,7 +92,7 @@
 | 方法签名                                                  | 旧固件                                              | 新固件                                                                                     | 标记          | new（手动标记）                                                         |
 | ----------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------- | ----------- | ----------------------------------------------------------------- |
 | `Tick20kHz()`                                         | 编码器采样 + 控制环                                      | 同                                                                                       | —           | 同旧：控制环框架无变化                                                       |
-| `CloseLoopControlTick()`                              | 19kHz 控制环                                        | 19kHz 控制环（增加 stall 检测 + LOCKED 维持 + 状态输出是 stall 专属，退回旧）                                 | **重构（退回旧）** | **退回旧：删除 stall v3 检测逻辑；LOCKED 维持删除（firmware_new 无此状态）**             |
+| `CloseLoopControlTick()`                              | 19kHz 控制环                                        | 19kHz 控制环（stall v3 检测 + LOCKED 维持 + 状态输出是 stall v3 专属，旧固件无此逻辑，同旧固件）                                 | **同旧固件** | **同旧固件：删除 stall v3 检测逻辑；firmware_new 无 LOCKED 状态**             |
 | `CalcCurrentToOutput(int32_t)`                        | FOC 电流环                                          | 同                                                                                       | —           | 同旧：FOC 电流环无变化                                                     |
 | `CalcPidToOutput(int32_t)`                            | PID 速度环                                          | 同                                                                                       | —           | 同旧：PID 速度环无变化                                                     |
 | `CalcDceToOutput(int32_t,int32_t)`                    | DCE 位置环                                          | 同                                                                                       | —           | 同旧：DCE 位置环无变化                                                     |
@@ -106,14 +108,14 @@
 | `GetVelocity()`                                       | `estVelocity / SUBDIVIDE`                        | 同                                                                                       | —           | 同旧：速度获取无变化                                                        |
 | `GetFocCurrent()`                                     | `focCurrent / 1000`                              | 同                                                                                       | —           | 同旧：电流获取无变化                                                        |
 | `CompensateAdvancedAngle(int32_t)`                    | 5 段查表                                            | 同                                                                                       | —           | 同旧：角度补偿无变化                                                        |
-| `Init()`                                              | 状态变量全部清零                                         | 状态变量全部清零（新增 stall 字段清零是 stall 专属，退回旧）                                                   | **重构（退回旧）** | **退回旧：删除 stall v3 字段清零（firmware_new 源码中无 stall v3 字段）**                          |
+| `Init()`                                              | 状态变量全部清零                                         | 状态变量全部清零（firmware_new 源码无 stall v3 字段，无需清零）                                                   | **同旧固件** | **同旧固件：firmware_new 源码无 stall v3 字段，无需额外处理**                          |
 | `AttachConfig(Config_t*)`                             | 绑 config                                         | 同                                                                                       | —           | 同旧：配置绑定无变化                                                        |
-| `ClearIntegral() const`                               | 清 PID/DCE `integralRound/outputKi`               | 清 PID/DCE `integralRound/outputKi`（仅清 estimator 状态是新 stall 专属，退回旧）                      | **重构（退回旧）** | **保留新：改为非 const，只清 estVelocityIntegral / estError（estimator 状态）** |
-| `ClearStallFlag()`                                    | 重置 `stalledTime + isStalled`                     | 保留（不删除）                                                                                 | —           | **退回旧：不实现 stall 检测时，**`ClearStallFlag()` **仍可保留用于清除旧固件遗留状态**      |
+| `ClearIntegral() const`                               | 清 PID/DCE `integralRound/outputKi`               | 清 PID/DCE `integralRound/outputKi`（firmware_new 源码保持此行为，与旧固件一致）                      | **同旧固件** | **同旧固件：保持 const，清 PID/DCE 6 字段，不清 estVelocityIntegral/estError** |
+| `ClearStallFlag()`                                    | 重置 `stalledTime + isStalled`                     | 保留（不删除）                                                                                 | —           | **同旧固件：不实现 stall 检测时，**`ClearStallFlag()` **仍可保留用于清除旧固件遗留状态**      |
 | `ApplyPosAsHomeOffset()`                              | `encoderHomeOffset = realPosition % SUBDIVIDE`   | **Bug 修复**：除改 offset 外，**同步** `realPosition = encoderHomeOffset`，让 `GetPosition()` 立即归零 | **重构**      | **保留新：Bug 修复，必须保留；旧固件归零后 GetPosition() 不归零**                      |
-| `ResetGoalsToCurrentPosition()`                       | ❌                                                | ❌（删除）                                                                                   | —           | **新增：用于 !BACKHOME 回退时停在当前位置，不继承旧目标**                              |
-| `GetEstPosition()`                                    | ❌                                                | ❌（删除）                                                                                   | —           | **退回旧：firmware_new 无此方法（无 stall v3 estimator），无需删除**              |
-| `GetEstVelocity()`                                    | ❌                                                | ❌（删除）                                                                                   | —           | **退回旧：firmware_new 无此方法（无 stall v3 estimator），无需删除**              |
+| `ResetGoalsToCurrentPosition()`                       | ❌                                                | ❌（不实现）                                                                                   | —           | **不实现：仅服务于 stall v3 LOCKED→IDLE 退出，旧固件亦无此方法**                              |
+| `GetEstPosition()`                                    | ❌                                                | ❌（删除）                                                                                   | —           | **同旧固件：firmware_new 无此方法（无 stall v3 estimator），无需删除**              |
+| `GetEstVelocity()`                                    | ❌                                                | ❌（删除）                                                                                   | —           | **同旧固件：firmware_new 无此方法（无 stall v3 estimator），无需删除**              |
 
 
 ### 2.2 状态机变化
@@ -124,18 +126,18 @@
 | 项                                                     | 旧固件                  | 新固件                                               | 标记  | new（手动标记）                                                               |
 | ----------------------------------------------------- | -------------------- | ------------------------------------------------- | --- | ----------------------------------------------------------------------- |
 | `Mode_t` (9 个模式)                                      | 同                    | 同                                                 | —   | 同旧：模式定义无变化                                                              |
-| `State_t::STATE_STALL`                                | `isStalled=true` 时进入 | `isStalled=true` 时进入（同旧；不在此处变更）                   | —   | **退回旧：保留旧固件 STATE_STALL 触发机制；不实现 stall v3 检测时不改变此逻辑**                   |
-| `State_t::STATE_OVERLOAD`                             | 有                    | 有（不删除；stall v3 状态机被删除后，STATE_OVERLOAD 可继续保留或后续清理） | —   | **退回旧：不实现 stall v3 时，STATE_OVERLOAD 可保留；不影响基本功能**                       |
-| `isStalled` / `stalledTime`                           | 存在                   | 存在（不删除）                                           | —   | **退回旧：保留旧固件** `isStalled` **字段；不实现 stall v3 时继续使用旧逻辑**                  |
-| `overloadTime` / `overloadFlag`                       | 存在                   | 存在（不删除）                                           | —   | **退回旧：保留旧固件 overload 逻辑**                                               |
-| `StallMode_t` **枚举**                                  | ❌                    | ❌（不新增）                                            | —   | **退回旧：**`STALL_IDLE/RETREATING/LOCKED` **是 stall v3 专属；不实现 stall 时不添加** |
-| `stallMode` 字段                                        | ❌                    | ❌（不新增）                                            | —   | **退回旧：不实现 stall v3 时不添加此字段**                                            |
-| `stallStartTick`                                      | ❌                    | ❌（不新增）                                            | —   | **退回旧：不实现 stall v3 时不添加此字段**                                            |
-| `retreatStartTick / RetreatTarget / RetreatDirection` | ❌                    | ❌（不新增）                                            | —   | **退回旧：不实现 stall v3 时不添加此字段**                                            |
-| `stallCurrentThreshold`                               | ❌                    | ❌（不新增）                                            | —   | **退回旧：**`stallCurrentThreshold` **仅服务于 stall v3；不实现 stall 时不添加**        |
-| `positionModeStartCycles`                             | ❌                    | ❌（不新增）                                            | —   | **退回旧：**`positionModeStartCycles` **仅服务于 stall v3 启动豁免；不实现 stall 时不添加** |
-| `stallBroadcastCmd`                                   | ❌                    | ❌（不新增）                                            | —   | **退回旧：**`stallBroadcastCmd` **仅服务于 stall 广播；不实现 stall 时不添加**            |
-| `stallDetectRisingEdge / RisingEstError`              | ❌                    | ❌（不新增）                                            | —   | **退回旧：二次验证字段仅服务于 stall v3 检测；不实现 stall 时不添加**                           |
+| `State_t::STATE_STALL`                                | `isStalled=true` 时进入 | `isStalled=true` 时进入（同旧；不在此处变更）                   | —   | **同旧固件：保留旧固件 STATE_STALL 触发机制；不实现 stall v3 检测时不改变此逻辑**                   |
+| `State_t::STATE_OVERLOAD`                             | 有                    | 有（明确保留）                                                                 | —   | **明确保留：纯电流过载检测（电流持续 1s 达额定值 → STATE_OVERLOAD），与 stall v3 完全独立；自动清除不影响基本功能**                       |
+| `isStalled` / `stalledTime`                           | 存在                   | 存在（不删除）                                           | —   | **同旧固件：保留旧固件** `isStalled` **字段；不实现 stall v3 时继续使用旧逻辑**                  |
+| `overloadTime` / `overloadFlag`                       | 存在                   | 存在（不删除）                                           | —   | **同旧固件：保留旧固件 overload 逻辑**                                               |
+| `StallMode_t` **枚举**                                  | ❌                    | ❌（不新增）                                            | —   | **同旧固件：**`STALL_IDLE/RETREATING/LOCKED` **是 stall v3 专属；不实现 stall 时不添加** |
+| `stallMode` 字段                                        | ❌                    | ❌（不新增）                                            | —   | **同旧固件：不实现 stall v3 时不添加此字段**                                            |
+| `stallStartTick`                                      | ❌                    | ❌（不新增）                                            | —   | **同旧固件：不实现 stall v3 时不添加此字段**                                            |
+| `retreatStartTick / RetreatTarget / RetreatDirection` | ❌                    | ❌（不新增）                                            | —   | **同旧固件：不实现 stall v3 时不添加此字段**                                            |
+| `stallCurrentThreshold`                               | ❌                    | ❌（不新增）                                            | —   | **同旧固件：**`stallCurrentThreshold` **仅服务于 stall v3；不实现 stall 时不添加**        |
+| `positionModeStartCycles`                             | ❌                    | ❌（不新增）                                            | —   | **同旧固件：**`positionModeStartCycles` **仅服务于 stall v3 启动豁免；不实现 stall 时不添加** |
+| `stallBroadcastCmd`                                   | ❌                    | ❌（不新增）                                            | —   | **同旧固件：**`stallBroadcastCmd` **仅服务于 stall 广播；不实现 stall 时不添加**            |
+| `stallDetectRisingEdge / RisingEstError`              | ❌                    | ❌（不新增）                                            | —   | **同旧固件：二次验证字段仅服务于 stall v3 检测；不实现 stall 时不添加**                           |
 
 
 ### 2.3 堵转检测 v3 协议（已删除 — 不实现）
@@ -145,20 +147,20 @@
 
 | 阶段                    | 规则     | new（手动标记）                                        | 状态  |
 | --------------------- | ------ | ------------------------------------------------ | --- |
-| 启动豁免期                 | —（删除）  | **退回旧：整个 stall v3 协议不实现，此阶段逻辑删除**                | ❌   |
-| 三条件首次同满足              | —（删除）  | **退回旧：同上**                                       | ❌   |
-| 上升沿计时                 | —（删除）  | **退回旧：同上**                                       | ❌   |
-| 30 ms 二次验证            | —（删除）  | **退回旧：同上**                                       | ❌   |
-| 200 ms 兜底             | —（删除）  | **退回旧：同上**                                       | ❌   |
-| 400 ms 兜底强制触发         | —（删除）  | **退回旧：同上**                                       | ❌   |
-| IDLE→RETREATING       | —（删除）  | **退回旧：同上**                                       | ❌   |
-| RETREATING 完成判定       | —（删除）  | **退回旧：同上**                                       | ❌   |
-| 2 s 超时兜底              | —（删除）  | **退回旧：同上**                                       | ❌   |
-| LOCKED 维持             | —（删除）  | **退回旧：同上**                                       | ❌   |
-| 250 ms 周期广播           | —（删除）  | **退回旧：同上**                                       | ❌   |
-| 0x5A 他机收              | —（删除）  | **退回旧：同上**                                       | ❌   |
-| 0x5B 全局解锁             | —（删除）  | **退回旧：同上**                                       | ❌   |
-| 0x1B Stall Protect 开关 | —（退回旧） | **退回旧：不实现 stall v3 时，堵转保护开关命令退回旧固件行为（写 EEPROM）** | 退回旧 |
+| 启动豁免期                 | —（删除）  | **同旧固件：整个 stall v3 协议不实现，此阶段逻辑删除**                | ❌   |
+| 三条件首次同满足              | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| 上升沿计时                 | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| 30 ms 二次验证            | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| 200 ms 兜底             | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| 400 ms 兜底强制触发         | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| IDLE→RETREATING       | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| RETREATING 完成判定       | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| 2 s 超时兜底              | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| LOCKED 维持             | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| 250 ms 周期广播           | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| 0x5A 他机收              | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| 0x5B 全局解锁             | —（删除）  | **同旧固件：同上**                                       | ❌   |
+| 0x1B Stall Protect 开关 | —（同旧固件） | **同旧固件：不实现 stall v3 时，堵转保护开关命令同旧固件固件行为（写 EEPROM）** | 同旧固件 |
 
 
 ---
@@ -203,7 +205,7 @@
 | `motionParams.ratedCurrentAcc`（电流变化率上限）                               | int32   | 2 × 1000 mA/s         | 2 × 1000 mA/s                    | 同旧                                      |
 | `motionParams.ratedVelocity`（电机额定转速，运行时由 ratedVelocity 覆盖）            | int32   | 30 × SUBDIVIDE        | 30 × SUBDIVIDE                   | 同旧                                      |
 | `motionParams.ratedVelocityAcc`（梯形加速度上限，0=由 main.cpp 接管）              | int32   | **1000 × SUBDIVIDE**  | **0**                            | 同旧：构造初始值实际被 main.cpp 覆盖，无实际影响           |
-| `ctrlParams.stallProtectSwitch`（是否启用旧版堵转检测的开关）                        | bool    | **false**             | **false**（退回旧；不实现 stall v3 时无意义） | **退回旧：不实现 stall v3 时此参数无意义；退回旧值 false** |
+| `ctrlParams.stallProtectSwitch`（是否启用旧版堵转检测的开关）                        | bool    | **false**             | **false**（同旧固件；不实现 stall v3 时无意义） | **同旧固件：不实现 stall v3 时此参数无意义；同旧固件值 false** |
 | `ctrlParams.pid.{kp,ki,kd}`（PID 速度环增益，仅在使用 PID 速度环时生效）                | int32×3 | `{5, 30, 0}`          | `{5, 30, 0}`                     | 同旧                                      |
 | `ctrlParams.dce.{kp,kv,ki,kd}`（DCE 位置环增益，firmware 使用 DCE 而非 PID 做位置环） | int32×4 | `{200, 80, 300, 250}` | `{200, 80, 300, 250}`            | 同旧                                      |
 
@@ -238,7 +240,7 @@
 | `pid_kd`                  | —     | —     | **0**    | **0**    | **10**    | **0**     | 同上                                     |
 | `ratedCurrentAcc` (mA/s)  | —     | —     | **2000** | **2000** | **50000** | **2000**  | 57=50×1000 爬升更缓，其余统一 2×1000            |
 | `enableMotorOnBoot`       | false | false | false    | false    | false     | false     | 同旧：上电使能无变化                             |
-| `enableStallProtect`      | false | false | false    | false    | false     | ❌         | **退回旧：不实现 stall v3 时，堵转保护默认关闭；与旧固件一致** |
+| `enableStallProtect`      | false | false | false    | false    | false     | ❌         | **同旧固件：不实现 stall v3 时，堵转保护默认关闭；与旧固件一致** |
 | `enableTempWatch`         | false | false | false    | false    | false     | false     | 同旧：温度监控无变化                             |
 
 
@@ -258,12 +260,12 @@
 
 | 旧固件                                    | 新固件 35/42/57                                                    | 新 gripper                  | new（手动标记）                                                                         |
 | -------------------------------------- | --------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------- |
-| CLICK → `controller->ClearStallFlag()` | CLICK → `controller->ClearStallFlag()`（退回旧；不实现 stall v3 时保留旧逻辑） | CLICK → `ClearStallFlag()` | **退回旧：不实现 stall v3 时，**`ClearStallFlag()` **仍有清除旧固件** `isStalled` **的功能；退回旧固件行为** |
+| CLICK → `controller->ClearStallFlag()` | CLICK → `controller->ClearStallFlag()`（同旧固件；不实现 stall v3 时保留旧逻辑） | CLICK → `ClearStallFlag()` | **同旧固件：不实现 stall v3 时，**`ClearStallFlag()` **仍有清除旧固件** `isStalled` **的功能；同旧固件固件行为** |
 
 
 `Tim1Callback100Hz` **差异**（35/42/57 vs gripper）：
 
-- 35/42/57：无 stall 250ms 周期广播 + stallBroadcastCmd（退回旧；不实现 stall v3 时删除）
+- 35/42/57：无 stall 250ms 周期广播 + stallBroadcastCmd（同旧固件；不实现 stall v3 时删除）
 - gripper：纯温度采集循环，无变化
 
 ---
@@ -283,13 +285,13 @@
 
 | 类别                           | 旧固件支持       | 新 35/42/57  | 新 gripper           | new（手动标记）                                             |
 | ---------------------------- | ----------- | ----------- | ------------------- | ----------------------------------------------------- |
-| 基本控制 `0x01`-`0x07`           | ✅           | ✅           | ✅                   | 同旧：基本控制命令退回旧固件行为（firmware_new 源码中无 stall v3 字段）                       |
-| 参数写入 `0x11`-`0x1A`           | ✅           | ✅           | ✅（gripper 缺 `0x1B`） | 同旧：参数写入退回旧固件（删除 stallCurrentThreshold 联动）             |
-| Stall 开关 `0x1B`              | ✅（写 EEPROM） | ✅（写 EEPROM） | ❌                   | **退回旧：不实现 stall v3 时，堵转保护开关无意义；退回旧固件行为（写 EEPROM）或删除** |
+| 基本控制 `0x01`-`0x07`           | ✅           | ✅           | ✅                   | 同旧：基本控制命令同旧固件固件行为（firmware_new 源码中无 stall v3 字段）                       |
+| 参数写入 `0x11`-`0x1A`           | ✅           | ✅           | ✅（gripper 缺 `0x1B`） | 同旧：参数写入同旧固件固件（删除 stallCurrentThreshold 联动）             |
+| Stall 开关 `0x1B`              | ✅（写 EEPROM） | ✅（写 EEPROM） | ❌                   | **同旧固件：不实现 stall v3 时，堵转保护开关无意义；同旧固件固件行为（写 EEPROM）或删除** |
 | 基本查询 `0x21`-`0x25`           | ✅           | ✅           | ✅                   | 同旧：基本查询无变化                                            |
 | DCE/Acc/Cur 查询 `0x28`-`0x2D` | ❌           | ✅       | ✅               | **保留新**                |
 | 急停广播 `0x09`                  | ❌           | ✅           | ✅                   | **保留新：安全急停功能，不依赖 stall 检测，建议保留**                      |
-| 堵转协议 `0x5A/0x5B/0x5C`        | ❌           | ❌（删除）       | ❌                   | **退回旧：整个 stall v3 协议全部删除**                            |
+| 堵转协议 `0x5A/0x5B/0x5C`        | ❌           | ❌（删除）       | ❌                   | **同旧固件：整个 stall v3 协议全部删除**                            |
 | 系统命令 `0x7D`-`0x7F`           | ✅           | ✅           | ✅                   | 同旧：系统命令无变化                                            |
 
 
@@ -297,9 +299,9 @@
 
 ## 八、新增/重构/删除 汇总
 
-> **迁移策略**：不实现 stall v3 检测。以上所有改动均以"退回旧固件"为优先。
+> **迁移策略**：不实现 stall v3 检测。以上所有改动均以"同旧固件固件"为优先。
 
-### 8.1 保留的新增（9 项）
+### 8.1 保留的新增（8 项）
 
 1. CAN `0x09` Broadcast EStop（35/42/57/gripper）—— 安全功能，不依赖 stall
 2. CAN `0x28` Get DCE Kp —— GET 查询命令，仅读参数
@@ -308,8 +310,7 @@
 5. CAN `0x2B` Get DCE Kd —— GET 查询命令，仅读参数
 6. CAN `0x2C` Get Acceleration —— GET 查询命令，仅读参数
 7. CAN `0x2D` Get Current-Limit —— GET 查询命令，仅读参数
-8. ClearIntegral()**改为非 const**，只清estVelocityIntegral / estError（estimator 状态）
-9. 旧固件 `ApplyPosAsHomeOffset()` Bug 修复 —— 同步 `realPosition = encoderHomeOffset`，让 `GetPosition()` 立即归零
+8. 旧固件 `ApplyPosAsHomeOffset()` Bug 修复 —— 同步 `realPosition = encoderHomeOffset`，让 `GetPosition()` 立即归零
 
 ### 8.2 删除的新增（7 项）
 
@@ -321,16 +322,16 @@
 6. `StallMode_t` 枚举 → **不添加**
 7. stall v3 状态字段 → **不添加**（`stallMode`、`stallStartTick`、`retreatStartTick`/`RetreatTarget`/`RetreatDirection`、`stallCurrentThreshold`、`positionModeStartCycles`、`stallBroadcastCmd`、`stallDetectRisingEdge`/`RisingEstError`）
 
-### 8.3 退回旧的重构（8 项）
+### 8.3 同旧固件的重构（8 项）
 
-1. `0x01 Enable` → **退回旧**：删除 LOCKED→IDLE + ResetGoals 联动
-2. `0x05 Set Position` → **退回旧**：删除 LOCKED/RETREATING 丢弃逻辑
-3. `0x07 Set Pos w/ VelLimit` → **退回旧**：删除 LOCKED 丢弃 + 恢复立即 FINISH ACK
-4. `0x12 Set I-Limit` → **退回旧**：删除 `stallCurrentThreshold` 同步
-5. `0x1B Stall-Protect` → **退回旧**：恢复写 EEPROM 行为（或删除命令）
-6. `CloseLoopControlTick()` → 退回旧：删除 stall v3 检测块（firmware_new 源码中无此代码块）
-7. `Init()` → 退回旧：firmware_new 源码无 stall v3 字段，无需清零
-8. `ClearIntegral()` → **退回旧**：恢复清 PID/DCE 积分的旧逻辑
+1. `0x01 Enable` → **同旧固件**：旧固件无 LOCKED→IDLE + ResetGoals 联动（firmware_new 源码中无此逻辑，无需删除）
+2. `0x05 Set Position` → **同旧固件**：旧固件无 LOCKED/RETREATING 状态，不存在丢弃逻辑（firmware_new 源码中无此逻辑，无需删除）
+3. `0x07 Set Pos w/ VelLimit` → **同旧固件**：旧固件无 LOCKED 状态，立即 FINISH ACK 即为最终行为（firmware_new 源码中无 LOCKED，无需删除）
+4. `0x12 Set I-Limit` → **同旧固件**：旧固件无 `stallCurrentThreshold` 字段，无需同步
+5. `0x1B Stall-Protect` → **同旧固件**：保留写 EEPROM 行为（35/42/57 写 `stallProtectSwitch + enableStallProtect + CONFIG_COMMIT`；gripper 通过 `MOTOR_TYPE` 条件编译让 `case 0x1B` 改为 no-op）
+6. `CloseLoopControlTick()` → 同旧固件：删除 stall v3 检测块（firmware_new 源码中无此代码块）
+7. `Init()` → 同旧固件：firmware_new 源码无 stall v3 字段，无需清零
+8. `ClearIntegral()` → **同旧固件**：恢复清 PID/DCE 积分的旧逻辑
 
 ### 8.4 保留旧固件的元素（不改动）
 
@@ -342,4 +343,42 @@
 6. `Mode_t` (9 个模式)
 7. 所有基本控制/查询/参数命令（`0x01`-`0x07`、`0x11`-`0x16`、`0x17`-`0x1A`、`0x21`-`0x25`、`0x7D`-`0x7F`）
 8. 旧固件默认值（`currentLimit=1000mA`、`velocityAcc=100r/s²`、`enableStallProtect=false`）
+
+---
+
+## 九、EEPROM 兼容性（firmware_old → firmware_new 升级路径）
+
+> **场景**：板子已用 firmware_old 烧录并写入 EEPROM，刷 firmware_new 后是否兼容？
+
+### 9.1 字段保留策略
+
+**所有 firmware_old 写入的 EEPROM 字段在 firmware_new 中字段定义不变、含义不变、读写命令不变。** 刷 firmware_new 后旧 EEPROM 数据可直接复用，无需 `0x7E Erase Configs` 擦除。
+
+| 字段 | firmware_old 行为 | firmware_new 行为 | 兼容性 |
+|---|---|---|---|
+| `configStatus` | 首次烧录写入；后续不再写 | 同 firmware_old | ✅ 完全兼容 |
+| `canNodeId` | 拨码/写入 | 35/42 仍拨码；57/gripper 硬编码宏**覆盖** EEPROM 值 | ⚠ 57/gripper 见 §9.2 |
+| `enableStallProtect` | false（旧固件默认关闭） | firmware_new 保留此字段，默认 false | ✅ 旧值 true 仍能读取 |
+| `enableMotorOnBoot` | false | 同 firmware_old | ✅ |
+| `enableTempWatch` | false | 同 firmware_old | ✅ |
+| `currentLimit` / `velocityLimit` / `velocityAcc` | 旧默认值（1000mA / 30r/s / 100r/s²） | firmware_new 默认值不同（2500mA / 30r/s / 30r/s²） | ⚠ 旧值不重置 |
+| DCE/PID 参数 | 旧默认值（195/80/300/250 等） | firmware_new 默认值不同（见 §5） | ⚠ 旧值不重置 |
+
+### 9.2 升级后行为差异
+
+- **57 电机 / gripper**：`canNodeId` 在 `main.cpp` 启动时被硬编码宏覆盖（57=7、gripper=8），**无视** EEPROM 旧值。
+  - 若旧 EEPROM 写入冲突值（如 57 板子旧 `canNodeId=5`），首次启动会立即覆盖；不影响后续行为。
+  - 如需清空旧值，发 `0x7E Erase Configs` 擦除后重新上电。
+
+- **`enableStallProtect=true`（旧固件烧录后写入）**：
+  - firmware_new **不实现 stall v3 检测**，此字段**不影响任何运行时行为**，仅作为配置占位保留。
+  - 上电后 `CtrlStallFlag()` 仍按旧固件逻辑处理（不影响主流程）。
+
+- **默认值差异**（`currentLimit` / DCE / PID 等）：
+  - 刷 firmware_new 后**不会自动更新**为新默认值，EEPROM 保留旧值。
+  - 如需使用新默认值，发 `0x7E Erase Configs` 触发 `CONFIG_RESTORE` 流程，下一次上电按 firmware_new 默认值（§5 表格）重新写入。
+
+### 9.3 降级路径
+
+firmware_new → firmware_old：所有字段定义一致，理论上可直接降级。但 firmware_new 默认值与 firmware_old 不同，若 EEPROM 已用 firmware_new 默认值覆盖，降级后行为会不同。
 

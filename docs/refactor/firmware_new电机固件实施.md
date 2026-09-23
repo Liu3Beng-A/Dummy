@@ -9,7 +9,7 @@
 > **核心原则**：
 > - 不 cherry-pick `firmware/` 代码，只看思路自己写
 > - `firmware_new/` 的 35/42 电机已经是 firmware_old 的副本，以此为基础增量修改
-> - 堵转检测 v3（0x5A/0x5B/0x5C）**不实现**，但其"检测→回退→锁定→解锁"的状态机思路用于 `!BACKHOME`
+> - 堵转检测 v3（0x5A/0x5B/0x5C）**不实现**，`!BACKHOME` 命令**不实现**，LOCKED/RETREATING 状态机**不引入**
 >
 > **创建日期**：2026-09-21
 
@@ -26,8 +26,7 @@ firmware_new/
 └── dummy-ref-core-fw/      ← 主控固件（不在本文范围）
 ```
 
-> `firmware_new/` 下**目前只有 35 和 42 电机固件**，57 和 gripper 固件尚未创建。
-> 57 和 gripper 的初始内容和 35 一样（都是 firmware_old 副本），后续通过 `MOTOR_TYPE` 宏切参数。
+> `firmware_new/dummy-35motor-fw/` 下只有**一套源码（42和35）**，通过 `MOTOR_TYPE` 宏（35/42/57/8=gripper）切参数，编译出 4 个 ELF。**不创建独立的** `dummy-57motor-fw/` **或** `dummy-gripper-fw/` 目录。
 
 ### 1.2 已经实现的功能（直接来自 firmware_old，无需修改）
 
@@ -51,15 +50,15 @@ firmware_new/
 | 1 | **3 个独立工程**（35/42 各一套） | **合并为 1 套源码 + 4 个 build**（35/42/57/gripper） | P0 |
 | 2 | **无 0x09 急停广播**（旧固件 CAN ID 0x89 是 bug） | **新增 0x09 广播急停** | P0 |
 | 3 | **`ApplyPosAsHomeOffset()` 不同步 realPosition**（GetPosition 返回累计圈数） | **v3.2 修复**：同步 `realPosition = encoderHomeOffset` | P0 |
-| 4 | **无 57 和 gripper 固件** | 创建两个新 build，**57 = 硬编码 ID=7，gripper = 硬编码 ID=8** | P0 |
+| 4 | **35/42 之外没有 57/gripper build** | 在 35 源码基础上加 57/gripper 两个 build target，**57 = 硬编码 ID=7，gripper = 硬编码 ID=8**；不创建独立目录 | P0 |
 | 5 | **4 个参数无法独立查询**（0x28~0x2D 缺失） | **新增 6 条查询命令**：0x28 DCE Kp / 0x29 Kv / 0x2A Ki / 0x2B Kd / 0x2C 加速度 / 0x2D 电流限幅 | P1 |
-| 6 | **`0x07` 总是立即发 FINISH ACK**（电机控制环还没跑到就回包） | **取消立即 ACK**：LOCKED/RETREATING 状态丢弃命令；正常状态去掉立即 ACK | P1 |
+| 6 | **`0x07` 总是立即发 FINISH ACK**（电机控制环还没跑到就回包） | **同旧固件：保留立即 ACK 行为**（旧固件无 LOCKED 状态，LOCKED 丢弃逻辑不适用；不引入此机制） | — |
 | 7 | **电流默认值 1A / 加速度 100 r/s²**（与需求不符） | **按 4 个 build 修正默认值**（见 §四） | P1 |
-| 8 | **`ClearIntegral()` 是 const**，清 PID/DCE 积分 | **重构为非 const**，只清 estimator 状态（estVelocityIntegral / estError） | P2 |
-| 9 | **`ResetGoalsToCurrentPosition()` 不存在** | **新增**：用于 `!BACKHOME` 回退时停在当前位置 | P2 |
-| 10 | **`motor.h` 中有 `isStalled` / `stalledTime` 等字段** | **删除**，替换为 BACKHOME 状态机字段 | P2 |
-| 11 | **无 `SetPositionSetPointWithTime()` 带时间的位置命令** | **新增**（已有方法签名，需在 CAN 层 case 0x06 中调用） | P1 |
-| 12 | **gripper 的 `configurations.h` 包含 `enableStallProtect` 字段** | **删除**（gripper 完全无堵转检测） | P1 |
+| 8 | **`ClearIntegral()` 是 const**，清 PID/DCE 积分 | **不动**（保持 const + 清 PID/DCE 6 字段，与旧固件一致） | — |
+| 9 | **`ResetGoalsToCurrentPosition()` 不存在** | **不新增**（依赖 stall v3 状态机，决策 §0 明确不实现） | — |
+| 10 | **`motor.h` 中有 `isStalled` / `stalledTime` 等字段** | **保留**（决策 §0 核心原则：旧固件元素不改动；默认 false/自动清除，无副作用） | — |
+| 11 | **`case 0x06` 未调用 `SetPositionSetPointWithTime()`** | **确认调用**（方法已存在，需在 CAN 层 case 0x06 中调用） | P2 |
+| 12 | **gripper 的 `configurations.h` 包含 `enableStallProtect` 字段** | **不动**（保留字段定义；gripper build 通过 `MOTOR_TYPE` 让 `case 0x1B` 改为 no-op） | P1 |
 | 13 | **57 和 gripper 固件尚未加入 CMake** | **修改 CMakeLists.txt**，加入 57 和 gripper 两个 build target | P0 |
 
 ---
@@ -68,36 +67,21 @@ firmware_new/
 
 > 每个任务说明：做什么 → 改哪些文件 → 怎么验证。
 
-### 【P0-1】合并 4 个 build，更新 CMakeLists.txt
+### 【P0-1】4 个 build 共用 1 套源码（35/42/57/gripper），更新 CMakeLists.txt
 
 **做什么**：
-- 电机固件最终是 1 套源码，通过 `MOTOR_TYPE` 宏切换参数，出 4 个 ELF
-- 在 35 电机的 CMakeLists.txt 基础上，添加 57 和 gripper 两个 target
-- 4 个 target 用同一套源文件，只在编译参数里加 `-DMOTOR_TYPE=35` / `42` / `57` / `8`
+- 电机固件是**唯一一套源码**（`dummy-35motor-fw/`），通过 `MOTOR_TYPE` 宏切换参数，编译出 4 个 ELF
+- 在 CMakeLists.txt 中定义 4 个 target，共用同一套源文件
+- 每个 target 在编译参数里加 `-DMOTOR_TYPE=35` / `42` / `57` / `8`（gripper=8）
+- **不创建独立的** `dummy-57motor-fw/` **或** `dummy-gripper-fw/` **目录**
 
 **改哪些文件**：
-- `firmware_new/dummy-35motor-fw/CMakeLists.txt` — 修改，加入 4 个 target
-- `firmware_new/dummy-35motor-fw/UserApp/configurations.h` — 条件编译，`MOTOR_TYPE` 决定 canNodeId 默认值
+- `firmware_new/dummy-35motor-fw/CMakeLists.txt` — 添加 4 个 target
+- `firmware_new/dummy-35motor-fw/UserApp/configurations.h` — 条件编译，`MOTOR_TYPE` 决定 `canNodeId` 默认值（35/42=拨码，57=7，gripper=8）
 
 **验证**：
-- `cd firmware_new/dummy-35motor-fw/build && ninja` → 产出 `motor-35.elf/.hex/.bin`
-- 同样方式验证 42 / 57 / gripper 三个 build 都能编译通过
-
----
-
-### 【P0-2】新建 57 和 gripper 固件目录
-
-**做什么**：
-- 57 电机：硬编码 `canNodeId = 7`，其余参数与 35 一致（PID 等后续按 §四修正）
-- gripper 夹爪：硬编码 `canNodeId = 8`，`configurations.h` 中去掉 `enableStallProtect` 字段
-
-**改哪些文件**：
-- 复制 `dummy-35motor-fw/` 为 `dummy-57motor-fw/` 和 `dummy-gripper-fw/`（用户手动做）
-- `dummy-gripper-fw/UserApp/configurations.h` — 删 `enableStallProtect` 字段，删对应变量
-- `dummy-gripper-fw/UserApp/protocols/interface_can.cpp` — gripper 不响应 0x1B（Set Stall-Protect）
-
-**验证**：
-- 3 个新 build 都能编译通过，CAN ID 正确
+- `cd firmware_new/dummy-35motor-fw/build && ninja` → 产出 `motor-35.elf/.hex/.bin`、`motor-42.*`、`motor-57.*`、`motor-gripper.*`
+- 4 个 ELF 中 `canNodeId` 默认值正确：35/42 拨码默认、57=7、gripper=8
 
 ---
 
@@ -154,20 +138,6 @@ firmware_new/
 
 ---
 
-### 【P1-2】`0x07` 去掉立即 ACK，LOCKED 状态丢弃
-
-**做什么**：
-- 去掉 `case 0x07` 中的立即 `CAN_Send(&txHeader, 0x23, ...)`（旧版在控制环还没跑到时就回包了，导致主控 SEQ 模式提前退出）
-- 正常运行时，`0x07` 和 `0x05` 一样：只下目标位置，不立即回包，等 0x23 查询时再回
-
-**改哪些文件**：
-- `firmware_new/dummy-35motor-fw/UserApp/protocols/interface_can.cpp` 的 `case 0x07`
-
-**验证**：
-- 发 `>J j1 j2 ...` 后，主控在电机到位前不应收到 FINISH ACK
-
----
-
 ### 【P1-3】修正 4 个 build 的默认参数
 
 **做什么**：按 §四的表格，修正以下默认值：
@@ -188,65 +158,19 @@ firmware_new/
 
 ---
 
-### 【P1-4】gripper 的 `configurations.h` 去掉 `enableStallProtect`
+### 【P1-4】gripper build 模式下 `0x1B` 改为 no-op
 
 **做什么**：
-- `BoardConfig_t` 结构体中删 `enableStallProtect` 字段
-- `interface_can.cpp` 中 gripper 的 `case 0x1B` 改为 no-op 或直接 `default`
+- 4 个 build 共用同一套源码，gripper 通过 `MOTOR_TYPE == 8` 在 `interface_can.cpp` 中条件编译
+- `case 0x1B` 在 gripper 模式下直接 `break`（no-op，不响应 Set Stall-Protect）
+- **不删除** `BoardConfig_t::enableStallProtect` 字段（保留字段定义以保证 EEPROM 兼容性，见决策 §九）
 
 **改哪些文件**：
-- `firmware_new/dummy-gripper-fw/UserApp/configurations.h`
-- `firmware_new/dummy-gripper-fw/UserApp/protocols/interface_can.cpp`
+- `firmware_new/dummy-35motor-fw/UserApp/protocols/interface_can.cpp` — `case 0x1B` 加 `#if MOTOR_TYPE != 8 ... #endif`，gripper 分支 no-op
 
 **验证**：
-- gripper build 编译通过，无 `enableStallProtect` 相关引用
-
----
-
-### 【P2-1】`ClearIntegral()` 重构
-
-**做什么**：
-- 旧版（现状）：是 `const` 方法，清 PID/DCE 的 `integralRound` / `outputKi`
-- 新版：非 `const`，只清 `estVelocityIntegral` 和 `estError`（estimator 状态）
-
-**改哪些文件**：
-- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.cpp`
-- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.h`
-
-**验证**：
-- `!BACKHOME` 切换状态时调用，积分累积消除，电机不抖动
-
----
-
-### 【P2-2】`ResetGoalsToCurrentPosition()` 新增
-
-**做什么**：
-- 新增方法（非继承自 firmware，只借思路）：把 `goalPosition = estPosition`（绕过 +offset），清零 `goalVelocity` / `goalCurrent`，触发 `softNewCurve`
-- 用于 `!BACKHOME` 回退时：让电机停在当前位置，而不是被驱动回旧目标
-
-**改哪些文件**：
-- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.cpp`
-- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.h`
-
-**验证**：
-- `!BACKHOME` 流程中机械臂卡阻回退时，电机停在当前位置
-
----
-
-### 【P2-3】删除 `isStalled` / `stalledTime` 等旧字段
-
-**做什么**：
-- `motor.h` 中删除：`isStalled` / `stalledTime` / `overloadTime` / `overloadFlag` / `ClearStallFlag()`
-- 删除 `State_t::STATE_OVERLOAD`
-- `main.cpp` 中按钮回调的 `ClearStallFlag()` 调用改为 no-op（gripper 是打印日志）
-
-**改哪些文件**：
-- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.h`
-- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.cpp`
-- `firmware_new/dummy-35motor-fw/UserApp/main.cpp`
-
-**验证**：
-- 编译通过，无 `isStalled` 相关引用
+- 35/42/57 build 仍响应 0x1B（写 EEPROM）；gripper build 无效（收到 0x1B 后静默忽略）
+- 4 个 build 中 `BoardConfig_t::enableStallProtect` 字段定义仍存在（grep 全源码命中 1 处，仅 `interface_can.cpp` 中的 gripper 条件分支屏蔽）
 
 ---
 
@@ -264,23 +188,39 @@ firmware_new/
 
 ---
 
+### 【P2-5】`SetPositionSetPointWithTime()` 加 `fmaxf(0, discriminant)` 兜底
+
+**做什么**：
+- 旧固件无 `fmaxf` 兜底；firmware 实现了此兜底（防 `sqrtf` 负数 crash）
+- 在 `motor.cpp` 的 `SetPositionSetPointWithTime()` 方法体中，`sqrtf(discriminant)` 改为 `sqrtf(fmaxf(0, discriminant))`
+- `discriminant < 0` 时自动取 0，按 `velocityLimit` 兜底（不 crash，返回 false）
+
+**改哪些文件**：
+- `firmware_new/dummy-35motor-fw/Ctrl/Motor/motor.cpp`
+
+**验证**：
+- 构造极小 `T`（如 T=0）使 `discriminant < 0`，调用 `SetPositionSetPointWithTime()` 不 crash
+- 方法返回 false 并使用 `velocityLimit` 兜底
+
+---
+
 ## 三、实施顺序建议
 
 ```
-第 1 步（P0）：CMake + 4 个 build + 57/gripper 目录
+第 1 步（P0）：CMake + 4 个 build target（共用 1 套源码，合并 dummy-35motor-fw/ 和 dummy-42motor-fw/，重命名为 dummy-motor-fw/）
 第 2 步（P0）：0x09 急停广播
 第 3 步（P0）：ApplyPosAsHomeOffset() v3.2 修复
 第 4 步（P1）：6 条 CAN 查询（0x28~0x2D）
-第 5 步（P1）：0x07 去掉立即 ACK
-第 6 步（P1）：修正 4 个 build 默认参数
-第 7 步（P1）：gripper 去掉 enableStallProtect
-第 8 步（P2）：ClearIntegral() 重构 + ResetGoalsToCurrentPosition() 新增
-第 9 步（P2）：删除旧 stall 字段
-第 10 步（P2）：0x06 确认调用 SetPositionSetPointWithTime()
+第 5 步（P1）：修正 4 个 build 默认参数
+第 6 步（P1）：gripper 模式下 0x1B 改为 no-op（保留 enableStallProtect 字段）
+第 7 步（P2）：SetPositionSetPointWithTime() 加 fmaxf(0, discriminant) 兜底
+第 8 步（P2）：0x06 确认调用 SetPositionSetPointWithTime()
 ```
 
-> **说明**：电机固件重构**不需要等主控固件**，可以先独立做完。
-> CAN 协议对齐后，主控固件的 0x09 / 0x28~0x2D 调用自然生效。
+> **说明**：
+> - **不实施项**：ClearIntegral() 重构、ResetGoalsToCurrentPosition() 新增、isStalled / stalledTime / overloadTime / overloadFlag / STATE_OVERLOAD 删除、`!BACKHOME` 命令——全部不做（与决策 §0 核心迁移原则一致）。
+> - 电机固件重构**不需要等主控固件**，可以先独立做完。
+> - CAN 协议对齐后，主控固件的 0x09 / 0x28~0x2D 调用自然生效。
 
 ---
 
@@ -334,18 +274,18 @@ firmware_new/
 
 | # | 验收条件 | 检查方法 |
 |---|---|---|
-| 1 | 4 个 build 都能编译通过 | `ninja` 在 4 个 build 目录下各跑一次 |
+| 1 | 4 个 build 都能编译通过 | `cd firmware_new/dummy-35motor-fw/build && ninja` → 产出 4 个 ELF |
 | 2 | 4 个 ELF 同时产出 .hex 和 .bin | 检查 build 目录 |
 | 3 | 57 CAN ID = 7，gripper CAN ID = 8 | 看代码中硬编码的值 |
 | 4 | 0x09 急停：发命令后所有电机立即停止 | 模拟测试或实机 |
 | 5 | 0x15 Apply Home 后 GetPosition() 返回 0 | 发 0x15 → 发 0x23 查询 |
 | 6 | 0x28~0x2D 能返回正确数值 | 主控发命令验证 |
 | 7 | 4 个 build 默认参数与 §四表格一致 | 编译后读 ELF 常量段 |
-| 8 | gripper 无 enableStallProtect | `grep -r enableStallProtect` 在 gripper 目录无结果 |
-| 9 | `ClearIntegral()` 是非 const，只清 estimator | 读代码确认 |
-| 10 | `ResetGoalsToCurrentPosition()` 存在 | `grep -r ResetGoalsToCurrentPosition` 有结果 |
-| 11 | 无 isStalled / stalledTime / overloadTime | `grep -r isStalled` 在 motor.h 无结果 |
-| 12 | 57 和 gripper 固件已加入 CMake | 读 CMakeLists.txt 有 4 个 target |
+| 8 | gripper build 中 0x1B 是 no-op（其他 build 仍写 EEPROM） | 反汇编 gripper ELF 中 case 0x1B 分支；发 0x1B 后 gripper 无 ACK |
+| 9 | `ClearIntegral()` 是 const，清 PID/DCE 6 字段（保持旧固件行为） | 读代码确认 |
+| 10 | `ResetGoalsToCurrentPosition()` 不存在（不实现） | `grep -r ResetGoalsToCurrentPosition` 在源码中无结果 |
+| 11 | `isStalled` / `stalledTime` / `overloadTime` / `overloadFlag` / `STATE_OVERLOAD` 保留存在 | `grep -r isStalled` 在 motor.h/motor.cpp 命中 ≥ 1 处 |
+| 12 | CMake 有 4 个 build target（共用 1 套源码） | 读 CMakeLists.txt 有 4 个 target；不创建 `dummy-57motor-fw/` 和 `dummy-gripper-fw/` 目录 |
 
 ---
 
