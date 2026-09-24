@@ -501,6 +501,32 @@ void DummyRobot::SetJointAcceleration(float _acc)
 }
 
 /**
+ * @brief 把 OLD 风格的档位百分比（0~100）按 per-joint BASE 表翻译成 r/s² 下发
+ * @param _acc_pct 档位百分比 (0~100)，LOW=30 / HIGH=100
+ * @note [v3.4] F1.3 改造：仅用于 SetCommandMode() 内部，
+ *       ASCII #ACC_J <node> <rps2> 命令继续走单层 r/s² 语义（直接调 SetJointAcceleration(float)）。
+ *       J7/地轨不参与（直连丝杆，加速度由电机端自动）。
+ */
+void DummyRobot::ApplyJointAccelTier(float _acc_pct)
+{
+    if (_acc_pct < 0)   _acc_pct = 0;
+    if (_acc_pct > 100) _acc_pct = 100;
+
+    float ratio = _acc_pct / 100.0f;
+
+    for (int i = 1; i <= 6; i++)  // 仅 J1~J6（all=0 占位、J7/地轨直连）
+    {
+        float rps2 = JOINT_ACCEL_BASES[i] * ratio;
+        if (rps2 < 1.0f)    rps2 = 1.0f;
+        if (rps2 > 500.0f)  rps2 = 500.0f;
+        motorJ[i]->SetAcceleration_persist(rps2, false);
+    }
+
+    // 异步回填 runtime 缓存（不阻塞，与 SetJointAcceleration() 一致）
+    SyncAllMotorAcceleration();
+}
+
+/**
  * @brief 向 8 个电机发 CAN 0x2C QueryAcceleration，触发回包更新 jointAccRuntime[]
  * @note  [v3.1] 7 个电机（motorJ[1..7]=J1~J7/地轨, motorJ[0]=ALL代理不查询）+ 夹爪，
  *        J1~J7 → runtime[1..7], 夹爪 → runtime[8]。回包处理在 can_protocol.cpp 0x2C 分支里完成。
@@ -527,28 +553,9 @@ void DummyRobot::Homing()
     // [v3.1] J7/地轨：直接下发（railSpeedRps 默认 30 r/s）
     motorJ[7]->SetPositionWithMotorRps(0, railSpeedRps);
 
-    /* [DIAG-2026-09-16] 30s 兜底超时：避免某电机永远不到位时 handler 永久挂死
-     * 原 bug：while(IsMoving()) 永真 → !HOME handler 永远不返回（I=2 O=1）。
-     * 根因：见 docs/发送就卡死—心跳定位排查方案—2026-09-16.md */
-    uint32_t _home_t0 = HAL_GetTick();
+    // [F1.5 配套 §6.3 2026-09-24] 删 30s 兜底超时，回到 OLD while(IsMoving()) 纯循环
     while (IsMoving())
-    {
-        if (HAL_GetTick() - _home_t0 > 30000U)  // 30s 兜底
-            break;
         osDelay(10);
-    }
-
-    /* 超时调试输出：哪个 bit 没就位 */
-    if (IsMoving())
-    {
-        printf("[HOME TIMEOUT] jointsStateFlag=0x%02X (expected 0x7E)\n",
-               (unsigned)jointsStateFlag);
-        for (int i = 1; i <= 6; i++)
-        {
-            printf("  J%d: state=%d (0=STOP,1=RUN,2=FINISH,3=STALL)\n",
-                   i, (int)motorJ[i]->state);
-        }
-    }
 
     SetJointSpeed(lastSlider);  // 还原用户原 slider
 }
@@ -567,28 +574,9 @@ void DummyRobot::Resting()
     // [v3.1] J7/地轨：直接下发（railSpeedRps 默认 30 r/s）
     motorJ[7]->SetPositionWithMotorRps(0, railSpeedRps);
 
-    /* [DIAG-2026-09-16] 30s 兜底超时：与 Homing() 保持一致
-     * 原 bug：while(IsMoving()) 永真 → !RESET handler 永远不返回（I=2 O=1）。
-     * 根因：见 docs/发送就卡死—心跳定位排查方案—2026-09-16.md */
-    uint32_t _rest_t0 = HAL_GetTick();
+    // [F1.5 配套 §6.3 2026-09-24] 删 30s 兜底超时
     while (IsMoving())
-    {
-        if (HAL_GetTick() - _rest_t0 > 30000U)  // 30s 兜底
-            break;
         osDelay(10);
-    }
-
-    /* 超时调试输出：哪个 bit 没就位 */
-    if (IsMoving())
-    {
-        printf("[REST TIMEOUT] jointsStateFlag=0x%02X (expected 0x7E)\n",
-               (unsigned)jointsStateFlag);
-        for (int i = 1; i <= 6; i++)
-        {
-            printf("  J%d: state=%d (0=STOP,1=RUN,2=FINISH,3=STALL)\n",
-                   i, (int)motorJ[i]->state);
-        }
-    }
 
     SetJointSpeed(lastSlider);
 }
@@ -609,11 +597,13 @@ void DummyRobot::SetEnable(bool _enable)
         for (int i = 0; i < 6; i++)
             targetCurrents[i] = 0.0f;
 
-        SetCommandMode(DEFAULT_COMMAND_MODE);
-        // [A3 修复] 不再写 targetJoints = currentJoints；
-        //         jointsStateFlag 方案下，电机 STOP 时 jointsStateFlag 自动全置位
-        //         (UpdateAngleCallback 收到 isFinished=0 → |= (1<<i))，
-        //         IsMoving() 行为符合"等电机真实状态"的语义。
+        // [F1.5] 删除 SetCommandMode(DEFAULT_COMMAND_MODE)
+        //   !DISABLE 保持当前模式不变，不丢用户的工作状态
+        //   默认语义只在上电那一刻生效（由 DEFAULT_COMMAND_MODE 定义）
+        //   [A3 修复] 不再写 targetJoints = currentJoints；
+        //            jointsStateFlag 方案下，电机 STOP 时 jointsStateFlag 自动全置位
+        //            (UpdateAngleCallback 收到 isFinished=0 → |= (1<<i))，
+        //            IsMoving() 行为符合"等电机真实状态"的语义。
     }
 
     // [v3.2] ALL 代理 1 帧 + 夹爪 1 帧 = 2 帧
@@ -693,15 +683,18 @@ void DummyRobot::SetCommandMode(uint32_t _mode)
     {
         case COMMAND_TARGET_POINT_SEQUENTIAL:
         case COMMAND_TARGET_POINT_INTERRUPTABLE:
+            // [F1.3 改造 2026-09-24] 恢复 OLD 双管齐下
+            //   SEQ 与 INT 的 jointSpeedRatio / 加速度档位完全相同，仅 ParseCommand 阻塞行为不同
             jointSpeedRatio = 1;
-            // v2.7: 不再调用 SetJointAcceleration 覆盖电机端加速度，
-            // 由 SyncAllMotorAcceleration() 在 Init() 末尾从 EEPROM 读取真实值
+            ApplyJointAccelTier(DEFAULT_JOINT_ACCELERATION_LOW);   // LOW = 30%
             break;
 
         case COMMAND_CONTINUES_TRAJECTORY:
-            // v2.7: 不再调用 SetJointAcceleration 覆盖电机端加速度，
-            // 由 SyncAllMotorAcceleration() 在 Init() 末尾从 EEPROM 读取真实值
-            // jointSpeedRatio 不再自动减半，由 SetJointSpeed 直接用 slider × SLIDER_TO_RPS
+            // [F1.3 改造 2026-09-24] 恢复 OLD 三件套
+            //   ratio=0.3（速度上限缩到 30%）+ HIGH 加速度档位（电机端能快速响应新目标）
+            //   两者必须配套使用，单独一个都失去设计意义
+            jointSpeedRatio = 0.3;
+            ApplyJointAccelTier(DEFAULT_JOINT_ACCELERATION_HIGH);  // HIGH = 100%
             break;
 
         case COMMAND_MOTOR_TUNING:
@@ -711,7 +704,7 @@ void DummyRobot::SetCommandMode(uint32_t _mode)
             break;
 
         case COMMAND_SERVO_J:
-            SetJointAcceleration(DEFAULT_JOINT_ACCELERATION);
+            SetJointAcceleration(DEFAULT_JOINT_ACCELERATION);  // 150 r/s²（保留现行为）
             break;
     }
 }
@@ -811,6 +804,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const char *_cmd)
     switch (context->commandMode)
     {
         case COMMAND_TARGET_POINT_SEQUENTIAL:
+        case COMMAND_CONTINUES_TRAJECTORY:    // [F1.1+F1.2+F1.3 改造 2026-09-24] 与 SEQ 合并 fall-through，共用阻塞回 OK 逻辑
             if (_cmd[0] == '>' || _cmd[0] == '&')
             {
                 // [v3.1] 新格式：>j1,j2,j3,j4,j5,j6,j7(rail),speed — 7 个关节在前，地轨在第7位
@@ -826,18 +820,19 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const char *_cmd)
                 {
                     if (context->MoveJ(j1, j2, j3, j4, j5, j6, j7, speed))
                     {
-                        // [v2.8 修复] SEQUENTIAL 模式下，若电机还在转，丢弃新指令回 ok，
-                        // 保留"上一条做完再做下一条"的语义，但不阻塞 FIFO 消费线程。
-                        if (context->IsMoving() && context->IsEnabled())
-                        {
-                            Respond(*usbStreamOutputPtr,  "ok");
-                            Respond(*uart4StreamOutputPtr, "ok");
-                            break;
-                        }
+                        // [F1.1+F1.3 改造 2026-09-24] 恢复 OLD 阻塞语义：SEQ+TRJ 共用此段代码，
+                        //   1) 立即下发 MoveJoints + 地轨，防止 IsMoving() 因 jointsStateFlag
+                        //      残留旧位而提前 false；
+                        //   2) 阻塞等待所有臂关节 FINISH（bit1~6 全置位 = 0b1111110）；
+                        //   3) USB+UART4 双通道同时回 ok。
+                        //   注：地轨位 bit0 恒为 0，IsMoving() 不会因地轨未到位而无限阻塞。
                         context->MoveJoints(context->targetJoints);
                         // [v3.1] J7/地轨：MoveJ 已填入 railSpeedRps，直接下发
                         context->motorJ[7]->SetPositionWithMotorRps(
                             context->targetRailPos / 5.0f, context->railSpeedRps);
+
+                        while (context->IsMoving() && context->IsEnabled())
+                            osDelay(5);
 
                         Respond(*usbStreamOutputPtr,  "ok");
                         Respond(*uart4StreamOutputPtr, "ok");
@@ -857,67 +852,13 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const char *_cmd)
                 {
                     if (context->MoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]))
                     {
-                        // [v2.8 修复] MoveL 同样改为非阻塞，新轨迹若电机还在跑则丢弃
-                        if (context->IsMoving() && context->IsEnabled())
-                        {
-                            Respond(*usbStreamOutputPtr,  "ok");
-                            Respond(*uart4StreamOutputPtr, "ok");
-                            break;
-                        }
+                        // [F1.2 改造 2026-09-24] MoveL 保持不阻塞 (OLD 行为)，
+                        //   移除 v2.8 "丢指令 break" 逻辑。
                         context->MoveJoints(context->targetJoints);
                         // MoveL 内部其实是 MoveJ，ra 处理同上
                         context->motorJ[7]->SetPositionWithMotorRps(
                             context->targetRailPos / 5.0f, context->railSpeedRps);
 
-                        Respond(*usbStreamOutputPtr,  "ok"); Respond(*uart4StreamOutputPtr, "ok");
-                    }
-                    else
-                    {
-                        Respond(*usbStreamOutputPtr,  "error: IK fail or out of limits"); Respond(*uart4StreamOutputPtr, "error: IK fail or out of limits");
-                    }
-                }
-            }
-            break;
-
-        case COMMAND_CONTINUES_TRAJECTORY:
-            if (_cmd[0] == '>' || _cmd[0] == '&')
-            {
-                // [v3.1] 新格式：>j1,j2,j3,j4,j5,j6,j7(rail),speed
-                float j1, j2, j3, j4, j5, j6, j7;  // j7=地轨
-                float speed = 0.0f;
-
-                argNum = sscanf(_cmd, (_cmd[0] == '>') ?
-                                ">%f,%f,%f,%f,%f,%f,%f,%f" : "&%f,%f,%f,%f,%f,%f,%f,%f",
-                                &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
-
-                if (argNum == 8) context->SetJointSpeed(speed);
-                if (argNum >= 7)
-                {
-                    if (context->MoveJ(j1, j2, j3, j4, j5, j6, j7, speed))
-                    {
-                        context->MoveJoints(context->targetJoints);
-                        // [v3.1] J7/地轨：MoveJ 已填入 railSpeedRps，直接下发
-                        context->motorJ[7]->SetPositionWithMotorRps(
-                            context->targetRailPos / 5.0f, context->railSpeedRps);
-
-                        Respond(*usbStreamOutputPtr,  "ok");
-                        Respond(*uart4StreamOutputPtr, "ok");
-                    }
-                    else
-                    {
-                        Respond(*usbStreamOutputPtr,  "error: joint out of limits"); Respond(*uart4StreamOutputPtr, "error: joint out of limits");
-                    }
-                }
-            }
-            else if (_cmd[0] == '@')
-            {
-                float pose[6], speed;
-                argNum = sscanf(_cmd, "@%f,%f,%f,%f,%f,%f,%f", pose, pose+1, pose+2, pose+3, pose+4, pose+5, &speed);
-                if (argNum == 7) context->SetJointSpeed(speed);
-                if (argNum >= 6)
-                {
-                    if (context->MoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]))
-                    {
                         Respond(*usbStreamOutputPtr,  "ok"); Respond(*uart4StreamOutputPtr, "ok");
                     }
                     else

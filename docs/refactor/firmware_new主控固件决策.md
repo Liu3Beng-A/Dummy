@@ -39,8 +39,8 @@ docs/refactor/
 
 | 模块              | 状态           | 范围                                                                                                                  |
 | --------------- | ------------ | ------------------------------------------------------------------------------------------------------------------- |
-| **模块 01**（运动指令） | **🔧 进行中**   | F1.1 SEQ/TRJ `>` `&` 阻塞回 OK、F1.2 `@` 清理 break、**F1.3 完全照搬 OLD 三件套**（`jointSpeedRatio=0.3` + per-joint BASE 加速度档位 + ParseCommand 阻塞）、F1.5 三项清理（默认 INT / SetEnable 防呆 / Homing 兜底）、F1.4 CMDMODE 5/6 不改 |
-| 模块 02（运动完成判断）   | ⏸️ 待模块 01 完成 | 仅 `IsMoving()` 公式回退；Homing/Resting 兜底回退已并入模块 01 §6.3                                                                |
+| **模块 01**（运动指令） | **✅ 代码完成（2026-09-24）** | F1.1 SEQ/TRJ `>` `&` 阻塞回 OK、F1.2 `@` 清理 break、**F1.3 完全照搬 OLD 三件套**（`jointSpeedRatio=0.3` + per-joint BASE 加速度档位 + ParseCommand 阻塞）、F1.5 三项清理（默认 INT / SetEnable 防呆 / Homing 兜底）、F1.4 CMDMODE 5/6 不改 — 全部代码改动 + ninja 编译（201/201）已完成；待现场实测 |
+| 模块 02（运动完成判断）   | ⏸️ 待实施       | 仅 `IsMoving()` 公式回退（dummy_robot.h:666-671）；Homing/Resting 兜底回退已并入模块 01 §6.3 完成                                                          |
 
 
 ### 已完成（不在本次范围）
@@ -78,8 +78,8 @@ docs/refactor/
 
 | #   | 模块                                        | 一句话决策                                                                                                | 状态           | 文档                                                  |
 | --- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------ | --------------------------------------------------- |
-| 01  | 运动指令 (`>` `&` `@`)                        | SEQ/TRJ `>` `&` **阻塞回 OK**（OLD 行为，共用 ParseCommand）；`@` 不阻塞（SEQ/INT/TRJ/INT 都立即回 ok）；F1.3 完全照搬 OLD 三件套（`jointSpeedRatio=0.3` + per-joint BASE 加速度档位 + 阻塞语义）；F1.5 默认 INT + 删 SetEnable 防呆 | **P0 待实施**   | [模块 01](firmware_new主控固件模块01_运动指令-MoveJ&MoveL.md)   |
-| 02  | 运动完成判断 (IsMoving)                         | 回退 OLD 公式 `jointsStateFlag != 0b1111110`，删除 v3.2 短路；Homing/Resting 兜底已并入模块 01 §6.3                   | ⏸️ 待模块 01 完成 | [模块 02](firmware_new主控固件模块02_运动完成判断-IsMoving.md)    |
+| 01  | 运动指令 (`>` `&` `@`)                        | SEQ/TRJ `>` `&` **阻塞回 OK**（OLD 行为，共用 ParseCommand）；`@` 不阻塞（SEQ/INT/TRJ/INT 都立即回 ok）；F1.3 完全照搬 OLD 三件套（`jointSpeedRatio=0.3` + per-joint BASE 加速度档位 + 阻塞语义）；F1.5 默认 INT + 删 SetEnable 防呆 | **✅ 代码完成（2026-09-24）** | [模块 01](firmware_new主控固件模块01_运动指令-MoveJ&MoveL.md)   |
+| 02  | 运动完成判断 (IsMoving)                         | 回退 OLD 公式 `jointsStateFlag != 0b1111110`，删除 v3.2 短路；Homing/Resting 兜底已并入模块 01 §6.3                   | ⏸️ 待实施       | [模块 02](firmware_new主控固件模块02_运动完成判断-IsMoving.md)    |
 | 03  | 关节角度同步 (UpdateAngle)                      | 保留单播轮询 14Hz/电机（决策 E2）；Enable 后预发 1 帧广播                                                               | **已生效**      | [模块 03](firmware_new主控固件模块03_关节角度同步-UpdateAngle.md) |
 | 04  | 急停 (EStop)                                | 0x09 广播急停 + 置 flag=ALL_FINISH_FLAG + 清 FIFO（已生效）                                                     | **已生效**      | [模块 04](firmware_new主控固件模块04_急停-EStop.md)           |
 | 05  | 命令模式 (CommandMode)                        | 6 模式 cmdModeNames 保留；SERVO_J/TORQUE 实际下发待拍板                                                          | **部分生效**     | [模块 05](firmware_new主控固件模块05_命令模式-CommandMode.md)   |
@@ -104,9 +104,9 @@ docs/refactor/
 
 | 状态             | 数量  | 模块                                      |
 | -------------- | --- | --------------------------------------- |
-| ✅ 已生效          | 9   | 03, 04, 07a, 08, 09, 10, 11, 12, 13, 16 |
+| ✅ 已生效（含 2026-09-24 模块 01 代码完成 + 编译通过）| 10  | 01, 03, 04, 07a, 08, 09, 10, 11, 12, 13, 16 |
 | ⚠️ 部分生效（待拍板子项） | 4   | 05, 07b, 14, 15                         |
-| ❌ P0 待实施       | 3   | 01, 02, 06                              |
+| ❌ P0 待实施       | 2   | 02, 06                                   |
 
 
 ---

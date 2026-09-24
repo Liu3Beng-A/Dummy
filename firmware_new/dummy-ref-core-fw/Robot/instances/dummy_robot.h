@@ -252,6 +252,29 @@ public:
     // 便于 ComputeSyncSpeeds 静态函数访问；此处不再重复声明。
     const float DEFAULT_JOINT_ACCELERATION = 150.0f;  
 
+    // OLD 风格：每关节一个 BASE 加速度上限，单位 r/s²
+    // 在 SetCommandMode() 切换 SEQ/INT/TRJ 时按百分比下发（LOW=30% / HIGH=100%）
+    // [v3.4] F1.3 改造：恢复 OLD BASE 表，保留 per-joint 差异化加速能力
+    //   索引 [0] = ALL 代理（占位，不参与）
+    //   索引 [1] = J1, [2] = J2, ..., [6] = J6
+    //   注：J7/地轨不参与（直连丝杆，无减速比，加速由电机端自动）
+    const float JOINT_ACCEL_BASES[7] = {
+        0,      // [0] ALL 代理
+        150,    // [1] J1 大臂
+        100,    // [2] J2 肘关节（减速比小，电机能力有限）
+        200,    // [3] J3 上臂
+        200,    // [4] J4
+        200,    // [5] J5
+        200,    // [6] J6
+    };
+
+    // OLD 档位（与 OLD 版本一致，0~100）
+    // [v3.4] F1.3 改造：档位百分比 → per-joint BASE × pct → 直接下发 r/s²
+    //   LOW  = 30% 对应 SEQ/INT 模式（保守加速，每段都希望电机平稳加减速）
+    //   HIGH = 100% 对应 TRJ 模式（强加速，电机能快速响应新目标位置）
+    const float DEFAULT_JOINT_ACCELERATION_LOW  = 30.0f;   // 单位：百分比档位（不是 r/s²）
+    const float DEFAULT_JOINT_ACCELERATION_HIGH = 100.0f;  // 单位：百分比档位（不是 r/s²）
+
     // [v3.1] runtime 索引: [1..7]=J1~J7/地轨, [8]=夹爪
     float jointAccRuntime[9] = {0};
     // v3.0 (2026-09-01): 与 jointAccRuntime[] 配对的"最后更新 ms 时间戳"
@@ -264,7 +287,7 @@ public:
     float     jointCurrentLimitRuntime[9]      = {0};
     uint32_t  jointCurrentLimitLastUpdateMs[9] = {0};
 
-    const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_SEQUENTIAL;
+    const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_INTERRUPTABLE;  // 2=非阻塞（OLD 默认）
 
     // 系统位姿记忆变量与实时状态寄存层
     DOF6Kinematic::Joint6D_t currentJoints  = REST_POSE;  // 当前各关节角度读取缓存 (度)

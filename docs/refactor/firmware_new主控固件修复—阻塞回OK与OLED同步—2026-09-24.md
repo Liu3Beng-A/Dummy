@@ -469,18 +469,20 @@
 >
 > ---
 >
-> ## 5. 实施 TODO（待用户确认后执行）
+> ## 5. 实施 TODO（2026-09-24 更新）
 >
 > ```text
-> ☐ F1.1  改 dummy_robot.cpp SEQ `>` `&` 子块（删除 v2.8 丢指令，加阻塞循环）
-> ☐ F1.2  改 dummy_robot.cpp SEQ `@` 子块（删除 v2.8 丢指令 break）
-> ☐ F1.3  改 dummy_robot.cpp TRJ `>` `&` 子块（加阻塞循环）
-> ☐ F5   改 dummy_robot.h IsMoving() 函数体（回归 0b1111110 字面量）
-> ☐ F3   改 main.cpp ThreadOledUpdate（删除心跳探针，加 [CMD] __*_*__ 状态行）
-> ☐ V1   验证阻塞回 OK 行为
-> ☐ V2   验证 OLED 状态横幅
-> ☐ V3   编译验证 ninja
+> ☑ F1.1  改 dummy_robot.cpp SEQ `>` `&` 子块（删除 v2.8 丢指令，加阻塞循环）—— 2026-09-24 完成
+> ☑ F1.2  改 dummy_robot.cpp SEQ `@` 子块（删除 v2.8 丢指令 break）—— 2026-09-24 完成
+> ☑ F1.3  改 dummy_robot.cpp TRJ `>` `&` 子块（加阻塞循环）—— 2026-09-24 完成
+> ☐ F5   改 dummy_robot.h IsMoving() 函数体（回归 0b1111110 字面量）—— 归属模块 02
+> ☐ F3   改 main.cpp ThreadOledUpdate（删除心跳探针，加 [CMD] __*_*__ 状态行）—— 归属修复文档独立任务
+> ☐ V1   验证阻塞回 OK 行为 —— 待现场实测
+> ☐ V2   验证 OLED 状态横幅 —— 待 F3 完成后实测
+> ☑ V3   编译验证 ninja —— 2026-09-24 完成，201/201 targets
 > ```
+>
+> > **归口说明**：F1.1/F1.2/F1.3 已并入 [模块 01 §3-§5](firmware_new主控固件模块01_运动指令-MoveJ&MoveL.md) 完成；F5 归属 [模块 02 §实施](firmware_new主控固件模块02_运动完成判断-IsMoving.md)；F3 是独立 OLED 任务。三项代码改动均已完成（含模块 01 全部 + 编译验证），仅剩 F5（模块 02 范围）和 F3（OLED 任务）。
 >
 > ---
 >

@@ -743,21 +743,21 @@ void DummyRobot::Resting()
 
 - [x] F1.1 / F1.2 / F1.3 / F1.4 / F1.5 用户拍板（2026-09-24）
 - [x] F1.3 决策反转（2026-09-24）：完全照搬 OLD 三件套，旧"拆解 + 仅 ratio=0.3"决策整体废弃
-- [ ] F1.1 代码修改（SEQ `>` `&` 改回阻塞，删除 v2.8 丢指令 break）
-- [ ] F1.2 代码修改（SEQ `@` 清理 break，TRJ `@` 无需改）
-- [ ] F1.3 代码修改（共 6 处）：
-  - [ ] §5 任务 1：`dummy_robot.h` 新增 `JOINT_ACCEL_BASES[7]` 表
-  - [ ] §5 任务 2：`dummy_robot.h` 新增 `DEFAULT_JOINT_ACCELERATION_LOW/HIGH` 常量
-  - [ ] §5 任务 3：`dummy_robot.cpp` 新增私有方法 `ApplyJointAccelTier(float pct)`
-  - [ ] §5 任务 4：`dummy_robot.cpp` 重构 `SetCommandMode()`（SEQ/INT 用 LOW + ratio=1；TRJ 用 HIGH + ratio=0.3）
-  - [ ] §5 任务 5：`dummy_robot.cpp` 重构 `ParseCommand()`（SEQ + TRJ 合并成 fall-through）
-  - [ ] §5 任务 6：`dummy_robot.cpp` 在合并后的 SEQ+TRJ `>` `&` 分支加阻塞循环（沿用 F1.1 写法）
-- [ ] F1.5 三处代码修改：
-  - [ ] §6.1 默认上电模式（`dummy_robot.h:267` → `INTERRUPTABLE`）
-  - [ ] §6.2 `SetEnable(false)` 删除 `SetCommandMode(DEFAULT_COMMAND_MODE)`（`dummy_robot.cpp:599-624`）
-  - [ ] §6.3 `Homing()` / `Resting()` 删除 30s 兜底超时（`dummy_robot.cpp:520-555`）
-- [ ] 编译验证（ninja）
-- [ ] 实测验证（SEQ/TRJ 阻塞回 OK / TRJ 速度比 0.3 / TRJ 加速度档位下发 / `!DISABLE` 不丢模式 / `!HOME` 不卡死）
+- [x] **F1.1 代码修改（SEQ `>` `&` 改回阻塞，删除 v2.8 丢指令 break）** — 2026-09-24 完成
+- [x] **F1.2 代码修改（SEQ `@` 清理 break，TRJ `@` 无需改）** — 2026-09-24 完成
+- [x] **F1.3 代码修改（共 6 处全部完成）**： — 2026-09-24
+  - [x] §5 任务 1：`dummy_robot.h` 新增 `JOINT_ACCEL_BASES[7]` 表（line 261-272）
+  - [x] §5 任务 2：`dummy_robot.h` 新增 `DEFAULT_JOINT_ACCELERATION_LOW/HIGH` 常量（line 275-276）
+  - [x] §5 任务 3：`dummy_robot.cpp` 新增私有方法 `ApplyJointAccelTier(float pct)`（line 509-533）
+  - [x] §5 任务 4：`dummy_robot.cpp` 重构 `SetCommandMode()`（SEQ/INT 用 LOW + ratio=1；TRJ 用 HIGH + ratio=0.3，line 708-733）
+  - [x] §5 任务 5：`dummy_robot.cpp` 重构 `ParseCommand()`（SEQ + TRJ 合并成 fall-through，line 818-867）
+  - [x] §5 任务 6：`dummy_robot.cpp` 在合并后的 SEQ+TRJ `>` `&` 分支加阻塞循环（line 818-867 内部）
+- [x] **F1.5 三处代码修改全部完成**： — 2026-09-24
+  - [x] §6.1 默认上电模式（`dummy_robot.h:290` → `INTERRUPTABLE`）
+  - [x] §6.2 `SetEnable(false)` 删除 `SetCommandMode(DEFAULT_COMMAND_MODE)`（`dummy_robot.cpp` line 599-628）
+  - [x] §6.3 `Homing()` / `Resting()` 删除 30s 兜底超时（`dummy_robot.cpp` line 538-553 / 573-588）
+- [x] **编译验证（ninja）** — 2026-09-24：201/201 targets 全通过；FLASH 36.64% / RAM 40.70% / CCMRAM 100%
+- [ ] 实测验证（SEQ/TRJ 阻塞回 OK / TRJ 速度比 0.3 / TRJ 加速度档位下发 / `!DISABLE` 不丢模式 / `!HOME` 不卡死） — 待现场实测
 
 ---
 
