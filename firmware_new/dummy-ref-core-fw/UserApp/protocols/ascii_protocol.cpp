@@ -16,11 +16,6 @@ struct CmdExitGuard {
     ~CmdExitGuard() { g_cmd_out++; }
 };
 
-// ── 命令限流状态 ──
-// !STALL_STATUS: 两次查询间隔不得少于 500ms，避免 CAN 总线和 UART 被塞满
-static uint32_t _stall_status_last_tick = 0;
-#define STALL_STATUS_INTERVAL_MS 500
-
 /* ======================================================================
  * OnUsbAsciiCmd —— USB 通道 ASCII 协议指令处理
  *
@@ -96,13 +91,11 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         }
         else if (s == "!HOME")
         {
-            if (dummy.IsStalled()) { Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first"); return; }
             dummy.Homing();
             Respond(_responseChannel, "ok");
         }
         else if (s == "!RESET")
         {
-            if (dummy.IsStalled()) { Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first"); return; }
             dummy.Resting();
             Respond(_responseChannel, "ok");
         }
@@ -135,44 +128,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             Respond(_responseChannel, "ok hand close");
         }
 
-        /* ── 堵转检测控制指令 ──
-         * !STALL_EN  → 开启所有电机堵转检测（发 CAN 0x1B 到 J0~J6）
-         * !STALL_DIS → 关闭所有电机堵转检测
-         * !STALL_STATUS → 查询各电机堵转状态（通过 CAN 0x5C）
-         * !STALL_UNLOCK → 广播 UNLOCKED (0x5B)，连续3次
-         */
-        else if (s.find("STALL_STATUS") != std::string::npos)
-        {
-            uint32_t now = HAL_GetTick();
-            if (now - _stall_status_last_tick < STALL_STATUS_INTERVAL_MS) {
-                Respond(_responseChannel, "warn STALL_STATUS rate-limited, try again in %lu ms",
-                        (unsigned long)(STALL_STATUS_INTERVAL_MS - (now - _stall_status_last_tick)));
-            } else {
-                _stall_status_last_tick = now;
-                dummy.QueryStallStatus();
-                Respond(_responseChannel, "ok STALL_STATUS rail_en=1 j1_en=1 j2_en=1 j3_en=1 j4_en=1 j5_en=1 j6_en=1 \\");
-                Respond(_responseChannel, "                 rail_lock=0 j1_lock=0 j2_lock=0 j3_lock=0 j4_lock=0 j5_lock=0 j6_lock=0");
-            }
-        }
-        else if (s.find("STALL_UNLOCK") != std::string::npos)
-        {
-            dummy.BroadcastUnlock();
-            Respond(_responseChannel, "ok stall unlock sent");
-        }
-        else if (s.find("STALL_EN") != std::string::npos)
-        {
-            // [v3.1] motorJ[0]=ALL代理不参与，i 从 1 遍历到 7（含 J7/地轨）
-            for (int i = 1; i <= 7; i++)
-                dummy.motorJ[i]->SetEnableStallProtect(true);
-            Respond(_responseChannel, "ok stall protect enabled");
-        }
-        else if (s.find("STALL_DIS") != std::string::npos)
-        {
-            // [v3.1] motorJ[0]=ALL代理不参与，i 从 1 遍历到 7（含 J7/地轨）
-            for (int i = 1; i <= 7; i++)
-                dummy.motorJ[i]->SetEnableStallProtect(false);
-            Respond(_responseChannel, "ok stall protect disabled");
-        }
         /* ── RGB 信仰灯控制指令 ──
          * !RGB_BRIGHT [<0-100>] [&] → 查询亮度 / 设置亮度 / 设置并保存亮度
          * !RGB_MODE <0-9>      → 切换灯效模式
@@ -781,11 +736,6 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             Respond(_responseChannel, "error: robot not enabled, send !START first");
             return;
         }
-        if (dummy.IsStalled())
-        {
-            Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first");
-            return;
-        }
         /* 运动/力矩指令直接入队，返回队列剩余空间供上位机流控 */
         uint32_t freeSize = dummy.commandHandler.Push(_cmd);
         Respond(_responseChannel, "%d", freeSize);
@@ -859,13 +809,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         }
         else if (s == "!HOME")
         {
-            if (dummy.IsStalled()) { Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first"); return; }
             dummy.Homing();
             Respond(_responseChannel, "ok");
         }
         else if (s == "!RESET")
         {
-            if (dummy.IsStalled()) { Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first"); return; }
             dummy.Resting();
             Respond(_responseChannel, "ok");
         }
@@ -925,38 +873,6 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             dummy.hand->SetAngleWithCurrentLimit(1);
             Respond(_responseChannel, "ok hand close");
-        }
-        else if (s.find("STALL_STATUS") != std::string::npos)
-        {
-            uint32_t now = HAL_GetTick();
-            if (now - _stall_status_last_tick < STALL_STATUS_INTERVAL_MS) {
-                Respond(_responseChannel, "warn STALL_STATUS rate-limited, try again in %lu ms",
-                        (unsigned long)(STALL_STATUS_INTERVAL_MS - (now - _stall_status_last_tick)));
-            } else {
-                _stall_status_last_tick = now;
-                dummy.QueryStallStatus();
-                Respond(_responseChannel, "ok STALL_STATUS rail_en=1 j1_en=1 j2_en=1 j3_en=1 j4_en=1 j5_en=1 j6_en=1 \\");
-                Respond(_responseChannel, "                 rail_lock=0 j1_lock=0 j2_lock=0 j3_lock=0 j4_lock=0 j5_lock=0 j6_lock=0");
-            }
-        }
-        else if (s.find("STALL_UNLOCK") != std::string::npos)
-        {
-            dummy.BroadcastUnlock();
-            Respond(_responseChannel, "ok stall unlock sent");
-        }
-        else if (s.find("STALL_EN") != std::string::npos)
-        {
-            // [v3.1] motorJ[0]=ALL代理不参与，i 从 1 遍历到 7（含 J7/地轨）
-            for (int i = 1; i <= 7; i++)
-                dummy.motorJ[i]->SetEnableStallProtect(true);
-            Respond(_responseChannel, "ok stall protect enabled");
-        }
-        else if (s.find("STALL_DIS") != std::string::npos)
-        {
-            // [v3.1] motorJ[0]=ALL代理不参与，i 从 1 遍历到 7（含 J7/地轨）
-            for (int i = 1; i <= 7; i++)
-                dummy.motorJ[i]->SetEnableStallProtect(false);
-            Respond(_responseChannel, "ok stall protect disabled");
         }
         else if (s.find("RGB_BRIGHT") != std::string::npos)
         {
@@ -1423,11 +1339,6 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         if (!dummy.IsEnabled())
         {
             Respond(_responseChannel, "error: robot not enabled, send !START first");
-            return;
-        }
-        if (dummy.IsStalled())
-        {
-            Respond(_responseChannel, "error: motor stalled, send !START or !DISABLE first");
             return;
         }
         uint32_t freeSize = dummy.commandHandler.Push(_cmd);

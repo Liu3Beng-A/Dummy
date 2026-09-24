@@ -453,7 +453,7 @@ void DummyRobot::UpdateJointAnglesCallback()
         currentJoints.a[i - 1] = motorJ[i]->angle + initPose.a[i - 1];
         // [A1 修复] CAN 0x23 回包时同步更新 jointsStateFlag：
         //   FINISH → 置位（bit i = 1 表示该轴到位）
-        //   其余   → 清位（RUNNING/STOP/STALL 都算"未到位"）
+        //   其余   → 清位（RUNNING/STOP 算"未到位"）
         // 配合 [v3.2] ALL 代理，IsMoving() 基于 jointsStateFlag != ALL_FINISH_FLAG 判定，
         //   7 轴全部 FINISH 时 flag = ALL_FINISH_FLAG = 0x7E（bit1-6=1, bit0=0 地轨位恒 0），
         //   IsMoving() 返回 false，阻塞解除。
@@ -517,51 +517,6 @@ void DummyRobot::SyncAllMotorAcceleration()
 /**
  * @brief 复归寻位归零标定启动策略流程
  */
-void DummyRobot::SetStallMode()
-{
-    SetStallMode(-1);  // 不指定电机，全部停住
-}
-
-void DummyRobot::SetStallMode(int motorIndex)
-{
-    // 切换 RGB 为红色心跳，视觉提示堵转
-    SetRGBMode(RGB::RED_HEARTBEAT);
-    // 标记堵转状态，拦截后续运动指令直到用户发送 !START 或 !DISABLE
-    isStalled = true;
-    // 停发新位置指令，保持当前位置（同步 targetAngle 避免误判）
-    targetJoints = currentJoints;
-    for (int j = 1; j <= 6; j++) {
-        motorJ[j]->targetAngle = currentJoints.a[j - 1] - initPose.a[j - 1];
-    }
-    // Bug-11 修复: 同步 targetRailPos 到 currentRailPos，否则主循环 500ms 周期
-    // MoveRail(targetRailPos) 仍按堵转前目标下发，enable 退出 LOCKED 后会覆盖
-    // 电机端 ResetGoalsToCurrentPosition() 设置，导致再次向堵转点推进 → 死循环
-    targetRailPos = currentRailPos;
-    (void)motorIndex;
-}
-
-void DummyRobot::BroadcastUnlock()
-{
-    // 连续 3 次 UNLOCKED 广播，间隔 100ms 防丢包
-    for (int i = 0; i < 3; i++)
-    {
-        motorJ[1]->BroadcastUnlock();
-        osDelay(100);
-    }
-    printf("[UNLOCK] broadcast x3 sent\r\n");
-}
-
-void DummyRobot::QueryStallStatus()
-{
-    // [v3.1] 7 个电机（J1~J7/地轨，motorJ[0]=ALL代理不参与）全部查询 en/lock
-    // CAN IDs: J1~J6 = 1~6, J7/地轨 = 7
-    for (int i = 1; i <= 7; i++)
-    {
-        motorJ[i]->QueryStallStatus(1);  // 查询 stallProtectSwitch
-        motorJ[i]->QueryStallStatus(2);  // 查询 stallMode==LOCKED
-    }
-}
-
 void DummyRobot::Homing()
 {
     float lastSlider = jointSpeedRps / SLIDER_TO_RPS;  // r/s → slider 还原
@@ -645,12 +600,10 @@ void DummyRobot::SetEnable(bool _enable)
 {
     if (_enable)
     {
-        isStalled = false;  // !START 可解除堵转拦截状态
         SetRGBMode(rgbStateEnable);
     }
     else
     {
-        isStalled = false;  // !DISABLE 可解除堵转拦截状态
         SetRGBMode(rgbStateDisable);
 
         for (int i = 0; i < 6; i++)
@@ -826,15 +779,6 @@ uint32_t DummyRobot::CommandHandler::GetSpace()
 uint32_t DummyRobot::CommandHandler::ParseCommand(const char *_cmd)
 {
     uint8_t argNum;
-
-    // [F2 修复] 堵转期间精确丢弃：运动指令（>/&/@）丢，控制指令（!START/!DISABLE/!STOP 等）放行
-    if (context->isStalled) {
-        if (_cmd[0] == '>' || _cmd[0] == '&' || _cmd[0] == '@') {
-            Respond(*usbStreamOutputPtr,  "ok");
-            Respond(*uart4StreamOutputPtr, "ok");
-            return osMessageQueueGetSpace(commandFifo);
-        }
-    }
 
     // [分支拦截] $ 高频投递的力控透传包剥离拦截，规避无意义繁杂判决延宕
     if (_cmd[0] == '$')

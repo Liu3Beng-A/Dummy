@@ -8,7 +8,7 @@
 // =====================================================================
 // [v3.2] ALL 代理索引：motorJ[ALL] 等价于 motorJ[0]（CAN ID=0 的广播占位对象）
 // 用于 1 帧 StdId=(0<<7)|cmd 触发所有电机（J1~J7/地轨）同时响应
-// 电机端 Rx 路由通过 `id == 0 && cmd != 0x5C` 识别为 ALL 广播
+// 电机端 Rx 路由通过 `id == 0` 识别为 ALL 广播
 // =====================================================================
 #define ALL 0
 // =====================================================================
@@ -307,11 +307,6 @@ public:
     void UpdateJointPose6D();
     void Reboot();
     void SetEnable(bool _enable);
-    void SetStallMode();
-    void SetStallMode(int motorIndex);
-    bool IsStalled() const { return isStalled; }
-    void BroadcastUnlock();
-    void QueryStallStatus();
     void Homing();
     void Resting();
     bool IsMoving();
@@ -334,7 +329,6 @@ public:
             make_protocol_object("hand",      hand->MakeProtocolDefinitions()),
             make_protocol_function("reboot",           *this, &DummyRobot::Reboot),
             make_protocol_function("set_enable",       *this, &DummyRobot::SetEnable,       "enable"),
-            make_protocol_function("set_stall_mode",   *this, &DummyRobot::SetStallMode),
             make_protocol_function("set_rgb_mode",     *this, &DummyRobot::SetRGBMode,      "mode"),
             make_protocol_function("set_joint_speed",  *this, &DummyRobot::SetJointSpeed,       "speed"),
             make_protocol_function("set_joint_acc",    *this, &DummyRobot::SetJointAcceleration, "acc"),
@@ -375,7 +369,6 @@ private:
     float jointSpeedRatio = 1;
     DOF6Kinematic* dof6Solver;
     bool     isEnabled    = false;
-    bool     isStalled    = false;
     uint32_t rgbMode      = 0;
 };
 

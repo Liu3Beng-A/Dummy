@@ -57,17 +57,6 @@ static CAN_TxHeaderTypeDef txHeader =
         .TransmitGlobalTime = DISABLE
     };
 
-// ── 堵转事件标志（修复 F4）──
-// ISR 内只设标志，主线程（OledTask）poll 后清 0 + printf
-// 使用 volatile uint8_t 保证 ARM Cortex-M4 单字节读写原子性
-volatile uint8_t _stall_event_flag = 0;   // 0=无事件, 1=有事件
-volatile uint8_t _stall_event_node = 0;   // 堵转节点 ID
-volatile uint8_t _stall_event_cmd = 0;    // 1=TRIGGER, 2=DONE, 3=TIMEOUT
-volatile uint8_t _stall_status_flag = 0;  // 0=无响应, 1=有响应
-volatile uint8_t _stall_status_node = 0;  // 查询响应节点 ID
-volatile uint8_t _stall_status_type = 0;  // 1=en, 2=lock
-volatile uint8_t _stall_status_val = 0;   // 0/1
-
 extern DummyRobot dummy;
 
 // ── PID 合并回包状态 ──
@@ -188,40 +177,6 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     dummy.jointCurrentLimitRuntime[7] = *(float*)data;
                     dummy.jointCurrentLimitLastUpdateMs[7] = HAL_GetTick();
                     break;
-                case 0x5A:
-                    // 电机堵转广播: data[0]=nodeID, data[1]=1=TRIGGER/2=DONE/3=TIMEOUT/4=HEARTBEAT
-                    {
-                        uint8_t stallNodeId = data[0];
-                        uint8_t stallCmd = data[1];
-                        // [F4 修复] ISR 只设标志，主线程 poll 后 printf
-                        if (stallCmd >= 1 && stallCmd <= 3) {
-                            dummy.SetStallMode((int)stallNodeId);
-                            _stall_event_flag = 1;
-                            _stall_event_node = stallNodeId;
-                            _stall_event_cmd = stallCmd;
-                        }
-                        // state==4 (HEARTBEAT): RETREATING 期间心跳，忽略
-                    }
-                    break;
-                case 0x5C:
-                    {
-                        // [F4 修复] ISR 只设标志，主线程 poll 后 printf
-                        uint8_t qtype = data[0];
-                        uint8_t qval = data[1];
-                        if (qtype == 1 || qtype == 2) {
-                            _stall_status_flag = 1;
-                            _stall_status_node = id;
-                            _stall_status_type = qtype;
-                            _stall_status_val = qval;
-                        }
-                    }
-                    break;
-                case 0x7C:
-                    // 旧堵转上报 (兼容旧固件)
-                    // [v3.1] J7/地轨 nodeID 9→7
-                    if (data[1] == 1)
-                        dummy.SetStallMode(7);
-                    break;
                 default:
                     break;
             }
@@ -298,39 +253,6 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     dummy.jointCurrentLimitRuntime[id] = *(float*)data;
                     dummy.jointCurrentLimitLastUpdateMs[id] = HAL_GetTick();
                     break;
-                case 0x5A:
-                    // 电机堵转广播: data[0]=nodeID, data[1]=1=TRIGGER/2=DONE/3=TIMEOUT/4=HEARTBEAT
-                    {
-                        uint8_t stallNodeId = data[0];
-                        uint8_t stallCmd = data[1];
-                        // [F4 修复] ISR 只设标志，主线程 poll 后 printf
-                        if (stallCmd >= 1 && stallCmd <= 3) {
-                            dummy.SetStallMode((int)stallNodeId);
-                            _stall_event_flag = 1;
-                            _stall_event_node = stallNodeId;
-                            _stall_event_cmd = stallCmd;
-                        }
-                        // state==4 (HEARTBEAT): RETREATING 期间心跳，忽略
-                    }
-                    break;
-                case 0x5C:
-                    {
-                        // [F4 修复] ISR 只设标志，主线程 poll 后 printf
-                        uint8_t qtype = data[0];
-                        uint8_t qval = data[1];
-                        if (qtype == 1 || qtype == 2) {
-                            _stall_status_flag = 1;
-                            _stall_status_node = id;
-                            _stall_status_type = qtype;
-                            _stall_status_val = qval;
-                        }
-                    }
-                    break;
-                case 0x7C:
-                    // 旧堵转上报 (兼容旧固件)
-                    if (data[1] == 1)
-                        dummy.SetStallMode((int)id);
-                    break;
                 default:
                     break;
             }
@@ -406,14 +328,6 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     // v3.0: 缓存夹爪电流限制 + 时间戳，移除 ISR 内 printf
                     dummy.jointCurrentLimitRuntime[8] = *(float*)data;
                     dummy.jointCurrentLimitLastUpdateMs[8] = HAL_GetTick();
-                    break;
-                case 0x5A:
-                    // 夹爪固件不支持堵转检测，忽略
-                    break;
-                case 0x7C:
-                    // 旧堵转上报 (兼容旧固件)
-                    if (data[1] == 1)
-                        dummy.SetStallMode(8);
                     break;
                 default:
                     break;

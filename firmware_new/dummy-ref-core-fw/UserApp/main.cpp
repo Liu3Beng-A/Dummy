@@ -1,17 +1,6 @@
 #include "common_inc.h"
 
 /* ======================================================================
- * [F4 修复] 堵转事件 poll 使用的全局变量（定义在 can_protocol.cpp）
- * ====================================================================== */
-extern volatile uint8_t _stall_event_flag;
-extern volatile uint8_t _stall_event_node;
-extern volatile uint8_t _stall_event_cmd;
-extern volatile uint8_t _stall_status_flag;
-extern volatile uint8_t _stall_status_node;
-extern volatile uint8_t _stall_status_type;
-extern volatile uint8_t _stall_status_val;
-
-/* ======================================================================
  * [PID 修复] PID 合并打印 poll（由 OledTask 调用，定义见 can_protocol.cpp）
  * ====================================================================== */
 extern "C" void PollPidPrint();
@@ -241,23 +230,6 @@ void ThreadOledUpdate(void* argument)
         // （调试阶段不需要 [SRV] __*__*_ 样式，恢复方法：见文档 §四.6）
 
         oled.sendBuffer();
-
-        // [F4 修复] 堵转事件 poll（避免 ISR 内 printf 影响 CAN RX ISR）
-        if (_stall_event_flag) {
-            uint8_t node = _stall_event_node;
-            uint8_t cmd = _stall_event_cmd;
-            _stall_event_flag = 0;
-            const char* cmd_str = (cmd == 1) ? "TRIGGER" : (cmd == 2) ? "done" : "timeout";
-            printf("[STALL] node=%d %s\r\n", node, cmd_str);
-        }
-        if (_stall_status_flag) {
-            uint8_t node = _stall_status_node;
-            uint8_t type = _stall_status_type;
-            uint8_t val = _stall_status_val;
-            _stall_status_flag = 0;
-            const char* type_str = (type == 1) ? "en" : "lock";
-            printf("[STALL_STATUS] node=%d %s=%d\r\n", node, type_str, val);
-        }
 
         // [PID 修复] PID 合并打印 poll（避免 ISR 内 printf 影响 CAN RX ISR）
         // 详见 can_protocol.cpp PollPidPrint()

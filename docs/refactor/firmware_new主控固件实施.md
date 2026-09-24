@@ -424,6 +424,88 @@ firmware_new/dummy-ref-core-fw/
 
 ---
 
+## 七、Stall v3 删除记录（2026-09-24 完成）
+
+> **背景**：决策文档 §0.1 #1 + §0.3 已明确**主控端不实现 stall v3 协议**。但早期从 `firmware/ref_core_f405/` 拷贝基线时，引入了 stall v3 主控侧冗余代码（约 310 行）。本次**反向回退**：从 `firmware_new/dummy-ref-core-fw/` 中精确删除 stall v3 主控侧代码，恢复到 `firmware_old` 的 stall-free 状态。
+
+### 7.1 删除范围（7 个文件，共删除 292 行）
+
+| # | 文件 | 删除前 | 删除后 | 行数差 | 主要删除内容 |
+|---|---|---|---|---|---|
+| 1 | `Robot/actuators/ctrl_step/ctrl_step.hpp` | 118 | 114 | -4 | `enum State` 中的 `STALL` + `BroadcastUnlock/QueryStallStatus/SetStallMode` 3 个方法声明 |
+| 2 | `Robot/actuators/ctrl_step/ctrl_step.cpp` | 435 | 413 | -22 | `SetStallMode()` / `BroadcastUnlock()` / `QueryStallStatus()` 3 个方法实现 |
+| 3 | `Robot/instances/dummy_robot.h` | 382 | 375 | -7 | `isStalled` 字段 + `SetStallMode/SetStallMode(int)/IsStalled/BroadcastUnlock/QueryStallStatus` 5 个方法声明 + `set_stall_mode` 协议项 + 顶部 ALL 路由注释（`id == 0 && cmd != 0x5C` → `id == 0`） |
+| 4 | `Robot/instances/dummy_robot.cpp` | 1131 | 1075 | -56 | `SetStallMode/SetStallMode(int)/BroadcastUnlock/QueryStallStatus` 4 个方法实现 + `SetEnable(true/false)` 中两处 `isStalled = false;` + `ParseCommand` 入口 `if (context->isStalled)` 拦截块 + `UpdateJointAnglesCallback` 注释（"RUNNING/STOP/STALL 都算未到位" → "RUNNING/STOP 算未到位"） |
+| 5 | `UserApp/protocols/can_protocol.cpp` | 428 | 342 | -86 | 顶部 7 个 `_stall_*` 全局变量 + `case 0x5A/0x5C/0x7C`（id=7 分支 + id 1~6 分支 + id=8 分支，共 5 个 case） |
+| 6 | `UserApp/protocols/ascii_protocol.cpp` | 1445 | 1356 | -89 | 顶部 `_stall_status_last_tick` + `STALL_STATUS_INTERVAL_MS` 宏 + USB/UART4 两个 `!STALL_STATUS/UNLOCK/EN/DIS` 分支块（每通道 4 个，共 8 个）+ USB/UART4 各 2 处 `!HOME/!RESET` 中的 `IsStalled()` 拦截 + USB/UART4 运动指令入口 2 处 `IsStalled()` 拦截 |
+| 7 | `UserApp/main.cpp` | 394 | 366 | -28 | 顶部 7 个 `extern volatile uint8_t _stall_*;` + `OledTask` 中 stall poll 块（`[STALL]` / `[STALL_STATUS]` 两条 printf 路径） |
+| **合计** | | **4333** | **4041** | **-292** | |
+
+### 7.2 删除原则（严格不破坏其他功能）
+
+**保留项**（不属于 stall v3，绝对不能动）：
+
+| 功能 | 位置 | 原因 |
+|---|---|---|
+| `SetEnableStallProtect(bool _enable)` | `ctrl_step.hpp:66` 声明 + `:101` 协议绑定 | CAN 0x1B 命令，独立"开关堵转保护"，OLD 也有（`firmware_old/.../ctrl_step.hpp:52`），电机端固件独立处理 |
+| `_pid_*` / `PollPidPrint()` | `can_protocol.cpp:78-86` 变量 + `:99` 函数 | PID 查询合并打印功能，与 stall 完全无关，是独立 v3.0 增强 |
+| `jointsStateFlag / ALL_FINISH_FLAG / IsMoving()` | `dummy_robot.cpp/h` | 运动完成判断核心，用户 P0 保留 |
+| `BroadcastEStop() / 0x09` 急停 | `ctrl_step.cpp:402` 函数 + `:410` StdId 计算 | 决策 §0.1 #2 保留，用户 P0 急停需求 |
+| 0x28~0x2D PID/Acc/Cur 查询 | `can_protocol.cpp` 三段 case | 决策 §0.3 D4 待决策但属于独立功能 |
+
+**保留项验收**：
+
+| # | 保留项 | 期望命中 | 实际命中 |
+|---|---|---|---|
+| 1 | `SetEnableStallProtect` | ≥1 | 2（声明 + 协议绑定）✅ |
+| 2 | `PollPidPrint` | ≥1 | 1（`can_protocol.cpp:99`）✅ |
+| 3 | `_pid_*` | ≥3 | 多处（8 个变量 + 多次引用）✅ |
+| 4 | `BroadcastEStop / 0x09` | ≥1 | 5（函数定义 + 注释 + StdId 计算）✅ |
+
+### 7.3 编译验证
+
+```bash
+cd E:\Dummy-code\firmware_new\dummy-ref-core-fw\build; ninja
+```
+
+**结果**：✅ **构建成功**，201/201 ninja targets，仅有预存在的 `LOAD segment with RWX permissions` 警告（与 stall 删除无关）。
+
+```text
+[197/201] Building CXX object CMakeFiles/Core-STM32F4-fw.elf.dir/UserApp/protocols/can_protocol.cpp.obj
+[198/201] Building CXX object CMakeFiles/Core-STM32F4-fw.elf.dir/Robot/instances/dummy_robot.cpp.obj
+[199/201] Building CXX object CMakeFiles/Core-STM32F4-fw.elf.dir/UserApp/protocols/ascii_protocol.cpp.obj
+[200/201] Building CXX object CMakeFiles/Core-STM32F4-fw.elf.dir/UserApp/protocols/cmd_protocol.cpp.obj
+[201/201] Linking CXX executable Core-STM32F4-fw.elf; ... .hex / .bin
+Memory region         Used Size  Region Size  %age Used
+             RAM:       53344 B       128 KB     40.70%
+          CCMRAM:         64 KB        64 KB    100.00%
+           FLASH:      384196 B         1 MB     36.64%
+```
+
+### 7.4 删除彻底性验证（9 项 grep 检查）
+
+| # | 检查项 | 期望 | 实际 |
+|---|---|---|---|
+| 1 | `STALL` 在 `ctrl_step.hpp` | 仅 `SetEnableStallProtect` 命中（2 处） | 2 处 ✅ |
+| 2 | `isStalled` 任何位置 | 0 命中 | 0 ✅ |
+| 3 | `_stall_event` / `_stall_status` 全局变量 | 0 命中 | 0 ✅ |
+| 4 | `0x5A/0x5B/0x5C/0x7C` 在主控代码（排除第三方 Drivers/Middlewares/Bsp/utils/arm_math 等） | 0 命中 | 0 ✅ |
+| 5 | `STALL_STATUS/UNLOCK/EN/DIS` 在 ASCII 协议 | 0 命中 | 0 ✅ |
+| 6 | `SetStallMode/BroadcastUnlock/QueryStallStatus` 方法 | 0 命中 | 0 ✅ |
+| 7 | `SetEnableStallProtect` 必须保留 | ≥1 | 2 ✅ |
+| 8 | `PollPidPrint / _pid_` 必须保留 | ≥3 | 100+ ✅ |
+| 9 | `BroadcastEStop / 0x09` 必须保留 | ≥1 | 5 ✅ |
+
+**结论**：✅ Stall v3 主控侧代码已**精确删除**，`firmware_new/dummy-ref-core-fw/` 当前状态与 `firmware_old/dummy-ref-core-fw/` 的 stall-free 基线一致。
+
+### 7.5 后续待办（与 stall v3 相关）
+
+- [ ] 电机固件 stall v3 实现：**不引入**（决策 §0.1 #5 "通路保留但电机端 stall v3 不实现"）
+- [ ] 0x1B `SetEnableStallProtect` 通路：保留（电机端可独立处理该命令，由电机固件决定是否启用堵转保护）
+- [ ] 0x5A/0x5B/0x5C/0x7C 主控侧处理：已**完全删除**（电机端若仍发这些命令，主控将无响应——符合决策预期）
+
+---
+
 ## 六、参考文档
 
 | 文档 | 内容 |

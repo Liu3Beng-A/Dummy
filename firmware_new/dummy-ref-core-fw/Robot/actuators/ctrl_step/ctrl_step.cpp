@@ -311,12 +311,6 @@ void CtrlStepMotor::UpdateAngleCallback(float _pos, bool _isFinished)
 }
 
 
-void CtrlStepMotor::SetStallMode()
-{
-    state = STALL;
-}
-
-
 void CtrlStepMotor::SetDceKp(int32_t _val)
 {
     uint8_t mode = 0x17;
@@ -405,14 +399,6 @@ void CtrlStepMotor::QueryDceKd()
     CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
 }
 
-void CtrlStepMotor::BroadcastUnlock()
-{
-    // 广播 UNLOCKED: StdId = (0 << 7) | 0x5B = 0x5B (落入电机端广播区间 0x50~0x7F)
-    txHeader.StdId = 0x5B;
-    uint8_t buf[8] = {0};
-    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
-}
-
 void CtrlStepMotor::BroadcastEStop()
 {
     // [v3.2] 广播 Emergency Stop: StdId = (nodeID << 7) | 0x09
@@ -423,13 +409,5 @@ void CtrlStepMotor::BroadcastEStop()
     //   旧版用硬编码 0x89 会被电机端广播区间 0x80~0xBF 路由抢走，与 ALL 代理不兼容
     txHeader.StdId = (nodeID << 7) | 0x09;
     uint8_t buf[8] = {0};
-    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
-}
-
-void CtrlStepMotor::QueryStallStatus(uint8_t queryType)
-{
-    // 单播查询 stall 状态: StdId = (nodeID << 7) | 0x5C (落入电机端广播区间 0x50~0x7F)
-    txHeader.StdId = (nodeID << 7) | 0x5C;
-    uint8_t buf[8] = { queryType, 0, 0, 0, 0, 0, 0, 0 };
     CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
 }
