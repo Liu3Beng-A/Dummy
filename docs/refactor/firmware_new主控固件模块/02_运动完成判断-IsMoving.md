@@ -47,6 +47,8 @@
 | 4 | **保留 EmergencyStop 中 `jointsStateFlag = ALL_FINISH_FLAG`** | 物理抱闸 + 短路 IsMoving，避免 !STOP 后 SEQUENTIAL 队列卡死 | OLD 是依赖回包自然更新，更慢；当前更快更安全，保留 |
 | 5 | **`UpdateJointAnglesCallback` 保持 `for (i=1; i<=6)`** | OLED 与 IsMoving 都只看 6 关节（地轨独立下发） | 无 |
 
+> **范围说明**：Homing/Resting 30s 兜底超时回退已并入模块 01 §6.3（当前重构范围）。模块 02 实施章节仅覆盖 `IsMoving()` 公式本身，不重复展开。
+
 ---
 
 ## 实施
@@ -85,6 +87,8 @@ bool DummyRobot::IsMoving()
 
 ---
 
+> **本节范围说明**：模块 02 仅覆盖 `IsMoving()` 公式本身。`Homing()` / `Resting()` 函数中的 30s 兜底超时回退，**已在模块 01 §6.3 中完整记录**（属于当前重构范围的一部分）。
+
 ## 验证
 
 | 测试 | 期望 | 命令 |
@@ -95,6 +99,8 @@ bool DummyRobot::IsMoving()
 | 急停后 IsMoving 立即 false | flag = 0x7E 强制短路 | `!STOP` 后看 IsMoving() |
 | 阻塞循环自然退出 | 6 个 `*` 后退出 while | 发 `>` 后 OLED 观察 |
 
+> Homing/Resting 删 30s 兜底超时后的行为验证见 [模块 01 §6.3](firmware_new主控固件模块01_运动指令-MoveJ&MoveL.md)。
+
 ---
 
 ## 状态
@@ -103,6 +109,8 @@ bool DummyRobot::IsMoving()
 - [ ] F5 代码已修改（dummy_robot.cpp:666-671）
 - [ ] 编译验证（ninja）
 - [ ] 实测验证（OLED + 串口）
+
+> Homing/Resting 兜底超时删除的代码改动登记在模块 01 §6.3 状态栏。
 
 ---
 

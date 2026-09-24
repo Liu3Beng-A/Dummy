@@ -4,6 +4,16 @@
 > **基线对齐**：`firmware_new主控固件决策.md` + `firmware_new主控固件实施.md`。
 > **创建日期**：2026-09-24
 > **状态**：⏳ 待执行（仅文档化，未实施）
+> **归口说明（2026-09-24 更新）**：
+>
+> | 修复项 | 决策归口 | 实施代码参考 |
+> |---|---|---|
+> | F1.1 / F1.2 / F1.3（运动指令） | [模块 01 §3-§5](firmware_new主控固件模块01_运动指令-MoveJ&MoveL.md) | 本文档 §2 F1.1-1.3（保留为快速参考） |
+> | F1.5 三项清理（默认 INT / SetEnable 防呆 / Homing 兜底） | [模块 01 §6](firmware_new主控固件模块01_运动指令-MoveJ&MoveL.md) | 本文档 §2 F1 + 模块 01 §6（已合并） |
+> | F5（`IsMoving()` 公式） | [模块 02 §决策 1](firmware_new主控固件模块02_运动完成判断-IsMoving.md) | 本文档 §2 F5（保留为快速参考） |
+> | F3（OLED 第 6 行 `[CMD] __*_*__`） | 本文档 §2 F3（**唯一实施位置**）+ [决策 §4.3 第 4 项](firmware_new主控固件决策.md) | 本文档 §2 F3 |
+>
+> **本文档保留所有 F1/F5/F3 实施代码块作为"快速参考"**，但完整决策（理由 + 配套 + 禁止事项）请查阅对应模块文档。
 >
 > ---
 >
@@ -358,14 +368,17 @@
 >     oled.setCursor(0, 45);  oled.printf("[XYZ]:");
 >     oled.setCursor(0, 56);  oled.printf("[ABC]:");
 >
->     /* [F3 修复] 第 6 行 (Y=78): [CMD] __*_*__ 状态横幅 (恢复 OLD 语义)
+>     /* [F3 修复] 第 6 行 (Y=78): [CMD] __*_*__ 状态横幅
+>      * 完全照抄 OLD 写法（firmware_old/dummy-ref-core-fw/UserApp/main.cpp:104-114）
+>      * - 字号: u8g2_font_10x20_tr（OLD 原版，10×20 px）
+>      * - 起点: Y=78（OLD 原版，屏是 128×80）
 >      * - 使能时: 显示 [SEQ] __*_*__ ，6 字符对应 J1~J6
 >      *           bit i = 1 → '*' (FINISH 到位)
 >      *           bit i = 0 → '_' (RUNNING/STOP)
 >      * - 失能时: 显示 [SEQ] ======
->      * 字号用 5x8_tr 与第 1 行同，Y=78 + ~8px ≈ 86px ≤ OLED 80-128 高
+>      * 屏幕尺寸确认：128×80 屏，Y=78+20=98 ≤128 屏高，无出界风险
 >      */
->     oled.setFont(u8g2_font_5x8_tr);
+>     oled.setFont(u8g2_font_10x20_tr);
 >     oled.setCursor(0, 78);
 >     if (dummy.IsEnabled()) {
 >         char buf[8];
@@ -389,7 +402,8 @@
 > ```
 >
 > **注意**：
-> - `cmdModeNames` 声明保持当前 `char cmdModeNames[6][4] = {"SEQ", "INT", "TRJ", "TUN", "TRQ", "SRV"};`（决策 C3 不改）
+> - `cmdModeNames` 声明保持当前 `char cmdModeNames[6][4] = {"SEQ", "INT", "TRJ", "TUN", "TRQ", "SRV"};`（决策 C3 不改，6 元素覆盖 OLD 的 4 元素写法）
+> - OLD 原本是 `char cmdModeNames[4][4] = {"SEQ", "INT", "TRJ", "TUN"};`，firmware_new 保留 6 模式（TRQ/SRV 也要正确显示）
 > - `buf` 声明如果在循环外，可保持现有 `char buf[16];`；如果改为内联声明，建议保持内联避免冲突
 >
 > ---
@@ -449,7 +463,7 @@
 > | ParseCommand 阻塞会延迟 ASCII 队列消费 | 低 | OLD 行为本来就是阻塞的；FIFO 队列 32×128，容量充足；用户 P0 明确要求阻塞 |
 > | `while(IsMoving) osDelay(5)` 阻塞期间有新指令入队 | 极低 | FIFO 是独立队列，新指令入队后等当前指令处理完才被消费；OLD 也是同样的行为 |
 > | OLED 第 6 行与现有 drawBox 在 Y=78 重叠 | 中 | 现有 drawBox(40, 35, 128, 24) 矩形只到 Y=59，与 Y=78 不重叠 |
-> | OLED Y=78 用 5x8 字号超过屏高 (128x64?) | 中 | OLD 用 10x20 字号在 Y=78，依赖屏幕实际尺寸 ≥128x80；用 5x8 字号更保守（Y=78+8=86 ≤128） |
+> | OLED Y=78 用 10x20 字号超屏 | 低 | 屏幕实测 128×80（Y=78+20=98 ≤128），OLD 时代一直用这个字号，安全无出界 |
 > | 删除 `!isEnabled` 短路导致 !DISABLE 后队列卡死 | 极低 | ParseCommand 用 `while(IsMoving && IsEnabled)`，IsEnabled=false 直接跳出循环，不会卡死 |
 > | heart-beat 探针删除后丢失调试信息 | 中 | 调试时可改回 printf 到 UART4；本任务优先恢复 P0 OLED 状态显示 |
 >
