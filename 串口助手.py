@@ -211,33 +211,6 @@ class RobotSerialAssistant:
                       relief=tk.FLAT, pady=4, command=lambda v=val: self.send_cmd(f"#CMDMODE {v}")
                       ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1)
 
-        # --- 堵转保护 toggle 按钮（2026-08-23 决策 F.6） ---
-        # 默认开启；重启后自动恢复开启；不写 EEPROM
-        ttk.Separator(sys_f, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
-        stall_row = ttk.Frame(sys_f)
-        stall_row.pack(fill=tk.X)
-        self.stall_protect_var = tk.BooleanVar(value=True)
-        self.stall_protect_btn = tk.Checkbutton(
-            stall_row,
-            text="堵转检测保护（地轨+J1~J6）",
-            variable=self.stall_protect_var,
-            indicatoron=False,  # toggle 样式（按下/弹起）
-            selectcolor="#2b8a3e",  # 按下（开）背景色
-            font=("Arial", 10, "bold"),
-            relief=tk.RAISED,
-            pady=4,
-            command=self._cmd_stall_protect,
-            width=30,
-        )
-        self.stall_protect_btn.pack(fill=tk.X, pady=2)
-        ttk.Label(stall_row, text="提示：重启后自动恢复开启", font=("Arial", 8),
-                  foreground="#868e96").pack(anchor="w", padx=4)
-        # 重构阶段4 (2026-08-23): 加查询按钮
-        # ttk.Button 不支持 font 参数，改用 tk.Button（与其他系统按钮风格一致）
-        tk.Button(stall_row, text="查询堵转状态", font=("Arial", 9), bg="#495057", fg="white",
-                  relief=tk.FLAT, pady=4,
-                  command=self._cmd_stall_status).pack(fill=tk.X, pady=2)
-
         # --- 查询与校准 ---
         query_f = ttk.LabelFrame(left_col, text="查询与置零", padding=6)
         query_f.pack(fill=tk.X, pady=(0, 6))
@@ -1380,10 +1353,6 @@ class RobotSerialAssistant:
                                 elif line.startswith("ok PID "):
                                     self.root.after(0, self.log, line, "RX")
                                     self._update_pid_from_response(line)
-                                # 重构阶段4 (2026-08-23): 拦截 STALL_STATUS 响应
-                                elif line.startswith("ok STALL_STATUS"):
-                                    self.root.after(0, self.log, line, "RX")
-                                    self._update_stall_status_from_response(line)
                                 else:
                                     self.root.after(0, self.log, line, "RX")
                                 # 拦截 #GETJPOS 响应并同步滑块
@@ -1439,57 +1408,6 @@ class RobotSerialAssistant:
         self._motor_enabled = False
         self._update_motor_state(False)
         self.send_cmd("!DISABLE")
-
-    def _cmd_stall_protect(self):
-        """堵转保护 toggle 按钮回调（2026-08-23 决策 F.6）
-        - 默认开启（True）
-        - 点击切换状态并发送 !STALL_EN 或 !STALL_DIS
-        - 不写 EEPROM，重启后主控自动恢复开启
-        """
-        if self.stall_protect_var.get():
-            self.send_cmd("!STALL_EN")
-            self.log("→ !STALL_EN (开启堵转保护)")
-        else:
-            self.send_cmd("!STALL_DIS")
-            self.log("→ !STALL_DIS (临时关闭堵转保护，重启后自动恢复)")
-
-    def _cmd_stall_status(self):
-        """查询所有电机堵转状态（重构阶段4, 2026-08-23）
-        触发响应：ok STALL_STATUS rail_en=... j1_en=... ... rail_lock=...
-        """
-        self.send_cmd("!STALL_STATUS")
-
-    def _update_stall_status_from_response(self, line):
-        """解析 ok STALL_STATUS 响应，同步 UI
-        格式: ok STALL_STATUS rail_en=1 j1_en=1 ... j6_en=1 rail_lock=0 j1_lock=0 ... j6_lock=0
-        """
-        try:
-            # 解析 enabled 状态（任一电机 enabled = 1 则按钮为按下状态）
-            any_enabled = False
-            for key in ('rail_en=', 'j1_en=', 'j2_en=', 'j3_en=', 'j4_en=', 'j5_en=', 'j6_en='):
-                idx = line.find(key)
-                if idx >= 0 and line[idx + len(key):idx + len(key) + 1] == '1':
-                    any_enabled = True
-                    break
-            if any_enabled:
-                self.stall_protect_var.set(True)
-            else:
-                self.stall_protect_var.set(False)
-
-            # 检查 LOCKED 状态，更新按钮颜色提示
-            any_locked = False
-            for key in ('rail_lock=', 'j1_lock=', 'j2_lock=', 'j3_lock=', 'j4_lock=', 'j5_lock=', 'j6_lock='):
-                idx = line.find(key)
-                if idx >= 0 and line[idx + len(key):idx + len(key) + 1] == '1':
-                    any_locked = True
-                    break
-            if any_locked:
-                # LOCKED 状态：按钮变红色
-                self.stall_protect_btn.configure(selectcolor="#c92a2a", text="堵转已锁定 (LOCKED)")
-            else:
-                self.stall_protect_btn.configure(selectcolor="#2b8a3e", text="堵转检测保护（地轨+J1~J6）")
-        except Exception:
-            pass
 
     def _query_acc_or_i(self, response_line):
         # auto-polling 已移除 (2026-09-01)
