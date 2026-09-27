@@ -68,9 +68,6 @@ void ThreadControlLoopFixUpdate(void* argument)
                             dummy.targetRailPos / 5.0f, dummy.railSpeedRps);
                     }
                     // [方案C] 单播轮询, 100 Hz / 7 轴 ≈ 14 Hz/电机
-                    if (updateCounter % 50 == 25) {
-                        dummy.UpdateJointAngles();
-                    }
                     // 基于刚体计算正逆解析法进行空间 TCP 位置计算追踪
                     dummy.UpdateJointPose6D();
                     break;
@@ -82,9 +79,6 @@ void ThreadControlLoopFixUpdate(void* argument)
                     // [v3.1] J7/地轨：直接下发（railSpeedRps 默认 30 r/s）
                     dummy.motorJ[7]->SetPositionWithMotorRps(
                         dummy.targetRailPos / 5.0f, dummy.railSpeedRps);
-                    if (updateCounter % 50 == 25) {
-                        dummy.UpdateJointAngles();
-                    }
                     dummy.UpdateJointPose6D();
                     break;
 
@@ -92,9 +86,6 @@ void ThreadControlLoopFixUpdate(void* argument)
                 case DummyRobot::COMMAND_MOTOR_TUNING:
                     if (updateCounter % 50 == 0) {
                         dummy.tuningHelper.Tick(10);
-                    }
-                    if (updateCounter % 50 == 25) {
-                        dummy.UpdateJointAngles();
                     }
                     dummy.UpdateJointPose6D();
                     break;
@@ -108,9 +99,6 @@ void ThreadControlLoopFixUpdate(void* argument)
                         // [v3.1] J7/地轨电流
                         dummy.motorJ[7]->SetCurrentSetPoint(dummy.targetRailCurrent);
                     }
-                    if (updateCounter % 50 == 25) {
-                        dummy.UpdateJointAngles();
-                    }
                     dummy.UpdateJointPose6D();
                     break;
             }
@@ -118,9 +106,7 @@ void ThreadControlLoopFixUpdate(void* argument)
         else
         {
             // 防呆或休眠情况中持续刷新观测位表，确切知晓关节在外力拖拽下的漂移姿态
-            if (updateCounter % 50 == 0) {
-                dummy.UpdateJointAngles();
-            }
+            dummy.UpdateJointAngles();
             dummy.UpdateJointPose6D();
         }
         updateCounter++;

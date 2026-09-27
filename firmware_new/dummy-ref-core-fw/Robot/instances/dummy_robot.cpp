@@ -429,18 +429,15 @@ bool DummyRobot::ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, f
 }
 
 /**
- * @brief 利用抽屉分时循环结构避让单点查询打满 CAN 信道容量引发断线隐患
- * @note [v3.2] 方案C修复：改回单播轮询，每帧只查一个电机（J1~J7循环），避免7节点同时回包导致总线冲突
- *       轮询查询每个电机，100Hz采样频率下每轴约14Hz查询速率，足够刷新状态
+ * @brief 触发全部电机回包 0x23，更新 joint 角度与 jointsStateFlag
+ * @note [D-1] 退回 OLD 广播策略：1 帧 motorJ[ALL] 广播（StdId=0x23）触发 J1~J7 同时回包
+ *       实测 OLD 广播无丢包；每秒 5k 帧实时环均会触发，电机端按 id 仲裁无冲突
  */
 void DummyRobot::UpdateJointAngles()
 {
-    static int currentIndex = 1;  // 轮询索引，1~7（J1~J7）
-    
-    // 轮询查询每个电机
-    motorJ[currentIndex]->UpdateAngle();
-    currentIndex++;
-    if (currentIndex > 7) currentIndex = 1;  // J1~J7循环
+    // [D-1] 退回 OLD 广播策略：1 帧 ALL 触发所有电机同时回包
+    //   节点 7 电机端 id==0 路由识别 (0<<7)|0x23 = 0x23
+    motorJ[ALL]->UpdateAngle();
 }
 
 /**
@@ -611,10 +608,7 @@ void DummyRobot::SetEnable(bool _enable)
     hand->SetEnable(_enable);         // StdId=(8<<7)|0x01
     isEnabled = _enable;
 
-    // [F1 配套] enable 后预发 UpdateAngle，避免 jointsStateFlag 在电机回包前错填
-    if (_enable) {
-        motorJ[ALL]->UpdateAngle();  // 1 帧触发 7 电机回包，等首次 0x23 自动纠正 state
-    }
+    // [D-2] 删除 enable 后预发广播（OLD 时代无此机制，无功能缺失）
 }
 
 /**
@@ -646,18 +640,18 @@ void DummyRobot::UpdateJointPose6D()
 
 /**
  * @brief 利用 jointsStateFlag 判定所有关节是否已完成收敛
- * @note [v3.2] 失能短路：!DISABLE 后 isEnabled=false，IsMoving() 必须返回 false，
- *       否则后续 SEQUENTIAL 队列会被堵死。
+ * @note [F5] OLD 严格公式：不做短路，依赖 jointsStateFlag 实际值
  *       bit=1 表示该轴已 FINISH 到位（电机端 CAN 0x23 回包 isFinished=1），
  *       bit=0 表示该轴仍在运动/STOP/STALL。
  *       地轨位 bit0 恒为 0（UpdateJointAnglesCallback 只处理 i=1~6）。
- *       7 轴全部到位时：flag = ALL_FINISH_FLAG = 0x7E（bit1-6=1，bit0=0）。
+ *       6 关节全部到位时：flag = 0b01111110（bit1-6=1，bit0=0）。
+ *       注意：!DISABLE 后 isEnabled=false 不短路（与 v3.2 不同），
+ *             依赖 EmergencyStop 中强制 flag = ALL_FINISH_FLAG 兜底。
  */
 bool DummyRobot::IsMoving()
 {
-    // [v3.2] 失能短路：!DISABLE 后 isEnabled=false，IsMoving() 必须返回 false
-    if (!isEnabled) return false;
-    return jointsStateFlag != ALL_FINISH_FLAG;  // 0x7E = bit1~6 全置位
+    // [F5] 严格 OLD 公式（P0 决策 D1）：不做短路，字面量与原代码 1:1
+    return jointsStateFlag != 0b1111110;
 }
 
 /**
