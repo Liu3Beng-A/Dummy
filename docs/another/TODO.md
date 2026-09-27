@@ -282,3 +282,79 @@ case 0x5C:
 - `firmware/ref_core_f405/UserApp/protocols/can_protocol.cpp`
 
 ---
+
+### [BUG-SRV-MODE] SERVO_J (`#CMDMODE 6`) 入口暂不开放 + `ServoJ` 地轨速度规划待调整 🔴
+
+**状态**：待修复（2026-09-27，发现于模块 05 审计；调整方案后续讨论）
+
+**现象 A — `#CMDMODE 6` 静默拒绝**：
+- 用户发 `#CMDMODE 6` 后，主控回 `ok Set command mode to [6]`
+- 但 `commandMode` 字段实际未变（仍是 5 或之前值）
+- 上位机按"回 ok = 切档成功"误判，后续发 `>` 按真实 mode 执行，与预期不符
+
+**现象 B — `ServoJ` 函数未为地轨算 reqSpeed**：
+- `firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:391-426` 的 `ServoJ(j1, j2, j3, j4, j5, j6, j7_mm)` 函数
+- 当前实现**只对 `j=1..6` 计算 `reqSpeed = deltaAngle / dt * 1.5f`**，对 6 个臂关节做速度规划
+- **地轨（`j=7`）没有 reqSpeed 计算**，仅 `targetRailPos = _j7_mm` 存储目标位置
+- 5kHz 实时环 SRV case（`firmware_new/dummy-ref-core-fw/UserApp/main.cpp:202-207`）下发地轨时直接使用 `railSpeedRps`（默认值 30 r/s，或最近一次 MoveJ 残值）
+
+**两条遗留紧密耦合**：
+- 只修范围 bug（A 不修 B）：SRV 跑出"地轨速度固定值/残值"的不一致行为（用户期望是逐拍动态调整）
+- 只修 `ServoJ` 地轨逻辑（B 不修 A）：用不到，因为根本切不进 SRV
+- 必须**两处配套修复**
+
+**根因 1：范围检查守门**
+
+`firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:670-671`：
+```cpp
+if (_mode < COMMAND_TARGET_POINT_SEQUENTIAL ||
+    _mode > COMMAND_TORQUE_CONTROL)
+    return;
+```
+- `COMMAND_TORQUE_CONTROL = 5`，故拒绝 6（SRV）
+- 范围检查目的是"防止无效输入"，但 SRV 是有效模式，被误拒
+
+**根因 2：地轨后 SRV 逻辑未适配**
+
+v3.1 加入地轨（`motorJ[7]`）时，仅 SEQ/INT/TRJ/MoveJ 的 7 轴规划做了适配。`ServoJ` 函数仍按 6 关节实现，**地轨速度规划被搁置**。SRV 因优先级低（无日常调试需求）一直未轮到工作。
+
+**修复方向**（待用户拍板，不在本任务实施）：
+1. **范围检查**：改为 `_mode < 1 || _mode > COMMAND_SERVO_J`（即 `_mode > 6`），或拆分为守护 + 显式拒
+2. **`ServoJ` 函数追加地轨速度规划**：
+   - 计算 `deltaRail_mm = fabsf(_j7_mm - currentRailPos)`
+   - 计算 `reqRailSpeed_mms = deltaRail_mm / dt * 1.5f`（mm/s）
+   - 换算到电机轴 r/s：`railSpeedRps = reqRailSpeed_mms / 5.0f`（地轨 reduction=1，1 圈=5mm）
+   - 钳制到 `AXIS_MAX_RPS[7] = 30`
+   - 与 6 关节 reqSpeed 一致的钳制（< 0.05 取 0.05，> 200 取 200）
+3. **`SetCommandMode(SRV)` case 体**：当前已调 `SetJointAcceleration(150)`，保留；还需检查 `jointSpeedRatio` 是否需要单独设置（5kHz 实时环不读 ratio）
+4. **5kHz 实时环 SRV case**：当前 `MoveJoints(targetJoints)` + `motorJ[7]->SetPositionWithMotorRps(targetRailPos/5, railSpeedRps)` 框架不变；`railSpeedRps` 由新 `ServoJ` 填入
+
+**风险评估**：
+- 配套修复后用户可走 `#CMDMODE 6 → >` 进入 SRV 模式
+- SRV 模式 5kHz 全速下发（与文档一致），上位机按惯例发 50~200Hz
+- 需要测试：
+  - 恒速地轨 SRV 模式下电机响应是否符合预期（`railSpeedRps` 与实际相符）
+  - 用户从 SEQ 切到 SRV 再切回 SEQ 时 `jointSpeedRatio`/`加速度档位`是否需要重新下发（看 `SetCommandMode(SEQ)` case）
+  - SRV 模式下若上位机只发臂关节不发地轨，地轨是否保持当前位置（`motorJ[7]->SetPositionWithMotorRps(currentRailPos/5, 30)` 兜底？）
+
+**禁止事项**：
+- ❌ 不要单独放开 `#CMDMODE 6` 入口而不修 `ServoJ` 地轨逻辑
+- ❌ 不要单独修 `ServoJ` 地轨逻辑而不开入口
+- ❌ 不要同时改两处而不设计配套测试
+- ❌ 不要让 `SetCommandMode(SRV)` 时漏掉必要的状态重置（如 `jointSpeedRatio`、`lastServoTime`）
+
+**未决问题**（与用户讨论）：
+- 是否长期不开放 SRV 给用户？（当前 seq/INT/TRJ/TUN/TRQ 5 模式已覆盖多数场景）
+- 若开放，`#CMDMODE 6` 是否配套给回错误警告（"暂不支持"）而非静默 ok？
+- `ServoJ` 函数是否应保留为 6 关节版本（旧行为），新增 `ServoJ7()` 7 轴版本？
+
+**相关代码**：
+- `firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:668-708` `SetCommandMode` 函数
+- `firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:670-671` 范围检查
+- `firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:391-426` `ServoJ` 函数
+- `firmware_new/dummy-ref-core-fw/UserApp/main.cpp:202-207` 5kHz 实时环 SRV case
+- `firmware_new/dummy-ref-core-fw/UserApp/protocols/can_protocol.cpp` CAN 0x23 回包路径
+- `firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.h:223-226` ServoJ 字段说明（dynamicJointSpeeds 保留字段）
+- `docs/refactor/firmware_new主控固件模块/05_命令模式-CommandMode.md` 本条目引用源
+
+---
