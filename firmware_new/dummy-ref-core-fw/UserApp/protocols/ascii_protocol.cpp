@@ -1013,7 +1013,8 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             uint32_t mode;
             sscanf(_cmd, "#CMDMODE %lu", &mode);
             dummy.SetCommandMode(mode);
-            Respond(_responseChannel, "Set command mode to [%lu]", mode);
+            // [2026-09-27 修订] 双协议回包统一：补 "ok " 前缀，与 OnUsb 路径一致
+            Respond(_responseChannel, "ok Set command mode to [%lu]", mode);
         }
         else if (s.find("ACC_BASE_J") != std::string::npos)
         {

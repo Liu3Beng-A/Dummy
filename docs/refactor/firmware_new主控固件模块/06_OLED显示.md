@@ -20,7 +20,7 @@ OLED 显示 4 行关键信息（旧版）+ 1 行 IMU/FPS：
 | 第 5 行 | 35-59 | 黑底矩形 + 文字标签 | — |
 | 第 6 行 | 78 | `[CMD] __*_*__` 状态横幅 | `cmdModeNames[mode-1]` + `jointsStateFlag` |
 
-**当前 firmware_new 状态**（重要）：删除 DIAG 心跳探针（F3 待实施）+ 恢复状态横幅。
+**当前 firmware_new 状态**（重要）：F3 已实施（2026-09-27）—— DIAG 心跳探针已删除，OLD 状态横幅已恢复，`cmdModeNames` 派上用场。
 
 ---
 
@@ -29,8 +29,8 @@ OLED 显示 4 行关键信息（旧版）+ 1 行 IMU/FPS：
 | 维度 | OLD | firmware | 当前 firmware_new |
 |---|---|---|---|
 | 第 3 行（角度） | `>j1\|j2\|j3\|j4\|j5\|j6` 整数° | 7 轴 + 4 位小数（破坏布局） | **6 轴整数°**（保留 OLD 布局） |
-| 第 4 行（CMD 模式） | `[SEQ] __*_*__` 6 字符 | `[SEQ] __*_*__` 扩 8 字符含地轨 | **心跳探针取代**（F3 待恢复） |
-| 心跳探针（DIAG-2026-09-16） | 无 | 有（FLAG/RT/OL/RGB/B/L/I/O 4 行调试面板） | **存在**（F3 待删除） |
+| 第 6 行（CMD 模式） | `[SEQ] __*_*__` 6 字符 | `[SEQ] __*_*__` 扩 8 字符含地轨 | **`[CMD] __*_*__`（F3 已恢复，6 字符不含地轨）** |
+| 心跳探针（DIAG-2026-09-16） | 无 | 有（FLAG/RT/OL/RGB/B/L/I/O 4 行调试面板） | **不存在（F3 已删除）** |
 | XYZ/ABC 世界坐标 | OLD 第 4-5 行 | 同 OLD | 保留 |
 | IMU 行（OLD 无） | 无 | 第 1 行 IMU+FPS | 保留 |
 
@@ -54,42 +54,14 @@ OLED 显示 4 行关键信息（旧版）+ 1 行 IMU/FPS：
 
 **位置**：`UserApp/main.cpp:103-180`（当前 ThreadOledUpdate 函数体）
 
-**当前代码**（DIAG 心跳探针，约 line 130-150）：
-```cpp
-oled.setFont(u8g2_font_5x8_tr);
-oled.setCursor(0, 62);
-oled.printf("FLAG:0x%02X/%02X", dummy.jointsStateFlag, 0x7E);
-oled.setCursor(0, 70);
-oled.printf("RT:%lu OL:%lu RGB:%lu", g_realtime_tick, g_oled_tick, g_rgb_tick);
-oled.setCursor(0, 78);
-oled.printf("B:%lu L:%lu I:%lu O:%lu", g_byte_in, g_line_ready, g_cmd_in, g_cmd_out);
-// 旧的 cmdMode/joints 横幅已由心跳探针取代
-```
+F3 实施要点（main.cpp `ThreadOledUpdate` 中"Y=78"段，2026-09-27 已落地）：
+- 删除原 4 行 DIAG 心跳面板（FLAG / RT/OL/RGB / B/L/I/O）
+- 替换为 `[CMD] __*_*__` 状态横幅，使用 `cmdModeNames[dummy.commandMode - 1]` + `dummy.jointsStateFlag` 各位
+- 使能时 bit i=1 → `'*'` (FINISH 到位)，bit i=0 → `'_'` (RUNNING/STOP)
+- 失能时显示 "======"
+- `cmdModeNames[6][4]` 从 dead code 转为实际引用
 
-**替换为**（OLD 状态横幅）：
-```cpp
-/* [F3] 第 6 行 (Y=78): [CMD] __*_*__ 状态横幅
- * - 使能时: [CMD] __*_*__ ，6 字符对应 J1~J6
- * - 失能时: [CMD] ======
- * - bit i = 1 → '*' (FINISH 到位)
- * - bit i = 0 → '_' (RUNNING/STOP)
- */
-oled.setFont(u8g2_font_5x8_tr);
-oled.setCursor(0, 78);
-if (dummy.IsEnabled()) {
-    char buf[8];
-    for (int i = 1; i <= 6; i++)
-        buf[i - 1] = (dummy.jointsStateFlag & (1 << i) ? '*' : '_');
-    buf[6] = 0;
-    oled.printf("[%s] %s",
-                cmdModeNames[dummy.commandMode - 1],
-                buf);
-} else {
-    oled.printf("[%s] %s",
-                cmdModeNames[dummy.commandMode - 1],
-                "======");
-}
-```
+注意：`main.cpp` 的 DIAG 全局计数器（`g_byte_in / g_line_ready / g_cmd_in / g_cmd_out / g_realtime_tick / g_oled_tick / g_rgb_tick`）保留（位于 `main.cpp:12-18`、`ascii_processor.cpp:74,81` 的 extern 调用、`ascii_protocol.cpp:8-17` 的 `CmdExitGuard`），仅删 OLED 4 行显示。这些计数器维持"发送就卡死"诊断能力（详见 `docs/发送就卡死—心跳定位排查方案—2026-09-16.md`），后续如不再需要可另立清理任务。
 
 **注意**：
 - `cmdModeNames` 已经是 6 元素（`{"SEQ","INT","TRJ","TUN","TRQ","SRV"}`）
@@ -119,9 +91,9 @@ if (dummy.IsEnabled()) {
 ## 状态
 
 - [x] 决策已记录（2026-09-24）
-- [ ] F3 代码已修改（main.cpp 删除 DIAG + 加状态横幅）
-- [ ] 编译验证（ninja）
-- [ ] 实测验证（OLED 视觉）
+- [x] F3 代码已修改（2026-09-27：main.cpp 第 6 行 `[CMD] __*_*__` 状态横幅已实施，DIAG 4 行已删除）
+- [ ] 编译验证（ninja）— 待用户在 main.cpp 改动后跑 `ninja` 确认 0 errors
+- [ ] 实测验证（OLED 视觉）— 待用户上电观察
 
 ---
 

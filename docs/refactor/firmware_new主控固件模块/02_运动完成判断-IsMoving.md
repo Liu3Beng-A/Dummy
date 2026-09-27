@@ -122,5 +122,5 @@ bool DummyRobot::IsMoving()
 |---|---|
 | [01 - MoveJ](firmware_new主控固件模块01_运动指令-MoveJ&MoveL.md) | F1.1/F1.3 阻塞循环依赖 IsMoving 返回 false |
 | [03 - UpdateAngle](firmware_new主控固件模块03_关节角度同步-UpdateAngle.md) | jointsStateFlag 更新靠 0x23 回包 |
-| [04 - EStop](firmware_new主控固件模块04_急停-EStop.md) | EmergencyStop 中强制 flag = ALL_FINISH_FLAG |
+| [04 - EStop](firmware_new主控固件模块04_急停-EStop.md) | EmergencyStop 中强制 flag = ALL_FINISH_FLAG；**F5 决策（IsMoving 无短路）下本机制是释放 SEQUENTIAL 阻塞循环的唯一手段，不可省略（详见模块 04 决策 #3/#5）** |
 | [06 - OLED显示](firmware_new主控固件模块06_OLED显示.md) | OLED 第 6 行直接读 jointsStateFlag |

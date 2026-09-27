@@ -201,19 +201,24 @@ void ThreadOledUpdate(void* argument)
         oled.setCursor(0, 56);
         oled.printf("[ABC]:");
 
-        // 【综合状态横幅通知】提供设备使能以及指令落实执行同步标记进度显示
-        // 【心跳探针面板】[DIAG-2026-09-16] 4 边界 + 3 任务探针 + 关节完成标志
+        // 【综合状态横幅通知】F3 已恢复 OLD 样式（详见 06_OLED显示.md F3）
+        //   [CMD] __*_*__ 状态横幅：使能时 bit i=1 → '*' (FINISH 到位) / 0 → '_' (RUNNING/STOP)
+        //                       失能时显示 "======"
         oled.setFont(u8g2_font_5x8_tr);
-        oled.setCursor(0, 62);
-        oled.printf("FLAG:0x%02X/%02X", dummy.jointsStateFlag, 0x7E);
-        oled.setCursor(0, 70);
-        oled.printf("RT:%lu OL:%lu RGB:%lu",
-                    g_realtime_tick, g_oled_tick, g_rgb_tick);
         oled.setCursor(0, 78);
-        oled.printf("B:%lu L:%lu I:%lu O:%lu",
-                    g_byte_in, g_line_ready, g_cmd_in, g_cmd_out);
-        // 旧的 cmdMode/joints 横幅已由心跳探针取代
-        // （调试阶段不需要 [SRV] __*__*_ 样式，恢复方法：见文档 §四.6）
+        {
+            char stateBuf[8];
+            if (dummy.IsEnabled()) {
+                for (int i = 1; i <= 6; i++)
+                    stateBuf[i - 1] = (dummy.jointsStateFlag & (1 << i)) ? '*' : '_';
+            } else {
+                for (int i = 0; i < 6; i++) stateBuf[i] = '=';
+            }
+            stateBuf[6] = 0;
+            oled.printf("[%s] %s",
+                        cmdModeNames[dummy.commandMode - 1],
+                        stateBuf);
+        }
 
         oled.sendBuffer();
 
