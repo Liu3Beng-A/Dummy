@@ -14,6 +14,7 @@ Release/
 *.elf
 *.hex
 *.bin
+*.log
 
 # Cache
 .cache/
