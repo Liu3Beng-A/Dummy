@@ -272,6 +272,27 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                         "error hand position - Invalid format. Use !HAND_POS <0-100>");
             }
         }
+        else if (s.find("HAND_I") != std::string::npos)
+        {
+            /* 夹爪电流透传: !HAND_I <A>
+             *   <A> > 0: 沿 +1 方向(闭合)施加电流
+             *   <A> < 0: 沿 -1 方向(张开)施加电流
+             *   <A> = 0: 解除电流透传(电机停止)
+             * 注: 不修改 StepHand::current 幅值,只下发电流 setpoint;
+             *     后续 !HAND_O / !HAND_C 仍用原 1.2A 幅值。
+             */
+            float i_a;
+            if (sscanf(_cmd, "!HAND_I %f", &i_a) == 1)
+            {
+                dummy.hand->SetCurrentSetPoint(i_a);
+                Respond(_responseChannel, "ok hand current %.2f A", i_a);
+            }
+            else
+            {
+                Respond(_responseChannel,
+                        "error HAND_I format. Use !HAND_I <A>");
+            }
+        }
         else if (s.find("PRINTPOSE") != std::string::npos)
         {
             /* 7 值顺序：Rail(mm), J1~J6(deg)，与 MoveJ 命令对齐 */
@@ -817,6 +838,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             dummy.Resting();
             Respond(_responseChannel, "ok");
         }
+        else if (s == "!START")
+        {
+            dummy.SetEnable(true);
+            Respond(_responseChannel, "ok");
+        }
         else if (s == "!DISABLE")
         {
             dummy.SetEnable(false);
@@ -873,6 +899,27 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         {
             dummy.hand->SetAngleWithCurrentLimit(1);
             Respond(_responseChannel, "ok hand close");
+        }
+        else if (s.find("HAND_I") != std::string::npos)
+        {
+            /* 夹爪电流透传: !HAND_I <A>
+             *   <A> > 0: 沿 +1 方向(闭合)施加电流
+             *   <A> < 0: 沿 -1 方向(张开)施加电流
+             *   <A> = 0: 解除电流透传(电机停止)
+             * 注: 不修改 StepHand::current 幅值,只下发电流 setpoint;
+             *     后续 !HAND_O / !HAND_C 仍用原 1.2A 幅值。
+             */
+            float i_a;
+            if (sscanf(_cmd, "!HAND_I %f", &i_a) == 1)
+            {
+                dummy.hand->SetCurrentSetPoint(i_a);
+                Respond(_responseChannel, "ok hand current %.2f A", i_a);
+            }
+            else
+            {
+                Respond(_responseChannel,
+                        "error HAND_I format. Use !HAND_I <A>");
+            }
         }
         else if (s.find("RGB_BRIGHT") != std::string::npos)
         {
