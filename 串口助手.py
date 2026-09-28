@@ -25,9 +25,17 @@ class RobotSerialAssistant:
         self._pos_queue_pending = []     # 待发送队列
         self._pos_queue_idx = 0          # 当前发送索引
         self._pos_queue_speed = 35       # 顺序发送速度
-        # 命令模式：True=阻塞 (mode=1, 等ok), False=非阻塞 (mode=2, 立即ok可打断)
-        self.cmd_block_mode_var = tk.BooleanVar(value=True)
-        self._on_cmd_block_toggle = self._make_cmd_block_toggle()
+
+        # [v3.5] 顺序发送策略: "step" = 逐条等 ok (旧逻辑, INT 等覆盖式模式用)
+        #                          "batch" = 批量 FIFO 推送 (SEQ/TRJ 利用固件阻塞串行消费)
+        self._pos_queue_strategy = "step"
+        self._pos_queue_ok_count = 0     # 批量模式接收 ok 计数
+
+        # 当前固件命令模式 (本地缓存, 跟随「模式」按钮更新, 默认 INT=2 与新固件上电默认一致)
+        self.current_cmdmode = 2
+
+        # 模式显示名表
+        self._MODE_NAME = {1: "顺序(SEQ)", 2: "打断(INT)", 3: "连续(TRJ)", 5: "力矩(TRQ)", 6: "伺服(SRV)"}
         # 主题与配色
         try:
             style = ttk.Style()
@@ -208,7 +216,7 @@ class RobotSerialAssistant:
         mode_f.pack(fill=tk.X)
         for label, val in [("1:顺序", 1), ("2:打断", 2), ("3:连续", 3), ("5:力矩", 5), ("6:伺服", 6)]:
             tk.Button(mode_f, text=label, font=("Arial", 10), bg="#495057", fg="white",
-                      relief=tk.FLAT, pady=4, command=lambda v=val: self.send_cmd(f"#CMDMODE {v}")
+                      relief=tk.FLAT, pady=4, command=lambda v=val: self._set_cmdmode(v)
                       ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=1)
 
         # --- 查询与校准 ---
@@ -810,14 +818,7 @@ class RobotSerialAssistant:
             bg_off="#e9ecef", bg_on="#2b8a3e",
             fg_off="#495057", fg_on="white",
             side=tk.LEFT, padx=2,
-        )
-        self._make_toggle_button(
-            rail_ctrl, self.cmd_block_mode_var,
-            text_off="非阻塞", text_on="阻塞(等ok)",
-            bg_off="#3b5bdb", bg_on="#c92a2a",
-            fg_off="white", fg_on="white",
-            side=tk.LEFT, padx=2,
-            on_change=self._on_cmd_block_toggle,
+            on_change=self._warn_drag_mode,
         )
         tk.Button(rail_ctrl, text="发送 MoveJ", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
                   relief=tk.FLAT, command=self.send_movej).pack(side=tk.RIGHT, padx=2)
@@ -940,15 +941,7 @@ class RobotSerialAssistant:
             fg_off="#495057", fg_on="white",
             font=("Arial", 10, "bold"),
             side=tk.LEFT, padx=2,
-        )
-        self._make_toggle_button(
-            movel_ctrl, self.cmd_block_mode_var,
-            text_off="非阻塞", text_on="阻塞(等ok)",
-            bg_off="#3b5bdb", bg_on="#c92a2a",
-            fg_off="white", fg_on="white",
-            font=("Arial", 10, "bold"),
-            side=tk.LEFT, padx=2,
-            on_change=self._on_cmd_block_toggle,
+            on_change=self._warn_drag_mode,
         )
         tk.Button(movel_ctrl, text="发送 MoveL", font=("Arial", 10, "bold"), bg="#3b5bdb", fg="white",
                   relief=tk.FLAT, command=self.send_movel).pack(side=tk.RIGHT, padx=2)
@@ -1090,8 +1083,49 @@ class RobotSerialAssistant:
         cmd = ">" + ",".join(str(v) for v in pos[:7]) + f",{speed}"
         self.send_cmd(cmd)
 
+    # ==============================================
+    # [v3.5] 模式切换 + 拖发/顺序发送模式提示
+    # ==============================================
+    def _set_cmdmode(self, mode):
+        """点击「模式」按钮时调用:更新本地缓存 + 转发指令到固件。
+        当前 cmdMode 在 OLED 上同步刷新, 串口助手本地缓存跟随。
+        """
+        self.current_cmdmode = mode
+        self.send_cmd(f"#CMDMODE {mode}")
+        self.log(f"已切换至模式 {mode} ({self._MODE_NAME.get(mode, '?')})", "INFO")
+
+    def _warn_drag_mode(self):
+        """MoveJ / MoveL 拖发按钮 ON→OFF 切换后回调。
+        若当前不是「连续模式(3)」则弹提示 (不自动切换, 仅提示)。
+        """
+        # 任一拖发打开都触发;只在打开时 (True) 提示,关闭不提示
+        if (self.movej_drag_enable.get() or self.movel_drag_enable.get()) \
+                and self.current_cmdmode != 3:
+            cur = self._MODE_NAME.get(self.current_cmdmode, f"模式{self.current_cmdmode}")
+            messagebox.showwarning(
+                "模式提示",
+                f"拖发建议使用「连续模式」(模式 3)\n"
+                f"当前是「{cur}」\n\n"
+                f"请在「模式」区域手动点击「3:连续」按钮切换。"
+            )
+
+    def _warn_seqsend_mode(self):
+        """顺序发送按钮按下时回调。若不是「顺序模式(1)」或「连续模式(3)」,
+        弹提示 (不自动切换, 不阻塞后续发送)。"""
+        if self.current_cmdmode not in (1, 3):
+            cur = self._MODE_NAME.get(self.current_cmdmode, f"模式{self.current_cmdmode}")
+            messagebox.showwarning(
+                "模式提示",
+                f"顺序发送建议使用「顺序模式」(模式 1)\n"
+                f"当前是「{cur}」\n\n"
+                f"请在「模式」区域手动点击「1:顺序」按钮切换。"
+            )
+
     def send_all_positions(self):
-        """按顺序发送所有点位（等上一个到达后再发下一个）"""
+        """按顺序发送所有点位
+        - 当前为 SEQ(1)/TRJ(3): 批量 FIFO 推送, 由固件阻塞串行消费 (新固件行为)
+        - 其他模式 (INT 等):    保留「逐条等 ok」逻辑 (避免覆盖式丢点位)
+        """
         if not self.stored_positions:
             self.log("没有存储的点位", "WARN")
             return
@@ -1102,15 +1136,34 @@ class RobotSerialAssistant:
             speed = float(self.ent_pos_speed.get())
         except ValueError:
             speed = 50
-        self._pos_queue_running = True
         self._pos_queue_pending = list(self.stored_positions)
         self._pos_queue_idx = 0
         self._pos_queue_speed = speed
-        self.log(f"开始顺序发送 {len(self._pos_queue_pending)} 个点位（等待ok）...", "INFO")
-        self._send_next_position()
+        total = len(self._pos_queue_pending)
+
+        # [v3.5] 模式提示 (不自动切换, 不阻塞发送)
+        self._warn_seqsend_mode()
+
+        if self.current_cmdmode in (1, 3):
+            # [v3.5] SEQ/TRJ 模式: 批量 FIFO 推送
+            #   利用固件 SEQ 阻塞回 OK 串行消费, 串口助手不再"逐条等 ok"
+            self._pos_queue_strategy = "batch"
+            self._pos_queue_ok_count = 0
+            self._pos_queue_running = True
+            self.log(f"开始顺序发送 {total} 个点位 (批量模式, 固件 {self._MODE_NAME.get(self.current_cmdmode)} 阻塞串行消费)...", "INFO")
+            for i, (name, pos) in enumerate(self._pos_queue_pending):
+                cmd = ">" + ",".join(str(v) for v in pos[:7]) + f",{self._pos_queue_speed}"
+                self.send_cmd(cmd)
+            # 完成判定: 接收线程累计 ok 数 = total 时自动判定完成 (无需 PC 端介入)
+        else:
+            # [v3.5] 其他模式 (INT 等): 保留「逐条等 ok」逻辑 (避免覆盖式丢点位)
+            self._pos_queue_strategy = "step"
+            self._pos_queue_running = True
+            self.log(f"开始顺序发送 {total} 个点位 (逐条等ok, 当前模式非 SEQ/TRJ)...", "INFO")
+            self._send_next_position()
 
     def _send_next_position(self):
-        """内部方法：发送下一个点位（由 ok 触发或由 send_all_positions 启动）"""
+        """内部方法: 仅「逐条等 ok」策略下使用。批量模式不调用此方法。"""
         if self._pos_queue_idx >= len(self._pos_queue_pending):
             return
         total = len(self._pos_queue_pending)
@@ -1374,15 +1427,25 @@ class RobotSerialAssistant:
                                             self.root.after(0, lambda n=len(nums): self.log(f"收到{n}个数据（含 Rail），已同步全部滑块", "INFO"))
                                         else:
                                             self.root.after(0, lambda: self.log(f"数据不足（需 7 个: Rail + J1-J6）: {nums}", "WARN"))
-                                # 拦截 ok 触发下一条顺序发送（SEQ 模式下固件阻塞到位后回单字 ok）
+                                # 拦截 ok 触发下一条顺序发送
+                                #   - "step" 策略: 每个 ok 触发发下一条 (INT 等覆盖式模式用)
+                                #   - "batch" 策略: 数够 total 个 ok 算完成 (SEQ/TRJ 批量 FIFO, 固件自己阻塞)
                                 if getattr(self, "_pos_queue_running", False) and line == "ok":
-                                    self._pos_queue_running = False
-                                    self._pos_queue_idx += 1
+                                    strategy = getattr(self, "_pos_queue_strategy", "step")
                                     total = len(self._pos_queue_pending)
-                                    if self._pos_queue_idx < total:
-                                        self.root.after(0, self._send_next_position)
-                                    else:
-                                        self.root.after(0, lambda: self.log(f"顺序发送完成，共{total}个点位", "INFO"))
+                                    if strategy == "batch":
+                                        self._pos_queue_ok_count += 1
+                                        if self._pos_queue_ok_count >= total:
+                                            self._pos_queue_running = False
+                                            self.root.after(0, lambda t=total: self.log(f"顺序发送完成,共{t}个点位", "INFO"))
+                                        # 否则继续等下一个 ok, 不主动发任何东西
+                                    else:  # "step"
+                                        self._pos_queue_running = False
+                                        self._pos_queue_idx += 1
+                                        if self._pos_queue_idx < total:
+                                            self.root.after(0, self._send_next_position)
+                                        else:
+                                            self.root.after(0, lambda t=total: self.log(f"顺序发送完成,共{t}个点位", "INFO"))
                 # 无数据时短暂休眠，不阻塞主循环
                 time.sleep(0.05)
             except serial.SerialException as e:
@@ -1452,17 +1515,6 @@ class RobotSerialAssistant:
                 messagebox.showerror("错误", "夹爪开度必须在 0~100 之间")
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
-
-    def _make_cmd_block_toggle(self):
-        """命令模式切换回调：True→阻塞(mode=1, 等ok), False→非阻塞(mode=2, 立即ok可打断)"""
-        def cb():
-            if self.cmd_block_mode_var.get():
-                self.send_cmd("#CMDMODE 1")
-                self.log("已切换 → 阻塞模式 (mode=1, 等 IsMoving 完成再回 ok)", "INFO")
-            else:
-                self.send_cmd("#CMDMODE 2")
-                self.log("已切换 → 非阻塞模式 (mode=2, 立即回 ok，新命令可打断)", "INFO")
-        return cb
 
     def _make_toggle_button(self, parent, var, text_off, text_on,
                             bg_off=None, bg_on="#2b8a3e",
