@@ -3,7 +3,7 @@ description: Dummy机械臂项目指南 - 必读项目上下文、问题追踪�
 alwaysApply: true
 ---
 
-# Dummy 7轴机械臂控制项目指南
+# Dummy 6轴机械臂 + 地轨 + 夹爪机械臂控制项目指南
 
 ---
 
