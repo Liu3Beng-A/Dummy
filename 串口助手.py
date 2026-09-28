@@ -3,13 +3,18 @@ from tkinter import ttk, scrolledtext, messagebox
 import serial
 import serial.tools.list_ports
 import threading
+import queue
 import time
 import math
 import configparser
 import os
 import re
 from pathlib import Path
-#你好
+
+
+BAUDRATE = 115200  # 固件 usart.c 中 huart4 波特率硬编码，PC 端必须一致
+
+
 class RobotSerialAssistant:
     def __init__(self, root):
         self.root = root
@@ -25,13 +30,8 @@ class RobotSerialAssistant:
         self._pos_queue_pending = []     # 待发送队列
         self._pos_queue_idx = 0          # 当前发送索引
         self._pos_queue_speed = 35       # 顺序发送速度
-
-        # [v3.5] 顺序发送策略: "step" = 逐条等 ok (旧逻辑, INT 等覆盖式模式用)
-        #                          "batch" = 批量 FIFO 推送 (SEQ/TRJ 利用固件阻塞串行消费)
         self._pos_queue_strategy = "step"
         self._pos_queue_ok_count = 0     # 批量模式接收 ok 计数
-
-        # 当前固件命令模式 (本地缓存, 跟随「模式」按钮更新, 默认 INT=2 与新固件上电默认一致)
         self.current_cmdmode = 2
 
         # 模式显示名表
@@ -103,6 +103,9 @@ class RobotSerialAssistant:
             pass
             
         self.serial_port = None
+        self._tx_queue = queue.Queue()
+        self._serial_write_lock = threading.Lock()
+        self._tx_thread = None
         self.is_connected = False
         self._motor_enabled = False  # UI4: 电机使能状态
 
@@ -131,13 +134,6 @@ class RobotSerialAssistant:
         tk.Label(left_top, text="端口:", bg="#2d2d2d", fg="#cccccc", font=("Arial", 10)).pack(side=tk.LEFT)
         self.cb_ports = ttk.Combobox(left_top, width=14, font=("Arial", 10))
         self.cb_ports.pack(side=tk.LEFT, padx=(4, 8))
-
-        tk.Label(left_top, text="波特率:", bg="#2d2d2d", fg="#cccccc", font=("Arial", 10)).pack(side=tk.LEFT, padx=(6, 0))
-        self.cb_baudrate = ttk.Combobox(left_top, width=10, font=("Arial", 10),
-                                        values=["9600", "57600", "115200", "230400", "460800", "1000000"],
-                                        state="readonly")
-        self.cb_baudrate.current(2)
-        self.cb_baudrate.pack(side=tk.LEFT, padx=4)
 
         ttk.Button(left_top, text="刷新", command=self.refresh_ports, width=5).pack(side=tk.LEFT, padx=6)
 
@@ -1345,25 +1341,26 @@ class RobotSerialAssistant:
     def toggle_connection(self):
         if not self.is_connected:
             port = self.cb_ports.get()
-            baud = self.cb_baudrate.get()
             try:
-                self.serial_port = serial.Serial(port, int(baud), timeout=0.5)
+                self.serial_port = serial.Serial(port, BAUDRATE, timeout=0.5)
                 self.serial_port.write_timeout = 1.0
                 self.is_connected = True
                 self.btn_connect.config(text="断开", bg="#c92a2a", activebackground="#a02222")
                 self._draw_led(True)
-                self.lbl_status.config(text=f"已连接 {port}  {baud}", fg="#4ade80")
-                self.log(f"成功连接 {port} @ {baud}")
-                
+                self.lbl_status.config(text=f"已连接 {port}  {BAUDRATE}", fg="#4ade80")
+                self.log(f"成功连接 {port} @ {BAUDRATE}")
+
                 self.stop_thread = False
                 self.receive_thread = threading.Thread(target=self.serial_receive_loop, daemon=True)
                 self.receive_thread.start()
+                self._start_tx_thread()
             except Exception as e:
                 messagebox.showerror("连接失败", str(e))
                 self.log(f"连接失败: {e}", "ERROR")
         else:
             self.is_servoj_testing = False
             self.stop_thread = True
+            self._stop_tx_thread()
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
             self.is_connected = False
@@ -1399,11 +1396,8 @@ class RobotSerialAssistant:
                                 # 过滤固件入队回执的纯数字行（如"31"=队列剩余空间），避免污染日志
                                 if line.isdigit():
                                     continue
-                                # UI1+UI2: 拦截 [ACC] / [I_LIMIT] 响应，0.5s 后自动发查询命令
-                                if line.startswith("[ACC]") or line.startswith("[I_LIMIT]"):
-                                    self.root.after(500, lambda l=line: [self.log(l, "RX"), self._query_acc_or_i(l)])
                                 # PID: 拦截合并回包，更新 UI，超时由 query_pid 中的 500ms timer 兜底
-                                elif line.startswith("ok PID "):
+                                if line.startswith("ok PID "):
                                     self.root.after(0, self.log, line, "RX")
                                     self._update_pid_from_response(line)
                                 else:
@@ -1411,7 +1405,8 @@ class RobotSerialAssistant:
                                 # 拦截 #GETJPOS 响应并同步滑块
                                 if getattr(self, "_sync_waiting", False):
                                     if line.startswith("ok") or line.startswith(">"):
-                                        tokens = line.lstrip(">ok").split()
+                                        payload = line.removeprefix("ok").removeprefix(">")
+                                        tokens = payload.split()
                                         nums = []
                                         for t in tokens:
                                             t = t.strip().rstrip(",")
@@ -1446,8 +1441,8 @@ class RobotSerialAssistant:
                                             self.root.after(0, self._send_next_position)
                                         else:
                                             self.root.after(0, lambda t=total: self.log(f"顺序发送完成,共{t}个点位", "INFO"))
-                # 无数据时短暂休眠，不阻塞主循环
-                time.sleep(0.05)
+                # 无数据时短暂休眠，不阻塞主循环（接收轮询周期 10ms，降低交互延迟）
+                time.sleep(0.01)
             except serial.SerialException as e:
                 self.root.after(0, self.log, f"串口异常: {e}", "ERROR")
                 break
@@ -1472,21 +1467,49 @@ class RobotSerialAssistant:
         self._update_motor_state(False)
         self.send_cmd("!DISABLE")
 
-    def _query_acc_or_i(self, response_line):
-        # auto-polling 已移除 (2026-09-01)
-        # #ACC_J/#I_LIMIT_J 为同步设置命令，串口端无需收到回包后再次查询
-        pass
+    def _serial_write_loop(self):
+        """守护发送线程：从队列取命令，经串口写出。"""
+        while True:
+            cmd = self._tx_queue.get()
+            if cmd is None:  # 停止哨兵
+                break
+            try:
+                with self._serial_write_lock:
+                    port_obj = self.serial_port
+                    if port_obj is None or not port_obj.is_open:
+                        self.root.after(0, self.log, f"发送失败(串口未打开): {cmd}", "ERROR")
+                        continue
+                    port_obj.write((cmd + "\n").encode('utf-8'))
+            except Exception as e:
+                self.root.after(0, self.log, f"发送失败: {e}", "ERROR")
+
+    def _start_tx_thread(self):
+        self._tx_thread = threading.Thread(target=self._serial_write_loop, daemon=True)
+        self._tx_thread.start()
+
+    def _stop_tx_thread(self):
+        """停止发送线程：先丢弃队列残留命令，再投哨兵，最后 join 等线程真正退出。
+        顺序不能颠倒：先投哨兵再清空会把哨兵一起吞掉，导致线程收不到停止信号而永久泄漏。
+        """
+        while True:
+            try:
+                self._tx_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._tx_queue.put(None)
+        if self._tx_thread is not None:
+            self._tx_thread.join(timeout=2.0)
+            self._tx_thread = None
 
     def send_cmd(self, cmd):
         if not self.is_connected or not self.serial_port:
             self.log("未连接串口", "WARN")
             return
         try:
-            full_cmd = f"{cmd}\n"
-            self.serial_port.write(full_cmd.encode('utf-8'))
+            self._tx_queue.put(cmd)
             self.log(cmd, "TX")
         except Exception as e:
-            self.log(f"发送失败: {e}", "ERROR")
+            self.log(f"入队失败: {e}", "ERROR")
 
     def send_custom_cmd(self):
         cmd = self.ent_custom_cmd.get().strip()
@@ -1792,7 +1815,8 @@ class RobotSerialAssistant:
             # [v3.1] 新格式 MoveJ: >j1,j2,j3,j4,j5,j6,j7(rail),speed  (8 个值, j7/地轨在第7位)
             cmd = f">{current_j1_pos:.2f},{base_joints[0]},{base_joints[1]},{base_joints[2]},{base_joints[3]},{base_joints[4]},{rail_pos:.2f},{speed}"
             try:
-                self.serial_port.write((cmd + "\n").encode('utf-8'))
+                with self._serial_write_lock:
+                    self.serial_port.write((cmd + "\n").encode('utf-8'))
                 if int(t * 50) % 20 == 0:
                     self.root.after(0, self.log, f"Target: {target_j1:.1f}, J1: {current_j1_pos:.1f}", "TX")
             except Exception as e:
