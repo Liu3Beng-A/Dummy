@@ -4,395 +4,213 @@
 #include "algorithms/kinematic/6dof_kinematic.h"
 #include "actuators/ctrl_step/ctrl_step.hpp"
 #include "string"
-
-// =====================================================================
-// [v3.2] ALL 代理索引：motorJ[ALL] 等价于 motorJ[0]（CAN ID=0 的广播占位对象）
-// 用于 1 帧 StdId=(0<<7)|cmd 触发所有电机（J1~J7/地轨）同时响应
-// 电机端 Rx 路由通过 `id == 0` 识别为 ALL 广播
-// =====================================================================
 #define ALL 0
-// =====================================================================
-// MoveJ 速度重构（D-Q1/D-Q2/D-Q4 已拍板，2026-08-27 修订）
-// 单位体系：电机轴 r/s（与电机端 CAN 0x07 ratedVelocity 完全一致）
-// =====================================================================
 
-// === slider → r/s 换算（slider 100 = 30 r/s）===
-static constexpr float SLIDER_TO_RPS = 0.30f;
-
-// === 各轴物理上限（r/s），与电机端 boardConfig.velocityLimit 对齐 ===
-// [v3.1] index [0]=ALL代理, [1]=J1, [2]=J2, [3]=J3, [4]=J4, [5]=J5, [6]=J6, [7]=J7/地轨
-// 注意：超过物理极限会失步/堵转，由电机端 FOC/EMF 约束
-static constexpr float AXIS_MAX_RPS[8] = {
-    0.0f,    // ALL 代理（不参与速度规划）
-    30.0f,   // J1
-    30.0f,   // J2
-    30.0f,   // J3
-    30.0f,   // J4
-    30.0f,   // J5
-    30.0f,   // J6
-    30.0f    // J7/地轨（直连丝杆1605）
-};
-
-// 电机减速比（用于距离 → 电机转数换算）
-// [v3.1] index [0]=ALL代理(无减速), [1~6]=J1~J6(50), [7]=J7/地轨(1, 直连丝杆1605)
-static constexpr uint8_t MOTOR_REDUCTION[8] = {1, 50, 50, 50, 50, 50, 30, 1};
-
-// 夹爪速度上限（电机轴 r/s，与35关节电机一致）
-// 夹爪 CAN ID=8，使用35电机 reduction=16，输出轴速度 = 20/16 ≈ 1.25 r/s
-static constexpr float HAND_MAX_RPS = 20.0f;
-
-// v2.7: jointAccRuntime[i]==0 时的兜底加速度（r/s²）
-// 与其他速度/减速比常量保持文件作用域，便于 ComputeSyncSpeeds 静态函数访问
-static constexpr float FALLBACK_JOINT_ACCELERATION = 10.0f;
-
-#include <cstdint>
-#include "rgb.hpp"
-#include "eeprom_interface.h"
-
-#define EEPROM_MAGIC 0x12345679
-
-/**
- * @brief 存储在 EEPROM 中的系统固化参数
- *
- * 注意 v2.6 起删除了 jointAccBases[6]（加速度单位统一为电机轴 r/s²，
- * 不再走"基准 × 百分比"双层语义）。EEPROM 结构前移 24 字节，老设备
- * 首次上电会因 magic 不匹配而自动走默认配置（rgbStateStart/Enable/
- * Disable + 亮度），加速度全部以 DEFAULT_JOINT_ACCELERATION=150 起步。
+/*
+  |   PARAMS   | `current_limit` | `acceleration` | `dce_kp` | `dce_kv` | `dce_ki` | `dce_kd` |
+  | ---------- | --------------- | -------------- | -------- | -------- | -------- | -------- |
+  | **Joint1** | 2               | 30             | 1000     | 80       | 200      | 250      |
+  | **Joint2** | 2               | 30             | 1000     | 80       | 200      | 200      |
+  | **Joint3** | 2               | 30             | 1500     | 80       | 200      | 250      |
+  | **Joint4** | 2               | 30             | 1000     | 80       | 200      | 250      |
+  | **Joint5** | 2               | 30             | 1000     | 80       | 200      | 250      |
+  | **Joint6** | 2               | 30             | 1000     | 80       | 200      | 250      |
  */
-struct EepromConfig {
-    uint32_t magic;           // EEPROM 校验魔数，用于判定 Flash 数据是否有效
-    uint8_t static_r[3];      // RGB 灯效 R 分量 (索引 0~2 对应不同模式)
-    uint8_t static_g[3];      // RGB 灯效 G 分量
-    uint8_t static_b[3];      // RGB 灯效 B 分量
-    uint8_t rgbBrightness;    // RGB 亮度 0~100 (掉电保持)
-    uint32_t rgbStateStart;   // 设备开机启动时的默认灯效模式
-    uint32_t rgbStateEnable;  // 机械臂激活/使能状态下的灯效模式
-    uint32_t rgbStateDisable; // 机械臂断电/失能状态下的灯效模式
-};
 
-/**
- * @brief 机械臂末端执行器夹爪控制类（继承于闭环步进电机基类）
- */
-class StepHand : public CtrlStepMotor
+
+class DummyHand
 {
 public:
-    // inverse=true：电机正方向 = 闭合（第2版，2026-09-03）
-    // inverse=false：电机正方向 = 张开（第1版，当前行为与需求反了）
-    StepHand(CAN_HandleTypeDef* hcan, uint8_t id)
-        : CtrlStepMotor(hcan, id, true, 16, -100, 100)
-    {
-    }
+    uint8_t nodeID = 7;
+//    float maxCurrent = 0.7;
+    float maxCurrent = 1.0;
 
-    float current          = 1.2f;   // 夹爪闭合或张开时允许的最大驱动电流幅值 (A)
-    // 标定语义（2026-09-03 用户最终确认）：
-    //   !HAND_ZERO 记录的位置 = 主控端 pos0（闭合）
-    //   pos100 → 沿正方向走 100 圈电机（撞开限位即为张开）
-    // 物理方向：motor 沿正方向 → 张开
-    // 工作流：!HAND_DIS → 手动掰到闭合 → !HAND_ZERO → pos100=张开 → pos0=闭合
-    float ClosedMotorAngle = 0.0f;   // 闭合电机角（pos0   时电机目标角 = 标定零点）
-    float OpenMotorAngle   = 100.0f; // 张开电机角（pos100 时电机目标角 = 正方向 100 圈）
 
-    /**
-     * @brief 基于速度规划的位置环夹爪控制
-     * @param _angle 夹爪百分比开度 (0 = 完全闭合, 100 = 完全张开)
-     *
-     * 直接映射：用户开度 = 电机角（相对 HAND_ZERO 零点）
-     *   _angle=0   → motor=0   (闭合，HAND_ZERO 时的位置)
-     *   _angle=100 → motor=100 (正方向 100 圈，撞限位即为张开)
-     */
-    void SetAngleWithSpeedLimit(float _angle)
-    {
-        float target_angle = ClosedMotorAngle + (OpenMotorAngle - ClosedMotorAngle) * (_angle / 100.0f);
-        SetAngleWithMotorRps(target_angle, HAND_MAX_RPS);
-    }
+    DummyHand(CAN_HandleTypeDef* _hcan, uint8_t _id);
 
-    /**
-     * @brief 基于电流环的夹爪力度控制模式 (透传纯力矩)
-     * @param inverse 夹爪运动受力方向 (+1 代表闭合施力, -1 代表张开施力)
-     */
-    void SetAngleWithCurrentLimit(float inverse)
-    {
-        SetCurrentSetPoint(inverse * current);
-    }
 
-    /**
-     * @brief 查询当前夹爪是否已解除急停/进入工作状态
-     */
-    bool isEnabled() const
-    {
-        return state != STOP;
-    }
+    void SetAngle(float _angle);
+    void SetMaxCurrent(float _val);
+    void SetEnable(bool _enable);
 
-    /**
-     * @brief 构建并暴露夹爪对外的通讯层 Fibre 协议接口
-     */
+
+    // Communication protocol definitions
     auto MakeProtocolDefinitions()
     {
         return make_protocol_member_list(
-            make_protocol_function("set_enable",
-                static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetEnable, "enable"),
-            make_protocol_function("set_angle",
-                *this, &StepHand::SetAngleWithSpeedLimit, "angle"),
-            make_protocol_function("set_current",
-                *this, &StepHand::SetAngleWithCurrentLimit, "direction"),
-            make_protocol_function("set_current_limit",
-                static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetCurrentLimit, "current")
+            make_protocol_function("set_angle", *this, &DummyHand::SetAngle, "angle"),
+            make_protocol_function("set_enable", *this, &DummyHand::SetEnable, "enable"),
+            make_protocol_function("set_current_limit", *this, &DummyHand::SetMaxCurrent, "current")
         );
     }
+
+
+private:
+    CAN_HandleTypeDef* hcan;
+    uint8_t canBuf[8];
+    CAN_TxHeaderTypeDef txHeader;
+    float minAngle = 0;
+    float maxAngle = 45;
 };
 
-/**
- * @brief Dummy 6自由度机械臂系统总控与运动学调度类
- */
+
 class DummyRobot
 {
-public:
-    // 地轨相关常量
-    // 直连丝杆1605（无减速）：200步/圈 × 1024微步 / 5mm/圈 = 40960 步/mm
-    static constexpr float RAIL_STEPS_PER_MM = 40960.0f;
-
-    // 地轨状态变量
-    float currentRailPos = 0.0f;   // 地轨当前位置 (mm)
-    float targetRailPos = 0.0f;    // 地轨目标位置 (mm)
-
-    float targetRailCurrent = 0.0f; // 地轨目标电流 (mA)
-
-    // ===== 替换原 jointSpeed（旧的含义是关节 °/s，错误） =====
-    // 含义改为：电机轴 r/s（slider 换算后的目标速度上限，所有轴共用）
-    float jointSpeedRps = 20.0f;  // 默认值 = AXIS_MAX_RPS[1~6] 的关节上限
-
-    // ===== 替换原 dynamicJointSpeeds（旧的 6 个关节 °/s） =====
-    // 含义改为：7 个轴的电机轴 r/s（含地轨）
-    // 索引 [0]=地轨, [1~6]=关节
-    struct DynamicJointSpeeds7 {
-        float rps[7] = {0};
-    };
-    DynamicJointSpeeds7 dynamicJointSpeeds7;
-
-    // 旧字段保留（ServoJ 暂时还用）
-    DOF6Kinematic::Joint6D_t dynamicJointSpeeds = {0.5f, 0.5f, 0.5f, 1.5f, 1.5f, 1.5f};
-
-    // 硬编码 30 r/s，非 MoveJ 路径（Homing/Resting/EmergencyStop）的兜底速度。
-    float railSpeedRps = 30.0f;
-
-    float targetCurrents[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-
-    // [v3.1] CAN 回传的电机 PID 参数缓存（用于查询，未来启用时已扩维到 9）
-    int32_t motorDceKps[9] = {0};
-    int32_t motorDceKvs[9] = {0};
-    int32_t motorDceKis[9] = {0};
-    int32_t motorDceKds[9] = {0};
-
 public:
     explicit DummyRobot(CAN_HandleTypeDef* _hcan);
     ~DummyRobot();
 
-    uint32_t rgbStateStart   = RGB::PURE_COLOR_0;
-    uint32_t rgbStateEnable  = RGB::PURE_COLOR_1;
-    uint32_t rgbStateDisable = RGB::PURE_COLOR_2;
 
-    uint32_t GetRGBMode()    const;
-    void     SetRGBMode(uint32_t mode);
-    
-    void     LoadConfig();
-    void     SaveConfig();
-
-    /**
-     * @brief 机械臂工作与路径插补调度模式枚举
-     */
     enum CommandMode
     {
-        COMMAND_TARGET_POINT_SEQUENTIAL    = 1,  // 顺序点位执行模式: 当上一指令完全抵达后方才解锁进行下一运动点插补
-        COMMAND_TARGET_POINT_INTERRUPTABLE = 2,  // 可中断点位执行模式: 直接清空历史缓存栈并让新位姿即刻覆盖生效
-        COMMAND_CONTINUES_TRAJECTORY       = 3,  // 连续圆滑轨迹模式: 点位与点位间不停顿降速, 以保持动量实现流畅随动
-        COMMAND_MOTOR_TUNING               = 4,  // 电机扫频调参模式: 强行将目标切为内部自带信号发生器注入用以测定伯德图等特征
-        COMMAND_TORQUE_CONTROL             = 5,  // 直接力矩透传模式: 关闭位置内环, 六轴直接听取并响应电流大小控制信号
-        COMMAND_SERVO_J                    = 6,  // 关节高频伺服模式: 取消冗长梯形加减速, 不阻塞高频响应位姿闭环跟随
+        COMMAND_TARGET_POINT_SEQUENTIAL = 1,
+        COMMAND_TARGET_POINT_INTERRUPTABLE,
+        COMMAND_CONTINUES_TRAJECTORY,
+        COMMAND_MOTOR_TUNING
     };
 
-    /**
-     * @brief 用于电机辨识校准的内置低频振荡发生器
-     */
+
     class TuningHelper
     {
     public:
-        explicit TuningHelper(DummyRobot* _context) : context(_context) {}
-        void StartSweep();
-        void Stop();
-        bool IsRunning() const;
-        auto MakeProtocolDefinitions()
+        explicit TuningHelper(DummyRobot* _context) : context(_context)
         {
-            return make_protocol_member_list(
-                make_protocol_function("set_tuning_freq_amp", context->tuningHelper,
-                                      &DummyRobot::TuningHelper::SetFreqAndAmp, "freq", "amp"),
-                make_protocol_function("set_tuning_flag", context->tuningHelper,
-                                      &DummyRobot::TuningHelper::SetTuningFlag, "flag")
-            );
         }
+
         void SetTuningFlag(uint8_t _flag);
         void Tick(uint32_t _timeMillis);
         void SetFreqAndAmp(float _freq, float _amp);
+
+
+        // Communication protocol definitions
+        auto MakeProtocolDefinitions()
+        {
+            return make_protocol_member_list(
+                make_protocol_function("set_tuning_freq_amp", *this,
+                                       &TuningHelper::SetFreqAndAmp, "freq", "amp"),
+                make_protocol_function("set_tuning_flag", *this,
+                                       &TuningHelper::SetTuningFlag, "flag")
+            );
+        }
+
+
     private:
         DummyRobot* context;
-        friend class DummyRobot;
-        float   time      = 0;
+        float time = 0;
         uint8_t tuningFlag = 0;
-        float   frequency  = 1;
-        float   amplitude  = 1;
+        float frequency = 1;
+        float amplitude = 1;
     };
     TuningHelper tuningHelper = TuningHelper(this);
 
-    // 结构硬变量缺省状态与初始化约束池
+
+    // This is the pose when power on.
     const DOF6Kinematic::Joint6D_t REST_POSE = {0, -75, 180, 0, 0, 0};
-    const float DEFAULT_JOINT_SPEED     = 80;
+//    const float DEFAULT_JOINT_SPEED = 30;  // degree/s
+    const float DEFAULT_JOINT_SPEED = 50;  // degree/s
+    const DOF6Kinematic::Joint6D_t DEFAULT_JOINT_ACCELERATION_BASES = {150, 100, 200, 200, 200, 200};
+//    const float DEFAULT_JOINT_ACCELERATION_LOW = 30;    // 0~100
+    const float DEFAULT_JOINT_ACCELERATION_LOW = 15;    // 0~100
+    const float DEFAULT_JOINT_ACCELERATION_HIGH = 100;  // 0~100
+    const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_INTERRUPTABLE;
 
-    // v2.6 加速度单位统一：电机轴 r/s²（与 CAN 0x14 入参 float 完全一致）
-    // 启动后通过 SyncAllMotorAcceleration() 从电机 EEPROM 读真实值回填
-    // FALLBACK_JOINT_ACCELERATION 已提升为文件作用域 constexpr（前面定义），
-    // 便于 ComputeSyncSpeeds 静态函数访问；此处不再重复声明。
-    const float DEFAULT_JOINT_ACCELERATION = 150.0f;  
 
-    // OLD 风格：每关节一个 BASE 加速度上限，单位 r/s²
-    // 在 SetCommandMode() 切换 SEQ/INT/TRJ 时按百分比下发（LOW=30% / HIGH=100%）
-    // [v3.4] F1.3 改造：恢复 OLD BASE 表，保留 per-joint 差异化加速能力
-    //   索引 [0] = ALL 代理（占位，不参与）
-    //   索引 [1] = J1, [2] = J2, ..., [6] = J6
-    //   注：J7/地轨不参与（直连丝杆，无减速比，加速由电机端自动）
-    const float JOINT_ACCEL_BASES[7] = {
-        0,      // [0] ALL 代理
-        150,    // [1] J1 大臂
-        100,    // [2] J2 肘关节（减速比小，电机能力有限）
-        200,    // [3] J3 上臂
-        200,    // [4] J4
-        200,    // [5] J5
-        200,    // [6] J6
-    };
+    DOF6Kinematic::Joint6D_t currentJoints = REST_POSE;
+    DOF6Kinematic::Joint6D_t targetJoints = REST_POSE;
+    DOF6Kinematic::Joint6D_t initPose = REST_POSE;
+    DOF6Kinematic::Pose6D_t currentPose6D = {};
+    volatile uint8_t jointsStateFlag = 0b00000000;
+    CommandMode commandMode = DEFAULT_COMMAND_MODE;
+    CtrlStepMotor* motorJ[7] = {nullptr};
+    DummyHand* hand = {nullptr};
 
-    // OLD 档位（与 OLD 版本一致，0~100）
-    // [v3.4] F1.3 改造：档位百分比 → per-joint BASE × pct → 直接下发 r/s²
-    //   LOW  = 30% 对应 SEQ/INT 模式（保守加速，每段都希望电机平稳加减速）
-    //   HIGH = 100% 对应 TRJ 模式（强加速，电机能快速响应新目标位置）
-    const float DEFAULT_JOINT_ACCELERATION_LOW  = 30.0f;   // 单位：百分比档位（不是 r/s²）
-    const float DEFAULT_JOINT_ACCELERATION_HIGH = 100.0f;  // 单位：百分比档位（不是 r/s²）
 
-    // [v3.1] runtime 索引: [1..7]=J1~J7/地轨, [8]=夹爪
-    float jointAccRuntime[9] = {0};
-    // v3.0 (2026-09-01): 与 jointAccRuntime[] 配对的"最后更新 ms 时间戳"
-    // 解决 #GETJACC 异步 printf 与 ASCII 任务 UART TX 竞争导致的合并怪行
-    // 同步查询通过比对时间戳判断 CAN 回包是否到达
-    uint32_t jointAccLastUpdateMs[9] = {0};
-
-    // v3.0: 新增 0x2D 电流限制回包缓存与时间戳（与加速度对称）
-    // ASCII #GETI 同步查询使用
-    float     jointCurrentLimitRuntime[9]      = {0};
-    uint32_t  jointCurrentLimitLastUpdateMs[9] = {0};
-
-    const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_INTERRUPTABLE;  // 2=非阻塞（OLD 默认）
-
-    // 系统位姿记忆变量与实时状态寄存层
-    DOF6Kinematic::Joint6D_t currentJoints  = REST_POSE;  // 当前各关节角度读取缓存 (度)
-    DOF6Kinematic::Joint6D_t targetJoints   = REST_POSE;  // 下一插补目标关节位置参数缓存 (度)
-    DOF6Kinematic::Joint6D_t initPose       = REST_POSE;  // 装配或上电标定时的机械零点偏移补偿映射表
-    DOF6Kinematic::Pose6D_t  currentPose6D  = {};         // 当前设备工作空间笛卡尔位姿坐标投影信息 (系统自动解算保持更新)
-    volatile uint8_t jointsStateFlag = 0b00000000;        // 每一位(bit)严格监控和指示对应关节底层的轨迹插补到位触发状况
-
-    // [v3.2] jointsStateFlag 全置位标记 = bit1~6 全 1，bit0/7 恒 0；ALL 代理永久不回包
-    //   bit1~6 = J1~J6 FINISH 状态位（UpdateJointAnglesCallback 写入）
-    //   bit0   = 地轨占位但恒为 0（地轨不在 UpdateJointAnglesCallback 处理范围）
-    //   bit7   = 未使用恒为 0
-    // EmergencyStop 后置此值短路 IsMoving()，避免 !STOP 后阻塞 SEQUENTIAL 队列
-    static constexpr uint8_t ALL_FINISH_FLAG = 0x7E;  // 0b01111110
-
-    CommandMode commandMode = DEFAULT_COMMAND_MODE;        
-    uint32_t lastServoTime = 0;                            
-
-    // 分布式通讯执行器操作列表
-    // [v3.1] motorJ[0]=ALL 广播代理 (ID=0, 占位), motorJ[1..7]=J1~J7(含地轨 ID=7)
-    CtrlStepMotor* motorJ[8] = {nullptr};
-    StepHand* hand = {nullptr};
-
-    // 系统调度与控制函数对外调用面板
     void Init();
-    bool MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm, float _slider);
+    bool MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6);
     bool MoveL(float _x, float _y, float _z, float _a, float _b, float _c);
-    bool ServoJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm);
     void MoveJoints(DOF6Kinematic::Joint6D_t _joints);
     void SetJointSpeed(float _speed);
     void SetJointAcceleration(float _acc);
-    /**
-     * @brief 向所有 8 个电机（地轨+6 关节+夹爪）发 CAN 0x2C 查询，
-     *        触发电机回包更新 jointAccRuntime[]（在 can_protocol.cpp 0x2C 处理里写）。
-     *        异步执行，不阻塞。回包延迟 ≤1 CAN 帧周期。
-     */
-    void SyncAllMotorAcceleration();
     void UpdateJointAngles();
     void UpdateJointAnglesCallback();
     void UpdateJointPose6D();
     void Reboot();
     void SetEnable(bool _enable);
+    void SetRGBEnable(bool _enable);
+    bool GetRGBEnabled();
+    void SetRGBMode(uint32_t mode);
+    uint32_t GetRGBMode();
+    void CalibrateHomeOffset();
     void Homing();
     void Resting();
     bool IsMoving();
     bool IsEnabled();
     void SetCommandMode(uint32_t _mode);
-    void SetJointCurrents(float c0, float c1, float c2, float c3, float c4, float c5, float c6, float c7);
 
-    // 暴露出厂端网络可调用结点供调试软件(Reftool等)拉取调用
+
+    // Communication protocol definitions
     auto MakeProtocolDefinitions()
     {
         return make_protocol_member_list(
-            make_protocol_function("homing",   *this, &DummyRobot::Homing),
-            make_protocol_function("resting",  *this, &DummyRobot::Resting),
-            make_protocol_object("joint_1",   motorJ[1]->MakeProtocolDefinitions()),
-            make_protocol_object("joint_2",   motorJ[2]->MakeProtocolDefinitions()),
-            make_protocol_object("joint_3",   motorJ[3]->MakeProtocolDefinitions()),
-            make_protocol_object("joint_4",   motorJ[4]->MakeProtocolDefinitions()),
-            make_protocol_object("joint_5",   motorJ[5]->MakeProtocolDefinitions()),
-            make_protocol_object("joint_6",   motorJ[6]->MakeProtocolDefinitions()),
-            make_protocol_object("hand",      hand->MakeProtocolDefinitions()),
-            make_protocol_function("reboot",           *this, &DummyRobot::Reboot),
-            make_protocol_function("set_enable",       *this, &DummyRobot::SetEnable,       "enable"),
-            make_protocol_function("set_rgb_mode",     *this, &DummyRobot::SetRGBMode,      "mode"),
-            make_protocol_function("set_joint_speed",  *this, &DummyRobot::SetJointSpeed,       "speed"),
-            make_protocol_function("set_joint_acc",    *this, &DummyRobot::SetJointAcceleration, "acc"),
-            make_protocol_function("set_command_mode", *this, &DummyRobot::SetCommandMode,       "mode"),
+            make_protocol_function("calibrate_home_offset", *this, &DummyRobot::CalibrateHomeOffset),
+            make_protocol_function("homing", *this, &DummyRobot::Homing),
+            make_protocol_function("resting", *this, &DummyRobot::Resting),
+            make_protocol_object("joint_1", motorJ[1]->MakeProtocolDefinitions()),
+            make_protocol_object("joint_2", motorJ[2]->MakeProtocolDefinitions()),
+            make_protocol_object("joint_3", motorJ[3]->MakeProtocolDefinitions()),
+            make_protocol_object("joint_4", motorJ[4]->MakeProtocolDefinitions()),
+            make_protocol_object("joint_5", motorJ[5]->MakeProtocolDefinitions()),
+            make_protocol_object("joint_6", motorJ[6]->MakeProtocolDefinitions()),
+            make_protocol_object("joint_all", motorJ[ALL]->MakeProtocolDefinitions()),
+            make_protocol_object("hand", hand->MakeProtocolDefinitions()),
+            make_protocol_function("reboot", *this, &DummyRobot::Reboot),
+            make_protocol_function("set_enable", *this, &DummyRobot::SetEnable, "enable"),
+            make_protocol_function("set_rgb_enable", *this, &DummyRobot::SetRGBEnable, "enable"),
+            make_protocol_function("set_rgb_mode", *this, &DummyRobot::SetRGBMode, "mode"),
+            make_protocol_function("move_j", *this, &DummyRobot::MoveJ, "j1", "j2", "j3", "j4", "j5", "j6"),
+            make_protocol_function("move_l", *this, &DummyRobot::MoveL, "x", "y", "z", "a", "b", "c"),
+            make_protocol_function("set_joint_speed", *this, &DummyRobot::SetJointSpeed, "speed"),
+            make_protocol_function("set_joint_acc", *this, &DummyRobot::SetJointAcceleration, "acc"),
+            make_protocol_function("set_command_mode", *this, &DummyRobot::SetCommandMode, "mode"),
             make_protocol_object("tuning", tuningHelper.MakeProtocolDefinitions())
         );
     }
 
-    /**
-     * @brief 主循环事件排队与命令行字符串分离执行中心
-     */
+
     class CommandHandler
     {
     public:
-        explicit CommandHandler(DummyRobot* _context) : context(_context) {}
-
-        void Init()
+        explicit CommandHandler(DummyRobot* _context) : context(_context)
         {
-            commandFifo = osMessageQueueNew(32, 128, nullptr);
+            commandFifo = osMessageQueueNew(16, 64, nullptr);
         }
 
-        uint32_t    Push(const char *_cmd);
-        const char* Pop(uint32_t timeout);
-        uint32_t    ParseCommand(const char *_cmd);
-        uint32_t    GetSpace();
-        void        ClearFifo();
-        void        EmergencyStop();
+        uint32_t Push(const std::string &_cmd);
+        std::string Pop(uint32_t timeout);
+        uint32_t ParseCommand(const std::string &_cmd);
+        uint32_t GetSpace();
+        void ClearFifo();
+        void EmergencyStop();
+
 
     private:
-        DummyRobot*         context;
-        osMessageQueueId_t  commandFifo;
-        char                strBuffer[128]{};
+        DummyRobot* context;
+        osMessageQueueId_t commandFifo;
+        char strBuffer[64]{};
     };
     CommandHandler commandHandler = CommandHandler(this);
 
+
 private:
     CAN_HandleTypeDef* hcan;
+    float jointSpeed = DEFAULT_JOINT_SPEED;
     float jointSpeedRatio = 1;
+    DOF6Kinematic::Joint6D_t dynamicJointSpeeds = {1, 1, 1, 1, 1, 1};
     DOF6Kinematic* dof6Solver;
-    bool     isEnabled    = false;
-    uint32_t rgbMode      = 0;
+    bool isEnabled = false;
+    bool isRGBEnabled = true;
+    uint32_t rgbMode = 0;
 };
+
 
 #endif //REF_STM32F4_FW_DUMMY_ROBOT_H

@@ -1,36 +1,3 @@
-"""
-Dummy Robot 串口助手（旧固件版）
-=========================================
-面向 firmware_old/dummy-ref-core-fw 的精简串口调试工具。界面风格与线程模型
-和新版 `串口助手.py` 保持一致，但只保留旧固件 ASCII 协议真正支持的指令。
-
-波特率 115200，每条指令以 "\n" 结尾。
-
-支持的指令一览
-----------------
-    !START                启动（电机使能）        -> "Started ok"
-    !DISABLE              失能                    -> "Disabled ok"
-    !HOME                 回零                    -> "Started ok"
-    !RESET                休息（回 REST_POSE）    -> "Started ok"
-    !CALIBRATION          置零(校准)+控制器重启   -> "calibration ok"
-    !STOP                 急停                    -> "Stopped ok"
-    #CMDMODE <1|2|3>      指令模式                -> "ok Set command mode to [n]"
-    #GETJPOS              读取关节角              -> "ok j1 j2 j3 j4 j5 j6"（6 个数）
-    #GETLPOS              读取位姿                -> "ok X Y Z A B C"（6 个数）
-    #REBOOT <1..6>        重启 n 号电机           -> "ok REBOOT MOTOR [n]"
-    >j1,j2,j3,j4,j5,j6,speed   MoveJ 关节运动（7 个值）-> 运动结束回 "ok"
-    @X,Y,Z,A,B,C,speed        MoveL 直线运动（7 个值）-> 运动结束回 "ok"
-
-FIFO 余量回执
-----------------
-旧固件对每条 ">" / "@" 推送只回一个「裸数字」= 16 条指令 FIFO 的剩余空位。
-255 表示入队失败（FIFO 已满），该指令被固件丢弃；其余数值只是余量计数，
-已在日志中静默过滤，避免污染终端。
-
-旧固件无 ASCII 支持的功能（彩灯、参数整定、电流设定、高频伺服随动等）
-在本工具中一律不提供。
-"""
-
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import serial

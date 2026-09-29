@@ -13,6 +13,7 @@ public:
         return AdcGetChipTemperature();
     }
 
+    /*just AN test for how to add a new CLI command through fibre protocol*/
     float GetVoltageHelper()
     {
         return AdcGetVoltage(TEST_ADC_CHANNEL_0);

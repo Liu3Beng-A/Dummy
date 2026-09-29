@@ -22,7 +22,8 @@ class DummyHand
 {
 public:
     uint8_t nodeID = 7;
-    float maxCurrent = 0.7;
+//    float maxCurrent = 0.7;
+    float maxCurrent = 1.0;
 
 
     DummyHand(CAN_HandleTypeDef* _hcan, uint8_t _id);
@@ -104,10 +105,12 @@ public:
 
 
     // This is the pose when power on.
-    const DOF6Kinematic::Joint6D_t REST_POSE = {0, -73, 180, 0, 0, 0};
-    const float DEFAULT_JOINT_SPEED = 30;  // degree/s
+    const DOF6Kinematic::Joint6D_t REST_POSE = {0, -75, 180, 0, 0, 0};
+//    const float DEFAULT_JOINT_SPEED = 30;  // degree/s
+    const float DEFAULT_JOINT_SPEED = 50;  // degree/s
     const DOF6Kinematic::Joint6D_t DEFAULT_JOINT_ACCELERATION_BASES = {150, 100, 200, 200, 200, 200};
-    const float DEFAULT_JOINT_ACCELERATION_LOW = 30;    // 0~100
+//    const float DEFAULT_JOINT_ACCELERATION_LOW = 30;    // 0~100
+    const float DEFAULT_JOINT_ACCELERATION_LOW = 15;    // 0~100
     const float DEFAULT_JOINT_ACCELERATION_HIGH = 100;  // 0~100
     const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_INTERRUPTABLE;
 
@@ -205,7 +208,7 @@ private:
     DOF6Kinematic::Joint6D_t dynamicJointSpeeds = {1, 1, 1, 1, 1, 1};
     DOF6Kinematic* dof6Solver;
     bool isEnabled = false;
-    bool isRGBEnabled = false;
+    bool isRGBEnabled = true;
     uint32_t rgbMode = 0;
 };
 

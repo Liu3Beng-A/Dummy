@@ -62,7 +62,7 @@ osSemaphoreId sem_can2_tx;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 2000,
+  .stack_size = 500 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
