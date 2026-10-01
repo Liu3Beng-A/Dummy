@@ -159,7 +159,8 @@ bool DummyRobot::MoveL(float _x, float _y, float _z, float _a, float _b, float _
 
 void DummyRobot::UpdateJointAngles()
 {
-    motorJ[ALL]->UpdateAngle();
+    for (int i = 1; i <= 6; i++)
+        motorJ[i]->UpdateAngle();
 }
 
 
