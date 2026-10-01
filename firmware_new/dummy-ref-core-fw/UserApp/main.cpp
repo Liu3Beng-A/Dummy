@@ -19,10 +19,15 @@ DummyRobot dummy(&hcan1);
 osThreadId_t controlLoopFixUpdateHandle;
 void ThreadControlLoopFixUpdate(void* argument)
 {
+    // §8.2 + §8.8 — 5ms 节奏累加，每 4 次（即 20ms / 50Hz）触发一次角度查询。
+    // 使能态、失能态、TUN 模式共享同一个 tick，相位一致。
+    static uint32_t queryTick = 0;
+
     for (;;)
     {
         // Suspended here until got Notification.
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        queryTick++;
 
         if (dummy.IsEnabled())
         {
@@ -34,17 +39,24 @@ void ThreadControlLoopFixUpdate(void* argument)
                 case DummyRobot::COMMAND_CONTINUES_TRAJECTORY:
                     dummy.MoveJoints(dummy.targetJoints);
                     dummy.UpdateJointPose6D();
+                    if ((queryTick & 0x03) == 0)
+                        dummy.UpdateJointAngles();
                     break;
                 case DummyRobot::COMMAND_MOTOR_TUNING:
                     dummy.tuningHelper.Tick(10);
                     dummy.UpdateJointPose6D();
+                    if ((queryTick & 0x03) == 0)
+                        dummy.UpdateJointAngles();
                     break;
             }
         } else
         {
-            // Just update Joint states
-            dummy.UpdateJointAngles();
-            dummy.UpdateJointPose6D();
+            // 失能态没有 0x07 下发，靠查询拿位置
+            // 50Hz 与使能态节奏保持一致
+            if ((queryTick & 0x03) == 0) {
+                dummy.UpdateJointAngles();
+                dummy.UpdateJointPose6D();
+            }
         }
     }
 }
@@ -63,12 +75,20 @@ void ThreadControlLoopUpdate(void* argument)
 osThreadId_t oledTaskHandle;
 void ThreadOledUpdate(void* argument)
 {
+    // §8.1 — 用 vTaskDelayUntil 钉住 50Hz（20ms 周期）。
+    // 不能用 osDelay(20)：相对延迟会被 200Hz 控制循环抢占拉长到 ≈40ms，
+    // 实测显示 OLED FPS 在 25~30 之间抖动。
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xPeriod = pdMS_TO_TICKS(20);   // 50Hz
+
     uint32_t t = micros();
     char buf[16];
     char cmdModeNames[4][4] = {"SEQ", "INT", "TRJ", "TUN"};
 
     for (;;)
     {
+        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+
         mpu6050.Update(true);
 
         oled.clearBuffer();

@@ -7,144 +7,74 @@ alwaysApply: true
 
 ---
 
-## 项目概述
+## 1. 项目概述
 
 这是一个基于 **STM32F405 (主控) + 8×STM32F103 (电机驱动)** 的 **6轴机械臂 + 地轨 + 夹爪** 控制系统，运行 FreeRTOS 实时操作系统。
 
-### 关键文档索引
+`firmware` 积累了大量 bug 难以更正，用户决定从 `firmware_new` 重新起步，**逐步把功能向 `firmware` 对齐**，并在此过程中修复已有问题。
 
-| 文件 | 用途 |
-|------|------|
-| `firmware` | 正在开发的新版本固件 |
-| `firmware_old` | 开发前保存的旧版本固件 |
+### 1.1 需要新增/调整的功能（截至 2026-09-29）
+
+- `!CALIBRATION` 逻辑调整：发送后 j1-6 只把当前位置修正为 `REST_POSE = {0,-75,180,0,0,0}`；地轨与夹爪自动运动到物理限位，记录限位位置
+- 加速度/速度单位统一：r/s、r/s²
+- 速度 1-100 逻辑：满速 30 r/s
+- 最大时间 + 加速度梯度算法：真实同步抵达
+- 加入地轨（id=7）：与关节同级别，参与 `IsMoving()`、OLED 屏幕位置显示等
+- 加入夹爪（id=8）：最低级别，**不**参与 `IsMoving()`、**不**进 OLED
+- `!STOP` 软停逻辑：夹爪不参与急停
+- RGB：24 灯珠圆环、用户设置颜色、动态灯效、不同模式对应不同灯效、亮度调节、开关
+- 伺服模式（SRV）：高频接收 MoveJ，降低其他算力
+- 力矩模式（TRQ）：接收电流值
+- PID、加速度、最大电流的**查询**与设置
+- 电机重启包含所有电机
 
 ---
 
-### 固件目录结构
+## 2. 仓库结构与模块映射
 
-```
-firmware/
-├── ref_core_f405/              # 主控制器固件 (STM32F405, FreeRTOS)
-│   ├── UserApp/
-│   │   ├── main.cpp            # 入口, FreeRTOS任务
-│   │   └── protocols/
-│   │       ├── ascii_protocol.cpp   # USB/UART4 ASCII命令解析
-│   │       ├── can_protocol.cpp     # CAN回包路由 (v3.0, 堵转广播)
-│   │       └── cmd_protocol.cpp     # 内部命令协议
-│   ├── Robot/
-│   │   ├── instances/dummy_robot.cpp/.h   # 7轴机器人类 (v2.8)
-│   │   ├── algorithms/kinematic/           # FK/IK 求解器
-│   │   └── actuators/ctrl_step/ctrl_step.cpp/.h  # CtrlStepMotor CAN接口
-│   └── Bsp/
-│       ├── communication/interface_can.cpp   # CAN发送 (v3.0)
-│       └── memory/emulated_eeprom.cpp
-│
-├── motor_fw_f103_35/           # 35电机固件 (J4~J6)
-├── motor_fw_f103_42/           # 42电机固件 (J1~J3)
-├── motor_fw_f103_57/           # 57电机固件 (地轨)
-└── motor_fw_f103_gripper/      # 夹爪独立固件 (35电机)
-```
+### 2.1 目录用途
 
-## 指令模式 (CommandMode)
+| 路径 | 模块 | 说明 |
+|---|---|---|
+| `firmware_new/dummy-ref-core-fw/` | 主控（STM32F405）| **当前正在开发**的固件 |
+| `firmware_new/dummy-motor-fw/` | 电机驱动（STM32F103）| **当前正在开发**的固件 |
+| `firmware/ref_core_f405/` | 主控参考 | 积累 bug 的目标参考版（**仅作对照，不要盲目复制**） |
+| `firmware/motor_fw_f103_35/42/57/` | 电机驱动参考 | 35/42/57 三种电机参考实现 |
+| `firmware/motor_fw_f103_gripper/` | 夹爪电机驱动参考 | 夹爪专用电机固件 |
+| `firmware_old/dummy-ref-core-fw/` | 主控基线 | 重构前的旧版正常固件 |
+| `firmware_old/dummy-35motor-fw/` | 35 电机基线 | |
+| `firmware_old/dummy-42motor-fw/` | 42 电机基线 | |
+| `docs/` | 项目文档 | 技术分析、方案、协议说明 |
+| `串口助手.py` / `串口助手_old.py` | 上位机调试工具 |
+| `esp32/` | 第三方示例 | mongoose 网络库示例，**不要修改** |
+
+### 2.2 关键 Node ID 体系（CAN StdId = `nodeID<<7 | cmdCode`）
+
+| nodeID | 含义 | 备注 |
+|---|---|---|
+| 0 | ALL 广播代理 | 若电机端协议支持，1 帧触发所有电机响应|
+| 1~6 | J1~J6 关节 | 与 MoveJ 顺序对齐 |
+| 7 | 地轨 |与关节同级，参与 `IsMoving()`、OLED |
+| 8 | 夹爪 |最低级别，不参与 `IsMoving()`、不进 OLED |
+
+---
+
+## 3. 指令模式 (CommandMode)
 
 | 值 | 名称 | 行为 |
-|----|------|------|
+|---|---|---|
 | 1 | SEQ (SEQUENTIAL) | 上一指令到位后才执行下一条 |
 | 2 | INT (INTERRUPTABLE) | 新指令直接清队列并覆盖 |
 | 3 | TRJ (CONTINUES TRAJECTORY) | 连续轨迹，不减速衔接 |
 | 4 | TUN (MOTOR_TUNING) | 扫频正弦激励 |
 | 5 | TRQ (TORQUE_CONTROL) | 力矩透传模式 |
-| 6 | SRV (SERVO_J) | 高频伺服随动 (5kHz 下发) |
+| 6 | SRV (SERVO_J) | 高频伺服随动 |
 
 ---
 
-## 主控固件 (ref_core_f405)
+## 4. 工作时行为指引
 
-### FreeRTOS 线程架构
-
-| 线程名 | 优先级 | 频率 | 职责 |
-|--------|--------|------|------|
-| `ControlLoopFixUpdateTask` | osPriorityRealtime | 5kHz (TIM7 200μs) | 实时下发电机指令 |
-| `ControlLoopUpdateTask` | osPriorityNormal | 事件触发 | 解析并执行 ASCII 命令 |
-| `OledTask` | osPriorityNormal | ~60Hz | OLED 显示刷新 |
-| `RGBTask` | osPriorityNormal | 33Hz | RGB LED 灯效 |
-
-### 5kHz 实时环 (TIM7) 各模式行为
-
-| 模式 | 位置下发频率 | 说明 |
-|------|-------------|------|
-| SEQ/INT/TRJ | **50Hz** | 降频下发避免总线拥堵 |
-| ServoJ | 5kHz | 高频全速下发 |
-| Torque | 100Hz | 直接下发电流 |
-| Tuning | 100Hz | 扫频信号发生器 |
-
-
-
-## 电机固件 (motor_fw_f103_*)
-
-### 双定时器架构
-
-| 定时器 | 频率 | 职责 |
-|--------|------|------|
-| TIM1 | 100Hz | 按钮去抖、LED状态、温度采集、堵转广播 |
-| TIM4 | 20kHz | 电机 FOC 控制环 + 堵转检测 |
-000 cycles @ 20kHz) 不检测
-
-
-### 电机固件默认参数
-
-| 参数 | 35电机 | 42电机 | 57电机 |
-|------|--------|--------|--------|
-| 电流限幅 | 2A | - | - |
-| 速度限幅 | 30 r/s | - | - |
-| DCE Kp | 195 | - | - |
-| DCE Kv | 80 | - | - |
-| DCE Ki | 300 | - | - |
-| DCE Kd | 250 | - | - |
-| 堵转保护 | 默认开启 | 默认开启 | 默认开启 |
-
----
-
-## 固件编译
-
-### 主控固件 (ref_core_f405)
-
-```bash
-cd firmware/ref_core_f405/build
-ninja
-# 产物: build/Core-STM32F4-fw.bin / .hex / .elf
-```
-
-### 电机驱动固件 (motor_fw_f103_*)
-
-```bash
- cd firmware/motor_fw_f103_35/build   # 35电机 (J4~J6, 夹爪)
- cd firmware/motor_fw_f103_42/build  # 42电机 (J1~J3)
- cd firmware/motor_fw_f103_57/build  # 57电机 (地轨)
-ninja
-```
-ware/motor_fw_f103_35/build/*.elf` 等
-
----
-
-## 关键文件索引
-
-| 功能 | 文件路径 |
-|------|----------|
-| 主控入口 | `firmware/ref_core_f405/UserApp/main.cpp` |
-| 7轴机器人类 | `firmware/ref_core_f405/Robot/instances/dummy_robot.cpp` |
-| 关节 CAN 接口 | `firmware/ref_core_f405/Robot/actuators/ctrl_step/ctrl_step.cpp` |
-| CAN 协议 | `firmware/ref_core_f405/UserApp/protocols/can_protocol.cpp` |
-| ASCII 协议 | `firmware/ref_core_f405/UserApp/protocols/ascii_protocol.cpp` |
-| CAN 发送层 | `firmware/ref_core_f405/Bsp/communication/interface_can.cpp` |
-| 电机控制核心 | `firmware/motor_fw_f103_35/Ctrl/Motor/motor.cpp` |
-| 电机 CAN 解析 | `firmware/motor_fw_f103_35/UserApp/protocols/interface_can.cpp` |
-
----
-
-## 工作时行为指引
-
-### 修改政策
+### 4.1 修改政策
 
 **未经用户明确同意，绝不修改任何代码、配置或项目文件（任何类型）。**
 
@@ -153,27 +83,54 @@ ware/motor_fw_f103_35/build/*.elf` 等
 2. 解释修改内容及作用
 3. 等待用户确认后再执行
 
-### 系统环境
+### 4.2 系统环境
 
 - **Windows + PowerShell**：版本 5.1，`&&` 不支持，命令串接用分号 `;`
 - **Ninja 构建**：所有固件均用 Ninja，在 `build/` 目录下运行 `ninja`
-- **Python**：版本 3.x，用于调试工具（`docs/串口助手.py`）
+- **Python**：版本 3.x，用于调试工具（仓库根目录 `串口助手.py`）
 
-### 修改代码前的习惯
+### 4.3 修改代码前的习惯
 
-- **修改固件前**：确认目标文件属于哪个模块（主控 ref_core_f405 / 电机驱动 motor_fw）
-- **修改电机固件**：确认 `configurations.h` 选中的电机类型（35/42/57）
-- **修改 CAN 协议**：注意 StdId 格式 `(nodeID << 7) | cmdCode`
+- **修改固件前**：确认目标文件属于哪个模块（主控 `dummy-ref-core-fw` / 电机驱动 `dummy-motor-fw`）
+- **修改电机固件**：确认 `configurations.h` 选中的电机类型（35/42/57/gripper）
+- **修改 CAN 协议**：注意 StdId 格式 `(nodeID << 7) | cmdCode`；id=0 是 ALL 广播
 - **修改 Python 工具**：注意 Tkinter 非线程安全，UI 更新用 `root.after()`
 - **修改 UI 布局**：改 grid 布局后必须读取实际文件验证
+- **参考 `firmware/` 时警惕**：只对照思路与功能定义，不直接 copy 代码块；具体 bug 列表需另行审计
 
-### Git 提交
+### 4.4 Git 提交
 
 - agent 执行 `git commit` 时必须使用仓库本地的 `user.name` 和 `user.email`
 - **禁止**使用 agent 自己的身份
 - 分支命名建议：`fix-bug/`、`feat/` 前缀
 
-### 其他注意事项
+### 4.5 其他注意事项
 
 - **不要修改** `esp32/` 目录下的示例代码（非生产代码）
-- 项目文档集中存放于 `docs/` 目录
+- 项目技术文档集中存放于 `docs/` 目录（如 `CAN角度更新机制与J2-J6卡顿问题分析.md`）
+- 上位机调试工具在仓库根目录（`串口助手.py`、`串口助手_old.py`），**不在 docs/**
+- 修改前先确认目标属于哪个模块、哪个子项目（`dummy-ref-core-fw` / `dummy-motor-fw`）
+
+---
+
+## 5. 思考态度
+
+- **以代码为准**：用户描述的现象与代码冲突时，以代码和文档为准，不盲目顺从。
+- **先验证再动手**：修改前先读相关代码和文档，不凭"应该是这样"直接改。
+- **不被紧迫感绑架**："急""先这样改"不是跳过分析的理由，错误快速修改比慢的正确修改代价更高。
+- **指出矛盾**：发现用户描述与代码/事实不符，直接说，给出证据（文件路径+行号），不为了"听话"而附和。
+- **对比择优**：方案看证据和约束，不因"用户想做"或"原版就这样"就照单全收；`firmware/`有 bug 是已知前提，不因"和原版一样"认为它正确。
+- **先讲清再动手**：动手前说明问题和方案，等用户确认后再执行。
+- **承认不知道**：不确定时明确说需要查什么，不编造。
+
+### 5.2 工作状态同步（防止上下文断层）
+
+每次关键节点后，在 `docs/SESSION_STATUS.md` 里更新以下内容：
+
+- **当前问题**：正在分析/解决什么
+- **已确认事实**：代码里验证过的结论（附文件路径）
+- **已排除方向**：试过不通的路径及其原因
+- **未完成/待确认**：还需要什么信息、用户要决定什么
+- **最新改动**：改了什么文件、为什么改
+
+当上下文接近满时，主动写或更新这个文件，不等它被清空。

@@ -36,6 +36,7 @@ struct CAN_context
     uint32_t received_ack = 0;
     uint32_t unexpected_errors = 0;
     uint32_t unhandled_messages = 0;
+    uint32_t tx_busy_errors = 0;   // §8.6 — HAL_CAN_AddTxMessage 返回非 OK 的次数，用于诊断
 };
 
 struct CAN_context* get_can_ctx(CAN_HandleTypeDef* hcan);

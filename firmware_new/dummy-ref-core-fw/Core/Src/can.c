@@ -48,7 +48,7 @@ void MX_CAN1_Init(void)
   hcan1.Init.AutoBusOff = DISABLE;
   hcan1.Init.AutoWakeUp = ENABLE;
   hcan1.Init.AutoRetransmission = DISABLE;
-  hcan1.Init.ReceiveFifoLocked = DISABLE;
+  hcan1.Init.ReceiveFifoLocked = ENABLE;   // §8.7 — FIFO 满时保留旧帧，不静默覆盖
   hcan1.Init.TransmitFifoPriority = ENABLE;
   if (HAL_CAN_Init(&hcan1) != HAL_OK)
   {
@@ -80,7 +80,7 @@ void MX_CAN2_Init(void)
   hcan2.Init.AutoBusOff = DISABLE;
   hcan2.Init.AutoWakeUp = ENABLE;
   hcan2.Init.AutoRetransmission = DISABLE;
-  hcan2.Init.ReceiveFifoLocked = DISABLE;
+  hcan2.Init.ReceiveFifoLocked = ENABLE;   // §8.7 — FIFO 满时保留旧帧，不静默覆盖
   hcan2.Init.TransmitFifoPriority = DISABLE;
   if (HAL_CAN_Init(&hcan2) != HAL_OK)
   {

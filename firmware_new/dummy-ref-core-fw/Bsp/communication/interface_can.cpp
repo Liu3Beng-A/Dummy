@@ -171,7 +171,18 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan)
 }
 
 void HAL_CAN_RxFifo0FullCallback(CAN_HandleTypeDef* hcan)
-{ if (get_can_ctx(hcan)) get_can_ctx(hcan)->RxFifo0FullCallbackCnt++; }
+{
+    CAN_context* ctx = get_can_ctx(hcan);
+    if (!ctx) return;
+    ctx->RxFifo0FullCallbackCnt++;
+    // §8.7 — FIFO 满 = 主控来不及读。释放 1 个槽位让后续帧进来。
+    // HAL_CAN_GetRxMessage 调用后该帧已被消费（不再上 CAN 协议层）。
+    // 不调 OnCanMessage — 这一帧已被放弃，由 HAL_CAN_RxFifo0MsgPendingCallback
+    // 在它自己的入口正常处理后续到达的帧。
+    CAN_RxHeaderTypeDef tmpHeader;
+    uint8_t tmpBuf[8];
+    (void) HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &tmpHeader, tmpBuf);
+}
 
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* hcan)
 { if (get_can_ctx(hcan)) get_can_ctx(hcan)->RxFifo1MsgPendingCallbackCnt++; }
@@ -245,6 +256,31 @@ void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* t
         return;
 
     if (semaphore_status == osOK)
-        HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData, &canCtx->last_heartbeat_mailbox);
+    {
+        // §8.6+ — bxCAN 3 mb 限制：等 mb 出现空位再入
+        // 5ms 控制周期内 6 条 0x07：J1-J3 入 mb0/1/2 立即成功，J4-J6 HAL_BUSY
+        // 等 mb 空后 J4-J6 也能入；总等待 ~340µs（占 5ms 周期 7%）
+        // 1ms 超时兜底，防止总线故障永久阻塞信号量
+        uint32_t start = micros();
+        HAL_StatusTypeDef status;
+        while ((status = HAL_CAN_AddTxMessage(
+                    canCtx->handle, txHeader, txData, &canCtx->last_heartbeat_mailbox)) != HAL_OK)
+        {
+            if ((micros() - start) > 1000)   // 1ms 超时
+            {
+                canCtx->tx_busy_errors++;   // 用于诊断（健康时应 ≈ 0）
+                break;
+            }
+        }
+
+        if (status != HAL_OK)
+        {
+            if (canCtx->handle->Instance == CAN1)
+                osSemaphoreRelease(sem_can1_tx);
+            else if (canCtx->handle->Instance == CAN2)
+                osSemaphoreRelease(sem_can2_tx);
+        }
+        // 成功时信号量由 tx_complete_callback 在发送完成后释放
+    }
 }
 
