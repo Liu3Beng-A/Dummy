@@ -110,6 +110,7 @@ alwaysApply: true
 - 项目技术文档集中存放于 `docs/` 目录（如 `CAN角度更新机制与J2-J6卡顿问题分析.md`）
 - 上位机调试工具在仓库根目录（`串口助手.py`、`串口助手_old.py`），**不在 docs/**
 - 修改前先确认目标属于哪个模块、哪个子项目（`dummy-ref-core-fw` / `dummy-motor-fw`）
+- **不要擅自提交commit** commit权限仅由用户决策，用户没说commit禁止擅自commit 
 
 ---
 
