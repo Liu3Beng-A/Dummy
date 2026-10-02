@@ -39,10 +39,11 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         std::string s(_cmd);
         if (s.find("GETJPOS") != std::string::npos)
         {
-            Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f",
+            Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],
                     dummy.currentJoints.a[2], dummy.currentJoints.a[3],
-                    dummy.currentJoints.a[4], dummy.currentJoints.a[5]);
+                    dummy.currentJoints.a[4], dummy.currentJoints.a[5],
+                    dummy.currentRailPos);  // [NEW] 第 7 位，Rail (mm)
         } else if (s.find("GETRAILPOS") != std::string::npos)
         {
             Respond(_responseChannel, "ok %.2f", dummy.currentRailPos);
@@ -93,11 +94,18 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             uint32_t node;
             sscanf(_cmd, "#REBOOT %lu", &node);
-            if (node >= 1 & node <= 6){
+            if (node >= 1 && node <= 7)                  // [FIX] && 写法 + 范围到 7
+            {
                 dummy.motorJ[node]->Reboot();
                 Respond(_responseChannel, "ok REBOOT MOTOR [%lu]", node);
             }
-            else {
+            else if (node == 0)                          // [NEW] ALL 代理
+            {
+                Respond(_responseChannel, "ok REBOOT ALL MOTORS + HAND");  // [FIX] 先回包
+                dummy.RebootAllMotors();                                   // [FIX] 再发重启帧
+            }
+            else
+            {
                 Respond(_responseChannel, "error REBOOT MOTOR [%lu] is wrong", node);
             }
         }else if (s.find("CMDMODE") != std::string::npos)
@@ -154,10 +162,11 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
         std::string s(_cmd);
         if (s.find("GETJPOS") != std::string::npos)
         {
-            Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f",
+            Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],
                     dummy.currentJoints.a[2], dummy.currentJoints.a[3],
-                    dummy.currentJoints.a[4], dummy.currentJoints.a[5]);
+                    dummy.currentJoints.a[4], dummy.currentJoints.a[5],
+                    dummy.currentRailPos);  // [NEW] 第 7 位，Rail (mm)
         } else if (s.find("GETRAILPOS") != std::string::npos)
         {
             Respond(_responseChannel, "ok %.2f", dummy.currentRailPos);

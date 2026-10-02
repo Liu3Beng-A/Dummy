@@ -264,7 +264,7 @@ class RobotSerialAssistantOld:
         node_f.pack(fill=tk.X)
         ttk.Label(node_f, text="节点:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
         self.cb_node = ttk.Combobox(node_f, width=5,
-                                    values=[str(i) for i in range(1, 7)],
+                                    values=[str(i) for i in range(0, 8)],   # 0=ALL(全部+夹爪), 1~6=J1~J6, 7=地轨
                                     state="readonly", font=("Arial", 10))
         self.cb_node.current(0)
         self.cb_node.pack(side=tk.LEFT, padx=4)
@@ -720,7 +720,8 @@ class RobotSerialAssistantOld:
         # 区分来源，必须由 500ms 定时器统一收尾时再连同 kind 一起取走。
         if self._pending_sync and line.startswith("ok"):
             nums = self._parse_numbers(line[2:].strip())
-            if nums is not None and len(nums) == 6:
+            expected = 7 if self._pending_sync == "j" else 6
+            if nums is not None and len(nums) == expected:
                 self._sync_data = nums
 
         # 顺序发送：固件每执行完一条 ">" 回一个 "ok"，收到后再发下一条
@@ -914,18 +915,18 @@ class RobotSerialAssistantOld:
             self.log(f"{what}同步超时，请确认机械臂已使能（!START）", "ERROR")
 
     def _fill_joints(self, nums):
-        """把 7 个数写进滑块（v3.1：nums[0]=Rail(mm), nums[1..6]=J1..J6(°)）"""
+        """把 7 个数写进滑块（新协议：nums[0..5]=J1..J6(°), nums[6]=Rail(mm)）"""
         self._suppress_drag_send = True
         try:
-            # 同步 J1~J6 (nums[1..6])
+            # 同步 J1~J6 (nums[0..5])
             for i in range(6):
-                v = nums[i + 1]
+                v = nums[i]
                 self.scl_joints[i].set(v)
                 self.ent_joints[i].delete(0, tk.END)
                 self.ent_joints[i].insert(0, f"{v:.2f}")
                 self.lbl_joints[i].config(text=f"{v:.2f}")
-            # 同步 Rail (nums[0])
-            rv = nums[0]
+            # 同步 Rail (nums[6])
+            rv = nums[6]
             self.scl_j7.set(rv)
             self.ent_j7.delete(0, tk.END)
             self.ent_j7.insert(0, f"{rv:.2f}")

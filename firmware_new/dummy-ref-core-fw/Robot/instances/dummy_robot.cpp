@@ -153,6 +153,16 @@ void DummyRobot::Reboot()
     HAL_NVIC_SystemReset();
 }
 
+void DummyRobot::RebootAllMotors()
+{
+    motorJ[ALL]->Reboot();   // J1~J7（含地轨），1 帧广播
+    hand->Reboot();          // 夹爪（id=8）单独 1 帧
+    // 故意不 osDelay：
+    //   原 Reboot() 末尾 500ms 是给 HAL_NVIC_SystemReset() 留出发帧时间，
+    //   本函数不调 reset，且 CAN 帧已在 µs 级装入 Mailbox（can.c CAN_Send），
+    //   无需 block 任何 RTOS 任务。
+}
+
 void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t _joints)
 {
     for (int j = 1; j <= 6; j++)

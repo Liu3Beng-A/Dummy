@@ -160,6 +160,15 @@ public:
     void UpdateJointAnglesCallback();
     void UpdateJointPose6D();
     void Reboot();
+    /** 重启全部电机 + 夹爪（**不**重启主控系统）。用于串口 #REBOOT 0。
+     *  - J1~J7（含地轨）通过 motorJ[ALL] 广播 1 帧 StdId=0x7F
+     *    （CAN 接收端 id==0 触发所有电机响应，见 dummy-motor-fw/Core/Src/can.c:202-204）
+     *  - 夹爪（id=8）通过 DummyHand::Reboot() 单独发 1 帧 StdId=0x47F
+     *  - 不调 HAL_NVIC_SystemReset()，避免主控重启后串口收不到 ok 回包
+     *  - 不调 osDelay：两帧 CAN 在 µs 级装入 Mailbox，硬件异步发完；
+     *    block 主任务 500ms 会导致 FixUpdate / OLED / 串口命令处理全部暂停
+     *  - 与 Reboot() 的区别：Reboot() 含 HAL_NVIC_SystemReset()，给内部协议层 reboot 调用 */
+    void RebootAllMotors();
     void SetEnable(bool _enable);
     void SetRGBEnable(bool _enable);
     bool GetRGBEnabled();
