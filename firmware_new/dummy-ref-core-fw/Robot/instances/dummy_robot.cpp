@@ -314,6 +314,11 @@ void DummyRobot::UpdateJointAnglesCallback()
     // 地轨：motorJ[7]->angle 单位是"电机轴圈×360"（reduction=1）
     // 反推 mm: angle / 360 × 5
     currentRailPos = motorJ[7]->angle / 360.0f * RAIL_MM_PER_CIRCLE;
+    // bit7 跟随地轨 FINISH 状态，参与 OLED *-_ 指示
+    if (motorJ[7]->state == CtrlStepMotor::FINISH)
+        jointsStateFlag |= (1 << 7);
+    else
+        jointsStateFlag &= ~(1 << 7);
 }
 
 
@@ -437,7 +442,7 @@ void DummyRobot::UpdateJointPose6D()
 
 bool DummyRobot::IsMoving()
 {
-    return jointsStateFlag != 0b01111110;  // bit1~6 全置位 → FINISH（地轨位 bit7 不参与）
+    return (jointsStateFlag & 0b11111110) != 0b11111110;  // bit1~7 全置位 → FINISH（夹爪位 bit8 不参与）
 }
 
 

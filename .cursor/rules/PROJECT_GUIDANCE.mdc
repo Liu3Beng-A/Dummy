@@ -111,7 +111,7 @@ alwaysApply: true
 - 上位机调试工具在仓库根目录（`串口助手.py`、`串口助手_old.py`），**不在 docs/**
 - 修改前先确认目标属于哪个模块、哪个子项目（`dummy-ref-core-fw` / `dummy-motor-fw`）
 - **不要擅自提交commit** commit权限仅由用户决策，用户没说commit禁止擅自commit 
-
+- **串口助手_old.py为目标串口助手** 串口助手.py仅用于参考，禁止修改/串口助手.py;新加功能时需要注意串口助手_old.py同步更新
 ---
 
 ## 5. 思考态度

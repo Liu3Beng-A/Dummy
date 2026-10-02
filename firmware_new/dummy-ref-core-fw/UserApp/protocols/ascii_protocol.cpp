@@ -43,6 +43,9 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],
                     dummy.currentJoints.a[2], dummy.currentJoints.a[3],
                     dummy.currentJoints.a[4], dummy.currentJoints.a[5]);
+        } else if (s.find("GETRAILPOS") != std::string::npos)
+        {
+            Respond(_responseChannel, "ok %.2f", dummy.currentRailPos);
         } else if (s.find("GETLPOS") != std::string::npos)
         {
             dummy.UpdateJointPose6D();
@@ -155,6 +158,9 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],
                     dummy.currentJoints.a[2], dummy.currentJoints.a[3],
                     dummy.currentJoints.a[4], dummy.currentJoints.a[5]);
+        } else if (s.find("GETRAILPOS") != std::string::npos)
+        {
+            Respond(_responseChannel, "ok %.2f", dummy.currentRailPos);
         } else if (s.find("GETLPOS") != std::string::npos)
         {
             dummy.UpdateJointPose6D();

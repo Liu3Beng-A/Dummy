@@ -105,36 +105,38 @@ void ThreadOledUpdate(void* argument)
                     (int) roundf(dummy.currentJoints.a[0]), (int) roundf(dummy.currentJoints.a[1]),
                     (int) roundf(dummy.currentJoints.a[2]), (int) roundf(dummy.currentJoints.a[3]),
                     (int) roundf(dummy.currentJoints.a[4]), (int) roundf(dummy.currentJoints.a[5]));
-        oled.setCursor(0, 38);
-        oled.printf("rail:%4dmm", (int) roundf(dummy.currentRailPos));
+        oled.setCursor(17, 40);
+        oled.printf("rail:%.2fmm", dummy.currentRailPos);
 
-        oled.drawBox(40, 35, 128, 24);
-        oled.setFont(u8g2_font_6x12_tr);
+        // [FIX] 模式 + 运动状态上移到中部（10x20），紧跟 rail
+        oled.setFont(u8g2_font_10x20_tr);
+        oled.setCursor(0, 58);
+        if (dummy.IsEnabled())
+        {
+            for (int i = 1; i <= 7; i++)
+                buf[i - 1] = (dummy.jointsStateFlag & (1 << i) ? '*' : '_');
+            buf[7] = 0;
+            oled.printf("%s: %s", cmdModeNames[dummy.commandMode - 1], buf);
+        } else
+        {
+            oled.printf("%s: %s", cmdModeNames[dummy.commandMode - 1], "=======");
+        }
+
+        // [FIX] XYZ/ABC 下移到屏幕底部：标签在框左外侧，6 个值在框内右侧（6x10 + 白框）
+        oled.drawBox(40, 60, 128, 20);
+        oled.setFont(u8g2_font_6x10_tr);
         oled.setDrawColor(0);
-        oled.setCursor(42, 45);
+        oled.setCursor(42, 70);
         oled.printf("%4d|%4d|%4d", (int) roundf(dummy.currentPose6D.X),
                     (int) roundf(dummy.currentPose6D.Y), (int) roundf(dummy.currentPose6D.Z));
-        oled.setCursor(42, 56);
+        oled.setCursor(42, 79);
         oled.printf("%4d|%4d|%4d", (int) roundf(dummy.currentPose6D.A),
                     (int) roundf(dummy.currentPose6D.B), (int) roundf(dummy.currentPose6D.C));
         oled.setDrawColor(1);
-        oled.setCursor(0, 45);
+        oled.setCursor(0, 70);
         oled.printf("[XYZ]:");
-        oled.setCursor(0, 56);
+        oled.setCursor(0, 79);
         oled.printf("[ABC]:");
-
-        oled.setFont(u8g2_font_10x20_tr);
-        oled.setCursor(0, 78);
-        if (dummy.IsEnabled())
-        {
-            for (int i = 1; i <= 6; i++)
-                buf[i - 1] = (dummy.jointsStateFlag & (1 << i) ? '*' : '_');
-            buf[6] = 0;
-            oled.printf("[%s] %s", cmdModeNames[dummy.commandMode - 1], buf);
-        } else
-        {
-            oled.printf("[%s] %s", cmdModeNames[dummy.commandMode - 1], "======");
-        }
 
         oled.sendBuffer();
     }
