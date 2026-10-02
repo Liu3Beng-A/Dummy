@@ -53,12 +53,15 @@ void Main()
             .dce_kp = 200, .dce_kv = 80, .dce_ki = 300, .dce_kd = 250,
             .motor_temperature = 0.0,
 #elif MOTOR_TYPE == 57
-            .currentLimit = 3000,
+            .currentLimit = 2500,                                          // mA — 参考 firmware/motor_fw_f103_57 设为 2.5A
             .velocityLimit = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
             .velocityAcc = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
             .calibrationCurrent = 2000,
+            // DCE 参数采用 firmware/motor_fw_f103_57 参考版本
             .dce_kp = 300, .dce_kv = 120, .dce_ki = 150, .dce_kd = 50,
             .motor_temperature = 0.0,
+            .enableMotorOnBoot = false,
+            .enableStallProtect = true,    // 57 地轨默认开启堵转保护（覆盖 outer 块的 false）
 #elif MOTOR_TYPE == 8
             .currentLimit = 2500,
             .velocityLimit = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
@@ -67,8 +70,8 @@ void Main()
             .dce_kp = 200, .dce_kv = 80, .dce_ki = 300, .dce_kd = 250,
             .motor_temperature = 0.0,
 #endif
-            .enableMotorOnBoot=false,
-            .enableStallProtect=false,
+            // .enableMotorOnBoot/.enableStallProtect 在 57 段内显式设为 false/true；
+            // 35/42/8 此处省略，按 C++20 designated initializer 规则默认为 false
             .enableTempWatch=false,
         };
         eeprom.put(0, boardConfig);
@@ -84,9 +87,12 @@ void Main()
     motor.config.motionParams.encoderHomeOffset = boardConfig.encoderHomeOffset;
     motor.config.motionParams.ratedCurrent = boardConfig.currentLimit;
 #if MOTOR_TYPE == 57
-    motor.config.motionParams.ratedCurrentAcc = 50 * 1000;    // mA/s - slower ramp for 57 motor
-#else
-    motor.config.motionParams.ratedCurrentAcc = 2 * 1000;     // mA/s
+    motor.config.motionParams.ratedCurrentAcc = 50 * 1000;    // mA/s — 57 电机慢爬坡
+    // 强制 nodeID（不读 DIP 开关），地轨 ID 固定为 7
+    boardConfig.canNodeId = RAIL_FIXED_NODE_ID;
+#elif MOTOR_TYPE == 8
+    motor.config.motionParams.ratedCurrentAcc = 2 * 1000;     // mA/s（与通用一致）
+    boardConfig.canNodeId = GRIPPER_FIXED_NODE_ID;
 #endif
     motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;
     motor.config.motionParams.ratedVelocityAcc = boardConfig.velocityAcc;

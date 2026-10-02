@@ -17,6 +17,99 @@ inline float AbsMaxOf6(DOF6Kinematic::Joint6D_t _joints, uint8_t &_index)
 }
 
 
+/**
+ * @brief §3.3.1 单轴梯形速度曲线总时间（v2.7，与电机端 motion_planner.cpp PositionTracker 对齐）
+ * @param d 距离（电机轴圈数）
+ * @param v 目标速度（匀速段速度，r/s）
+ * @param a 加速度（r/s²）
+ * @return 该轴按梯形曲线跑 d 距离的总时间（s）
+ * @note  距离太短（2*d_acc >= d）时退化为三角曲线：T = 2*sqrt(d/a)
+ */
+static float timeTrapezoid(float d, float v, float a)
+{
+    if (d < 1e-6f || v < 1e-6f || a < 1e-6f) return 0;
+    float d_acc = v * v / (2.0f * a);  // 单边加速距离
+    if (2.0f * d_acc >= d) {
+        // 三角形：距离太短，没匀速段
+        return 2.0f * sqrtf(d / a);
+    }
+    // 梯形：加速→匀速→减速
+    return 2.0f * v / a + (d - 2.0f * d_acc) / v;
+}
+
+
+/**
+ * @brief §3.3.1 7 轴同步抵达速度规划 v2.7（梯形曲线 + 迭代收敛）
+ * @param deltaRails[7] 各轴距离，[0]=地轨(mm)，[1..6]=关节(°)
+ * @param sliderCaps[7] 各轴电机轴 r/s 上限（地轨=30，关节=30）
+ * @param accel[7]      各轴加速度（r/s²），0 用 JOINT_ACC_FALLBACK 兜底
+ * @param sliderSpeed   统一基础速度（slider × 0.30，r/s）
+ * @param outSpeeds[7]  输出每轴最终电机轴 r/s
+ * @return timeBudget   同步抵达总时间（s）
+ * @note  与电机端 motion_planner.cpp PositionTracker 公式一致：对称梯形加减速，
+ *        距离太短退化为三角形曲线。本期 jointAccRuntime[] 异步回填逻辑属 §9 #7，
+ *        未回包前用 JOINT_ACC_FALLBACK[i] 兜底。
+ */
+static float ComputeSyncSpeeds(const float deltaRails[7], const float sliderCaps[7],
+                               const float accel[7], float sliderSpeed,
+                               float outSpeeds[7])
+{
+    // 步骤 1：各轴距离 → 电机轴圈数
+    float distMotor[7];
+    for (int i = 0; i < 7; i++) {
+        distMotor[i] = (i == 0)
+            ? fabsf(deltaRails[i]) / RAIL_MM_PER_CIRCLE
+            : fabsf(deltaRails[i]) * (float)MOTOR_REDUCTION[i] / 360.0f;
+    }
+
+    // 步骤 2：初始预算时间 = 各轴在 sliderSpeed（钳制到 cap）下的梯形时间，取 max
+    float timeBudget = 0;
+    for (int i = 0; i < 7; i++) {
+        if (distMotor[i] < 1e-6f) continue;
+        float a = (accel[i] > 1e-6f) ? accel[i] : JOINT_ACC_FALLBACK[i];
+        float v = fminf(sliderSpeed, sliderCaps[i]);
+        float t = timeTrapezoid(distMotor[i], v, a);
+        if (t > timeBudget) timeBudget = t;
+    }
+
+    if (timeBudget < 1e-6f) {
+        // 所有轴距离都 ≈ 0，不动
+        for (int i = 0; i < 7; i++) outSpeeds[i] = 0;
+        return 0.0f;
+    }
+
+    // 步骤 3：迭代收敛（最多 10 轮，一般 2~3 轮收敛）
+    // 解二次方程：v²/a - v*T + d = 0  →  v = (T - sqrt(T² - 4d/a)) × a / 2
+    for (int iter = 0; iter < 10; iter++) {
+        float newTimeBudget = 0;
+        for (int i = 0; i < 7; i++) {
+            if (distMotor[i] < 1e-6f) {
+                outSpeeds[i] = 0;
+                continue;
+            }
+            float a  = (accel[i] > 1e-6f) ? accel[i] : JOINT_ACC_FALLBACK[i];
+            float vc = sliderCaps[i];
+            float disc = timeBudget * timeBudget - 4.0f * distMotor[i] / a;
+            // 临界抖动：disc 偶尔 <0 时钳到 0，让反推公式自然算出"刚够用"速度
+            if (disc < 0) disc = 0;
+            float v = (timeBudget - sqrtf(disc)) * a * 0.5f;
+            // 双钳制：物理上限 (vc) + 用户意图上限 (sliderSpeed)
+            if (v > vc) v = vc;
+            if (v > sliderSpeed) v = sliderSpeed;
+            outSpeeds[i] = v;
+            float t = timeTrapezoid(distMotor[i], v, a);
+            if (t > newTimeBudget) newTimeBudget = t;
+        }
+        if (fabsf(newTimeBudget - timeBudget) < 1e-3f) {
+            timeBudget = newTimeBudget;
+            break;
+        }
+        timeBudget = newTimeBudget;
+    }
+    return timeBudget;
+}
+
+
 DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
     hcan(_hcan)
 {
@@ -27,7 +120,9 @@ DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
     motorJ[4] = new CtrlStepMotor(_hcan, 4, true, 50, -270, 270);
     motorJ[5] = new CtrlStepMotor(_hcan, 5, true, 50, -100, 100);
     motorJ[6] = new CtrlStepMotor(_hcan, 6, true, 30, -180, 180);
-    hand = new DummyHand(_hcan, 7);
+    motorJ[7] = new CtrlStepMotor(_hcan, 7, true, 1, -250, 250);  //  -250/+250 单位是 mm（MoveJ 按 mm 比较），不是°。直连丝杆1605（5mm/圈）
+
+    hand = new DummyHand(_hcan, 8);   
 
     dof6Solver = new DOF6Kinematic(0.165f, 0.0f, 0.170f, 0.117f, 0.0695f, 0.113f);
 }
@@ -35,7 +130,7 @@ DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
 
 DummyRobot::~DummyRobot()
 {
-    for (int j = 0; j <= 6; j++)
+    for (int j = 0; j <= 7; j++)   // [FIX] 0..6 → 0..7（包含地轨）
         delete motorJ[j];
 
     delete hand;
@@ -53,6 +148,7 @@ void DummyRobot::Init()
 void DummyRobot::Reboot()
 {
     motorJ[ALL]->Reboot();
+    hand->Reboot();                          // [FIX] 夹爪不在 ALL 代理范围，需独立发 0x7F 帧
     osDelay(500); // waiting for all joints done
     HAL_NVIC_SystemReset();
 }
@@ -64,40 +160,75 @@ void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t _joints)
         motorJ[j]->SetAngleWithVelocityLimit(_joints.a[j - 1] - initPose.a[j - 1],
                                              dynamicJointSpeeds.a[j - 1]);
     }
+    // [FIX] 地轨：reduction=1 直连丝杆1605（5mm/圈）。
+    // targetRailPos 单位是 mm；motorJ[7]->angleLimitMin/Max 在此处按 **mm** 直接比较
+    // （不要按 CtrlStepMotor 默认°语义解读，否则会把 250 当成 250°=6.94mm，误以为软限位过窄）。
+    // 下发必须用 SetPositionWithVelocityLimit 直接传电机圈数（mm/5），
+    // 否则被 SetAngle* 按°解读，实际走 1/72（100 mm → 1.39 mm）。
+    motorJ[7]->SetPositionWithVelocityLimit(targetRailPos / RAIL_MM_PER_CIRCLE,
+                                            dynamicJointSpeeds7[0]);
 }
 
 
-bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6)
+bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4,
+                       float _j5, float _j6, float _j7_mm, float _speed)
 {
     DOF6Kinematic::Joint6D_t targetJointsTmp(_j1, _j2, _j3, _j4, _j5, _j6);
-    bool valid = true;
 
+    // 地轨限位
+    if (_j7_mm > motorJ[7]->angleLimitMax || _j7_mm < motorJ[7]->angleLimitMin)
+        return false;
+
+    // 关节限位
+    bool valid = true;
     for (int j = 1; j <= 6; j++)
     {
         if (targetJointsTmp.a[j - 1] > motorJ[j]->angleLimitMax ||
             targetJointsTmp.a[j - 1] < motorJ[j]->angleLimitMin)
             valid = false;
     }
+    if (!valid) return false;
 
-    if (valid)
-    {
-        DOF6Kinematic::Joint6D_t deltaJoints = targetJointsTmp - currentJoints;
-        uint8_t index;
-        float maxAngle = AbsMaxOf6(deltaJoints, index);
-        float time = maxAngle * (float) (motorJ[index + 1]->reduction) / jointSpeed;
-        for (int j = 1; j <= 6; j++)
-        {
-            dynamicJointSpeeds.a[j - 1] =
-                abs(deltaJoints.a[j - 1] * (float) (motorJ[j]->reduction) / time * 0.1f); //0~10r/s
-        }
+    // §3.3.1 物理同步：梯形曲线 + 迭代收敛（替换原"按距离比例限速"）
+    // 按用户给定 speed (1~100) 换算电机轴 r/s：100 → 30 r/s
+    float slider = _speed > 0 ? _speed : 50.0f;  // 默认值 50（原 DEFAULT_JOINT_SPEED）
+    if (slider < 1) slider = 1;
+    if (slider > 100) slider = 100;
+    float sliderSpeedRps = slider * 0.30f;  // 100 → 30 r/s
 
-        jointsStateFlag = 0;
-        targetJoints = targetJointsTmp;
+    // 各轴目标位移：索引 0=地轨(mm)，1..6=关节(°)
+    float deltaRails[7] = {
+        _j7_mm - currentRailPos,
+        targetJointsTmp.a[0] - currentJoints.a[0],
+        targetJointsTmp.a[1] - currentJoints.a[1],
+        targetJointsTmp.a[2] - currentJoints.a[2],
+        targetJointsTmp.a[3] - currentJoints.a[3],
+        targetJointsTmp.a[4] - currentJoints.a[4],
+        targetJointsTmp.a[5] - currentJoints.a[5],
+    };
+    // 各轴加速度：异步回填槽；本期用 JOINT_ACC_FALLBACK 兜底（§9 #7 后续接电机端回填）
+    float jointAcc[7] = {
+        jointAccRuntime[0], jointAccRuntime[1], jointAccRuntime[2],
+        jointAccRuntime[3], jointAccRuntime[4], jointAccRuntime[5],
+        jointAccRuntime[6],
+    };
 
-        return true;
+    float outSpeeds[7] = {0};
+    float timeBudget = ComputeSyncSpeeds(deltaRails, SLIDER_CAPS_V, jointAcc,
+                                        sliderSpeedRps, outSpeeds);
+
+    // 写回 dynamicJointSpeeds7：[0]=地轨，[1..6]=J1..J6
+    dynamicJointSpeeds7[0] = outSpeeds[0];
+    for (int j = 1; j <= 6; j++) {
+        dynamicJointSpeeds7[j] = outSpeeds[j];
+        dynamicJointSpeeds.a[j - 1] = outSpeeds[j];   // ServoJ 兼容旧字段
     }
 
-    return false;
+    jointsStateFlag = 0;
+    targetJoints = targetJointsTmp;
+    targetRailPos = _j7_mm;
+
+    return true;
 }
 
 
@@ -149,9 +280,11 @@ bool DummyRobot::MoveL(float _x, float _y, float _z, float _a, float _b, float _
             }
         }
 
+        // [NEW] MoveL 不动地轨，地轨保持当前位置
         return MoveJ(ikSolves.config[indexConfig].a[0], ikSolves.config[indexConfig].a[1],
                      ikSolves.config[indexConfig].a[2], ikSolves.config[indexConfig].a[3],
-                     ikSolves.config[indexConfig].a[4], ikSolves.config[indexConfig].a[5]);
+                     ikSolves.config[indexConfig].a[4], ikSolves.config[indexConfig].a[5],
+                     currentRailPos, 0);
     }
 
     return false;
@@ -159,8 +292,11 @@ bool DummyRobot::MoveL(float _x, float _y, float _z, float _a, float _b, float _
 
 void DummyRobot::UpdateJointAngles()
 {
-    for (int i = 1; i <= 6; i++)
-        motorJ[i]->UpdateAngle();
+    // 轮询查询 1~7（J1~J7，含地轨），每帧查一个电机，100Hz 下约 14Hz/轴
+    static int currentIndex = 1;
+    motorJ[currentIndex]->UpdateAngle();
+    currentIndex++;
+    if (currentIndex > 7) currentIndex = 1;
 }
 
 
@@ -175,6 +311,9 @@ void DummyRobot::UpdateJointAnglesCallback()
         else
             jointsStateFlag &= ~(1 << i);
     }
+    // 地轨：motorJ[7]->angle 单位是"电机轴圈×360"（reduction=1）
+    // 反推 mm: angle / 360 × 5
+    currentRailPos = motorJ[7]->angle / 360.0f * RAIL_MM_PER_CIRCLE;
 }
 
 
@@ -235,7 +374,7 @@ void DummyRobot::Homing()
     float lastSpeed = jointSpeed;
     SetJointSpeed(10);
 
-    MoveJ(0, 0, 90, 0, 0, 0);
+    MoveJ(0, 0, 90, 0, 0, 0, 0, 10);   // J1~J6 = 0,0,90,0,0,0 + 地轨 = 0mm
     MoveJoints(targetJoints);
     while (IsMoving())
         osDelay(10);
@@ -250,7 +389,7 @@ void DummyRobot::Resting()
     SetJointSpeed(10);
 
     MoveJ(REST_POSE.a[0], REST_POSE.a[1], REST_POSE.a[2],
-          REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5]);
+          REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5], 0, 10);  // 地轨=0mm
     MoveJoints(targetJoints);
     while (IsMoving())
         osDelay(10);
@@ -262,7 +401,9 @@ void DummyRobot::Resting()
 void DummyRobot::SetEnable(bool _enable)
 {
     motorJ[ALL]->SetEnable(_enable);
+    hand->SetEnable(_enable);
     isEnabled = _enable;
+    if (_enable) motorJ[ALL]->UpdateAngle();  // 预发一次回包请求
 }
 
 void DummyRobot::SetRGBEnable(bool _enable)
@@ -296,7 +437,7 @@ void DummyRobot::UpdateJointPose6D()
 
 bool DummyRobot::IsMoving()
 {
-    return jointsStateFlag != 0b1111110;
+    return jointsStateFlag != 0b01111110;  // bit1~6 全置位 → FINISH（地轨位 bit7 不参与）
 }
 
 
@@ -353,7 +494,7 @@ void DummyHand::SetAngle(float _angle)
     if (_angle < 0)_angle = 0;
 
     uint8_t mode = 0x02;
-    txHeader.StdId = 7 << 7 | mode;
+    txHeader.StdId = nodeID << 7 | mode;   // [FIX] 使用构造函数传入的 nodeID（8），不再硬编码 7
 
     // Float to Bytes
     auto* b = (unsigned char*) &_angle;
@@ -370,7 +511,7 @@ void DummyHand::SetMaxCurrent(float _val)
     if (_val < 0)_val = 0;
 
     uint8_t mode = 0x01;
-    txHeader.StdId = 7 << 7 | mode;
+    txHeader.StdId = nodeID << 7 | mode;   // [FIX] 使用构造函数传入的 nodeID（8），不再硬编码 7
 
     // Float to Bytes
     auto* b = (unsigned char*) &_val;
@@ -389,6 +530,13 @@ void DummyHand::SetEnable(bool _enable)
         SetMaxCurrent(0);
 }
 
+void DummyHand::Reboot()
+{
+    uint8_t mode = 0x7f;
+    txHeader.StdId = nodeID << 7 | mode;
+    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
 
 uint32_t DummyRobot::CommandHandler::Push(const std::string &_cmd)
 {
@@ -403,7 +551,8 @@ uint32_t DummyRobot::CommandHandler::Push(const std::string &_cmd)
 void DummyRobot::CommandHandler::EmergencyStop()
 {
     context->MoveJ(context->currentJoints.a[0], context->currentJoints.a[1], context->currentJoints.a[2],
-                   context->currentJoints.a[3], context->currentJoints.a[4], context->currentJoints.a[5]);
+                   context->currentJoints.a[3], context->currentJoints.a[4], context->currentJoints.a[5],
+                   context->currentRailPos, 0);  // 地轨保持当前位置
     context->MoveJoints(context->targetJoints);
     context->isEnabled = false;
     ClearFifo();
@@ -434,24 +583,20 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
         case COMMAND_CONTINUES_TRAJECTORY:
             if (_cmd[0] == '>' || _cmd[0] == '&')
             {
-                float joints[6];
-                float speed;
-
+                float j1, j2, j3, j4, j5, j6, j7;
+                float speed = 0.0f;
                 if (_cmd[0] == '>')
-                    argNum = sscanf(_cmd.c_str(), ">%f,%f,%f,%f,%f,%f,%f", joints, joints + 1, joints + 2,
-                                    joints + 3, joints + 4, joints + 5, &speed);
+                    argNum = sscanf(_cmd.c_str(), ">%f,%f,%f,%f,%f,%f,%f,%f",
+                                    &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
                 if (_cmd[0] == '&')
-                    argNum = sscanf(_cmd.c_str(), "&%f,%f,%f,%f,%f,%f,%f", joints, joints + 1, joints + 2,
-                                    joints + 3, joints + 4, joints + 5, &speed);
-                if (argNum == 6)
+                    argNum = sscanf(_cmd.c_str(), "&%f,%f,%f,%f,%f,%f,%f,%f",
+                                    &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
+                if (argNum >= 7)
                 {
-                    context->MoveJ(joints[0], joints[1], joints[2],
-                                   joints[3], joints[4], joints[5]);
-                } else if (argNum == 7)
-                {
-                    context->SetJointSpeed(speed);
-                    context->MoveJ(joints[0], joints[1], joints[2],
-                                   joints[3], joints[4], joints[5]);
+                    if (argNum == 8) context->SetJointSpeed(speed);
+                    // 默认地轨保持当前位置
+                    if (argNum == 7) j7 = context->currentRailPos;
+                    context->MoveJ(j1, j2, j3, j4, j5, j6, j7, speed);
                 }
                 // Trigger a transmission immediately, in case IsMoving() returns false
                 context->MoveJoints(context->targetJoints);
@@ -484,24 +629,20 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
         case COMMAND_TARGET_POINT_INTERRUPTABLE:
             if (_cmd[0] == '>' || _cmd[0] == '&')
             {
-                float joints[6];
-                float speed;
-
+                float j1, j2, j3, j4, j5, j6, j7;
+                float speed = 0.0f;
                 if (_cmd[0] == '>')
-                    argNum = sscanf(_cmd.c_str(), ">%f,%f,%f,%f,%f,%f,%f", joints, joints + 1, joints + 2,
-                                    joints + 3, joints + 4, joints + 5, &speed);
+                    argNum = sscanf(_cmd.c_str(), ">%f,%f,%f,%f,%f,%f,%f,%f",
+                                    &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
                 if (_cmd[0] == '&')
-                    argNum = sscanf(_cmd.c_str(), "&%f,%f,%f,%f,%f,%f,%f", joints, joints + 1, joints + 2,
-                                    joints + 3, joints + 4, joints + 5, &speed);
-                if (argNum == 6)
+                    argNum = sscanf(_cmd.c_str(), "&%f,%f,%f,%f,%f,%f,%f,%f",
+                                    &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
+                if (argNum >= 7)
                 {
-                    context->MoveJ(joints[0], joints[1], joints[2],
-                                   joints[3], joints[4], joints[5]);
-                } else if (argNum == 7)
-                {
-                    context->SetJointSpeed(speed);
-                    context->MoveJ(joints[0], joints[1], joints[2],
-                                   joints[3], joints[4], joints[5]);
+                    if (argNum == 8) context->SetJointSpeed(speed);
+                    // 默认地轨保持当前位置
+                    if (argNum == 7) j7 = context->currentRailPos;
+                    context->MoveJ(j1, j2, j3, j4, j5, j6, j7, speed);
                 }
                 Respond(*usbStreamOutputPtr, "ok");
                 Respond(*uart4StreamOutputPtr, "ok");

@@ -92,6 +92,8 @@ void CtrlStepMotor::SetVelocitySetPoint(float _val)
 
 void CtrlStepMotor::SetPositionSetPoint(float _val)
 {
+    _val = inverseDirection ? -_val : _val;  // [FIX] inverseDirection 下放到最底层
+
     uint8_t mode = 0x05;
     txHeader.StdId = nodeID << 7 | mode;
 
@@ -107,6 +109,8 @@ void CtrlStepMotor::SetPositionSetPoint(float _val)
 
 void CtrlStepMotor::SetPositionWithVelocityLimit(float _pos, float _vel)
 {
+    _pos = inverseDirection ? -_pos : _pos;  // [FIX] inverseDirection 下放到最底层
+
     uint8_t mode = 0x07;
     txHeader.StdId = nodeID << 7 | mode;
 
@@ -250,17 +254,15 @@ void CtrlStepMotor::EraseConfigs()
 
 void CtrlStepMotor::SetAngle(float _angle)
 {
-    _angle = inverseDirection ? -_angle : _angle;
     float stepMotorCnt = _angle / 360.0f * (float) reduction;
-    SetPositionSetPoint(stepMotorCnt);
+    SetPositionSetPoint(stepMotorCnt);  // SetPositionSetPoint 已根据 inverseDirection 取反
 }
 
 
 void CtrlStepMotor::SetAngleWithVelocityLimit(float _angle, float _vel)
 {
-    _angle = inverseDirection ? -_angle : _angle;
     float stepMotorCnt = _angle / 360.0f * (float) reduction;
-    SetPositionWithVelocityLimit(stepMotorCnt, _vel);
+    SetPositionWithVelocityLimit(stepMotorCnt, _vel);  // SetPositionWithVelocityLimit 已根据 inverseDirection 取反
 }
 
 

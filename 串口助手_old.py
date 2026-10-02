@@ -9,12 +9,16 @@ import time
 
 BAUDRATE = 115200  # 固件 usart.c 中 huart4 波特率硬编码，PC 端必须一致
 
-# 各关节软限位：取自 DummyRobot 构造函数中 CtrlStepMotor 的构造参数
-JOINT_RANGES = [(-170, 170), (-73, 90), (35, 180), (-180, 180), (-120, 120), (-720, 720)]
-# 默认关节角 = 固件 REST_POSE = {0, -73, 180, 0, 0, 0}
-JOINT_DEFAULTS = [0, -73, 180, 0, 0, 0]
-# 旧固件 DEFAULT_JOINT_SPEED = 30 (degree/s)
-DEFAULT_SPEED = 30
+# 各关节软限位（v3.1 同步到 firmware_new 构造参数 ±175/±75/(0,180)/±270/±100/±180）
+JOINT_RANGES = [(-175, 175), (-75, 90), (0, 180), (-270, 270), (-100, 100), (-180, 180)]
+# 默认关节角 = 固件 REST_POSE = {0, -75, 180, 0, 0, 0}
+JOINT_DEFAULTS = [0, -75, 180, 0, 0, 0]
+# v3.1 默认速度 35（slider 35 ≈ 10.5 r/s，与新版串口助手对齐）
+DEFAULT_SPEED = 35
+
+# [v3.1 新增] 地轨（J7）参数：直连丝杆1605，5mm/圈，行程 ±250 mm
+RAIL_RANGE = (-250, 250)
+RAIL_DEFAULT = 0
 
 # MoveL 滑块范围（笛卡尔空间覆盖范围）
 POSE_LABELS = ['X', 'Y', 'Z', 'A', 'B', 'C']
@@ -373,6 +377,40 @@ class RobotSerialAssistantOld:
                 return cb
             ent.bind("<Return>", make_jentrycb(i, scl))
             ent.bind("<FocusOut>", make_jentrycb(i, scl))
+
+        # [v3.1 新增] Rail（J7）行 —— 单独第 7 行，与 J1~J6 同布局
+        ttk.Label(jgrid, text="Rail:", font=("Arial", 10, "bold"), foreground="#007ACC"
+                  ).grid(row=6, column=0, padx=4, pady=2, sticky="e")
+        self.ent_j7 = ttk.Entry(jgrid, width=7, font=("Arial", 10))
+        self.ent_j7.insert(0, str(RAIL_DEFAULT))
+        self.ent_j7.grid(row=6, column=1, padx=4, pady=2)
+        self.scl_j7 = ttk.Scale(jgrid, from_=RAIL_RANGE[0], to=RAIL_RANGE[1], orient=tk.HORIZONTAL)
+        self.scl_j7.set(RAIL_DEFAULT)
+        self.scl_j7.grid(row=6, column=2, sticky="ew", padx=8, pady=2)
+        self.lbl_j7 = ttk.Label(jgrid, text=f"{RAIL_DEFAULT:.1f} mm", width=8, font=("Arial", 9))
+        self.lbl_j7.grid(row=6, column=3, padx=4, pady=2)
+
+        def j7_scl_cb(val):
+            v = float(val)
+            self.lbl_j7.config(text=f"{v:.1f} mm")
+            s = f"{v:.1f}"
+            if self.ent_j7.get() != s:
+                self.ent_j7.delete(0, tk.END)
+                self.ent_j7.insert(0, s)
+            if self.movej_drag_enable.get() and not self._suppress_drag_send:
+                now = time.time()
+                if now - self.last_movej_send_time > 0.1:
+                    self.last_movej_send_time = now
+                    self.root.after(1, self.send_movej)
+        self.scl_j7.config(command=j7_scl_cb)
+
+        def j7_entry_cb(event):
+            try:
+                self.scl_j7.set(float(self.ent_j7.get()))
+            except ValueError:
+                pass
+        self.ent_j7.bind("<Return>", j7_entry_cb)
+        self.ent_j7.bind("<FocusOut>", j7_entry_cb)
 
         # 控制行：速度 + 拖发 + 发送
         ctrl_f = ttk.Frame(parent)
@@ -808,11 +846,12 @@ class RobotSerialAssistantOld:
     # 运动指令
     # ==============================================
     def send_movej(self):
-        """>j1,j2,j3,j4,j5,j6,speed  （7 个值）"""
+        """>j1,j2,j3,j4,j5,j6,j7(rail),speed  （8 个值，v3.1 新协议）"""
         try:
             j = [float(ent.get()) for ent in self.ent_joints]
+            j7 = float(self.ent_j7.get())
             speed = float(self.ent_j_speed.get())
-            cmd = ">" + ",".join(f"{v:g}" for v in j) + f",{speed:g}"
+            cmd = ">" + ",".join(f"{v:g}" for v in j) + f",{j7:g},{speed:g}"
             self.send_cmd(cmd)
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数字")
@@ -875,14 +914,22 @@ class RobotSerialAssistantOld:
             self.log(f"{what}同步超时，请确认机械臂已使能（!START）", "ERROR")
 
     def _fill_joints(self, nums):
-        """把 6 个关节角写进滑块 / 输入框 / 数值标签"""
+        """把 7 个数写进滑块（v3.1：nums[0]=Rail(mm), nums[1..6]=J1..J6(°)）"""
         self._suppress_drag_send = True
         try:
+            # 同步 J1~J6 (nums[1..6])
             for i in range(6):
-                self.scl_joints[i].set(nums[i])
+                v = nums[i + 1]
+                self.scl_joints[i].set(v)
                 self.ent_joints[i].delete(0, tk.END)
-                self.ent_joints[i].insert(0, f"{nums[i]:.2f}")
-                self.lbl_joints[i].config(text=f"{nums[i]:.2f}")
+                self.ent_joints[i].insert(0, f"{v:.2f}")
+                self.lbl_joints[i].config(text=f"{v:.2f}")
+            # 同步 Rail (nums[0])
+            rv = nums[0]
+            self.scl_j7.set(rv)
+            self.ent_j7.delete(0, tk.END)
+            self.ent_j7.insert(0, f"{rv:.2f}")
+            self.lbl_j7.config(text=f"{rv:.2f} mm")
         finally:
             self._suppress_drag_send = False
 
@@ -902,19 +949,22 @@ class RobotSerialAssistantOld:
     # 点位示教
     # ==============================================
     def _current_joint_values(self):
-        """读取 6 个输入框中的关节角；有非法输入时记录日志并返回 None"""
+        """读取 6 个关节 + 地轨（J7）的滑块值；非法输入时记录日志并返回 None"""
         try:
-            return [round(float(e.get()), 2) for e in self.ent_joints]
+            jvals = [round(float(e.get()), 2) for e in self.ent_joints]
+            j7 = round(float(self.ent_j7.get()), 2)
+            return jvals + [j7]
         except ValueError:
-            self.log("关节输入框中存在非法数字，请先修正后再操作", "ERROR")
+            self.log("关节/地轨输入框中存在非法数字，请先修正后再操作", "ERROR")
             return None
 
     def read_current_position(self):
-        """读取当前滑块值并打印到日志"""
+        """读取当前滑块值并打印到日志（v3.1：J1~J6 + Rail）"""
         pos = self._current_joint_values()
         if pos is None:
             return
-        msg = ", ".join(f"J{i+1}={v}" for i, v in enumerate(pos))
+        names = ["J1", "J2", "J3", "J4", "J5", "J6", "Rail"]
+        msg = ", ".join(f"{n}={v}" for n, v in zip(names, pos))
         self.log(f"当前滑块: {msg}", "INFO")
 
     def save_current_position(self):
@@ -949,7 +999,8 @@ class RobotSerialAssistantOld:
             return
         idx = idx[0]
         name, pos = self.stored_positions[idx]
-        self._fill_joints(pos[:6])
+        # [v3.1] pos 现在是 7 个值（6 关节 + Rail）
+        self._fill_joints(pos[:7])
         full = f"{name} [{','.join(str(v) for v in pos)}]"
         self.log(f"已加载: {full}", "INFO")
 
@@ -968,8 +1019,8 @@ class RobotSerialAssistantOld:
         idx = idx[0]
         _name, pos = self.stored_positions[idx]
         speed = self._get_pos_speed()
-        # >j1,j2,j3,j4,j5,j6,speed （7 个值）
-        self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:6]) + f",{speed:g}")
+        # [v3.1] >j1,j2,j3,j4,j5,j6,j7(rail),speed （8 个值）
+        self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:7]) + f",{speed:g}")
 
     def send_all_positions(self):
         """顺序发送全部点位：旧固件每条 ">" 执行完才回 "ok"，
@@ -999,7 +1050,8 @@ class RobotSerialAssistantOld:
         _name, pos = self._seq_pending[self._seq_idx]
         # 必须在 send_cmd 之前置位标志，避免固件 ok 先到导致漏接
         self._seq_running = True
-        self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:6]) + f",{self._seq_speed:g}")
+        # [v3.1] >j1,j2,j3,j4,j5,j6,j7(rail),speed （8 个值）
+        self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:7]) + f",{self._seq_speed:g}")
 
     # ==============================================
     # 命令历史

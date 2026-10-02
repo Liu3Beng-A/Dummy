@@ -101,10 +101,12 @@ void ThreadOledUpdate(void* argument)
 
         oled.drawBox(0, 15, 128, 3);
         oled.setCursor(0, 30);
-        oled.printf(">%3d|%3d|%3d|%3d|%3d|%3d",
+        oled.printf(">%3d|%3d|%3d|%3d|%3d|%3d|",
                     (int) roundf(dummy.currentJoints.a[0]), (int) roundf(dummy.currentJoints.a[1]),
                     (int) roundf(dummy.currentJoints.a[2]), (int) roundf(dummy.currentJoints.a[3]),
                     (int) roundf(dummy.currentJoints.a[4]), (int) roundf(dummy.currentJoints.a[5]));
+        oled.setCursor(0, 38);
+        oled.printf("rail:%4dmm", (int) roundf(dummy.currentRailPos));
 
         oled.drawBox(40, 35, 128, 24);
         oled.setFont(u8g2_font_6x12_tr);

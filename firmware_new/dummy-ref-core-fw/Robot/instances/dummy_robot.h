@@ -6,6 +6,19 @@
 #include "string"
 #define ALL 0
 
+// 地轨相关常量
+#define RAIL_FIXED_NODE_ID 7   // 地轨电机固定 Node ID（与 configurations.h 对齐）
+#define RAIL_MM_PER_CIRCLE 5.0f // 丝杆1605：5mm/圈
+
+// §3.3.1 物理同步参数（v2.7，加强版）
+// 数组索引：[0]=地轨（J7）, [1..6]=J1~J6
+// 各轴电机轴减速比：地轨直连丝杆1605(reduction=1)，J1~J5=50，J6=30
+constexpr uint8_t MOTOR_REDUCTION[7] = {1, 50, 50, 50, 50, 50, 30};
+// 各轴电机轴 r/s 上限（与电机端 EEPROM velocityLimit 对齐；本期统一 30）
+constexpr float SLIDER_CAPS_V[7] = {30.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f};
+// 各轴加速度兜底（r/s²）：运行时回填未就绪时使用；地轨=30（57 电机端），J1=150, J2=100, J3~J6=200
+constexpr float JOINT_ACC_FALLBACK[7] = {30.0f, 150.0f, 100.0f, 200.0f, 200.0f, 200.0f, 200.0f};
+
 /*
   |   PARAMS   | `current_limit` | `acceleration` | `dce_kp` | `dce_kv` | `dce_ki` | `dce_kd` |
   | ---------- | --------------- | -------------- | -------- | -------- | -------- | -------- |
@@ -21,7 +34,7 @@
 class DummyHand
 {
 public:
-    uint8_t nodeID = 7;
+    uint8_t nodeID = 8;  // [FIX] 夹爪 ID: 7 → 8（地轨占用 ID=7）
 //    float maxCurrent = 0.7;
     float maxCurrent = 1.0;
 
@@ -32,6 +45,7 @@ public:
     void SetAngle(float _angle);
     void SetMaxCurrent(float _val);
     void SetEnable(bool _enable);
+    void Reboot();
 
 
     // Communication protocol definitions
@@ -121,12 +135,23 @@ public:
     DOF6Kinematic::Pose6D_t currentPose6D = {};
     volatile uint8_t jointsStateFlag = 0b00000000;
     CommandMode commandMode = DEFAULT_COMMAND_MODE;
-    CtrlStepMotor* motorJ[7] = {nullptr};
+    CtrlStepMotor* motorJ[8] = {nullptr};  // [FIX] 0=ALL代理, 1~6=J1~J6, 7=地轨
     DummyHand* hand = {nullptr};
+
+    // 地轨状态变量（mm）
+    float currentRailPos = 0.0f;
+    float targetRailPos = 0.0f;
+
+    // 7 个轴的速度缓存（电机轴 r/s, 索引 0=地轨, 1..6=J1..J6）
+    float dynamicJointSpeeds7[7] = {0};
+
+    // §3.3.1 各轴运行时加速度（r/s²）：异步从电机端 EEPROM 回填（§9 #7）；
+    // 本期用 JOINT_ACC_FALLBACK 兜底（初始值同兜底，回填协议就绪后由电机端覆盖）
+    float jointAccRuntime[7] = {30.0f, 150.0f, 100.0f, 200.0f, 200.0f, 200.0f, 200.0f};
 
 
     void Init();
-    bool MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6);
+    bool MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm, float _speed = 0);
     bool MoveL(float _x, float _y, float _z, float _a, float _b, float _c);
     void MoveJoints(DOF6Kinematic::Joint6D_t _joints);
     void SetJointSpeed(float _speed);
@@ -167,7 +192,7 @@ public:
             make_protocol_function("set_enable", *this, &DummyRobot::SetEnable, "enable"),
             make_protocol_function("set_rgb_enable", *this, &DummyRobot::SetRGBEnable, "enable"),
             make_protocol_function("set_rgb_mode", *this, &DummyRobot::SetRGBMode, "mode"),
-            make_protocol_function("move_j", *this, &DummyRobot::MoveJ, "j1", "j2", "j3", "j4", "j5", "j6"),
+            make_protocol_function("move_j", *this, &DummyRobot::MoveJ, "j1", "j2", "j3", "j4", "j5", "j6", "j7", "speed"),
             make_protocol_function("move_l", *this, &DummyRobot::MoveL, "x", "y", "z", "a", "b", "c"),
             make_protocol_function("set_joint_speed", *this, &DummyRobot::SetJointSpeed, "speed"),
             make_protocol_function("set_joint_acc", *this, &DummyRobot::SetJointAcceleration, "acc"),
