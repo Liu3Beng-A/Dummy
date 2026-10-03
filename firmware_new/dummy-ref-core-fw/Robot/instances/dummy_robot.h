@@ -31,48 +31,57 @@ constexpr float JOINT_ACC_FALLBACK[7] = {30.0f, 150.0f, 100.0f, 200.0f, 200.0f, 
  */
 
 
-class DummyHand
+/**
+ * @brief 夹爪控制类（继承闭环步进电机基类，参考 firmware/ref_core_f405 StepHand 实现）
+ * @note  reduction=16（物理减速比），inverse=true（与 ref 对齐，基类 SetPositionWithVelocityLimit 自动取反）
+ *        角度范围 0~100：override SetAngle 后 _angle 直接对应电机轴圈数（0=闭合，100=张开）
+ *        override 仅 2 个方法（SetAngle / SetAngleWithVelocityLimit），不 override UpdateAngleCallback（与 ref 一致）
+ *        MakeProtocolDefinitions 注册 4 条 fibre，set_enable 用 R1 强转写法避免 fibre 库继承二义性
+ */
+class StepHand : public CtrlStepMotor
 {
 public:
-    uint8_t nodeID = 8;  // [FIX] 夹爪 ID: 7 → 8（地轨占用 ID=7）
-//    float maxCurrent = 0.7;
-    float maxCurrent = 1.0;
+    // 构造 reduction=16（物理减速比），inverse=true（让基类 SetPositionWithVelocityLimit 自动取反）
+    // 角度范围 0~100（开度百分比，override 后 _angle 直接对应电机圈数）
+    StepHand(CAN_HandleTypeDef* hcan, uint8_t id)
+        : CtrlStepMotor(hcan, id, true, 16, 0, 100)
+    {
+    }
 
+    // 运行时电流幅值（A），由 !HAND_I 设置；掉电丢；默认 1.0A（基类无此字段）
+    float current = 1.0f;
 
-    DummyHand(CAN_HandleTypeDef* _hcan, uint8_t _id);
+    // 跳过基类 _angle/360*reduction 归一化，_angle 直接作为电机圈数（基类按 inverse=true 自动取反）
+    // 由 !HAND_POS [0-100] 调用，0=闭合，100=张开
+    void SetAngle(float _angle)
+    {
+        if (_angle < 0) _angle = 0;
+        if (_angle > 100) _angle = 100;
+        SetPositionWithVelocityLimit(_angle, 30.0f);
+    }
 
+    // 同 SetAngle 跳过归一化，供带 vel 参数的位置命令使用
+    void SetAngleWithVelocityLimit(float _angle, float _vel)
+    {
+        if (_angle < 0) _angle = 0;
+        if (_angle > 100) _angle = 100;
+        SetPositionWithVelocityLimit(_angle, _vel);
+    }
 
-    void SetAngle(float _angle);
-    void SetMaxCurrent(float _val);
-    void SetEnable(bool _enable);
-    void Reboot();
-
-
-    // Communication protocol definitions
+    // Communication protocol definitions (4 fibre entries，对齐 ref 写法)
     auto MakeProtocolDefinitions()
     {
         return make_protocol_member_list(
-            make_protocol_function("set_angle", *this, &DummyHand::SetAngle, "angle"),
-            make_protocol_function("set_enable", *this, &DummyHand::SetEnable, "enable"),
-            make_protocol_function("set_current_limit", *this, &DummyHand::SetMaxCurrent, "current")
+            // set_angle 指向 StepHand 自己的 override
+            make_protocol_function("set_angle", *this, &StepHand::SetAngle, "angle"),
+            // [R1] set_enable 强转写法：避免 fibre 库对继承类成员指针解析的二义性（StepHand 不 override SetEnable）
+            make_protocol_function("set_enable", static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetEnable, "enable"),
+            // set_current 强转写法：StepHand 不 override SetCurrentSetPoint（基类直接走 cmd=0x03 透传电流）
+            make_protocol_function("set_current", static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetCurrentSetPoint, "current"),
+            // set_current_limit 强转写法：StepHand 不 override SetCurrentLimit
+            make_protocol_function("set_current_limit", static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetCurrentLimit, "current")
         );
     }
-
-
-private:
-    CAN_HandleTypeDef* hcan;
-    uint8_t canBuf[8];
-    CAN_TxHeaderTypeDef txHeader;
-    float minAngle = 0;
-    float maxAngle = 45;
-    // [Step1] DummyHand 状态与运行时参数（SetEnable 切换位置模式需要知道当前位置+限速）
-    float currentMotorAngle = 0.0f;     // 上次下发的电机轴相对角（圈）；`!START` 保持闭合=0
-    float currentVelocityLimit = 30.0f; // 与电机端 EEPROM velocityLimit 对齐
-    bool isEnabled = false;             // 主控记录的夹爪使能状态（电机端无回包）
-    // 发送 cmd=0x07 位置+限速帧（pos 占 canBuf[0..3]，vel 占 canBuf[4..7]）。
-    // 电机端 cmd=0x07 会按 RxData[0..3]=pos, RxData[4..7]=vel 解析，
-    // 必须把 8 字节填齐，否则 canBuf[4..7] 残留上一次发帧的字节会被误读为 vel。
-    void SendPositionVelocityFrame(float _pos, float _vel);
 };
 
 
@@ -144,7 +153,7 @@ public:
     volatile uint8_t jointsStateFlag = 0b00000000;
     CommandMode commandMode = DEFAULT_COMMAND_MODE;
     CtrlStepMotor* motorJ[8] = {nullptr};  // [FIX] 0=ALL代理, 1~6=J1~J6, 7=地轨
-    DummyHand* hand = {nullptr};
+    StepHand* hand = {nullptr};
 
     // 地轨状态变量（mm）
     float currentRailPos = 0.0f;
@@ -169,11 +178,12 @@ public:
     void UpdateJointPose6D();
     void Reboot();
     /** 重启全部电机 + 夹爪（**不**重启主控系统）。用于串口 #REBOOT 0。
-     *  - J1~J7（含地轨）通过 motorJ[ALL] 广播 1 帧 StdId=0x7F
-     *    （CAN 接收端 id==0 触发所有电机响应，见 dummy-motor-fw/Core/Src/can.c:202-204）
-     *  - 夹爪（id=8）通过 DummyHand::Reboot() 单独发 1 帧 StdId=0x47F
+     *  - J1~J8（含地轨 id=7 + 夹爪 id=8）通过 motorJ[ALL] 广播 **1 帧** StdId=0x7F
+     *    （CAN 接收端 id==0 触发所有电机响应，见 dummy-motor-fw/Core/Src/can.c:202-204；
+     *      夹爪端 interface_can.cpp case 0x7F 也会响应 ALL 帧）
+     *  - **不**再单独调 hand->Reboot()：Step 2 已删除冗余帧（ALL 帧已覆盖夹爪 id=8）
      *  - 不调 HAL_NVIC_SystemReset()，避免主控重启后串口收不到 ok 回包
-     *  - 不调 osDelay：两帧 CAN 在 µs 级装入 Mailbox，硬件异步发完；
+     *  - 不调 osDelay：1 帧 CAN 在 µs 级装入 Mailbox，硬件异步发完；
      *    block 主任务 500ms 会导致 FixUpdate / OLED / 串口命令处理全部暂停
      *  - 与 Reboot() 的区别：Reboot() 含 HAL_NVIC_SystemReset()，给内部协议层 reboot 调用 */
     void RebootAllMotors();

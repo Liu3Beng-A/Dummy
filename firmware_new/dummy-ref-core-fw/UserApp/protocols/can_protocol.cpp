@@ -26,10 +26,16 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
         switch (cmd)
         {
             case 0x23:
-                dummy.motorJ[id]->UpdateAngleCallback(*(float*) (data), data[4]);
+                if (id == 8)
+                    dummy.hand->UpdateAngleCallback(*(float*) (data), data[4]);
+                else
+                    dummy.motorJ[id]->UpdateAngleCallback(*(float*) (data), data[4]);
                 break;
             case 0x25:
-                 memcpy(&dummy.motorJ[id]->temperature, data, sizeof(uint32_t));//(uint32_t) (data);
+                if (id == 8)
+                    memcpy(&dummy.hand->temperature, data, sizeof(uint32_t));
+                else
+                    memcpy(&dummy.motorJ[id]->temperature, data, sizeof(uint32_t));
                 break;
             default:
                 break;
