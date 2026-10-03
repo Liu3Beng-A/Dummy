@@ -154,54 +154,123 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             uint32_t kp;
             uint32_t node;
             sscanf(_cmd, "#SET_DCE_KP %lu %lu", &node, &kp);
-            if (node >= 1 & node <= 6){
+            if (node >= 1 && node <= 7){  // [Step 4] 范围 1~6 → 1~7（8 在下面单独处理）
                 dummy.motorJ[node]->SetDceKp(kp);
                 Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KP [%lu]", node, kp);
             }
+            else if (node == 8){           // [Step 4] 夹爪走 dummy.hand
+                dummy.hand->SetDceKp(kp);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KP [%lu] (HAND)", node, kp);
+            }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP [%lu] is wrong", node, kp);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KP [%lu] is wrong (range 1~8, reject 0)", node, kp);
             }
         } else if (s.find("SET_DCE_KI") != std::string::npos)
         {
-            uint32_t kp;
+            uint32_t ki;
             uint32_t node;
-            sscanf(_cmd, "#SET_DCE_KI %lu %lu", &node, &kp);
-            if (node >= 1 & node <= 6){
-                dummy.motorJ[node]->SetDceKi(kp);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KI [%lu]", node, kp);
+            sscanf(_cmd, "#SET_DCE_KI %lu %lu", &node, &ki);
+            if (node >= 1 && node <= 7){  // [Step 4] 范围 1~6 → 1~7（8 在下面单独处理）
+                dummy.motorJ[node]->SetDceKi(ki);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KI [%lu]", node, ki);
+            }
+            else if (node == 8){           // [Step 4] 夹爪走 dummy.hand
+                dummy.hand->SetDceKi(ki);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KI [%lu] (HAND)", node, ki);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI [%lu] is wrong", node, kp);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KI [%lu] is wrong (range 1~8, reject 0)", node, ki);
             }
         } else if (s.find("SET_DCE_KD") != std::string::npos)
         {
-            uint32_t kp;
+            uint32_t kd;
             uint32_t node;
-            sscanf(_cmd, "#SET_DCE_KD %lu %lu", &node, &kp);
-            if (node >= 1 & node <= 6){
-                dummy.motorJ[node]->SetDceKd(kp);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KD [%lu]", node, kp);
+            sscanf(_cmd, "#SET_DCE_KD %lu %lu", &node, &kd);
+            if (node >= 1 && node <= 7){  // [Step 4] 范围 1~6 → 1~7（8 在下面单独处理）
+                dummy.motorJ[node]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KD [%lu]", node, kd);
+            }
+            else if (node == 8){           // [Step 4] 夹爪走 dummy.hand
+                dummy.hand->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KD [%lu] (HAND)", node, kd);
             }
             else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD [%lu] is wrong", node, kp);
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KD [%lu] is wrong (range 1~8, reject 0)", node, kd);
+            }
+        }
+        // [Step 4] 新增 #SET_DCE_KV / #I_LIMIT_J / #ACC_J 3 条 # 配置类命令
+        else if (s.find("SET_DCE_KV") != std::string::npos)
+        {
+            int32_t kv;
+            uint32_t node;
+            sscanf(_cmd, "#SET_DCE_KV %lu %ld", &node, &kv);
+            if (node >= 1 && node <= 7){
+                dummy.motorJ[node]->SetDceKv(kv);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KV [%ld]", node, kv);
+            }
+            else if (node == 8){
+                dummy.hand->SetDceKv(kv);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] DCE_KV [%ld] (HAND)", node, kv);
+            }
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV [%ld] is wrong (range 1~8, reject 0)", node, kv);
+            }
+        }
+        else if (s.find("I_LIMIT_J") != std::string::npos)
+        {
+            float current;
+            uint32_t node;
+            sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &current);
+            if (node >= 1 && node <= 7){
+                dummy.motorJ[node]->SetCurrentLimit(current);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] I_LIMIT [%.2f]", node, current);
+            }
+            else if (node == 8){
+                dummy.hand->SetCurrentLimit(current);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] I_LIMIT [%.2f] (HAND)", node, current);
+            }
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] I_LIMIT [%.2f] is wrong (range 1~8, reject 0)", node, current);
+            }
+        }
+        else if (s.find("ACC_J") != std::string::npos)
+        {
+            float acc;
+            uint32_t node;
+            sscanf(_cmd, "#ACC_J %lu %f", &node, &acc);
+            if (node >= 1 && node <= 7){
+                dummy.motorJ[node]->SetAcceleration(acc);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] ACC [%.2f]", node, acc);
+            }
+            else if (node == 8){
+                dummy.hand->SetAcceleration(acc);
+                Respond(_responseChannel, "ok SET MOTOR [%lu] ACC [%.2f] (HAND)", node, acc);
+            }
+            else {
+                Respond(_responseChannel, "error SET MOTOR [%lu] ACC [%.2f] is wrong (range 1~8, reject 0)", node, acc);
             }
         } else if (s.find("REBOOT") != std::string::npos)
         {
             uint32_t node;
             sscanf(_cmd, "#REBOOT %lu", &node);
-            if (node >= 1 && node <= 7)                  // [FIX] && 写法 + 范围到 7
+            if (node >= 1 && node <= 7)                  // J1~J7（含地轨）
             {
                 dummy.motorJ[node]->Reboot();
                 Respond(_responseChannel, "ok REBOOT MOTOR [%lu]", node);
             }
-            else if (node == 0)                          // [NEW] ALL 代理
+            else if (node == 8)                          // [Step 4] 夹爪独立 reboot
             {
-                Respond(_responseChannel, "ok REBOOT ALL MOTORS + HAND");  // [FIX] 先回包
-                dummy.RebootAllMotors();                                   // [FIX] 再发重启帧
+                dummy.hand->Reboot();
+                Respond(_responseChannel, "ok REBOOT MOTOR [%lu] (HAND)", node);
+            }
+            else if (node == 0)                          // ALL 代理（J1~J7 + 夹爪 1 帧广播）
+            {
+                Respond(_responseChannel, "ok REBOOT ALL MOTORS + HAND");
+                dummy.RebootAllMotors();
             }
             else
             {
-                Respond(_responseChannel, "error REBOOT MOTOR [%lu] is wrong", node);
+                Respond(_responseChannel, "error REBOOT MOTOR [%lu] is wrong (range 1~8, 0=ALL)", node);
             }
         }else if (s.find("CMDMODE") != std::string::npos)
         {
