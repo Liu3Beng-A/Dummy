@@ -56,6 +56,11 @@ class RobotSerialAssistantOld:
         self._seq_idx = 0           # 当前发送索引
         self._seq_speed = DEFAULT_SPEED
 
+        # [调整] 夹爪开度拖发状态字段（仿 movej/movel：开关 + 节流时间戳）
+        # 必须在 _build_hand_page 之前初始化（_warn_drag_mode 要能读到 hand_pos_drag_enable）
+        self.hand_pos_drag_enable = tk.BooleanVar(value=False)
+        self.last_hand_pos_send_time = 0
+
         # 主题与配色（与新版助手保持同一套色板）
         try:
             style = ttk.Style()
@@ -200,7 +205,8 @@ class RobotSerialAssistantOld:
 
         # 左栏窄、右栏宽（右栏是主要工作区）
         control_area.columnconfigure(0, weight=1)  # 左栏
-        control_area.columnconfigure(1, weight=4)  # 右栏（关节控制 / MoveL）
+        control_area.columnconfigure(1, weight=4)  # 中栏（关节控制 / MoveL）
+        control_area.columnconfigure(2, weight=2)  # 右栏（夹爪控制独立面板）[调整: 夹爪页移出 Notebook]
         control_area.rowconfigure(0, weight=1)
 
         # ==============================================
@@ -273,10 +279,10 @@ class RobotSerialAssistantOld:
                   ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         # ==============================================
-        # 右栏：Notebook（关节控制 / MoveL）
+        # 中栏：Notebook（关节控制 / MoveL；夹爪页已移至右栏）
         # ==============================================
         right_col = ttk.Frame(control_area)
-        right_col.grid(row=0, column=1, sticky="nsew", padx=(0, 0))
+        right_col.grid(row=0, column=1, sticky="nsew", padx=(0, 6))
         right_col.rowconfigure(0, weight=1)
         right_col.columnconfigure(0, weight=1)
 
@@ -291,10 +297,14 @@ class RobotSerialAssistantOld:
         self.joint_nb.add(movel_page, text=" MoveL ")
         self._build_movel_page(movel_page)
 
-        # [Step 5] 夹爪控制页 — UART4 独有的 !HAND_* 运行时命令（4 条）
-        hand_page = ttk.Frame(self.joint_nb, padding=5)
-        self.joint_nb.add(hand_page, text=" 夹爪控制 ")
-        self._build_hand_page(hand_page)
+        # ==============================================
+        # 右栏：夹爪控制独立面板（原 joint_nb 第 3 tab，已移出）
+        # ==============================================
+        right_col2 = ttk.Frame(control_area)
+        right_col2.grid(row=0, column=2, sticky="nsew", padx=(0, 0))
+        right_col2.rowconfigure(0, weight=1)
+        right_col2.columnconfigure(0, weight=1)
+        self._build_hand_page(right_col2)
 
         # ==============================================
         # 底部终端
@@ -828,13 +838,29 @@ class RobotSerialAssistantOld:
         def hand_pos_cb(val):
             v = int(float(val))
             self.lbl_hand_pos.config(text=f"{v}")
+            # [调整] 拖发节流：开关 ON + 非抑制 + 距上次 > 0.1s → 异步调 _cmd_hand_set_pos
+            if self.hand_pos_drag_enable.get() and not self._suppress_drag_send:
+                now = time.time()
+                if now - self.last_hand_pos_send_time > 0.1:
+                    self.last_hand_pos_send_time = now
+                    self.root.after(1, self._cmd_hand_set_pos)
         self.scl_hand_pos.config(command=hand_pos_cb)
         pos_btn_row = ttk.Frame(pos_f)
         pos_btn_row.pack(fill=tk.X, pady=(4, 0))
         tk.Button(pos_btn_row, text="设置位置", font=("Arial", 10, "bold"),
                   bg="#3b5bdb", fg="white", relief=tk.FLAT,
                   command=self._cmd_hand_set_pos
-                  ).pack(side=tk.LEFT, expand=True, fill=tk.X)
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        # [调整] 拖发开关（仿 movej/movel 的 _make_toggle_button，on_change 触发模式提示）
+        self._make_toggle_button(
+            pos_btn_row, self.hand_pos_drag_enable,
+            text_off="拖发 OFF", text_on="拖发 ON",
+            bg_off="#e9ecef", bg_on="#2b8a3e",
+            fg_off="#495057", fg_on="white",
+            font=("Arial", 10, "bold"),
+            side=tk.LEFT, padx=2,
+            on_change=self._warn_drag_mode,
+        )
         # --- 配置类说明（折叠提示） ---
         info_f = ttk.LabelFrame(parent, text="说明", padding=6)
         info_f.pack(fill=tk.X)
@@ -936,7 +962,8 @@ class RobotSerialAssistantOld:
 
     def _warn_drag_mode(self):
         """拖发开关切换后回调。若不是「连续模式(3)」则弹提示（不自动切换）。"""
-        if (self.movej_drag_enable.get() or self.movel_drag_enable.get()) \
+        if (self.movej_drag_enable.get() or self.movel_drag_enable.get()
+                or self.hand_pos_drag_enable.get()) \
                 and self.current_cmdmode != 3:
             cur = self._MODE_NAME.get(self.current_cmdmode, f"模式{self.current_cmdmode}")
             messagebox.showwarning(

@@ -126,6 +126,32 @@ void CtrlStepMotor::SetPositionWithVelocityLimit(float _pos, float _vel)
 }
 
 
+// [Step 6] 与 ref 对齐：补 SetPositionWithMotorRps（去掉 inverse 取反，由 SetAngleWithMotorRps 在外层统一处理）
+void CtrlStepMotor::SetPositionWithMotorRps(float _pos, float _rps)
+{
+    uint8_t mode = 0x07;
+    txHeader.StdId = nodeID << 7 | mode;
+
+    auto* b = (unsigned char*) &_pos;
+    for (int i = 0; i < 4; i++)
+        canBuf[i] = *(b + i);
+    b = (unsigned char*) &_rps;
+    for (int i = 4; i < 8; i++)
+        canBuf[i] = *(b + i - 4);
+
+    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+
+// [Step 6] 与 ref 对齐：补 SetAngleWithMotorRps（_angle 是度，内部做 inverseDirection 取反 + _angle/360*reduction 度→圈换算）
+void CtrlStepMotor::SetAngleWithMotorRps(float _angle, float _rps)
+{
+    _angle = inverseDirection ? -_angle : _angle;
+    float stepMotorCnt = _angle / 360.0f * (float) reduction;
+    SetPositionWithMotorRps(stepMotorCnt, _rps);
+}
+
+
 void CtrlStepMotor::SetNodeID(uint32_t _id)
 {
     uint8_t mode = 0x11;

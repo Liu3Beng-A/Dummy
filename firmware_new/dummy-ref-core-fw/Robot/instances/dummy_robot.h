@@ -33,53 +33,84 @@ constexpr float JOINT_ACC_FALLBACK[7] = {30.0f, 150.0f, 100.0f, 200.0f, 200.0f, 
 
 /**
  * @brief 夹爪控制类（继承闭环步进电机基类，参考 firmware/ref_core_f405 StepHand 实现）
- * @note  reduction=16（物理减速比），inverse=true（与 ref 对齐，基类 SetPositionWithVelocityLimit 自动取反）
- *        角度范围 0~100：override SetAngle 后 _angle 直接对应电机轴圈数（0=闭合，100=张开）
- *        override 仅 2 个方法（SetAngle / SetAngleWithVelocityLimit），不 override UpdateAngleCallback（与 ref 一致）
- *        MakeProtocolDefinitions 注册 4 条 fibre，set_enable 用 R1 强转写法避免 fibre 库继承二义性
+ * @note  reduction=16（物理减速比），inverse=true（与 ref 对齐，基类 SetPositionWithMotorRps 自动取反）
+ *        角度范围 -100~100（电机轴目标角度单位 = 度，由 SetAngleWithMotorRps 内部做 _angle/360*reduction 度→圈换算）
+ *        物理方向：motor 沿正方向 → 张开；pos0=闭合，pos100=张开（沿电机正方向走 100 圈撞开限位）
+ *        不 override SetAngle / SetAngleWithVelocityLimit / UpdateAngleCallback（与 ref 一致）
+ *        MakeProtocolDefinitions 注册 4 条 fibre，set_enable/set_current_limit 用 R1 强转写法避免 fibre 库继承二义性
  */
 class StepHand : public CtrlStepMotor
 {
 public:
-    // 构造 reduction=16（物理减速比），inverse=true（让基类 SetPositionWithVelocityLimit 自动取反）
-    // 角度范围 0~100（开度百分比，override 后 _angle 直接对应电机圈数）
+    // 构造 reduction=16（物理减速比），inverse=true（让基类 SetAngleWithMotorRps 自动取反）
+    // 角度范围 -100~100（电机轴目标角度，单位 = 度）
     StepHand(CAN_HandleTypeDef* hcan, uint8_t id)
-        : CtrlStepMotor(hcan, id, true, 16, 0, 100)
+        : CtrlStepMotor(hcan, id, true, 16, -100, 100)
     {
     }
 
     // 运行时电流幅值（A），由 !HAND_I 设置；掉电丢；默认 1.0A（基类无此字段）
+    // [Step 6 用户决策] 留 1.0A，不沿用 ref 1.2A
     float current = 1.0f;
 
-    // 跳过基类 _angle/360*reduction 归一化，_angle 直接作为电机圈数（基类按 inverse=true 自动取反）
-    // 由 !HAND_POS [0-100] 调用，0=闭合，100=张开
-    void SetAngle(float _angle)
+    // 标定语义：
+    //   pos0 (ClosedMotorAngle) = 夹爪闭合时电机目标角
+    //   pos100 (OpenMotorAngle) = 夹爪全开时电机目标角（沿正方向 100 圈撞限位即为张开）
+    // 物理方向：motor 沿正方向 → 张开
+    float ClosedMotorAngle = 0.0f;   // pos0   时电机目标角（默认标定零点 = 0 度）
+    float OpenMotorAngle   = 100.0f; // pos100 时电机目标角（正方向 100 度）
+
+    // [Step 6 用户决策] HAND_MAX_RPS = 30（与决策"统一 30"一致，不沿用 ref 的 20）
+    static constexpr float HAND_MAX_RPS = 30.0f;
+
+    /**
+     * @brief 基于速度规划的位置环夹爪控制
+     * @param _angle 夹爪百分比开度 (0 = 完全闭合, 100 = 完全张开)
+     *
+     * 映射：用户开度 0~100 → 电机目标角 ClosedMotorAngle~OpenMotorAngle
+     *   _angle=0   → motor=ClosedMotorAngle   (闭合)
+     *   _angle=100 → motor=OpenMotorAngle     (张开，沿正方向 100 圈)
+     * 内部走 SetAngleWithMotorRps：inverseDirection 取反 + _angle/360*reduction 度→圈换算
+     */
+    void SetAngleWithSpeedLimit(float _angle)
     {
-        if (_angle < 0) _angle = 0;
-        if (_angle > 100) _angle = 100;
-        SetPositionWithVelocityLimit(_angle, 30.0f);
+        float target_angle = ClosedMotorAngle + (OpenMotorAngle - ClosedMotorAngle) * (_angle / 100.0f);
+        SetAngleWithMotorRps(target_angle, HAND_MAX_RPS);
     }
 
-    // 同 SetAngle 跳过归一化，供带 vel 参数的位置命令使用
-    void SetAngleWithVelocityLimit(float _angle, float _vel)
+    /**
+     * @brief 基于电流环的夹爪力度控制模式 (透传纯力矩)
+     * @param inverse 夹爪运动受力方向 (+1 代表闭合施力, -1 代表张开施力)
+     */
+    void SetAngleWithCurrentLimit(float inverse)
     {
-        if (_angle < 0) _angle = 0;
-        if (_angle > 100) _angle = 100;
-        SetPositionWithVelocityLimit(_angle, _vel);
+        SetCurrentSetPoint(inverse * current);
+    }
+
+    /**
+     * @brief 查询当前夹爪是否已解除急停/进入工作状态
+     */
+    bool isEnabled() const
+    {
+        return state != STOP;
     }
 
     // Communication protocol definitions (4 fibre entries，对齐 ref 写法)
     auto MakeProtocolDefinitions()
     {
         return make_protocol_member_list(
-            // set_angle 指向 StepHand 自己的 override
-            make_protocol_function("set_angle", *this, &StepHand::SetAngle, "angle"),
             // [R1] set_enable 强转写法：避免 fibre 库对继承类成员指针解析的二义性（StepHand 不 override SetEnable）
-            make_protocol_function("set_enable", static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetEnable, "enable"),
-            // set_current 强转写法：StepHand 不 override SetCurrentSetPoint（基类直接走 cmd=0x03 透传电流）
-            make_protocol_function("set_current", static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetCurrentSetPoint, "current"),
-            // set_current_limit 强转写法：StepHand 不 override SetCurrentLimit
-            make_protocol_function("set_current_limit", static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetCurrentLimit, "current")
+            make_protocol_function("set_enable",
+                static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetEnable, "enable"),
+            // set_angle 指 StepHand 自己的 SetAngleWithSpeedLimit（带速度规划 + 度→圈换算）
+            make_protocol_function("set_angle",
+                *this, &StepHand::SetAngleWithSpeedLimit, "angle"),
+            // set_current 指 StepHand 自己的 SetAngleWithCurrentLimit（透传 inverse*current 电流）
+            make_protocol_function("set_current",
+                *this, &StepHand::SetAngleWithCurrentLimit, "direction"),
+            // [R1] set_current_limit 强转写法：StepHand 不 override SetCurrentLimit
+            make_protocol_function("set_current_limit",
+                static_cast<CtrlStepMotor&>(*this), &CtrlStepMotor::SetCurrentLimit, "current")
         );
     }
 };

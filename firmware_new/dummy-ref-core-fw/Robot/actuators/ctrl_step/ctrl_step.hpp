@@ -39,6 +39,8 @@ public:
     void SetVelocitySetPoint(float _val);
     void SetPositionSetPoint(float _val);
     void SetPositionWithVelocityLimit(float _pos, float _vel);
+    void SetPositionWithMotorRps(float _pos, float _rps);
+    void SetAngleWithMotorRps(float _angle, float _rps);
     void SetNodeID(uint32_t _id);
     void SetCurrentLimit(float _val);
     void SetVelocityLimit(float _val);

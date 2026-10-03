@@ -60,7 +60,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             uint32_t pos;
             sscanf(_cmd, "!HAND_POS %lu", &pos);
             if (pos > 100) pos = 100;
-            dummy.hand->SetAngle(static_cast<float>(pos));
+            dummy.hand->SetAngleWithSpeedLimit(static_cast<float>(pos));
             Respond(_responseChannel, "ok hand pos=%lu", pos);
         }
         else if (s.rfind("!HAND_I ", 0) == 0)                          // 运行时电流幅值（不发 CAN 帧）
@@ -345,7 +345,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
             uint32_t pos;
             sscanf(_cmd, "!HAND_POS %lu", &pos);
             if (pos > 100) pos = 100;
-            dummy.hand->SetAngle(static_cast<float>(pos));
+            dummy.hand->SetAngleWithSpeedLimit(static_cast<float>(pos));
             Respond(_responseChannel, "ok hand pos=%lu", pos);
         }
         else if (s.rfind("!HAND_I ", 0) == 0)
