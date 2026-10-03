@@ -505,27 +505,30 @@ _id) :
 
 void DummyHand::SetAngle(float _angle)
 {
-    if (_angle > 30)_angle = 30;
+    // [Step1] 开度 0~100%：0=闭合，100=张开（文档 §3.2.3）
+    if (_angle > 100)_angle = 100;
     if (_angle < 0)_angle = 0;
 
-    uint8_t mode = 0x02;
-    txHeader.StdId = nodeID << 7 | mode;   // [FIX] 使用构造函数传入的 nodeID（8），不再硬编码 7
-
-    // Float to Bytes
-    auto* b = (unsigned char*) &_angle;
-    for (int i = 0; i < 4; i++)
-        canBuf[i] = *(b + i);
-
-    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+    // [Step1] cmd 0x02（Do Calibration）→ 0x07（Set Position with Velocity-Limit）。
+    // 旧实现：发 0x02 触发电机的 encoderCalibrator，不读 _angle。
+    // 新实现：发 0x07 把 _angle（电机轴圈数，0~100）作为 SetPoint + 限速 currentVelocityLimit，
+    //         电机端 case 0x07 会自动 SetCtrlMode(MODE_COMMAND_POSITION)。
+    currentMotorAngle = _angle;
+    SendPositionVelocityFrame(_angle, currentVelocityLimit);
 }
 
 
 void DummyHand::SetMaxCurrent(float _val)
 {
-    if (_val > 1)_val = 1;
+    // [Step1] 电流限 0~2.5A（对齐电机端 EEPROM currentLimit=2500mA，文档 §3.5.1）。
+    // 旧实现上限 1A 太小，且会与电机端实际 2500mA 失配。
+    if (_val > 2.5f)_val = 2.5f;
     if (_val < 0)_val = 0;
 
-    uint8_t mode = 0x01;
+    // [Step1] cmd 0x01（Enable Motor）→ 0x12（Set Current-Limit and Store to EEPROM）。
+    // 旧实现：发 0x01 把 _val 字节当 uint32 读，float 1.0 (=0x3F800000) ≠ 1 → 电机进 MODE_STOP，
+    //         导致 SetEnable(true) 后夹爪完全失能。本期用 0x12 写 EEPROM ratedCurrent。
+    uint8_t mode = 0x12;
     txHeader.StdId = nodeID << 7 | mode;   // [FIX] 使用构造函数传入的 nodeID（8），不再硬编码 7
 
     // Float to Bytes
@@ -540,9 +543,52 @@ void DummyHand::SetMaxCurrent(float _val)
 void DummyHand::SetEnable(bool _enable)
 {
     if (_enable)
-        SetMaxCurrent(maxCurrent);
+    {
+        // [Step1] 使能：发 cmd=0x07（位置+限速）一帧强制切到位置模式。
+        // 旧实现：SetMaxCurrent(maxCurrent) → cmd=0x01, data=1.0 → 字节类型错配 → MODE_STOP → 失能。
+        // 新实现：cmd=0x07 自身会 SetCtrlMode(MODE_COMMAND_POSITION) 并按 vel 限速，
+        //         不需要先发 cmd=0x01；位置设为 currentMotorAngle（默认 0=闭合），
+        //         上电首次 !START 后夹爪保持闭合不乱跳。
+        SendPositionVelocityFrame(currentMotorAngle, currentVelocityLimit);
+        isEnabled = true;
+    }
     else
-        SetMaxCurrent(0);
+    {
+        // [Step1] 失能：发 cmd=0x01, data=uint32(0) → 电机端判 false → MODE_STOP。
+        // 电机可手动掰动，扭矩释放。
+        uint8_t mode = 0x01;
+        txHeader.StdId = nodeID << 7 | mode;
+
+        uint32_t val = 0;
+        auto* b = (unsigned char*) &val;
+        for (int i = 0; i < 4; i++)
+            canBuf[i] = *(b + i);
+        for (int i = 4; i < 8; i++)  // 关键：填齐 8 字节避免下次发帧残留
+            canBuf[i] = 0;
+
+        CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+        isEnabled = false;
+    }
+}
+
+
+void DummyHand::SendPositionVelocityFrame(float _pos, float _vel)
+{
+    // [Step1] 私有方法：发 cmd=0x07（Set Position with Velocity-Limit）8 字节完整帧。
+    // pos 写 canBuf[0..3]、vel 写 canBuf[4..7]，必须填齐 8 字节；
+    // 旧 SetAngle 只写 canBuf[0..3]，canBuf[4..7] 残留上次发帧字节，
+    // 电机端会把残留当 vel 误读（最大可触发 30+ r/s 的危险值）。
+    uint8_t mode = 0x07;
+    txHeader.StdId = nodeID << 7 | mode;
+
+    auto* b = (unsigned char*) &_pos;
+    for (int i = 0; i < 4; i++)
+        canBuf[i] = *(b + i);
+    b = (unsigned char*) &_vel;
+    for (int i = 4; i < 8; i++)
+        canBuf[i] = *(b + i - 4);
+
+    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
 }
 
 void DummyHand::Reboot()

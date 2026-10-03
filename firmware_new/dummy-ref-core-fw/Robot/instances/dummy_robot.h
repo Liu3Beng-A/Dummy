@@ -65,6 +65,14 @@ private:
     CAN_TxHeaderTypeDef txHeader;
     float minAngle = 0;
     float maxAngle = 45;
+    // [Step1] DummyHand 状态与运行时参数（SetEnable 切换位置模式需要知道当前位置+限速）
+    float currentMotorAngle = 0.0f;     // 上次下发的电机轴相对角（圈）；`!START` 保持闭合=0
+    float currentVelocityLimit = 30.0f; // 与电机端 EEPROM velocityLimit 对齐
+    bool isEnabled = false;             // 主控记录的夹爪使能状态（电机端无回包）
+    // 发送 cmd=0x07 位置+限速帧（pos 占 canBuf[0..3]，vel 占 canBuf[4..7]）。
+    // 电机端 cmd=0x07 会按 RxData[0..3]=pos, RxData[4..7]=vel 解析，
+    // 必须把 8 字节填齐，否则 canBuf[4..7] 残留上一次发帧的字节会被误读为 vel。
+    void SendPositionVelocityFrame(float _pos, float _vel);
 };
 
 
