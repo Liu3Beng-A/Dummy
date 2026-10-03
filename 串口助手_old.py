@@ -264,7 +264,7 @@ class RobotSerialAssistantOld:
         node_f.pack(fill=tk.X)
         ttk.Label(node_f, text="节点:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
         self.cb_node = ttk.Combobox(node_f, width=5,
-                                    values=[str(i) for i in range(0, 8)],   # 0=ALL(全部+夹爪), 1~6=J1~J6, 7=地轨
+                                    values=[str(i) for i in range(0, 9)],   # 0=ALL(全部+夹爪), 1~6=J1~J6, 7=地轨, 8=夹爪 [Step 5]
                                     state="readonly", font=("Arial", 10))
         self.cb_node.current(0)
         self.cb_node.pack(side=tk.LEFT, padx=4)
@@ -290,6 +290,11 @@ class RobotSerialAssistantOld:
         movel_page = ttk.Frame(self.joint_nb, padding=5)
         self.joint_nb.add(movel_page, text=" MoveL ")
         self._build_movel_page(movel_page)
+
+        # [Step 5] 夹爪控制页 — UART4 独有的 !HAND_* 运行时命令（4 条）
+        hand_page = ttk.Frame(self.joint_nb, padding=5)
+        self.joint_nb.add(hand_page, text=" 夹爪控制 ")
+        self._build_hand_page(hand_page)
 
         # ==============================================
         # 底部终端
@@ -767,6 +772,115 @@ class RobotSerialAssistantOld:
         if self._tx_thread is not None:
             self._tx_thread.join(timeout=2.0)
             self._tx_thread = None
+
+    # ==============================================
+    # 夹爪控制页（!HAND_*）
+    # ==============================================
+    def _build_hand_page(self, parent):
+        """夹爪控制面板：开 / 闭 / 设电流 / 设位置 4 个功能。
+        命令映射（与 firmware_new ascii_protocol.cpp OnUsbAsciiCmd + OnUart4AsciiCmd 一致）：
+          !HAND_O         → 张开（不带参数，用 self.hand_current 作为幅值；不写 EEPROM）
+          !HAND_C         → 闭合（同 !HAND_O 语义，电流取正）
+          !HAND_I <A>     → 设运行时电流幅值 0.05~2.5A（纯 RAM 变量，掉电丢；与基线 1.0A 一致）
+          !HAND_POS <0-100> → 设位置 0~100%（override 后 pos=电机圈数；限速 30 r/s；不写 EEPROM）
+        注意：!HAND_VEL/ACC/KP/KV/KI/KD/ONBOOT/ERASE 8 条配置类本期不暴露 UI，
+        等配置需求时再加折叠面板（避免误操作改写电机端 EEPROM）。
+        """
+        # --- 电流设置 ---
+        cur_f = ttk.LabelFrame(parent, text="电流设置（运行时，掉电丢）", padding=6)
+        cur_f.pack(fill=tk.X, pady=(0, 6))
+        cur_top = ttk.Frame(cur_f)
+        cur_top.pack(fill=tk.X)
+        ttk.Label(cur_top, text="电流(A):", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        self.hand_current = tk.DoubleVar(value=1.0)  # 默认 1.0A（与 firmware_new Q1 决策一致）
+        self.spb_current = tk.Spinbox(cur_top, from_=0.05, to=2.5, increment=0.05,
+                                      textvariable=self.hand_current, width=6,
+                                      format="%.2f", font=("Arial", 10))
+        self.spb_current.pack(side=tk.LEFT, padx=4)
+        ttk.Label(cur_top, text="范围 0.05~2.5A（步长 0.05）", font=("Arial", 9),
+                  foreground="#666").pack(side=tk.LEFT, padx=4)
+        cur_btn_row = ttk.Frame(cur_f)
+        cur_btn_row.pack(fill=tk.X, pady=(4, 0))
+        tk.Button(cur_btn_row, text="设置电流", font=("Arial", 10, "bold"),
+                  bg="#3b5bdb", fg="white", relief=tk.FLAT,
+                  command=self._cmd_hand_set_i
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+        tk.Button(cur_btn_row, text="开（张开）", font=("Arial", 10, "bold"),
+                  bg="#2b8a3e", fg="white", relief=tk.FLAT,
+                  command=self._cmd_hand_open
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        tk.Button(cur_btn_row, text="闭（闭合）", font=("Arial", 10, "bold"),
+                  bg="#e67700", fg="white", relief=tk.FLAT,
+                  command=self._cmd_hand_close
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        # --- 位置设置 ---
+        pos_f = ttk.LabelFrame(parent, text="位置设置（0=闭合，100=张开撞限位）", padding=6)
+        pos_f.pack(fill=tk.X, pady=(0, 6))
+        pos_top = ttk.Frame(pos_f)
+        pos_top.pack(fill=tk.X)
+        ttk.Label(pos_top, text="位置:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        self.hand_pos = tk.IntVar(value=0)
+        self.scl_hand_pos = ttk.Scale(pos_top, from_=0, to=100, orient=tk.HORIZONTAL,
+                                      variable=self.hand_pos)
+        self.scl_hand_pos.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.lbl_hand_pos = ttk.Label(pos_top, text="0", width=4, font=("Arial", 10, "bold"))
+        self.lbl_hand_pos.pack(side=tk.LEFT)
+        def hand_pos_cb(val):
+            v = int(float(val))
+            self.lbl_hand_pos.config(text=f"{v}")
+        self.scl_hand_pos.config(command=hand_pos_cb)
+        pos_btn_row = ttk.Frame(pos_f)
+        pos_btn_row.pack(fill=tk.X, pady=(4, 0))
+        tk.Button(pos_btn_row, text="设置位置", font=("Arial", 10, "bold"),
+                  bg="#3b5bdb", fg="white", relief=tk.FLAT,
+                  command=self._cmd_hand_set_pos
+                  ).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        # --- 配置类说明（折叠提示） ---
+        info_f = ttk.LabelFrame(parent, text="说明", padding=6)
+        info_f.pack(fill=tk.X)
+        info_text = (
+            "• 开/闭：电流透传（张开=负电流 / 闭合=正电流，电流幅值=Spinbox 值）\n"
+            "• 电流：仅改 RAM 变量 hand->current，不发 CAN 帧；掉电丢\n"
+            "• 位置：pos 直接对应电机圈数；限速 30 r/s；不写 EEPROM\n"
+            "• 配置类（!HAND_VEL/ACC/KP/KV/KI/KD/ONBOOT/ERASE）需谨慎，本期不暴露\n"
+            "• UART4 限制：仅开/闭/设位置/设电流 4 条可发；配置类串口助手用 USB 通道"
+        )
+        ttk.Label(info_f, text=info_text, font=("Arial", 9),
+                  foreground="#444", justify=tk.LEFT).pack(anchor="w")
+
+    # ==============================================
+    # 夹爪控制回调
+    # ==============================================
+    def _cmd_hand_open(self):
+        """!HAND_O — 张开方向电流（-A），电流幅值用 self.hand_current。"""
+        a = self.hand_current.get()
+        self.send_cmd(f"!HAND_O {a:.2f}")
+
+    def _cmd_hand_close(self):
+        """!HAND_C — 闭合方向电流（+A），电流幅值用 self.hand_current。"""
+        a = self.hand_current.get()
+        self.send_cmd(f"!HAND_C {a:.2f}")
+
+    def _cmd_hand_set_i(self):
+        """!HAND_I — 设置运行时电流幅值（纯 RAM，掉电丢）。"""
+        a = self.hand_current.get()
+        # 上限 2.5A / 下限 0.05A 已被 Spinbox 限定；额外夹一道防御
+        if a < 0.05:
+            a = 0.05
+        elif a > 2.5:
+            a = 2.5
+        self.hand_current.set(a)
+        self.send_cmd(f"!HAND_I {a:.2f}")
+
+    def _cmd_hand_set_pos(self):
+        """!HAND_POS — 设置位置 0~100（int）。"""
+        p = self.hand_pos.get()
+        if p < 0:
+            p = 0
+        elif p > 100:
+            p = 100
+        self.hand_pos.set(p)
+        self.send_cmd(f"!HAND_POS {p}")
 
     def send_cmd(self, cmd):
         """所有指令的唯一出口：入队 + 记 TX 日志，由写线程串行发出"""
