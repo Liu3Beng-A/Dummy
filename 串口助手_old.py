@@ -6,9 +6,10 @@ import threading
 import queue
 import time
 import re
+import math
 
 
-BAUDRATE = 115200  # 固件 usart.c 中 huart4 波特率硬编码，PC 端必须一致
+BAUDRATE = 115200  # 固件 usart.c 中 huart4 波特率硬编码
 
 # 各关节软限位（v3.1 同步到 firmware_new 构造参数 ±175/±75/(0,180)/±270/±100/±180）
 JOINT_RANGES = [(-175, 175), (-75, 90), (0, 180), (-270, 270), (-100, 100), (-180, 180)]
@@ -344,6 +345,11 @@ class RobotSerialAssistantOld:
         self.btn_acc_save = ttk.Button(acc_f, text="保存", command=self._save_acc)
         self.btn_acc_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
+        # 全量回读电机加速度，刷新主控同步规划使用的 RAM 缓存。
+        tk.Button(param_f, text="同步加速度至主控", font=("Arial", 9, "bold"), bg="#1971c2", fg="white",
+                  relief=tk.FLAT, command=lambda: self.send_cmd("#GETJACC 0")
+                  ).pack(fill=tk.X, padx=2, pady=(2, 4))
+
         # 电流限制（A）Entry + 读取 / 应用 / 保存 按钮
         # 应用 = #I_LIMIT_J n v（不写 EEPROM，掉电丢）；保存 = #I_LIMIT_J n v &（走 SetCurrentLimit_persist 写 EEPROM）
         i_f = ttk.Frame(param_f)
@@ -520,10 +526,11 @@ class RobotSerialAssistantOld:
         # 控制行：速度 + 拖发 + 发送
         ctrl_f = ttk.Frame(parent)
         ctrl_f.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(ctrl_f, text="Speed:", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Label(ctrl_f, text="速度(1–100):", font=("Arial", 9)).pack(side=tk.LEFT, padx=(0, 2))
         self.ent_j_speed = ttk.Entry(ctrl_f, width=6, font=("Arial", 9))
         self.ent_j_speed.insert(0, str(DEFAULT_SPEED))
         self.ent_j_speed.pack(side=tk.LEFT)
+        ttk.Label(ctrl_f, text="100 = 30 r/s", font=("Arial", 9)).pack(side=tk.LEFT, padx=4)
         self._make_toggle_button(
             ctrl_f, self.movej_drag_enable,
             text_off="拖发 OFF", text_on="拖发 ON",
@@ -575,7 +582,7 @@ class RobotSerialAssistantOld:
 
         pos_bot = ttk.Frame(parent)
         pos_bot.pack(fill=tk.X)
-        ttk.Label(pos_bot, text="速度:", font=("Arial", 10)).pack(side=tk.LEFT)
+        ttk.Label(pos_bot, text="速度(1–100):", font=("Arial", 10)).pack(side=tk.LEFT)
         self.ent_pos_speed = ttk.Entry(pos_bot, width=6, font=("Arial", 10))
         self.ent_pos_speed.insert(0, str(DEFAULT_SPEED))
         self.ent_pos_speed.pack(side=tk.LEFT, padx=4)
@@ -639,7 +646,7 @@ class RobotSerialAssistantOld:
 
         movel_ctrl = ttk.Frame(parent)
         movel_ctrl.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(movel_ctrl, text="Speed:", font=("Arial", 10)).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Label(movel_ctrl, text="速度(1–100):", font=("Arial", 10)).pack(side=tk.LEFT, padx=(0, 2))
         self.ent_l_speed = ttk.Entry(movel_ctrl, width=6, font=("Arial", 10))
         self.ent_l_speed.insert(0, str(DEFAULT_SPEED))
         self.ent_l_speed.pack(side=tk.LEFT)
@@ -1224,26 +1231,33 @@ class RobotSerialAssistantOld:
     # ==============================================
     # 运动指令
     # ==============================================
+    @staticmethod
+    def _validated_speed(value):
+        speed = float(value)
+        if not math.isfinite(speed) or not 1 <= speed <= 100:
+            raise ValueError("速度档位必须为 1–100 的有限数值（100 = 30 r/s）")
+        return speed
+
     def send_movej(self):
         """>j1,j2,j3,j4,j5,j6,j7(rail),speed  （8 个值，v3.1 新协议）"""
         try:
             j = [float(ent.get()) for ent in self.ent_joints]
             j7 = float(self.ent_j7.get())
-            speed = float(self.ent_j_speed.get())
+            speed = self._validated_speed(self.ent_j_speed.get())
             cmd = ">" + ",".join(f"{v:g}" for v in j) + f",{j7:g},{speed:g}"
             self.send_cmd(cmd)
         except ValueError:
-            messagebox.showerror("错误", "请输入有效的数字")
+            messagebox.showerror("错误", "请输入有效数字；速度档位必须为 1–100（100 = 30 r/s）")
 
     def send_movel(self):
         """@X,Y,Z,A,B,C,speed  （7 个值）"""
         try:
             p = [float(ent.get()) for ent in self.ent_pose]
-            speed = float(self.ent_l_speed.get())
+            speed = self._validated_speed(self.ent_l_speed.get())
             cmd = "@" + ",".join(f"{v:g}" for v in p) + f",{speed:g}"
             self.send_cmd(cmd)
         except ValueError:
-            messagebox.showerror("错误", "请输入有效的数字")
+            messagebox.showerror("错误", "请输入有效数字；速度档位必须为 1–100（100 = 30 r/s）")
 
     # ==============================================
     # 关节角 / 位姿回读同步
@@ -1385,9 +1399,10 @@ class RobotSerialAssistantOld:
 
     def _get_pos_speed(self):
         try:
-            return float(self.ent_pos_speed.get())
+            return self._validated_speed(self.ent_pos_speed.get())
         except ValueError:
-            return DEFAULT_SPEED
+            messagebox.showerror("错误", "速度档位必须为 1–100 的有限数值（100 = 30 r/s）")
+            return None
 
     def send_selected_position(self):
         """发送列表中选中的点位"""
@@ -1398,6 +1413,8 @@ class RobotSerialAssistantOld:
         idx = idx[0]
         _name, pos = self.stored_positions[idx]
         speed = self._get_pos_speed()
+        if speed is None:
+            return
         # [v3.1] >j1,j2,j3,j4,j5,j6,j7(rail),speed （8 个值）
         self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:7]) + f",{speed:g}")
 
@@ -1413,6 +1430,8 @@ class RobotSerialAssistantOld:
         self._seq_pending = list(self.stored_positions)
         self._seq_idx = 0
         self._seq_speed = self._get_pos_speed()
+        if self._seq_speed is None:
+            return
         total = len(self._seq_pending)
 
         # 模式提示（不自动切换，不阻塞发送）

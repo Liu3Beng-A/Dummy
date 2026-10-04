@@ -1,5 +1,15 @@
 #include "communication.hpp"
 #include "dummy_robot.h"
+#include <cstring>
+
+// Release 使用 -Ofast，按 IEEE-754 位模式检查，避免 isfinite 被优化掉。
+static bool IsFiniteCommandValue(float value)
+{
+    uint32_t bits;
+    static_assert(sizeof(bits) == sizeof(value), "32-bit float required");
+    std::memcpy(&bits, &value, sizeof(bits));
+    return (bits & 0x7f800000U) != 0x7f800000U;
+}
 
 inline float AbsMaxOf6(DOF6Kinematic::Joint6D_t _joints, uint8_t &_index)
 {
@@ -33,13 +43,13 @@ static float timeTrapezoid(float d, float v, float a)
         // 三角形：距离太短，没匀速段
         return 2.0f * sqrtf(d / a);
     }
-    // 梯形：加速→匀速→减速
-    return 2.0f * v / a + (d - 2.0f * d_acc) / v;
+    // 梯形：T = d/v + v/a，避免在临界距离附近做相近数相减。
+    return d / v + v / a;
 }
 
 
 /**
- * @brief §3.3.1 7 轴同步抵达速度规划 v2.7（梯形曲线 + 迭代收敛）
+ * @brief 7 轴同步抵达速度规划（固定最大时间预算 + 稳定小根）
  * @param deltaRails[7] 各轴距离，[0]=地轨(mm)，[1..6]=关节(°)
  * @param sliderCaps[7] 各轴电机轴 r/s 上限（地轨=30，关节=30）
  * @param accel[7]      各轴加速度（r/s²），0 用 JOINT_ACC_FALLBACK 兜底
@@ -47,7 +57,7 @@ static float timeTrapezoid(float d, float v, float a)
  * @param outSpeeds[7]  输出每轴最终电机轴 r/s
  * @return timeBudget   同步抵达总时间（s）
  * @note  与电机端 motion_planner.cpp PositionTracker 公式一致：对称梯形加减速，
- *        距离太短退化为三角形曲线。本期 jointAccRuntime[] 异步回填逻辑属 §9 #7，
+ *        距离太短退化为三角形曲线。运行时加速度通过 CAN 回读，
  *        未回包前用 JOINT_ACC_FALLBACK[i] 兜底。
  */
 static float ComputeSyncSpeeds(const float deltaRails[7], const float sliderCaps[7],
@@ -62,7 +72,7 @@ static float ComputeSyncSpeeds(const float deltaRails[7], const float sliderCaps
             : fabsf(deltaRails[i]) * (float)MOTOR_REDUCTION[i] / 360.0f;
     }
 
-    // 步骤 2：初始预算时间 = 各轴在 sliderSpeed（钳制到 cap）下的梯形时间，取 max
+    // 步骤 2：固定预算 = 各轴在用户/物理限速下的最短梯形时间，取 max。
     float timeBudget = 0;
     for (int i = 0; i < 7; i++) {
         if (distMotor[i] < 1e-6f) continue;
@@ -78,33 +88,24 @@ static float ComputeSyncSpeeds(const float deltaRails[7], const float sliderCaps
         return 0.0f;
     }
 
-    // 步骤 3：迭代收敛（最多 10 轮，一般 2~3 轮收敛）
-    // 解二次方程：v²/a - v*T + d = 0  →  v = (T - sqrt(T² - 4d/a)) × a / 2
-    for (int iter = 0; iter < 10; iter++) {
-        float newTimeBudget = 0;
-        for (int i = 0; i < 7; i++) {
-            if (distMotor[i] < 1e-6f) {
-                outSpeeds[i] = 0;
-                continue;
-            }
-            float a  = (accel[i] > 1e-6f) ? accel[i] : JOINT_ACC_FALLBACK[i];
-            float vc = sliderCaps[i];
-            float disc = timeBudget * timeBudget - 4.0f * distMotor[i] / a;
-            // 临界抖动：disc 偶尔 <0 时钳到 0，让反推公式自然算出"刚够用"速度
-            if (disc < 0) disc = 0;
-            float v = (timeBudget - sqrtf(disc)) * a * 0.5f;
-            // 双钳制：物理上限 (vc) + 用户意图上限 (sliderSpeed)
-            if (v > vc) v = vc;
-            if (v > sliderSpeed) v = sliderSpeed;
-            outSpeeds[i] = v;
-            float t = timeTrapezoid(distMotor[i], v, a);
-            if (t > newTimeBudget) newTimeBudget = t;
+    // 步骤 3：用同一个预算直接反解各轴速度，无需重新反算预算。
+    // v²/a - v*T + d = 0 的小根有理化后：v = 2d / (T + sqrt(T² - 4d/a))。
+    // 避免 T-sqrt(...) 的相减消去，尤其是“不动轴”的微小编码器残差。
+    // 不再用反解后的浮点误差放大 T，保证小残差不拖慢其他运动轴。
+    for (int i = 0; i < 7; i++) {
+        if (distMotor[i] < 1e-6f) {
+            outSpeeds[i] = 0;
+            continue;
         }
-        if (fabsf(newTimeBudget - timeBudget) < 1e-3f) {
-            timeBudget = newTimeBudget;
-            break;
-        }
-        timeBudget = newTimeBudget;
+        float a = (accel[i] > 1e-6f) ? accel[i] : JOINT_ACC_FALLBACK[i];
+        float disc = timeBudget * timeBudget - 4.0f * distMotor[i] / a;
+        // 三角曲线临界处允许浮点舍入造成的小负数。
+        if (disc < 0) disc = 0;
+        float v = 2.0f * distMotor[i] / (timeBudget + sqrtf(disc));
+        // 保持各轴物理上限与用户速度档位上限。
+        if (v > sliderCaps[i]) v = sliderCaps[i];
+        if (v > sliderSpeed) v = sliderSpeed;
+        outSpeeds[i] = v;
     }
     return timeBudget;
 }
@@ -259,9 +260,11 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4,
     }
     if (!valid) return false;
 
-    // §3.3.1 物理同步：梯形曲线 + 迭代收敛（替换原"按距离比例限速"）
+    // 物理同步：固定最大时间预算 + 数值稳定的梯形曲线速度反解。
     // 按用户给定 speed (1~100) 换算电机轴 r/s：100 → 30 r/s
-    float slider = _speed > 0 ? _speed : 50.0f;  // 默认值 50（原 DEFAULT_JOINT_SPEED）
+    if (!IsFiniteCommandValue(_speed)) return false;
+    // 0 是内部“沿用当前档位”标记；串口助手只允许输入 1..100。
+    float slider = _speed == 0 ? jointSpeed : _speed;
     if (slider < 1) slider = 1;
     if (slider > 100) slider = 100;
     float sliderSpeedRps = slider * 0.30f;  // 100 → 30 r/s
@@ -397,20 +400,26 @@ void DummyRobot::UpdateJointAnglesCallback()
 
 void DummyRobot::SetJointSpeed(float _speed)
 {
-    if (_speed < 0)_speed = 0;
+    if (!IsFiniteCommandValue(_speed)) return;
+    if (_speed < 1) _speed = 1;
     else if (_speed > 100) _speed = 100;
-
-    jointSpeed = _speed * jointSpeedRatio;
+    jointSpeed = _speed;
 }
 
 
 void DummyRobot::SetJointAcceleration(float _acc)
 {
-    if (_acc < 0)_acc = 0;
-    else if (_acc > 100) _acc = 100;
+    if (!IsFiniteCommandValue(_acc)) return;
+    if (_acc < 1) _acc = 1;
+    else if (_acc > 5000) _acc = 5000;
 
-    for (int i = 1; i <= 6; i++)
-        motorJ[i]->SetAcceleration(_acc / 100 * DEFAULT_JOINT_ACCELERATION_BASES.a[i - 1]);
+    for (int i = 1; i <= 7; i++)
+    {
+        motorJ[i]->SetAcceleration_persist(_acc, false);
+        // 立即更新规划值，随后由电机回读确认，避免紧接的 MoveJ 使用旧值。
+        jointAccRuntime[i] = _acc;
+    }
+    SyncAllMotorAcceleration();
 }
 
 
@@ -532,20 +541,8 @@ void DummyRobot::SetCommandMode(uint32_t _mode)
 
     commandMode = static_cast<CommandMode>(_mode);
 
-    switch (commandMode)
-    {
-        case COMMAND_TARGET_POINT_SEQUENTIAL:
-        case COMMAND_TARGET_POINT_INTERRUPTABLE:
-            jointSpeedRatio = 1;
-            SetJointAcceleration(DEFAULT_JOINT_ACCELERATION_LOW);
-            break;
-        case COMMAND_CONTINUES_TRAJECTORY:
-            SetJointAcceleration(DEFAULT_JOINT_ACCELERATION_HIGH);
-            jointSpeedRatio = 0.3;
-            break;
-        case COMMAND_MOTOR_TUNING:
-            break;
-    }
+    // 切换 SEQ/INT/TRJ/TUN 保留速度档位及电机加速度设置。
+    // 启动时也不覆盖 EEPROM 中的加速度，由 Init() 的查询回填。
 }
 
 
@@ -602,11 +599,10 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 if (_cmd[0] == '&')
                     argNum = sscanf(_cmd.c_str(), "&%f,%f,%f,%f,%f,%f,%f,%f",
                                     &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
-                if (argNum >= 7)
+                if (argNum >= 7 && IsFiniteCommandValue(speed))
                 {
                     if (argNum == 8) context->SetJointSpeed(speed);
-                    // 默认地轨保持当前位置
-                    if (argNum == 7) j7 = context->currentRailPos;
+                    // 七参数为六关节 + 地轨；省略速度时沿用当前档位。
                     context->MoveJ(j1, j2, j3, j4, j5, j6, j7, speed);
                 }
                 // Trigger a transmission immediately, in case IsMoving() returns false
@@ -626,7 +622,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 if (argNum == 6)
                 {
                     context->MoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]);
-                } else if (argNum == 7)
+                } else if (argNum == 7 && IsFiniteCommandValue(speed))
                 {
                     context->SetJointSpeed(speed);
                     context->MoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]);
@@ -648,11 +644,10 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 if (_cmd[0] == '&')
                     argNum = sscanf(_cmd.c_str(), "&%f,%f,%f,%f,%f,%f,%f,%f",
                                     &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
-                if (argNum >= 7)
+                if (argNum >= 7 && IsFiniteCommandValue(speed))
                 {
                     if (argNum == 8) context->SetJointSpeed(speed);
-                    // 默认地轨保持当前位置
-                    if (argNum == 7) j7 = context->currentRailPos;
+                    // 七参数为六关节 + 地轨；省略速度时沿用当前档位。
                     context->MoveJ(j1, j2, j3, j4, j5, j6, j7, speed);
                 }
                 Respond(*usbStreamOutputPtr, "ok");
@@ -667,7 +662,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 if (argNum == 6)
                 {
                     context->MoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]);
-                } else if (argNum == 7)
+                } else if (argNum == 7 && IsFiniteCommandValue(speed))
                 {
                     context->SetJointSpeed(speed);
                     context->MoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]);

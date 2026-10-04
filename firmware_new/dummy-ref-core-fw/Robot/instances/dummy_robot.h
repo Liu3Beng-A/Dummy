@@ -168,12 +168,7 @@ public:
 
     // This is the pose when power on.
     const DOF6Kinematic::Joint6D_t REST_POSE = {0, -75, 180, 0, 0, 0};
-//    const float DEFAULT_JOINT_SPEED = 30;  // degree/s
-    const float DEFAULT_JOINT_SPEED = 50;  // degree/s
-    const DOF6Kinematic::Joint6D_t DEFAULT_JOINT_ACCELERATION_BASES = {150, 100, 200, 200, 200, 200};
-//    const float DEFAULT_JOINT_ACCELERATION_LOW = 30;    // 0~100
-    const float DEFAULT_JOINT_ACCELERATION_LOW = 15;    // 0~100
-    const float DEFAULT_JOINT_ACCELERATION_HIGH = 100;  // 0~100
+    const float DEFAULT_JOINT_SPEED = 50; // 速度档位 1..100；100 = 电机轴 30 r/s
     const CommandMode DEFAULT_COMMAND_MODE = COMMAND_TARGET_POINT_INTERRUPTABLE;
 
 
@@ -219,8 +214,8 @@ public:
     bool MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm, float _speed = 0);
     bool MoveL(float _x, float _y, float _z, float _a, float _b, float _c);
     void MoveJoints(DOF6Kinematic::Joint6D_t _joints);
-    void SetJointSpeed(float _speed);
-    void SetJointAcceleration(float _acc);
+    void SetJointSpeed(float _speed); // 档位 1..100（非物理速度）
+    void SetJointAcceleration(float _acc); // 电机轴 r/s²，J1..J7，运行时应用
     void UpdateJointAngles();
     void UpdateJointAnglesCallback();
     void UpdateJointPose6D();
@@ -312,7 +307,6 @@ public:
 private:
     CAN_HandleTypeDef* hcan;
     float jointSpeed = DEFAULT_JOINT_SPEED;
-    float jointSpeedRatio = 1;
     DOF6Kinematic::Joint6D_t dynamicJointSpeeds = {1, 1, 1, 1, 1, 1};
     DOF6Kinematic* dof6Solver;
     bool isEnabled = false;
