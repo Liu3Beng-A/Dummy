@@ -49,6 +49,13 @@ public:
     void SetDceKv(int32_t _val);
     void SetDceKi(int32_t _val);
     void SetDceKd(int32_t _val);
+    // CAN Query
+    void QueryDceKp();
+    void QueryDceKv();
+    void QueryDceKi();
+    void QueryDceKd();
+    void QueryAcceleration();
+    void QueryCurrentLimit();
     void ApplyPositionAsHome();
     void SetEnableOnBoot(bool _enable);
     void SetEnableStallProtect(bool _enable);

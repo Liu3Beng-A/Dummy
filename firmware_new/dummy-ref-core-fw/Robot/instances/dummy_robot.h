@@ -195,7 +195,23 @@ public:
 
     // §3.3.1 各轴运行时加速度（r/s²）：异步从电机端 EEPROM 回填（§9 #7）；
     // 本期用 JOINT_ACC_FALLBACK 兜底（初始值同兜底，回填协议就绪后由电机端覆盖）
-    float jointAccRuntime[7] = {30.0f, 150.0f, 100.0f, 200.0f, 200.0f, 200.0f, 200.0f};
+    // [v2026-10-03] 查询端补齐：索引 [7] 扩到 [9]
+    //   [0]=ALL 代理空闲槽；[1..7]=J1~J7/地轨（与 motorJ[1..7] 对齐）；[8]=夹爪
+    //   初始值沿用 JOINT_ACC_FALLBACK[0..6] + 夹爪 30；由 Init() 末尾 SyncAllMotorAcceleration() 异步覆盖
+    float jointAccRuntime[9] = {0};
+    uint32_t jointAccLastUpdateMs[9] = {0};
+    float jointCurrentLimitRuntime[9] = {0};
+    uint32_t jointCurrentLimitLastUpdateMs[9] = {0};
+
+    // [v2026-10-03] PID 缓存（0x28~0x2B 4 帧合并）
+    //   [1..7]=J1~J7/地轨；[8]=夹爪；[0]=空闲
+    int32_t motorDceKps[9] = {0};
+    int32_t motorDceKvs[9] = {0};
+    int32_t motorDceKis[9] = {0};
+    int32_t motorDceKds[9] = {0};
+    uint8_t motorPidRcvdCount[9] = {0};                       // 4 帧合并计数器，到 4 置 _pid_print_pending
+    volatile uint8_t _pid_print_pending[9] = {0};             // ISR 写、OledTask 读+清 0 + printf
+    volatile uint8_t _pid_pending_node[9] = {0};               // 触发合并的节点 ID（1~8）
 
 
     void Init();
@@ -229,6 +245,14 @@ public:
     bool IsMoving();
     bool IsEnabled();
     void SetCommandMode(uint32_t _mode);
+
+    // [v2026-10-03] 查询端补齐：3 个 Sync + 1 个 Poll
+    //  - SyncAll* 被 #GET_PID 0 / #GETJACC 0 / #GETI 0 内部调用（ALL 模式触发）
+    //  - PollPidPrint 由 OledTask 周期调用，print 4 帧合并完成的 PID 节点
+    void SyncAllMotorAcceleration();
+    void SyncAllMotorCurrentLimit();
+    void SyncAllMotorPid();
+    void PollPidPrint();
 
 
     // Communication protocol definitions

@@ -149,6 +149,54 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                     dummy.currentPose6D.X, dummy.currentPose6D.Y,
                     dummy.currentPose6D.Z, dummy.currentPose6D.A,
                     dummy.currentPose6D.B, dummy.currentPose6D.C);
+        }
+        // [v2026-10-03] 查询端补齐：#GET_PID 1~8 + 0=ALL
+        //   1~8 单节点 30ms 同步等（osDelay(1) 轮询 motorPidRcvdCount[idx] >= 4）
+        //   0=ALL 立即 Respond "ALL dispatched"，32 帧回包由 OledTask PollPidPrint 分行打印
+        else if (s.find("GET_PID") != std::string::npos)
+        {
+            uint32_t node;
+            sscanf(_cmd, "#GET_PID %lu", &node);
+            if (node == 0) {
+                // ALL 模式：8 节点 × 4 帧 = 32 帧，立即返回不阻塞
+                for (int i = 1; i <= 7; i++) {
+                    dummy.motorJ[i]->QueryDceKp();
+                    dummy.motorJ[i]->QueryDceKv();
+                    dummy.motorJ[i]->QueryDceKi();
+                    dummy.motorJ[i]->QueryDceKd();
+                }
+                dummy.hand->QueryDceKp();
+                dummy.hand->QueryDceKv();
+                dummy.hand->QueryDceKi();
+                dummy.hand->QueryDceKd();
+                Respond(_responseChannel, "ok GET_PID ALL dispatched (8 nodes x 4 = 32 frames; results printed by OledTask PollPidPrint in 1-2 s)");
+            } else if (node >= 1 && node <= 8) {
+                int idx = (node == 7) ? 7 : (node == 8) ? 8 : (int)node;
+                if (node == 8) {
+                    dummy.hand->QueryDceKp(); dummy.hand->QueryDceKv();
+                    dummy.hand->QueryDceKi(); dummy.hand->QueryDceKd();
+                } else {
+                    dummy.motorJ[node]->QueryDceKp(); dummy.motorJ[node]->QueryDceKv();
+                    dummy.motorJ[node]->QueryDceKi(); dummy.motorJ[node]->QueryDceKd();
+                }
+                // 30ms 超时同步等 4 帧合并
+                uint32_t waited = 0;
+                while (dummy.motorPidRcvdCount[idx] < 4 && waited < 30) {
+                    osDelay(1); waited++;
+                }
+                if (dummy.motorPidRcvdCount[idx] >= 4) {
+                    Respond(_responseChannel, "ok PID [%lu] kp=%ld kv=%ld ki=%ld kd=%ld%s",
+                            node, (long)dummy.motorDceKps[idx], (long)dummy.motorDceKvs[idx],
+                            (long)dummy.motorDceKis[idx], (long)dummy.motorDceKds[idx],
+                            node == 8 ? " (HAND)" : (node == 7 ? " (rail)" : ""));
+                    dummy.motorPidRcvdCount[idx] = 0;
+                } else {
+                    uint8_t got = dummy.motorPidRcvdCount[idx];
+                    Respond(_responseChannel, "error GET_PID [%lu] timeout (got %u/4, %lu ms)", node, got, waited);
+                }
+            } else {
+                Respond(_responseChannel, "error GET_PID [%lu] wrong (use 7=rail, 1~6=joints, 8=hand, 0=ALL)", node);
+            }
         } else if (s.find("SET_DCE_KP") != std::string::npos)
         {
             uint32_t kp;
@@ -216,6 +264,29 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                 Respond(_responseChannel, "error SET MOTOR [%lu] DCE_KV [%ld] is wrong (range 1~8, reject 0)", node, kv);
             }
         }
+        // [v2026-10-03] 查询端补齐：#SET_PID 1~8（写 EEPROM 4 个 PID 值）
+        //   放在 SET_DCE_KV 之后、I_LIMIT_J 之前（防 SET_DCE_K* 子串抢先匹配）
+        else if (s.find("SET_PID") != std::string::npos)
+        {
+            uint32_t node, kp, kv, ki, kd;
+            sscanf(_cmd, "#SET_PID %lu %lu %lu %lu %lu", &node, &kp, &kv, &ki, &kd);
+            if (node >= 1 && node <= 7) {
+                dummy.motorJ[node]->SetDceKp(kp);
+                dummy.motorJ[node]->SetDceKv(kv);
+                dummy.motorJ[node]->SetDceKi(ki);
+                dummy.motorJ[node]->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [%lu] kp=%lu kv=%lu ki=%lu kd=%lu%s",
+                        node, kp, kv, ki, kd, node == 7 ? " (rail)" : "");
+            } else if (node == 8) {
+                dummy.hand->SetDceKp(kp);
+                dummy.hand->SetDceKv(kv);
+                dummy.hand->SetDceKi(ki);
+                dummy.hand->SetDceKd(kd);
+                Respond(_responseChannel, "ok SET PID [8] kp=%lu kv=%lu ki=%lu kd=%lu (HAND)", kp, kv, ki, kd);
+            } else {
+                Respond(_responseChannel, "error SET PID [%lu] wrong (use 7=rail, 1~6=joints, 8=hand, 0=ALL not allowed)", node);
+            }
+        }
         else if (s.find("I_LIMIT_J") != std::string::npos)
         {
             float current;
@@ -231,6 +302,64 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             }
             else {
                 Respond(_responseChannel, "error SET MOTOR [%lu] I_LIMIT [%.2f] is wrong (range 1~8, reject 0)", node, current);
+            }
+        }
+        // [v2026-10-03] 查询端补齐：#GETJACC 1~8 + 0=ALL
+        //   1~8 单节点 30ms 同步等 jointAccLastUpdateMs[idx] 变化
+        //   0=ALL 调 SyncAllMotorAcceleration() 异步触发 8 个 0x2C
+        //   放在 I_LIMIT_J 之后、ACC_J 之前
+        else if (s.find("GETJACC") != std::string::npos)
+        {
+            uint32_t node;
+            sscanf(_cmd, "#GETJACC %lu", &node);
+            if (node == 0) {
+                dummy.SyncAllMotorAcceleration();
+                Respond(_responseChannel, "ok GETJACC ALL dispatched (8 nodes; results printed by OledTask in <100 ms)");
+            } else if (node >= 1 && node <= 8) {
+                int idx = (node == 7) ? 7 : (node == 8) ? 8 : (int)node;
+                uint32_t old_ms = dummy.jointAccLastUpdateMs[idx];
+                if (node == 8) dummy.hand->QueryAcceleration();
+                else           dummy.motorJ[node]->QueryAcceleration();
+                uint32_t waited = 0;
+                while (dummy.jointAccLastUpdateMs[idx] == old_ms && waited < 30) {
+                    osDelay(1); waited++;
+                }
+                if (dummy.jointAccLastUpdateMs[idx] != old_ms) {
+                    Respond(_responseChannel, "ok ACC [%lu] = %.2f r/s^2%s", node, dummy.jointAccRuntime[idx],
+                            node == 8 ? " (HAND)" : (node == 7 ? " (rail)" : ""));
+                } else {
+                    Respond(_responseChannel, "error GETJACC [%lu] timeout (%lu ms)", node, waited);
+                }
+            } else {
+                Respond(_responseChannel, "error GETJACC [%lu] wrong (use 7=rail, 1~6=joints, 8=hand, 0=ALL)", node);
+            }
+        }
+        // [v2026-10-03] 查询端补齐：#GETI 1~8 + 0=ALL
+        //   ⚠️ 必须放 ACC_J 分支之前（防 #GETI 1 被 ACC_J 抢先匹配 — 实际不会但按方案顺序约束）
+        else if (s.find("GETI") != std::string::npos)
+        {
+            uint32_t node;
+            sscanf(_cmd, "#GETI %lu", &node);
+            if (node == 0) {
+                dummy.SyncAllMotorCurrentLimit();
+                Respond(_responseChannel, "ok GETI ALL dispatched (8 nodes, async; results printed by OledTask in <100 ms)");
+            } else if (node >= 1 && node <= 8) {
+                int idx = (node == 7) ? 7 : (node == 8) ? 8 : (int)node;
+                uint32_t old_ms = dummy.jointCurrentLimitLastUpdateMs[idx];
+                if (node == 8) dummy.hand->QueryCurrentLimit();
+                else           dummy.motorJ[node]->QueryCurrentLimit();
+                uint32_t waited = 0;
+                while (dummy.jointCurrentLimitLastUpdateMs[idx] == old_ms && waited < 30) {
+                    osDelay(1); waited++;
+                }
+                if (dummy.jointCurrentLimitLastUpdateMs[idx] != old_ms) {
+                    Respond(_responseChannel, "ok I_LIMIT [%lu] = %.2f A%s", node, dummy.jointCurrentLimitRuntime[idx],
+                            node == 8 ? " (HAND)" : (node == 7 ? " (rail)" : ""));
+                } else {
+                    Respond(_responseChannel, "error GETI [%lu] timeout (%lu ms)", node, waited);
+                }
+            } else {
+                Respond(_responseChannel, "error GETI [%lu] wrong (use 7=rail, 1~6=joints, 8=hand, 0=ALL)", node);
             }
         }
         else if (s.find("ACC_J") != std::string::npos)

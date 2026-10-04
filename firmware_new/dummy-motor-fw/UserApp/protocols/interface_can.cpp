@@ -116,7 +116,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             // 0x10~0x1F CMDs with Memory
 #if MOTOR_TYPE == 8
         case 0x11:  // Set Node-ID and Store to EEPROM (no-op for gripper)
-            // gripper 硬编�?ID=8，启动时已被 main.cpp 强制覆盖
+            // gripper 硬编�?ID=8，启动时已被 main.cpp 强制覆盖
             break;
 #else
         case 0x11:  // Set Node-ID and Store to EEPROM
@@ -139,7 +139,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
-        case 0x14:  // Set Acceleration （and Store to EEPROM�?
+        case 0x14:  // Set Acceleration （and Store to EEPROM�?
             tmpF = *(float*) RxData * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 
             motor.config.motionParams.ratedVelocityAcc = (int32_t) tmpF;
@@ -186,7 +186,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
         #if MOTOR_TYPE == 8
         case 0x1B:  // Set Enable Stall-Protect (no-op for gripper)
-            // gripper 没有 stall 保护；保�?EEPROM 字段不变
+            // gripper 没有 stall 保护；保�?EEPROM 字段不变
             break;
 #else
         case 0x1B:  // Set Enable Stall-Protect

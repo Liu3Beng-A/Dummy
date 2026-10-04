@@ -252,6 +252,54 @@ void CtrlStepMotor::SetEnableStallProtect(bool _enable)
 }
 
 
+void CtrlStepMotor::QueryDceKp()
+{
+    uint8_t mode = 0x28;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::QueryDceKv()
+{
+    uint8_t mode = 0x29;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::QueryDceKi()
+{
+    uint8_t mode = 0x2A;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::QueryDceKd()
+{
+    uint8_t mode = 0x2B;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::QueryAcceleration()
+{
+    uint8_t mode = 0x2C;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
+void CtrlStepMotor::QueryCurrentLimit()
+{
+    uint8_t mode = 0x2D;
+    txHeader.StdId = nodeID << 7 | mode;
+    uint8_t buf[8] = {0};
+    CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
+}
+
 void CtrlStepMotor::Reboot()
 {
     uint8_t mode = 0x7f;

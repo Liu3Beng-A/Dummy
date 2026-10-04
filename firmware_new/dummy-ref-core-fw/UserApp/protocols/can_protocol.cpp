@@ -37,6 +37,44 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 else
                     memcpy(&dummy.motorJ[id]->temperature, data, sizeof(uint32_t));
                 break;
+            // [v2026-10-03] 查询端补齐：0x28~0x2D 回包路由
+            //   0x28~0x2B: 4 帧 PID 合并 → motorPidRcvdCount[idx]，到 4 置 _pid_print_pending
+            //   0x2C: jointAccRuntime[idx] + 时间戳
+            //   0x2D: jointCurrentLimitRuntime[idx] + 时间戳
+            //   节点 id 1~8 全部覆盖（含地轨 7 + 夹爪 8）；id==0 走电机端广播过滤，主控不响应
+            case 0x28:  // QueryDceKp
+            case 0x29:  // QueryDceKv
+            case 0x2A:  // QueryDceKi
+            case 0x2B:  // QueryDceKd
+                if (id >= 1 && id <= 8) {
+                    int idx = (id == 7) ? 7 : (id == 8) ? 8 : (int)id;
+                    int32_t val = *(int32_t*)data;
+                    if      (cmd == 0x28) dummy.motorDceKps[idx] = val;
+                    else if (cmd == 0x29) dummy.motorDceKvs[idx] = val;
+                    else if (cmd == 0x2A) dummy.motorDceKis[idx] = val;
+                    else                  dummy.motorDceKds[idx] = val;
+                    dummy.motorPidRcvdCount[idx]++;
+                    if (dummy.motorPidRcvdCount[idx] >= 4) {
+                        dummy._pid_print_pending[idx] = 1;
+                        dummy._pid_pending_node[idx] = id;
+                        dummy.motorPidRcvdCount[idx] = 0;  // 重置合并
+                    }
+                }
+                break;
+            case 0x2C:  // QueryAcceleration
+                if (id >= 1 && id <= 8) {
+                    int idx = (id == 7) ? 7 : (id == 8) ? 8 : (int)id;
+                    dummy.jointAccRuntime[idx] = *(float*)data;
+                    dummy.jointAccLastUpdateMs[idx] = HAL_GetTick();
+                }
+                break;
+            case 0x2D:  // QueryCurrentLimit
+                if (id >= 1 && id <= 8) {
+                    int idx = (id == 7) ? 7 : (id == 8) ? 8 : (int)id;
+                    dummy.jointCurrentLimitRuntime[idx] = *(float*)data;
+                    dummy.jointCurrentLimitLastUpdateMs[idx] = HAL_GetTick();
+                }
+                break;
             default:
                 break;
         }

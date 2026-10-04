@@ -142,6 +142,9 @@ void DummyRobot::Init()
 {
     SetCommandMode(DEFAULT_COMMAND_MODE);
     SetJointSpeed(DEFAULT_JOINT_SPEED);
+
+    // [v2026-10-03] 启动后异步回填 jointAccRuntime[1..8]（0x2C 回包，~5ms 抵达）
+    SyncAllMotorAcceleration();
 }
 
 
@@ -159,6 +162,63 @@ void DummyRobot::RebootAllMotors()
     //   原 Reboot() 末尾 500ms 是给 HAL_NVIC_SystemReset() 留出发帧时间，
     //   本函数不调 reset，且 CAN 帧已在 µs 级装入 Mailbox（can.c CAN_Send），
     //   无需 block 任何 RTOS 任务。
+}
+
+// [v2026-10-03] 查询端补齐：3 Sync + 1 Poll（ASCII ALL 模式内部使用 + OledTask 周期 poll）
+void DummyRobot::SyncAllMotorAcceleration()
+{
+    // 触发 8 个电机发 0x2C 回包（电机端回 float 到 can_protocol ISR）
+    for (int i = 1; i <= 7; i++) motorJ[i]->QueryAcceleration();
+    if (hand) hand->QueryAcceleration();
+}
+
+void DummyRobot::SyncAllMotorCurrentLimit()
+{
+    // 触发 8 个电机发 0x2D 回包
+    for (int i = 1; i <= 7; i++) motorJ[i]->QueryCurrentLimit();
+    if (hand) hand->QueryCurrentLimit();
+}
+
+void DummyRobot::SyncAllMotorPid()
+{
+    // 触发 8×4 = 32 帧 PID 查询；4 帧合并由 can_protocol ISR 完成
+    for (int i = 1; i <= 7; i++) {
+        motorJ[i]->QueryDceKp();
+        motorJ[i]->QueryDceKv();
+        motorJ[i]->QueryDceKi();
+        motorJ[i]->QueryDceKd();
+    }
+    if (hand) {
+        hand->QueryDceKp();
+        hand->QueryDceKv();
+        hand->QueryDceKi();
+        hand->QueryDceKd();
+    }
+}
+
+void DummyRobot::PollPidPrint()
+{
+    // OledTask 50Hz 周期调用；扫描 8 节点，4 帧合并完成的 PID 立即 printf 并清 0
+    for (int idx = 1; idx <= 8; idx++) {
+        if (_pid_print_pending[idx]) {
+            _pid_print_pending[idx] = 0;
+            uint8_t node = _pid_pending_node[idx];
+            if (node == 7) {
+                printf("ok PID [7] kp=%ld kv=%ld ki=%ld kd=%ld (rail)\r\n",
+                       (long)motorDceKps[idx], (long)motorDceKvs[idx],
+                       (long)motorDceKis[idx], (long)motorDceKds[idx]);
+            } else if (node == 8) {
+                printf("ok PID [8] kp=%ld kv=%ld ki=%ld kd=%ld (HAND)\r\n",
+                       (long)motorDceKps[idx], (long)motorDceKvs[idx],
+                       (long)motorDceKis[idx], (long)motorDceKds[idx]);
+            } else {
+                printf("ok PID [%u] kp=%ld kv=%ld ki=%ld kd=%ld\r\n", node,
+                       (long)motorDceKps[idx], (long)motorDceKvs[idx],
+                       (long)motorDceKis[idx], (long)motorDceKds[idx]);
+            }
+            motorPidRcvdCount[idx] = 0;  // 重置合并计数器
+        }
+    }
 }
 
 void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t _joints)
@@ -215,10 +275,13 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4,
         targetJointsTmp.a[5] - currentJoints.a[5],
     };
     // 各轴加速度：异步回填槽；本期用 JOINT_ACC_FALLBACK 兜底（§9 #7 后续接电机端回填）
+    // [v2026-10-03] 索引迁移：[7]→[9]；[0] 仍对齐 deltaRails[0]=地轨
+    //   jointAccRuntime[0] 留空（ALL 代理空闲槽）；地轨走 jointAccRuntime[7]
+    //   J1~J6 走 jointAccRuntime[1..6]；夹爪走 jointAccRuntime[8]
     float jointAcc[7] = {
-        jointAccRuntime[0], jointAccRuntime[1], jointAccRuntime[2],
-        jointAccRuntime[3], jointAccRuntime[4], jointAccRuntime[5],
-        jointAccRuntime[6],
+        jointAccRuntime[7],  // [0]=地轨（与 deltaRails[0] 对齐，ComputeSyncSpeeds i==0 走 RAIL_MM_PER_CIRCLE 分支）
+        jointAccRuntime[1], jointAccRuntime[2], jointAccRuntime[3],
+        jointAccRuntime[4], jointAccRuntime[5], jointAccRuntime[6],
     };
 
     float outSpeeds[7] = {0};
