@@ -170,6 +170,19 @@ void StartDefaultTask(void *argument)
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
+// Inspect these symbols if the stack guard fires. Do not printf here: the
+// overflowing task's stack and communication may already be damaged.
+TaskHandle_t volatile stackOverflowTask = NULL;
+char * volatile stackOverflowTaskName = NULL;
+
+void vApplicationStackOverflowHook(TaskHandle_t task, char *taskName)
+{
+    stackOverflowTask = task;
+    stackOverflowTaskName = taskName;
+    taskDISABLE_INTERRUPTS();
+    for (;;) {}
+}
+
 /* USER CODE END Application */
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/

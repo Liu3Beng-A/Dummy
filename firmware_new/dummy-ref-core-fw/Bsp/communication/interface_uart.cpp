@@ -17,6 +17,10 @@ static uint32_t dma_last_rcv_idx[2];
 
 osThreadId_t uartServerTaskHandle;
 
+// UART ASCII commands use the same newlib float parser/formatter as USB.
+alignas(8) static StackType_t uartServerStack[4096 / sizeof(StackType_t)];
+static StaticTask_t uartServerTaskControlBlock;
+
 
 class UART4Sender : public StreamSink
 {
@@ -178,7 +182,10 @@ static void UartServerTask(void* ctx)
 
 const osThreadAttr_t uartServerTask_attributes = {
     .name = "UartServerTask",
-    .stack_size = 2000,
+    .cb_mem = &uartServerTaskControlBlock,
+    .cb_size = sizeof(uartServerTaskControlBlock),
+    .stack_mem = uartServerStack,
+    .stack_size = sizeof(uartServerStack),
     .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -195,6 +202,12 @@ void StartUartServer()
 
     // Start UART communication thread
     uartServerTaskHandle = osThreadNew(UartServerTask, nullptr, &uartServerTask_attributes);
+    configASSERT(uartServerTaskHandle != nullptr);
+}
+
+uint32_t UartServerStackFreeBytes(void)
+{
+    return uartServerTaskHandle ? osThreadGetStackSpace(uartServerTaskHandle) : 0;
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef* huart)

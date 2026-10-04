@@ -16,6 +16,7 @@ extern "C" {
 extern osThreadId uart_thread;
 
 void StartUartServer(void);
+uint32_t UartServerStackFreeBytes(void);
 
 #ifdef __cplusplus
 }

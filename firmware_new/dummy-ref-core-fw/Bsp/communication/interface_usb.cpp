@@ -8,6 +8,12 @@
 osThreadId_t usbServerTaskHandle;
 USBStats_t usb_stats_ = {0};
 
+// Full newlib float sscanf needs more than the old 2000-byte task stack.
+// Static RAM storage leaves room in the 64 KiB CCM FreeRTOS heap for the
+// 45 KiB protocol initialization task and other tasks created at startup.
+alignas(8) static StackType_t usbServerStack[4096 / sizeof(StackType_t)];
+static StaticTask_t usbServerTaskControlBlock;
+
 class USBSender : public PacketSink
 {
 public:
@@ -179,7 +185,10 @@ void usb_rx_process_packet(uint8_t *buf, uint32_t len, uint8_t endpoint_pair)
 
 const osThreadAttr_t usbServerTask_attributes = {
     .name = "UsbServerTask",
-    .stack_size = 2000,
+    .cb_mem = &usbServerTaskControlBlock,
+    .cb_size = sizeof(usbServerTaskControlBlock),
+    .stack_mem = usbServerStack,
+    .stack_size = sizeof(usbServerStack),
     .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -187,4 +196,10 @@ void StartUsbServer()
 {
     // Start USB communication thread
     usbServerTaskHandle = osThreadNew(UsbServerTask, nullptr, &usbServerTask_attributes);
+    configASSERT(usbServerTaskHandle != nullptr);
+}
+
+uint32_t UsbServerStackFreeBytes(void)
+{
+    return usbServerTaskHandle ? osThreadGetStackSpace(usbServerTaskHandle) : 0;
 }

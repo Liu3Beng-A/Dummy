@@ -2,6 +2,15 @@
 
 extern DummyRobot dummy;
 
+static void RespondStackStats(StreamSink& responseChannel)
+{
+    // Minimum unused stack since boot, in bytes (not current free stack).
+    Respond(responseChannel, "ok STACK usb=%lu uart=%lu heap=%lu",
+            (unsigned long) UsbServerStackFreeBytes(),
+            (unsigned long) UartServerStackFreeBytes(),
+            (unsigned long) xPortGetFreeHeapSize());
+}
+
 void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
     uint8_t  i;
@@ -132,7 +141,10 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
     } else if (_cmd[0] == '#')
     {
         std::string s(_cmd);
-        if (s.find("GETJPOS") != std::string::npos)
+        if (s == "#STACK")
+        {
+            RespondStackStats(_responseChannel);
+        } else if (s.find("GETJPOS") != std::string::npos)
         {
             Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],
@@ -518,7 +530,10 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
     } else if (_cmd[0] == '#')
     {
         std::string s(_cmd);
-        if (s.find("GETJPOS") != std::string::npos)
+        if (s == "#STACK")
+        {
+            RespondStackStats(_responseChannel);
+        } else if (s.find("GETJPOS") != std::string::npos)
         {
             Respond(_responseChannel, "ok %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
                     dummy.currentJoints.a[0], dummy.currentJoints.a[1],

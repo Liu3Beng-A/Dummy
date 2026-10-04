@@ -24,6 +24,7 @@ extern USBStats_t usb_stats_;
 
 void usb_rx_process_packet(uint8_t *buf, uint32_t len, uint8_t endpoint_pair);
 void StartUsbServer(void);
+uint32_t UsbServerStackFreeBytes(void);
 
 #ifdef __cplusplus
 }
