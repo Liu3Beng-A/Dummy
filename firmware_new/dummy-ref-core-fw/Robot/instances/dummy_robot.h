@@ -209,9 +209,10 @@ public:
     int32_t motorDceKvs[9] = {0};
     int32_t motorDceKis[9] = {0};
     int32_t motorDceKds[9] = {0};
-    uint8_t motorPidRcvdCount[9] = {0};                       // 4 帧合并计数器，到 4 置 _pid_print_pending
-    volatile uint8_t _pid_print_pending[9] = {0};             // ISR 写、OledTask 读+清 0 + printf
-    volatile uint8_t _pid_pending_node[9] = {0};               // 触发合并的节点 ID（1~8）
+    volatile uint8_t motorPidRcvdCount[9] = {0};               // 4 帧合并计数器，ISR 写、ASCII 读
+    volatile uint32_t motorPidLastUpdateMs[9] = {0};           // [v2026-10-04] ISR 合并 4 帧时同步设置，ASCII 同步等待用
+    volatile uint8_t _pid_print_pending[9] = {0};             // [v2026-10-04] ASCII #GET_PID 0 (ALL) 写、OledTask 读+清 0 + printf；ISR 已不再写（避免单节点双发）
+    volatile uint8_t _pid_pending_node[9] = {0};               // 触发合并的节点 ID（1~8），ASCII ALL 写
 
 
     void Init();

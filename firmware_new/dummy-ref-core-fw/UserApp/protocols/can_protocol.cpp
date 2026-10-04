@@ -55,9 +55,11 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                     else                  dummy.motorDceKds[idx] = val;
                     dummy.motorPidRcvdCount[idx]++;
                     if (dummy.motorPidRcvdCount[idx] >= 4) {
-                        dummy._pid_print_pending[idx] = 1;
-                        dummy._pid_pending_node[idx] = id;
                         dummy.motorPidRcvdCount[idx] = 0;  // 重置合并
+                        dummy.motorPidLastUpdateMs[idx] = HAL_GetTick();   // [v2026-10-04] 给同步等待用的时间戳
+                        // [v2026-10-04] 不再在 ISR 置 _pid_print_pending / _pid_pending_node：
+                        //   单节点路径由 ASCII #GET_PID <n> 时间戳同步打印（1 行）
+                        //   ALL 模式由 ASCII #GET_PID 0 主动置 flag（避免单节点双发）
                     }
                 }
                 break;

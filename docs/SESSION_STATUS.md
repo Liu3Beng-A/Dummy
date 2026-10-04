@@ -214,3 +214,52 @@
 
 - 实际硬件联调（本机无设备）
 - git commit 未走（按规则等待用户决策）
+
+# SESSION STATUS（2026-10-04 09:45）追加段 — 用户拍板 5 项决策
+
+## 用户拍板的决策（2026-10-04 09:45）
+
+| # | 决策 | 用户意见 |
+|---|---|---|
+| 1 | PID 维持现状（总写 EEPROM），不动 `SetDceK*` | ✅ 同意 |
+| 2 | `#ACC_J` / `#I_LIMIT_J` 默认不写、`&` 才写（方案 A1，与 ref 对齐）| ✅ 同意 |
+| 3 | `#GET_PID` 改用时间戳模式（方案 A）| ✅ 同意 |
+| 4 | `#GET_PID` 等待 30ms → 10ms；`SyncAllMotorPid` 加 osDelay(1) 错峰（方案 A+C）| ✅ 同意 |
+
+## 实施分工（4 subagent 并行）
+
+| Subagent | 范围 | 状态 |
+|---|---|---|
+| A 基类 | `ctrl_step.hpp` / `ctrl_step.cpp`：+`SetAcceleration_persist` / `SetCurrentLimit_persist` 2 变体 | ✅ PASS |
+| B ASCII | `ascii_protocol.cpp`：`#ACC_J` / `#I_LIMIT_J` 解析 `&`；`#GET_PID` 时间戳模式 + 10ms | ✅ PASS |
+| C DummyRobot+ISR | `dummy_robot.h` / `cpp` + `can_protocol.cpp`：+`volatile motorPidLastUpdateMs[9]`；ISR 设时间戳；`SyncAllMotorPid` 加 `osDelay(1)` | ✅ PASS |
+| D 文档 | `查询端补齐方案.md` / `SESSION_STATUS.md`：本节 | ✅ PASS |
+
+## 审查结果（主 agent，2026-10-04 09:50）
+
+完整 ninja clean rebuild：198/198 通过；FLASH 36.14%（+0.04%）/ RAM 35.77%（无变化）；仅 1 个原有 RWX 链接器警告。
+
+改动总览：
+- `firmware_new/dummy-ref-core-fw/Robot/actuators/ctrl_step/ctrl_step.hpp` +2 个方法声明
+- `firmware_new/dummy-ref-core-fw/Robot/actuators/ctrl_step/ctrl_step.cpp` +2 个 _persist 实现
+- `firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.h` +`motorPidLastUpdateMs[9]`，`motorPidRcvdCount[9]` 加 volatile
+- `firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp` `SyncAllMotorPid` 加 `osDelay(1)`
+- `firmware_new/dummy-ref-core-fw/UserApp/protocols/can_protocol.cpp` ISR 合并时设 `motorPidLastUpdateMs[idx]`
+- `firmware_new/dummy-ref-core-fw/UserApp/protocols/ascii_protocol.cpp` `#ACC_J` / `#I_LIMIT_J` 解析 `&`；`#GET_PID` 时间戳模式 + 10ms
+- `docs/查询端补齐方案.md` 修订 #8~#12 + 决策表 #10~#14
+- `docs/SESSION_STATUS.md` 本节追加
+
+未 commit。等用户决策。
+
+## 行为变更点（已知，需告知硬件测试人员）
+
+- `#I_LIMIT_J <node> <A>` 默认行为从「写 EEPROM」变「不写 EEPROM」。电机掉电后电流限制恢复上次 EEPROM 值。需重新下指令才会保存。
+
+## 审查流程
+
+subagent 完成后由主 agent 审查：
+1. 重读各文件 diff 确认符合规格
+2. `ninja` 编译验证
+3. 报告审查结论给用户
+
+**未提交 commit**，等用户决策。

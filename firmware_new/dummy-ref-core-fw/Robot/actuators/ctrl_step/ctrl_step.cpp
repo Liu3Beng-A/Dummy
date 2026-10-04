@@ -212,6 +212,36 @@ void CtrlStepMotor::SetAcceleration(float _val)
 }
 
 
+void CtrlStepMotor::SetAcceleration_persist(float _val, bool _persist)
+{
+    uint8_t mode = 0x14;
+    txHeader.StdId = nodeID << 7 | mode;
+
+    // Float to Bytes
+    auto* b = (unsigned char*) &_val;
+    for (int i = 0; i < 4; i++)
+        canBuf[i] = *(b + i);
+    canBuf[4] = _persist ? 1 : 0; // Need save to EEPROM or not
+
+    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+
+void CtrlStepMotor::SetCurrentLimit_persist(float _val, bool _persist)
+{
+    uint8_t mode = 0x12;
+    txHeader.StdId = nodeID << 7 | mode;
+
+    // Float to Bytes
+    auto* b = (unsigned char*) &_val;
+    for (int i = 0; i < 4; i++)
+        canBuf[i] = *(b + i);
+    canBuf[4] = _persist ? 1 : 0; // Need save to EEPROM or not
+
+    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+
 void CtrlStepMotor::ApplyPositionAsHome()
 {
     uint8_t mode = 0x15;

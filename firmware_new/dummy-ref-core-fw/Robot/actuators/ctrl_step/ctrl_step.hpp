@@ -45,6 +45,8 @@ public:
     void SetCurrentLimit(float _val);
     void SetVelocityLimit(float _val);
     void SetAcceleration(float _val);
+    void SetAcceleration_persist(float _val, bool _persist);
+    void SetCurrentLimit_persist(float _val, bool _persist);
     void SetDceKp(int32_t _val);
     void SetDceKv(int32_t _val);
     void SetDceKi(int32_t _val);

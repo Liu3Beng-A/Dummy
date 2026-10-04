@@ -288,10 +288,12 @@ class RobotSerialAssistantOld:
         middle_col.rowconfigure(0, weight=1)
 
         # 查询与设置合并为一个面板，共享同一个节点下拉。
-        # 写入语义（firmware_new 基类 canBuf[4]，写死在 CtrlStepMotor::* 方法里）：
-        #   - SetCurrentLimit / SetVelocityLimit：canBuf[4]=1 写 EEPROM
-        #   - SetAcceleration / SetMotorPID：canBuf[4]=0 不写 EEPROM（运行时）
-        # ASCII 协议层不解析 & 后缀（& 在 firmware_new 是死信），所有写入语义由 C++ 方法决定。
+        # 写入语义（firmware_new 决策 #1/#2，2026-10-04 拍板）：
+        #   - #SET_PID        ：永远写 EEPROM（无 RAM/EEPROM 区分，固件基类固定 canBuf[4]=1）
+        #   - #ACC_J          ：默认不写 EEPROM；末尾追加 `&` 走 SetAcceleration_persist 写 EEPROM
+        #   - #I_LIMIT_J      ：默认不写 EEPROM；末尾追加 `&` 走 SetCurrentLimit_persist 写 EEPROM
+        # UI 区分两个按钮：「应用」= 不带 &（运行时 RAM，掉电丢），「保存」= 带 &（写 EEPROM 掉电保持）。
+        # PID 永远写 EEPROM，因此只配「保存」一个按钮（与「应用」同义）。
         # 节点 0=ALL 仅用于查询广播；节点=0 时写入按钮禁用，避免误写所有节点。
         # 回包统一追加到底部终端日志，不再单独显示。
         param_f = ttk.LabelFrame(middle_col, text="电机参数（查询 / 设置）", padding=6)
@@ -319,14 +321,17 @@ class RobotSerialAssistantOld:
             ent.pack(side=tk.LEFT)
             setattr(self, f"ent_set_pid_{key}", ent)
 
-        # PID 读取 / 写入按钮（firmware_new 的 SetMotorPID 不写 EEPROM，按钮文字明确标注）
+        # PID 读取 / 保存 按钮
+        # 固件侧 #SET_PID 永远写 EEPROM（无 RAM/EEPROM 区分），因此只配「保存」一个按钮
+        # ——文本不再写「不写 EEPROM」（与实际行为矛盾的旧文字已纠正）。
         pid_btn = ttk.Frame(param_f)
         pid_btn.pack(fill=tk.X, pady=2)
         ttk.Button(pid_btn, text="读取 PID", command=self._qry_pid).pack(side=tk.LEFT, padx=2)
-        self.btn_write_pid = ttk.Button(pid_btn, text="写入 PID（不写 EEPROM）", command=self._set_pid)
-        self.btn_write_pid.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.btn_pid_save = ttk.Button(pid_btn, text="保存", command=self._set_pid)
+        self.btn_pid_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
-        # 加速度（r/s²）Entry + 读取 / 应用按钮
+        # 加速度（r/s²）Entry + 读取 / 应用 / 保存 按钮
+        # 应用 = #ACC_J n v（不写 EEPROM，掉电丢）；保存 = #ACC_J n v &（走 SetAcceleration_persist 写 EEPROM）
         acc_f = ttk.Frame(param_f)
         acc_f.pack(fill=tk.X, pady=2)
         ttk.Label(acc_f, text="ACC (r/s²):", font=("Arial", 10)).pack(side=tk.LEFT)
@@ -334,10 +339,13 @@ class RobotSerialAssistantOld:
         self.ent_set_acc.insert(0, "150")
         self.ent_set_acc.pack(side=tk.LEFT, padx=4)
         ttk.Button(acc_f, text="读取 ACC", command=self._qry_acc).pack(side=tk.LEFT, padx=2)
-        self.btn_write_acc = ttk.Button(acc_f, text="应用（不写 EEPROM）", command=self._set_acc)
-        self.btn_write_acc.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.btn_acc_apply = ttk.Button(acc_f, text="应用", command=self._set_acc)
+        self.btn_acc_apply.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.btn_acc_save = ttk.Button(acc_f, text="保存", command=self._save_acc)
+        self.btn_acc_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
-        # 电流限制（A）Entry + 读取 / 写入按钮（仅 I_LIMIT 在 firmware_new 写 EEPROM）
+        # 电流限制（A）Entry + 读取 / 应用 / 保存 按钮
+        # 应用 = #I_LIMIT_J n v（不写 EEPROM，掉电丢）；保存 = #I_LIMIT_J n v &（走 SetCurrentLimit_persist 写 EEPROM）
         i_f = ttk.Frame(param_f)
         i_f.pack(fill=tk.X, pady=2)
         ttk.Label(i_f, text="I_LIMIT (A):", font=("Arial", 10)).pack(side=tk.LEFT)
@@ -345,8 +353,10 @@ class RobotSerialAssistantOld:
         self.ent_set_i.insert(0, "1.5")
         self.ent_set_i.pack(side=tk.LEFT, padx=4)
         ttk.Button(i_f, text="读取 I_LIMIT", command=self._qry_i).pack(side=tk.LEFT, padx=2)
-        self.btn_write_i = ttk.Button(i_f, text="写入（写 EEPROM）", command=self._set_i)
-        self.btn_write_i.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.btn_i_apply = ttk.Button(i_f, text="应用", command=self._set_i)
+        self.btn_i_apply.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+        self.btn_i_save = ttk.Button(i_f, text="保存", command=self._save_i)
+        self.btn_i_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         # 全部读取（仅查询）：始终可点
         all_btn = ttk.Frame(param_f)
@@ -354,7 +364,12 @@ class RobotSerialAssistantOld:
         ttk.Button(all_btn, text="全部读取(8 节点)", command=self._qry_all).pack(side=tk.LEFT, padx=2)
 
         # 写入按钮的可用性受节点下拉控制：节点=0 (ALL) 时禁用，避免误写广播
-        self._write_buttons = [self.btn_write_pid, self.btn_write_acc, self.btn_write_i]
+        # 共 5 个写入按钮：1 个 PID 保存 + 2 个 ACC（应用/保存）+ 2 个 I（应用/保存）
+        self._write_buttons = [
+            self.btn_pid_save,
+            self.btn_acc_apply, self.btn_acc_save,
+            self.btn_i_apply, self.btn_i_save,
+        ]
         self.param_node.trace_add("write", lambda *_: self._update_write_btn_state())
         self._update_write_btn_state()
 
@@ -892,11 +907,11 @@ class RobotSerialAssistantOld:
         self.send_cmd(f"#GETI {self.param_node.get()}")
 
     def _qry_all(self):
-        """全部读取：触发 3 条 ALL 模式查询，等 OledTask 周期打印回包（走底部日志）"""
+
         self.send_cmd("#GET_PID 0")    # ALL: 8 节点 × 4 帧 = 32 帧 PID
         self.send_cmd("#GETJACC 0")    # ALL: 8 节点 0x2C
         self.send_cmd("#GETI 0")       # ALL: 8 节点 0x2D
-        self.log("全部读取已触发（3 条 ALL 命令），1~2 秒后 OledTask 周期打印 8×3 = 24 行...", "INFO")
+
 
     def _fill_pid_entries(self, kp, kv, ki, kd):
         """PID 回包解析后回填 Entry（仅 UI 辅助，不影响主日志）"""
@@ -923,9 +938,12 @@ class RobotSerialAssistantOld:
 
     # ==============================================
     # 电机参数设置（#SET_PID / #ACC_J / #I_LIMIT_J）
-    # 与查询共用 param_node 下拉；写入语义由 panel 注释写明：
-    #   - #SET_PID / #I_LIMIT_J：写 EEPROM（基类 canBuf[4]=1）
-    #   - #ACC_J：不写 EEPROM（基类 canBuf[4]=0，运行时）
+    # 与查询共用 param_node 下拉；写入语义由 panel 注释写明（决策 #1/#2，2026-10-04）：
+    #   - #SET_PID        ：永远写 EEPROM（固件无 RAM/EEPROM 区分）
+    #   - #ACC_J          ：默认不写 EEPROM；末尾追加 `&` 才写 EEPROM
+    #   - #I_LIMIT_J      ：默认不写 EEPROM；末尾追加 `&` 才写 EEPROM
+    # 因此 ACC/I 各有两个回调：_set_* 发不带 & 的命令（应用），
+    # _save_* 复用同一份入参校验，仅在 send_cmd 字符串末尾追加 `&`（保存）。
     # ==============================================
     def _set_pid(self):
         """写 4 个 PID 值到指定节点（写 EEPROM，#SET_PID 一次发 4 个值）"""
@@ -941,7 +959,7 @@ class RobotSerialAssistantOld:
         self.send_cmd(f"#SET_PID {node} {kp} {kv} {ki} {kd}")
 
     def _set_acc(self):
-        """设置节点加速度（不写 EEPROM，#ACC_J 默认 canBuf[4]=0）"""
+        """应用节点加速度（不写 EEPROM）：发送 #ACC_J <node> <r/s²>"""
         try:
             node = self.param_node.get()
             acc = float(self.ent_set_acc.get())
@@ -955,8 +973,24 @@ class RobotSerialAssistantOld:
             acc = 5000.0
         self.send_cmd(f"#ACC_J {node} {acc}")
 
+    def _save_acc(self):
+        """保存节点加速度到 EEPROM：发送 #ACC_J <node> <r/s²> &
+        末尾 `&` 触发固件解析 canBuf[4]=1 走 SetAcceleration_persist 写 EEPROM（决策#2）。"""
+        try:
+            node = self.param_node.get()
+            acc = float(self.ent_set_acc.get())
+        except ValueError:
+            messagebox.showerror("错误", "加速度必须为数值（r/s²）")
+            return
+        if acc < 0:
+            messagebox.showerror("错误", "加速度不能为负数")
+            return
+        if acc > 5000.0:
+            acc = 5000.0
+        self.send_cmd(f"#ACC_J {node} {acc} &")
+
     def _set_i(self):
-        """设置节点电流限制（写 EEPROM，#I_LIMIT_J 走基类 SetCurrentLimit canBuf[4]=1）"""
+        """应用节点电流限制（不写 EEPROM）：发送 #I_LIMIT_J <node> <A>"""
         try:
             node = self.param_node.get()
             i_limit = float(self.ent_set_i.get())
@@ -969,6 +1003,22 @@ class RobotSerialAssistantOld:
         if i_limit > 3.0:
             i_limit = 3.0
         self.send_cmd(f"#I_LIMIT_J {node} {i_limit}")
+
+    def _save_i(self):
+        """保存节点电流限制到 EEPROM：发送 #I_LIMIT_J <node> <A> &
+        末尾 `&` 触发固件解析 canBuf[4]=1 走 SetCurrentLimit_persist 写 EEPROM（决策#2）。"""
+        try:
+            node = self.param_node.get()
+            i_limit = float(self.ent_set_i.get())
+        except ValueError:
+            messagebox.showerror("错误", "电流必须为数值（A）")
+            return
+        if i_limit <= 0:
+            messagebox.showerror("错误", "电流必须大于 0")
+            return
+        if i_limit > 3.0:
+            i_limit = 3.0
+        self.send_cmd(f"#I_LIMIT_J {node} {i_limit} &")
 
     # ==============================================
     # 夹爪控制页（!HAND_*）

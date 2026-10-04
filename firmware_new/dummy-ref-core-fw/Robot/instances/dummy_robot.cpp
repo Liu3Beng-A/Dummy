@@ -181,12 +181,14 @@ void DummyRobot::SyncAllMotorCurrentLimit()
 
 void DummyRobot::SyncAllMotorPid()
 {
-    // 触发 8×4 = 32 帧 PID 查询；4 帧合并由 can_protocol ISR 完成
+    // [v2026-10-04] 帧间加 osDelay(1)：32 帧错峰 ~32ms，避免撞 5ms 控制环
+    // tx_busy_errors 不再累加；200Hz 控制环不掉拍
     for (int i = 1; i <= 7; i++) {
         motorJ[i]->QueryDceKp();
         motorJ[i]->QueryDceKv();
         motorJ[i]->QueryDceKi();
         motorJ[i]->QueryDceKd();
+        osDelay(1);
     }
     if (hand) {
         hand->QueryDceKp();

@@ -159,16 +159,21 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             sscanf(_cmd, "#GET_PID %lu", &node);
             if (node == 0) {
                 // ALL 模式：8 节点 × 4 帧 = 32 帧，立即返回不阻塞
+                // [v2026-10-04] ASCII 主动设 _pid_print_pending（ISR 已不再设）：让 OledTask PollPidPrint 异步打印
                 for (int i = 1; i <= 7; i++) {
                     dummy.motorJ[i]->QueryDceKp();
                     dummy.motorJ[i]->QueryDceKv();
                     dummy.motorJ[i]->QueryDceKi();
                     dummy.motorJ[i]->QueryDceKd();
+                    dummy._pid_print_pending[i] = 1;       // ASCII 主动置 flag → OledTask PollPidPrint
+                    dummy._pid_pending_node[i] = i;        // 节点号用于 printf (idx → 实际 nodeID)
                 }
                 dummy.hand->QueryDceKp();
                 dummy.hand->QueryDceKv();
                 dummy.hand->QueryDceKi();
                 dummy.hand->QueryDceKd();
+                dummy._pid_print_pending[8] = 1;           // hand = idx 8
+                dummy._pid_pending_node[8] = 8;
                 Respond(_responseChannel, "ok GET_PID ALL dispatched (8 nodes x 4 = 32 frames; results printed by OledTask PollPidPrint in 1-2 s)");
             } else if (node >= 1 && node <= 8) {
                 int idx = (node == 7) ? 7 : (node == 8) ? 8 : (int)node;
@@ -179,17 +184,17 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                     dummy.motorJ[node]->QueryDceKp(); dummy.motorJ[node]->QueryDceKv();
                     dummy.motorJ[node]->QueryDceKi(); dummy.motorJ[node]->QueryDceKd();
                 }
-                // 30ms 超时同步等 4 帧合并
+                // [v2026-10-04] 改用时间戳模式，与 ACC/I_LIMIT 同模式；不再共享 _pid_print_pending
+                uint32_t old_ms = dummy.motorPidLastUpdateMs[idx];
                 uint32_t waited = 0;
-                while (dummy.motorPidRcvdCount[idx] < 4 && waited < 30) {
+                while (dummy.motorPidLastUpdateMs[idx] == old_ms && waited < 10) {  // 30ms → 10ms
                     osDelay(1); waited++;
                 }
-                if (dummy.motorPidRcvdCount[idx] >= 4) {
+                if (dummy.motorPidLastUpdateMs[idx] != old_ms) {
                     Respond(_responseChannel, "ok PID [%lu] kp=%ld kv=%ld ki=%ld kd=%ld%s",
                             node, (long)dummy.motorDceKps[idx], (long)dummy.motorDceKvs[idx],
                             (long)dummy.motorDceKis[idx], (long)dummy.motorDceKds[idx],
                             node == 8 ? " (HAND)" : (node == 7 ? " (rail)" : ""));
-                    dummy.motorPidRcvdCount[idx] = 0;
                 } else {
                     uint8_t got = dummy.motorPidRcvdCount[idx];
                     Respond(_responseChannel, "error GET_PID [%lu] timeout (got %u/4, %lu ms)", node, got, waited);
@@ -291,17 +296,25 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             float current;
             uint32_t node;
-            sscanf(_cmd, "#I_LIMIT_J %lu %f", &node, &current);
-            if (node >= 1 && node <= 7){
-                dummy.motorJ[node]->SetCurrentLimit(current);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] I_LIMIT [%.2f]", node, current);
-            }
-            else if (node == 8){
-                dummy.hand->SetCurrentLimit(current);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] I_LIMIT [%.2f] (HAND)", node, current);
-            }
-            else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] I_LIMIT [%.2f] is wrong (range 1~8, reject 0)", node, current);
+            char saveFlag = 0;
+            int ret = sscanf(_cmd, "#I_LIMIT_J %lu %f %c", &node, &current, &saveFlag);
+            if (ret >= 2) {
+                bool persist = (saveFlag == '&');   // [v2026-10-04] & 决定是否写 EEPROM（与 ref 对齐，默认不写）
+                if (node >= 1 && node <= 7){
+                    dummy.motorJ[node]->SetCurrentLimit_persist(current, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] I_LIMIT [%.2f]%s", node, current,
+                            persist ? " (saved)" : "");
+                }
+                else if (node == 8){
+                    dummy.hand->SetCurrentLimit_persist(current, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] I_LIMIT [%.2f] (HAND)%s", node, current,
+                            persist ? " (saved)" : "");
+                }
+                else {
+                    Respond(_responseChannel, "error SET MOTOR [%lu] I_LIMIT [%.2f] is wrong (range 1~8, reject 0)", node, current);
+                }
+            } else {
+                Respond(_responseChannel, "error I_LIMIT_J parse failed. Use: #I_LIMIT_J <node> <A> [&]");
             }
         }
         // [v2026-10-03] 查询端补齐：#GETJACC 1~8 + 0=ALL
@@ -366,17 +379,25 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         {
             float acc;
             uint32_t node;
-            sscanf(_cmd, "#ACC_J %lu %f", &node, &acc);
-            if (node >= 1 && node <= 7){
-                dummy.motorJ[node]->SetAcceleration(acc);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] ACC [%.2f]", node, acc);
-            }
-            else if (node == 8){
-                dummy.hand->SetAcceleration(acc);
-                Respond(_responseChannel, "ok SET MOTOR [%lu] ACC [%.2f] (HAND)", node, acc);
-            }
-            else {
-                Respond(_responseChannel, "error SET MOTOR [%lu] ACC [%.2f] is wrong (range 1~8, reject 0)", node, acc);
+            char saveFlag = 0;
+            int ret = sscanf(_cmd, "#ACC_J %lu %f %c", &node, &acc, &saveFlag);
+            if (ret >= 2) {
+                bool persist = (saveFlag == '&');   // [v2026-10-04] & 决定是否写 EEPROM（与 ref 对齐）
+                if (node >= 1 && node <= 7){
+                    dummy.motorJ[node]->SetAcceleration_persist(acc, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] ACC [%.2f]%s", node, acc,
+                            persist ? " (saved)" : "");
+                }
+                else if (node == 8){
+                    dummy.hand->SetAcceleration_persist(acc, persist);
+                    Respond(_responseChannel, "ok SET MOTOR [%lu] ACC [%.2f] (HAND)%s", node, acc,
+                            persist ? " (saved)" : "");
+                }
+                else {
+                    Respond(_responseChannel, "error SET MOTOR [%lu] ACC [%.2f] is wrong (range 1~8, reject 0)", node, acc);
+                }
+            } else {
+                Respond(_responseChannel, "error ACC_J parse failed. Use: #ACC_J <node> <r/s^2> [&]");
             }
         } else if (s.find("REBOOT") != std::string::npos)
         {
