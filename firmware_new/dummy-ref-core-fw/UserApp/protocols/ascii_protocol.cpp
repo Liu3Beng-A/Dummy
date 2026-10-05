@@ -2,6 +2,44 @@
 
 extern DummyRobot dummy;
 
+static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
+{
+    std::string command(cmd, len);
+    const size_t first = command.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return true;
+    const size_t last = command.find_last_not_of(" \t\r\n");
+    command = command.substr(first, last - first + 1);
+    if (command == "!START")
+    {
+        dummy.RequestStart();
+        Respond(response, dummy.IsEnabled() && !dummy.IsStopLocked() ? "Started ok" : "Start pending");
+        return true;
+    }
+    if (command == "!DISABLE")
+    {
+        dummy.RequestDisable();
+        Respond(response, "Disable pending");
+        return true;
+    }
+    if (dummy.IsStopLocked())
+    {
+        Respond(response, "error STOP_LOCKED");
+        return true;
+    }
+    if (command == "!STOP")
+    {
+        dummy.RequestSoftStop();
+        Respond(response, "Stopping ok");
+        return true;
+    }
+    if (!dummy.IsEnabled() && (command[0] == '>' || command[0] == '@' || command[0] == '&'))
+    {
+        Respond(response, "error DISABLED");
+        return true;
+    }
+    return false;
+}
+
 static void RespondStackStats(StreamSink& responseChannel)
 {
     // Minimum unused stack since boot, in bytes (not current free stack).
@@ -13,35 +51,24 @@ static void RespondStackStats(StreamSink& responseChannel)
 
 void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
+    if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
     uint8_t  i;
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
     if (_cmd[0] == '!' )
     {
         std::string s(_cmd);
-        if (s.find("STOP") != std::string::npos)
+        if (s.find("HOME") != std::string::npos)
         {
-            dummy.commandHandler.EmergencyStop();
-            Respond(_responseChannel, "Stopped ok");
-        } else if (s.find("START") != std::string::npos)
-        {
-            dummy.SetEnable(true);
-            Respond(_responseChannel, "Started ok");
-        } else if (s.find("HOME") != std::string::npos)
-        {
-            dummy.Homing();
-            Respond(_responseChannel, "Started ok");
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!HOME") == 0xFF ?
+                    "error DISABLED" : "Home pending");
         } else if (s.find("CALIBRATION") != std::string::npos)
         {
-            dummy.CalibrateHomeOffset();
-            Respond(_responseChannel, "calibration ok");
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!CALIBRATION") == 0xFF ?
+                    "error STOP_LOCKED" : "Calibration pending");
         } else if (s.find("RESET") != std::string::npos)
         {
-            dummy.Resting();
-            Respond(_responseChannel, "Started ok");
-        } else if (s.find("DISABLE") != std::string::npos)
-        {
-            dummy.SetEnable(false);
-            Respond(_responseChannel, "Disabled ok");
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!RESET") == 0xFF ?
+                    "error DISABLED" : "Reset pending");
         }
         // [Step 3] !HAND_* 12 条命令（运行时 4 条 + 配置 8 条；UART4 仅允许运行时 4 条）
         // 运行时 4 条：!HAND_O / !HAND_C / !HAND_POS / !HAND_I
@@ -454,34 +481,23 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 
 void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
+    if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
     if (_cmd[0] == '!' || !dummy.IsEnabled())
     {
         std::string s(_cmd);
-        if (s.find("STOP") != std::string::npos)
+        if (s.find("HOME") != std::string::npos)
         {
-            dummy.commandHandler.EmergencyStop();
-            Respond(_responseChannel, "Stopped ok");
-        } else if (s.find("START") != std::string::npos)
-        {
-            dummy.SetEnable(true);
-            Respond(_responseChannel, "Started ok");
-        } else if (s.find("HOME") != std::string::npos)
-        {
-            dummy.Homing();
-            Respond(_responseChannel, "Started ok");
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!HOME") == 0xFF ?
+                    "error DISABLED" : "Home pending");
         } else if (s.find("CALIBRATION") != std::string::npos)
         {
-            dummy.CalibrateHomeOffset();
-            Respond(_responseChannel, "calibration ok");
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!CALIBRATION") == 0xFF ?
+                    "error STOP_LOCKED" : "Calibration pending");
         } else if (s.find("RESET") != std::string::npos)
         {
-            dummy.Resting();
-            Respond(_responseChannel, "Started ok");
-        } else if (s.find("DISABLE") != std::string::npos)
-        {
-            dummy.SetEnable(false);
-            Respond(_responseChannel, "Disabled ok");
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!RESET") == 0xFF ?
+                    "error DISABLED" : "Reset pending");
         }
         // [Step 3] UART4 仅允许 !HAND_O/C/POS/I 4 条运行时（顺序匹配避免 !HAND_ONBOOT 抢先匹配 !HAND_O）
         else if (s == "!HAND_O" || s.rfind("!HAND_O ", 0) == 0)
@@ -569,6 +585,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
 
 void OnUart5AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
+    if (dummy.IsStopLocked()) return;
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
 
 /*---------------------------- ↑ Add Your CMDs Here ↑ -----------------------------*/

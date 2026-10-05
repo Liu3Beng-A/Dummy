@@ -1,4 +1,58 @@
-# SESSION STATUS（2026-10-04）
+# SESSION STATUS（2026-10-05）
+
+## 当前工作：加速度同步与 ALL 查询审计，删除串口助手全部读取按钮（2026-10-05）
+
+- **当前问题**：用户询问为何同步按钮使用 `#GETJACC 0`、发送提示被拒绝的修复方案，以及 `#GET*** 0` 批量查询是否必要；明确要求删除 `串口助手_old.py` 的“全部读取(8 节点)”按钮。固件仅分析和提出方案，尚未授权修改相关协议或发送逻辑。
+- **已确认事实**：`docs/查询端补齐方案.md:18` 记录以 ALL 查询替代独立 `#SYNC_*` 命令的设计；`Robot/instances/dummy_robot.cpp:178` 逐个查询 8 个节点，`UserApp/protocols/can_protocol.cpp:69` 将加速度回包写入主控缓存，MoveJ 第307行使用 J1～J7 缓存。ALL 分支没有八轴完成确认或缺失节点汇总，`PollPidPrint()` 只打印 PID，未实现 ACC/I_LIMIT 的 ALL 结果打印。
+- **已确认发送缺陷**：主控 `UserApp/protocols/ascii_protocol.cpp:369` 的 GETJACC ALL 提示为75字节；`Bsp/communication/ascii_processor.hpp:29` 的64字节缓冲使用 snprintf 所需长度发送，`Bsp/communication/interface_usb.cpp:75` 又把总长度而非 chunk 传给64字节上限的发送器，故正文被拒绝，仅发送换行。当前 BIN 含该提示，ELF 反汇编确认发送缺陷仍存在；未据此认定设备已烧录的内容。
+- **已排除方向**：当前 firmware_new 已没有旧版 accBase 百分比设置逻辑；主控仍有与电机默认30 r/s²不一致的加速度规划兜底。删除界面全部读取按钮不会修复 ALL 回包或发送缺陷；外部 `#GET*** 0` 是批量调试接口，主控内部启动回读并不依赖这组 ASCII 命令。
+- **最新改动与验证**：仅删除 `串口助手_old.py` 的全部读取按钮、专属空容器和 `_qry_all` 回调；保留单参数读取、节点0选择及蓝色同步按钮。读回实际源文件、Python语法检查和隐藏Tkinter界面创建通过，确认删除项不存在、其余读取按钮存在、蓝色按钮仍只发送 `#GETJACC 0`。验证时以串口模块替身隔离默认Python缺少pyserial的依赖，未打开设备连接。未改固件或参考 `串口助手.py`，未重新编译、烧录或commit。
+- **未完成/待确认**：用户决定是否保留外部 ALL 查询、是否引入明确的加速度同步入口；发送可采用短提示或完整长文本分包，但共同需要修正 Respond 长度处理，支持长文本时还需修正 USB chunk 传参。同步完成/缺失节点反馈及 ACC_J 设置后的缓存自动回读仍未修复。
+
+---
+
+## 当前工作：STOP 判稳窗口优化实机未见显著问题，主控等待诊断保留（2026-10-05）
+
+- **最新实机反馈**：用户反馈“这次没有什么显著的问题”，未提供逐项验收日志；记录为本轮实机复测未见显著问题，不推定此前 HOME/USB 独立异常已解决。
+- **诊断保留建议**：用户询问是否撤回上轮主控关节等待打印。核对 `Robot/instances/dummy_robot.cpp:831` 及 `UserApp/main.cpp`：详细快照只在 STOPPING/STARTING/DISABLING 等待至少 2 秒后输出一次，重复 START 可重新触发；USB 打印在 OLED 任务的 PollStopPrint 中执行，不在运动控制任务里打印。只记录阶段/回包/轮询数据，不参与判稳条件或决定解锁。建议保留便于定位偶发等待；等待节点不能直接认定为“卡死”。本轮没有修改诊断代码或重新构建固件。
+
+- **已确认实机事实**：重新烧录 J8 后，19:01 的 START/DISABLE 均成功完成 pending→ok，之前仅缺 J8 的握手问题已解决。19:08～19:10 多次 STOP 可完成；慢的几次均收到 J1～J7 的 0x0A 回包，token 正确，但 J4 或 J4/J6 仍为 phase=1（DECELERATING）。例如 `ack=0x0EE wait=0x010 rx=0x0FE` 仅等待 J4；`ack=0x0AE wait=0x050 rx=0x0FE` 等待 J4/J6。期间 START 保留 pending，停稳后按既定方案自动完成。此次日志没有证明 ENABLE_HOLD 丢包。
+- **用户补充**：等待 STOP 完成时，肉眼观察所有关节已经停止；手碰机械臂后才收到完成回执。与微小编码器反馈反复清零判稳计时的方向一致，但未取得实机速度/位置窗口采样，不能将具体噪声幅度或 PID 状态视为已测得事实。
+- **代码证据**：电机 `firmware_new/dummy-motor-fw/Ctrl/Motor/motor.cpp` 的既有 20kHz 估速器中，从零开始一次 1 内部单位的位置跳变产生 625 单位/s，即 0.012207 电机 r/s。旧 STOP 每个周期要求瞬时估速≤0.01 r/s，且位置相对窗口起点±8，连续 1000 周期（50ms）；一次速度超限即清零计时。真实控制函数注入有界反馈跳变，复现了位置变化仅 3 单位仍 20 秒不确认。
+- **本轮改动**：仅修改电机模块 `Ctrl/Motor/motor.cpp/.h` 的 STOP 判稳；本地加速度减速、实际停点捕获、保持、保护和协议不变。参考速度归零后采集 1000 周期窗口，要求所有位置样本峰峰值≤8，窗口估计速度的有符号均值绝对值≤0.01 电机 r/s。位置范围超限立即重启窗口；窗口末平均速度超限也重启；不增加超时成功。新增最大位置及 int64 速度累计字段，20kHz 内使用整数运算。峰峰值≤8 比原起点±8 的允许空间范围更严格。
+- **验证**：28 组真实完整 20kHz 控制函数反馈测试，新版静止及 1/3/4/6/8 单位有界跳变、6 单位三角波均在参考零速后 50ms 确认；9/16 单位超范围波动、±0.004 r/s 持续漂移和 0.02/1 r/s 运动在 20 秒预算内不确认。新版噪声回归 2,422,094 项断言通过；既有真实电机 35/夹爪回归分别 10,629,070 / 10,629,068 项通过，含 78 组速度/加速度、保持隔离和 DISABLE。测试替换硬件接口，不代表已测得实机噪声或闭环效果。记录在主控 `build/analysis/stop_regression/settle_result_old.txt`、`settle_result_new.txt`、`motor_result_35.txt`、`motor_result_8.txt`。
+- **编译产物**：四种电机 Ninja 36/36 成功，19:21:27 生成；35/42 BIN72816B、57 BIN72808B、gripper BIN72776B，RAM8176B；最终电机/主控 `ninja -n` 无待构建项。35/42 SHA256 `6676AED6D07DAAFF1763C8018259126D4493F708CD92FB30C99EE58A4AEB8D90`；57 `9F249A76789A3BDBFF4C5F057D4E246614208A52216E8F9F3440680FE4ED74A8`；gripper `216231A136A1847CA9914D1D4D1BADBDBC07FAF55185165DE4DE37A99C67350D`。主控 BIN389604B、SHA256 `8BF59F47D9CFA1274A47A938A78BD8E27DB3D688293BFE9C27A8BA904004490E` 未变。
+- **交付与待完成**：本轮用户只需更新 J1～J7：J1～J6 按实际电机类型选择 `motor-35.bin`/`motor-42.bin`，J7 选择 `motor-57.bin`；主控保持当前诊断版，J8 保持已验证工作的版本，协议未变化。反复测运动中 STOP、无需触碰即可确认、减速中 START 等待完成、停点保持及 DISABLE。若仍慢，记录等待节点和 phase；软件复现只证明已修正一条噪声敏感路径，实机改善尚待验证。
+- **其他问题仅记录**：19:01 HOME 后 DISABLE 快照 `polls=0 rx=0`，与本轮 `polls>0 rx=0x0FE phase=1` 属于不同证据，不能用判稳优化解释或宣称修复；该次实时任务未继续轮询的原因未确认。19:10:50 的 USB ClearCommError 同样未定位，未改 USB。CAN 发送的无限信号量等待及正常目标共用发送缓冲需要另行验证，不能据此认定实机根因。本轮不改 HOME、普通 FINISH、主控、PID、串口助手或其他模块，无烧录、无 commit。
+
+---
+
+## 前一阶段：实机 START/DISABLE 持续 pending，主控诊断版已编译（2026-10-05 18:36，历史记录）
+
+- **实机事实**：用户确认已更新主控和全部八个电机；串口助手连接 COM20 主控 USB 虚拟串口，UART4 连接 ESP32 暂不用。J6 重新烧录后恢复 OLED 角度刷新，目前可见的 J1～J7 均刷新，J8 不在 OLED 上，未取得其 0x0A 握手日志。
+- **18:49～18:50 诊断结果**：START 停在 STARTING/QUERY，DISABLE 停在 DISABLING/DISABLE；两者均 `ack=0x0FE wait=0x100 rx=0x0FE badpos=0x000`，`polls=403 txbusy=0`，`J8 no 0x0A reply`。已确认 J1～J7 的对应阶段回包通过，仅缺 J8 的 0x0A 回包；不是收到 J8 FAULT/旧 token 后被拒绝。START 尚未进入 ENABLE_HOLD，因此主控没有完成本次八轴使能；DISABLE 已确认七轴失能，但八轴完成条件未满足。
+- **夹爪产物核对**：用户确认实际文件是 `firmware_new/dummy-motor-fw/build/motor-gripper.bin`，计划重新烧录 J8。当前 Ninja 夹爪目标无待构建项；构建命令为 MOTOR_TYPE=8，ARM ELF Main 把运行时 ID 设为 8，OnCanCmd 对 QUERY/ENABLE_HOLD/DISABLE 均调用 RequestSoftStop 后发送 0x0A 状态回包。QUERY 不需要等待控制中断或编码器校准完成。BIN72640B，SHA256 仍为 `AEFAEAC29BD8CA2D4654F6F6213FD811C11BB533BA83C7FB35583305EAFA408C`。代码/产物核对不能证明设备 Flash 内容或 CAN 链路状态。
+- **现象与结论边界**：多次 START 均只返回 `Start pending`，DISABLE 只返回 `Disable pending`，未见完成回执。位置刷新走 0x23，不能证明 0x0A 确认齐全。目前尚未确定哪个节点、哪个阶段或发送等待导致无法完成；不把 J8 缺失、CAN 配置或 UART4 未使用当作已确认根因。
+- **纠正前述分析**：用户说明 `[WARN] STOP 锁定中，仅接受 !START 或 !DISABLE` 是点击 MoveJ 等其他指令后的正常拦截。已撤回把该提示认定为实现错误的结论，本轮不改串口助手锁定/拦截规则。
+- **最新改动**：仅在主控 `Robot/instances/dummy_robot.cpp/.h` 的 STOP 流程补充等待诊断。每阶段等待超过 2 秒后，通过 USB 输出一次 state/action、ack/wait/rx/badpos 位图、控制轮询次数、CAN 发送调用是否尚未返回及当前节点；对未确认节点打印无回包或实际 phase/token 与期望 token。等待期间重复 START 可重新触发快照。日志只观察状态，不放宽确认规则、不自动解锁；电机固件和串口助手本轮未改。
+- **本轮验证**：主控真实状态机/队列/ASCII/CAN 发送函数及诊断共 391 项断言通过。新增覆盖缺失 J8、状态未稳、旧 token、非有限位置、阶段切换不沿用旧诊断、计时回绕与发送阻塞快照；核对每条输出小于实际 Respond 的 64 字节缓冲。Ninja 主控 11/11 成功，最终无待编译项，FLASH389604B/RAM55400B；既有 RWX 警告仍在。四种电机 BIN SHA256 与上轮一致。
+- **当前主控产物**：`firmware_new/dummy-ref-core-fw/build/Core-STM32F4-fw.bin`，SHA256 `8BF59F47D9CFA1274A47A938A78BD8E27DB3D688293BFE9C27A8BA904004490E`。本次仅需用户更新主控，电机保持上一轮配套固件。
+- **待完成**：等待用户重新烧录 J8 后的结果。主控保持当前诊断版，当前 DISABLING 会持续重试；J8 回包通过后应收到 Disabled ok，再测试 START。若仍缺 J8 回包，需进一步验证 J8 基础 CAN 回复/设备 Flash，而非假定其停稳、PID、故障状态或改为忽略 J8。另已询问“无法失能”是实际仍有保持力还是只有回执未完成，尚待回复。实机 pending 问题未宣称修复。此次未再改固件/串口助手，无代理烧录、无 commit。
+
+---
+
+## 上一阶段：STOP 初版已完成编译与软件回归（2026-10-05）
+
+- **授权与范围**：用户已批准实施上轮 STOP 方案；仅修改 STOP/START/DISABLE、相关锁态/取消/反馈和目标串口助手，其他问题记录后提出，不擅自修复。无 commit、无代理烧录。
+- **已确认决策**：J1~J7 按各自电机本地生效加速度减速，实际停稳后捕获停点并保持；STOP 期间仅 START/DISABLE 被执行；其他指令丢弃，包括新夹爪指令，夹爪原动作继续；提前 START 等七轴停稳后自动解锁；DISABLE 让 J1~J8 全部失能并取消待执行 START。
+- **最新实现**：新增 `firmware_new/stop_protocol.h`（CAN 0x0A 请求/回包及 token）；主控 `dummy_robot.cpp/h` 增加状态机、队列 epoch 和旧任务取消；周期任务处理软停协议并停止旧目标发布；两套 ASCII 严格匹配 START/DISABLE，原生协议锁态拦截；电机 `motor.cpp/h` 复用速度跟踪器降速、实测稳定 50ms 后捕获编码器停点，切换位置保持；电机 CAN/调试串口/按键锁态拦截；`串口助手_old.py` 增加软停回执状态与待发点位取消。
+- **收尾边界**：HOME/RESET/CALIBRATION 转后台并增加 epoch 取消检查，原动作内容保留；CAN 等待后拒绝已取消任务。首次 STOP 逐轴同步 token，缺失节点不妨碍其他轴软停；START 同步 token 防主控单独重启后的重复值。原生 UART 清旧半包，USB 记录收包锁态/epoch；Fibre 仅增加半包丢弃方法；串口助手只为 STOP 回执增加跨读取拼接。
+- **最终验证**：主控真实函数 336 项、真实电机 35/夹爪分别 10,629,070/10,629,068 项、原生分包 1475 项、真实 Tkinter 389 项断言全部通过。包含完整 20kHz 控制函数、78 组速度/加速度、提前 START、八轴 DISABLE、缺失/旧回包、冷启动缺失节点、token 回绕及每种回执切分。测试硬件接口被替换，不能代替实机闭环验证。
+- **最终构建**：Ninja 主控及 35/42/57/gripper 均成功，最终 dry-run 无待编译项；主控 FLASH387380B/RAM55360B/既有 CCMRAM65536B；电机 RAM8160B，FLASH 分别72672/72672/72664/72640B。主控 BIN SHA256 `A946452E8B4E0CAF724A11D6C1F49ED488EBCDECE8BFFCB1BB85B9E3E55BC8F7`。无新编译错误，既有非 void 空函数/RWX 警告未改。
+- **交付与待测试**：详见 [STOP软停实现与测试报告.md](STOP软停实现与测试报告.md)，含产物、SHA256、协议、范围、验证与实机步骤。必须主控与全部八个电机配套更新（夹爪虽排除 STOP，也需更新 DISABLE/START 握手）。用户烧录验证实际减速、重力负载保持及 J8 行为；本代理未烧录、未连接设备、无 commit。
+- **其他问题只记录**：普通 FINISH 只检查规划值；UART5 原生接收误用 uart4_stream_input；多通道 ASCII 共用静态缓冲；普通 CAN 准备缓冲仍共享；非 STOP 串口回包不跨读取拼接。证据与既有编译警告已列入报告，没有扩大修复范围。`esp32/`、`firmware/`、`firmware_old/`、`串口助手.py` 无本轮改动。
+
+---
 
 ## 当前状态：串口助手已增加主动同步加速度按钮（2026-10-04）
 

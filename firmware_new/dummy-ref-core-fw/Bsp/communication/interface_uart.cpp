@@ -3,6 +3,7 @@
 #include "ascii_processor.hpp"
 #include "fibre/protocol.hpp"
 #include "usart.h"
+extern DummyRobot dummy;
 
 #define UART_TX_BUFFER_SIZE 64
 #define UART_RX_BUFFER_SIZE 64
@@ -111,9 +112,17 @@ StreamToPacketSegmenter uart5_stream_input(uart5_channel);
 static void UartServerTask(void* ctx)
 {
     (void) ctx;
+    uint32_t nativeEpoch = dummy.GetMotionEpoch();
 
     for (;;)
     {
+        const uint32_t epoch = dummy.GetMotionEpoch();
+        if (epoch != nativeEpoch)
+        {
+            uart4_stream_input.discard_pending_packet();
+            uart5_stream_input.discard_pending_packet();
+            nativeEpoch = epoch;
+        }
         // Check for UART errors and restart recieve DMA transfer if required
         if (huart4.ErrorCode != HAL_UART_ERROR_NONE)
         {
@@ -127,7 +136,7 @@ static void UartServerTask(void* ctx)
         // Process bytes in one or two chunks (two in case there was a wrap)
         if (new_rcv_idx < dma_last_rcv_idx[0])
         {
-            uart4_stream_input.process_bytes(dma_rx_buffer[0] + dma_last_rcv_idx[0],
+            if (!dummy.IsStopLocked()) uart4_stream_input.process_bytes(dma_rx_buffer[0] + dma_last_rcv_idx[0],
                                              UART_RX_BUFFER_SIZE - dma_last_rcv_idx[0],
                                              nullptr); // TODO: use process_all
             ASCII_protocol_parse_stream(dma_rx_buffer[0] + dma_last_rcv_idx[0],
@@ -136,7 +145,7 @@ static void UartServerTask(void* ctx)
         }
         if (new_rcv_idx > dma_last_rcv_idx[0])
         {
-            uart4_stream_input.process_bytes(dma_rx_buffer[0] + dma_last_rcv_idx[0],
+            if (!dummy.IsStopLocked()) uart4_stream_input.process_bytes(dma_rx_buffer[0] + dma_last_rcv_idx[0],
                                              new_rcv_idx - dma_last_rcv_idx[0],
                                              nullptr); // TODO: use process_all
             ASCII_protocol_parse_stream(dma_rx_buffer[0] + dma_last_rcv_idx[0],
@@ -158,7 +167,7 @@ static void UartServerTask(void* ctx)
         // Process bytes in one or two chunks (two in case there was a wrap)
         if (new_rcv_idx < dma_last_rcv_idx[1])
         {
-            uart4_stream_input.process_bytes(dma_rx_buffer[1] + dma_last_rcv_idx[1],
+            if (!dummy.IsStopLocked()) uart4_stream_input.process_bytes(dma_rx_buffer[1] + dma_last_rcv_idx[1],
                                              UART_RX_BUFFER_SIZE - dma_last_rcv_idx[1],
                                              nullptr); // TODO: use process_all
             ASCII_protocol_parse_stream(dma_rx_buffer[1] + dma_last_rcv_idx[1],
@@ -167,7 +176,7 @@ static void UartServerTask(void* ctx)
         }
         if (new_rcv_idx > dma_last_rcv_idx[1])
         {
-            uart4_stream_input.process_bytes(dma_rx_buffer[1] + dma_last_rcv_idx[1],
+            if (!dummy.IsStopLocked()) uart4_stream_input.process_bytes(dma_rx_buffer[1] + dma_last_rcv_idx[1],
                                              new_rcv_idx - dma_last_rcv_idx[1],
                                              nullptr); // TODO: use process_all
             ASCII_protocol_parse_stream(dma_rx_buffer[1] + dma_last_rcv_idx[1],

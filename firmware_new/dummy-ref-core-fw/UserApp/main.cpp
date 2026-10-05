@@ -28,6 +28,7 @@ void ThreadControlLoopFixUpdate(void* argument)
         // Suspended here until got Notification.
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         queryTick++;
+        dummy.PollSoftStop();
 
         if (dummy.IsEnabled())
         {
@@ -94,6 +95,7 @@ void ThreadOledUpdate(void* argument)
         // [v2026-10-03] 查询端补齐：周期 poll 4 帧合并完成的 PID 节点
         //   #GET_PID 0 ALL 模式 32 帧回包由 OledTask 分行打印；< 50µs 开销
         dummy.PollPidPrint();
+        dummy.PollStopPrint();
 
         oled.clearBuffer();
         oled.setFont(u8g2_font_5x8_tr);

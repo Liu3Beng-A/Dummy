@@ -201,6 +201,7 @@ extern "C" void Tim4Callback20kHz()
 
 void OnButton1Event(Button::Event _event)
 {
+    if (motor.controller->IsSoftStopLocked()) return;
     switch (_event)
     {
         case ButtonBase::UP:
@@ -231,6 +232,7 @@ void OnButton1Event(Button::Event _event)
 
 void OnButton2Event(Button::Event _event)
 {
+    if (motor.controller->IsSoftStopLocked()) return;
     switch (_event)
     {
         case ButtonBase::UP:

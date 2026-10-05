@@ -1,4 +1,4 @@
-import tkinter as tk
+﻿import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import serial
 import serial.tools.list_ports
@@ -139,6 +139,9 @@ class RobotSerialAssistantOld:
         self._tx_thread = None
         self.is_connected = False
         self._motor_enabled = False  # 电机使能状态
+        self._stop_locked = False
+        self._tx_generation = 0
+        self._stop_rx_fragment = ""
 
         self.create_widgets()
         self.refresh_ports()
@@ -190,7 +193,7 @@ class RobotSerialAssistantOld:
         self.lbl_motor_state.pack(side=tk.RIGHT, padx=(0, 8), pady=8)
 
         # 右侧：急停按钮（最醒目）
-        self.btn_emergency = tk.Button(top_bar, text="[ !STOP 急停 ]", font=("Arial", 12, "bold"),
+        self.btn_emergency = tk.Button(top_bar, text="[ !STOP ]", font=("Arial", 12, "bold"),
                                        bg="#c92a2a", fg="white", activebackground="#a02222",
                                        relief=tk.RAISED, padx=20, pady=8,
                                        command=lambda: self.send_cmd("!STOP"))
@@ -363,11 +366,6 @@ class RobotSerialAssistantOld:
         self.btn_i_apply.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
         self.btn_i_save = ttk.Button(i_f, text="保存", command=self._save_i)
         self.btn_i_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
-
-        # 全部读取（仅查询）：始终可点
-        all_btn = ttk.Frame(param_f)
-        all_btn.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(all_btn, text="全部读取(8 节点)", command=self._qry_all).pack(side=tk.LEFT, padx=2)
 
         # 写入按钮的可用性受节点下拉控制：节点=0 (ALL) 时禁用，避免误写广播
         # 共 5 个写入按钮：1 个 PID 保存 + 2 个 ACC（应用/保存）+ 2 个 I（应用/保存）
@@ -747,6 +745,7 @@ class RobotSerialAssistantOld:
                 self.serial_port = serial.Serial(port, BAUDRATE, timeout=0.5)
                 self.serial_port.write_timeout = 1.0
                 self.is_connected = True
+                self._stop_rx_fragment = ""
                 self.btn_connect.config(text="断开", bg="#c92a2a", activebackground="#a02222")
                 self._draw_led(True)
                 self.lbl_status.config(text=f"已连接 {port}  {BAUDRATE}", fg="#4ade80")
@@ -784,7 +783,7 @@ class RobotSerialAssistantOld:
                     data = self.serial_port.read(self.serial_port.in_waiting)
                     if data:
                         text = data.decode('utf-8', errors='replace')
-                        for line in self._split_rx_lines(text):
+                        for line in self._split_rx_stop_status(text):
                             self._handle_rx_line(line)
                 # 无数据时短暂休眠，不阻塞主循环（接收轮询周期 10ms，降低交互延迟）
                 time.sleep(0.01)
@@ -794,6 +793,20 @@ class RobotSerialAssistantOld:
             except Exception as e:
                 self.root.after(0, self.log, f"读取异常: {e}", "ERROR")
                 break
+
+    def _split_rx_stop_status(self, text):
+        """STOP 回执允许跨串口读取分段，完整一行后再更新锁态。"""
+        text = self._stop_rx_fragment + text
+        self._stop_rx_fragment = ""
+        rows = text.split('\n')
+        tail = rows[-1].strip()
+        replies = ("Stopping ok", "STOP locked", "STOP locked disabled", "Start pending",
+                   "Disable pending", "Started ok", "Disabled ok", "error STOP_LOCKED",
+                   "STOP fault ")
+        if tail and len(rows[-1]) < 256 and (
+                any(reply.startswith(tail) for reply in replies) or tail.startswith("STOP fault ")):
+            self._stop_rx_fragment = rows.pop()
+        return self._split_rx_lines('\n'.join(rows))
 
     @staticmethod
     def _split_rx_lines(text):
@@ -826,6 +839,9 @@ class RobotSerialAssistantOld:
             return
 
         self.root.after(0, self.log, line, "RX")
+        if line in ("Stopping ok", "STOP locked", "STOP locked disabled", "Start pending",
+                    "Disable pending", "Started ok", "Disabled ok", "error STOP_LOCKED") or line.startswith("STOP fault "):
+            self.root.after(0, self._handle_stop_status, line)
 
         # 电机参数查询回包解析：节点匹配且非 0 时，把数值回填到右侧 Entry（仅 UI 辅助，不影响主日志）
         m = re.match(r'ok PID \[(\d+)\] kp=(-?\d+) kv=(-?\d+) ki=(-?\d+) kd=(-?\d+)', line)
@@ -870,11 +886,16 @@ class RobotSerialAssistantOld:
     def _serial_write_loop(self):
         """守护发送线程：从队列取命令，经串口写出。"""
         while True:
-            cmd = self._tx_queue.get()
-            if cmd is None:  # 停止哨兵
+            item = self._tx_queue.get()
+            if item is None:  # 停止哨兵
                 break
+            generation, cmd = item
             try:
                 with self._serial_write_lock:
+                    if generation != self._tx_generation:
+                        continue
+                    if self._stop_locked and cmd not in ("!STOP", "!START", "!DISABLE"):
+                        continue
                     port_obj = self.serial_port
                     if port_obj is None or not port_obj.is_open:
                         self.root.after(0, self.log, f"发送失败(串口未打开): {cmd}", "ERROR")
@@ -912,13 +933,6 @@ class RobotSerialAssistantOld:
 
     def _qry_i(self):
         self.send_cmd(f"#GETI {self.param_node.get()}")
-
-    def _qry_all(self):
-
-        self.send_cmd("#GET_PID 0")    # ALL: 8 节点 × 4 帧 = 32 帧 PID
-        self.send_cmd("#GETJACC 0")    # ALL: 8 节点 0x2C
-        self.send_cmd("#GETI 0")       # ALL: 8 节点 0x2D
-
 
     def _fill_pid_entries(self, kp, kv, ki, kd):
         """PID 回包解析后回填 Entry（仅 UI 辅助，不影响主日志）"""
@@ -1157,8 +1171,16 @@ class RobotSerialAssistantOld:
         if not self.is_connected or not self.serial_port:
             self.log("未连接串口", "WARN")
             return
+        cmd = cmd.strip()
+        if self._stop_locked and cmd not in ("!START", "!DISABLE"):
+            self.log("STOP 锁定中，仅接受 !START 或 !DISABLE", "WARN")
+            return
+        if cmd in ("!STOP", "!DISABLE"):
+            self._cancel_motion_for_stop()
+            self._stop_locked = True
+            self._handle_stop_status("Stopping ok" if cmd == "!STOP" else "Disable pending")
         try:
-            self._tx_queue.put(cmd)
+            self._tx_queue.put((self._tx_generation, cmd))
             self.log(cmd, "TX")
         except Exception as e:
             self.log(f"入队失败: {e}", "ERROR")
@@ -1166,6 +1188,41 @@ class RobotSerialAssistantOld:
     # ==============================================
     # 系统控制
     # ==============================================
+    def _cancel_motion_for_stop(self):
+        self._tx_generation += 1
+        self._seq_running = False
+        self._seq_pending = []
+        self._seq_idx = 0
+        self._pending_sync = None
+        self._sync_data = None
+        while True:
+            try:
+                self._tx_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _handle_stop_status(self, line):
+        if line == "Started ok":
+            self._stop_locked = False
+            self._update_motor_state(True)
+        elif line == "Disabled ok":
+            self._stop_locked = False
+            self._update_motor_state(False)
+        else:
+            if not self._stop_locked:
+                self._cancel_motion_for_stop()
+            self._stop_locked = True
+            labels = {
+                "Stopping ok": "● 软停减速中",
+                "STOP locked": "● STOP 锁定 / 停点保持",
+                "STOP locked disabled": "● STOP 锁定 / 电机失能",
+                "Start pending": "● 等待停稳并解锁",
+                "Disable pending": "● 等待八轴失能确认",
+                "error STOP_LOCKED": "● STOP 锁定",
+            }
+            self.lbl_motor_state.config(text=labels.get(line, "● STOP 故障 / 保持锁定"),
+                                        bg="#495057", fg="#ffd43b")
+
     def _update_motor_state(self, enabled):
         self._motor_enabled = enabled
         if enabled:
@@ -1174,11 +1231,9 @@ class RobotSerialAssistantOld:
             self.lbl_motor_state.config(text="● 电机已失能", bg="#495057", fg="#ff6b6b")
 
     def _cmd_start(self):
-        self._update_motor_state(True)
         self.send_cmd("!START")
 
     def _cmd_disable(self):
-        self._update_motor_state(False)
         self.send_cmd("!DISABLE")
 
     def _cmd_calibration(self):
@@ -1421,6 +1476,9 @@ class RobotSerialAssistantOld:
     def send_all_positions(self):
         """顺序发送全部点位：旧固件每条 ">" 执行完才回 "ok"，
         因此严格逐条下发——发第 N 条，等回 ok，再发第 N+1 条。"""
+        if self._stop_locked:
+            self.log("STOP 锁定中，不能启动顺序发送", "WARN")
+            return
         if not self.stored_positions:
             self.log("没有存储的点位", "WARN")
             return
@@ -1443,6 +1501,8 @@ class RobotSerialAssistantOld:
 
     def _send_next_position(self):
         """发下一个点位，等固件回 ok 后由 RX 线程再次调用"""
+        if self._stop_locked:
+            return
         if self._seq_idx >= len(self._seq_pending):
             return
         _name, pos = self._seq_pending[self._seq_idx]

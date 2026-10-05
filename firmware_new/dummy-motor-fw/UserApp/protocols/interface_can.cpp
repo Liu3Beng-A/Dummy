@@ -1,6 +1,7 @@
 #include "common_inc.h"
 #include "configurations.h"
 #include <can.h>
+#include <cstring>
 
 
 extern Motor motor;
@@ -22,8 +23,36 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
     float tmpF;
     int32_t tmpI;
 
+    if (motor.controller->IsSoftStopLocked() &&
+        _cmd != SoftStopProtocol::COMMAND && _cmd != 0x23 &&
+        !(_cmd == 0x01 && _len >= 4 && *(uint32_t*)_data == 0))
+        return;
+
     switch (_cmd)
     {
+        case SoftStopProtocol::COMMAND:
+        {
+            if (_len < 4) break;
+#if MOTOR_TYPE == 8
+            // Gripper only participates in START from disabled, never STOP/RELEASE.
+            if (_data[0] != SoftStopProtocol::ENABLE_HOLD &&
+                _data[0] != SoftStopProtocol::DISABLE &&
+                _data[0] != SoftStopProtocol::QUERY) break;
+#endif
+            const uint16_t token = static_cast<uint16_t>(_data[2] | (_data[3] << 8));
+            motor.controller->RequestSoftStop(_data[0], token);
+            uint8_t reply[8] = {};
+            const float position = motor.controller->GetSoftStopPosition();
+            memcpy(reply, &position, sizeof(position));
+            reply[4] = motor.controller->GetSoftStopPhase();
+            const uint16_t replyToken = motor.controller->GetSoftStopToken();
+            reply[6] = static_cast<uint8_t>(replyToken);
+            reply[7] = static_cast<uint8_t>(replyToken >> 8);
+            CAN_TxHeaderTypeDef header = txHeader;
+            header.StdId = (boardConfig.canNodeId << 7) | SoftStopProtocol::COMMAND;
+            CAN_Send(&header, reply);
+            break;
+        }
         // 0x00~0x0F No Memory CMDs
         case 0x09:  // Broadcast EStop - Emergency stop all motors
             motor.controller->requestMode = Motor::MODE_STOP;
@@ -33,6 +62,13 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             // 不发 ACK，纯制动
             break;
         case 0x01:  // Enable Motor
+            if (_len < 4) break;
+            if (*(uint32_t*)_data == 0)
+            {
+                motor.controller->DisableForStop();
+                break;
+            }
+            motor.controller->SetDisable(false);
             motor.controller->requestMode = (*(uint32_t*) (RxData) == 1) ?
                                             Motor::MODE_COMMAND_VELOCITY : Motor::MODE_STOP;
             break;

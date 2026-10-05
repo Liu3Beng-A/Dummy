@@ -178,6 +178,15 @@ public:
     DOF6Kinematic::Pose6D_t currentPose6D = {};
     volatile uint8_t jointsStateFlag = 0b00000000;
     CommandMode commandMode = DEFAULT_COMMAND_MODE;
+    enum StopState { NORMAL, STOPPING, STOPPED, STARTING, DISABLING, DISABLED };
+    bool IsStopLocked() const { return stopState != NORMAL && stopState != DISABLED; }
+    uint32_t GetMotionEpoch() const { return motionEpoch; }
+    void RequestSoftStop();
+    void RequestStart();
+    void RequestDisable();
+    void PollSoftStop();
+    void PollStopPrint();
+    void SoftStopCallback(uint8_t node, const uint8_t* data);
     CtrlStepMotor* motorJ[8] = {nullptr};  // [FIX] 0=ALL代理, 1~6=J1~J6, 7=地轨
     StepHand* hand = {nullptr};
 
@@ -285,10 +294,12 @@ public:
     public:
         explicit CommandHandler(DummyRobot* _context) : context(_context)
         {
-            commandFifo = osMessageQueueNew(16, 64, nullptr);
+            commandFifo = osMessageQueueNew(16, sizeof(QueueItem), nullptr);
         }
 
         uint32_t Push(const std::string &_cmd);
+        uint32_t PushSystem(const std::string& cmd);
+        bool IsTaskCancelled() const { return parsing && activeEpoch != context->GetMotionEpoch(); }
         std::string Pop(uint32_t timeout);
         uint32_t ParseCommand(const std::string &_cmd);
         uint32_t GetSpace();
@@ -300,6 +311,17 @@ public:
         DummyRobot* context;
         osMessageQueueId_t commandFifo;
         char strBuffer[64]{};
+        struct QueueItem { uint32_t epoch; char command[64]; };
+        uint32_t poppedEpoch = 0;
+        bool parsing = false;
+        uint32_t activeEpoch = 0;
+        struct ExecutionScope
+        {
+            CommandHandler& handler;
+            ExecutionScope(CommandHandler& h, uint32_t epoch) : handler(h)
+            { h.activeEpoch = epoch; h.parsing = true; }
+            ~ExecutionScope() { handler.parsing = false; }
+        };
     };
     CommandHandler commandHandler = CommandHandler(this);
 
@@ -309,7 +331,44 @@ private:
     float jointSpeed = DEFAULT_JOINT_SPEED;
     DOF6Kinematic::Joint6D_t dynamicJointSpeeds = {1, 1, 1, 1, 1, 1};
     DOF6Kinematic* dof6Solver;
-    bool isEnabled = false;
+    volatile bool isEnabled = false;
+    volatile StopState stopState = DISABLED;
+    volatile uint32_t motionEpoch = 0;
+    volatile uint16_t stopToken = 0;
+    volatile uint16_t stopAckMask = 0;
+    volatile uint8_t stopAction = 0;
+    volatile bool startPending = false;
+    bool stopStartAllEight = true;
+    volatile uint16_t stopHoldingMask = 0;
+    bool stopPerNodeTokens = false;
+    volatile uint16_t stopSyncedMask = 0;
+    volatile bool motionActive = false;
+    volatile bool motionDispatchPending = false;
+    volatile bool stopNeedsSend = false;
+    uint8_t stopPollNode = 1;
+    float stopPositions[9] = {};
+    volatile uint16_t stopNodeTokens[9] = {};
+    const char* volatile pendingStopNotice = nullptr;
+    volatile uint16_t stopFaultMask = 0;
+    uint16_t stopFaultPrinted = 0;
+    volatile uint16_t stopRxMask = 0;
+    volatile uint16_t stopBadPositionMask = 0;
+    volatile uint8_t stopRxPhases[9] = {};
+    volatile uint16_t stopRxTokens[9] = {};
+    volatile uint32_t stopDiagPollCount = 0;
+    volatile bool stopDiagTxBusy = false;
+    volatile uint8_t stopDiagTxNode = 0;
+    uint32_t stopDiagSinceMs = 0;
+    bool stopDiagPending = false;
+    void ResetStopDiagnostics();
+    bool PlanMoveJ(float j1, float j2, float j3, float j4, float j5, float j6,
+                   float rail, float speed, uint32_t epoch);
+    bool PlanMoveL(float x, float y, float z, float a, float b, float c, uint32_t epoch);
+    void SetMotionSpeed(float speed, uint32_t epoch);
+    void HomingForGeneration(uint32_t epoch);
+    void RestingForGeneration(uint32_t epoch);
+    void CalibrateForGeneration(uint32_t epoch);
+    void RebootForGeneration(uint32_t epoch);
     bool isRGBEnabled = true;
     uint32_t rgbMode = 0;
 };

@@ -22,17 +22,22 @@ CtrlStepMotor::CtrlStepMotor(CAN_HandleTypeDef* _hcan, uint8_t _id, bool _invers
 void CtrlStepMotor::SetEnable(bool _enable)
 {
     state = _enable ? FINISH : STOP;
-
-    uint8_t mode = 0x01;
-    txHeader.StdId = nodeID << 7 | mode;
-
-    // Int to Bytes
+    // STOP control traffic uses local frames, independent of periodic query buffers.
+    CAN_TxHeaderTypeDef header = txHeader;
+    header.StdId = (nodeID << 7) | 0x01;
+    uint8_t data[8] = {};
     uint32_t val = _enable ? 1 : 0;
-    auto* b = (unsigned char*) &val;
-    for (int i = 0; i < 4; i++)
-        canBuf[i] = *(b + i);
+    memcpy(data, &val, sizeof(val));
+    CanSendMessage(get_can_ctx(hcan), data, &header);
+}
 
-    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+void CtrlStepMotor::SendSoftStop(uint8_t action, uint16_t token)
+{
+    CAN_TxHeaderTypeDef header = txHeader;
+    header.StdId = (nodeID << 7) | SoftStopProtocol::COMMAND;
+    uint8_t data[8] = {action, 0, static_cast<uint8_t>(token),
+                       static_cast<uint8_t>(token >> 8), 0, 0, 0, 0};
+    CanSendMessage(get_can_ctx(hcan), data, &header);
 }
 
 void CtrlStepMotor::SetEnableTemp(bool _enable)

@@ -92,6 +92,12 @@ void Motor::CloseLoopControlTick()
     // Estimate Error
     controller->estError = controller->softPosition - controller->estPosition;
 
+    // Requests are submitted by CAN; all ramp/hold transitions run at 20kHz.
+    const uint32_t stopIrqMask = __get_PRIMASK();
+    __disable_irq();
+    const bool softStopOwnsControl = controller->TickSoftStop();
+    __set_PRIMASK(stopIrqMask);
+
     /************************************ Ctrl Loop ************************************/
     if (controller->isStalled ||
         controller->softDisable ||
@@ -143,6 +149,8 @@ void Motor::CloseLoopControlTick()
         }
     }
 
+    if (!softStopOwnsControl)
+    {
     /******************************* Mode Change Handle *******************************/
     if (controller->modeRunning != controller->requestMode)
     {
@@ -253,6 +261,7 @@ void Motor::CloseLoopControlTick()
             break;
     }
 
+    }
     controller->softDisable = controller->goalDisable;
     controller->softBrake = controller->goalBrake;
 
@@ -298,7 +307,10 @@ void Motor::CloseLoopControlTick()
     }
 
     /******************************** Update State ********************************/
-    if (!encoder->IsCalibrated())
+    if (controller->IsSoftStopLocked())
+        controller->state = controller->softStopPhase == SoftStopProtocol::HOLDING ?
+                            STATE_FINISH : STATE_RUNNING;
+    else if (!encoder->IsCalibrated())
         controller->state = STATE_NO_CALIB;
     else if (controller->modeRunning == MODE_STOP)
         controller->state = STATE_STOP;
@@ -414,7 +426,197 @@ void Motor::Controller::CalcDceToOutput(int32_t _location, int32_t _speed)
 
 void Motor::Controller::SetCtrlMode(Motor::Mode_t _mode)
 {
+    if (IsSoftStopLocked()) return;
     requestMode = _mode;
+}
+
+void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
+{
+    using namespace SoftStopProtocol;
+    if (action == SoftStopProtocol::DISABLE)
+    {
+        if (softStopTokenValid && token == softStopToken && softStopPhase == DISABLED) return;
+        softStopToken = token;
+        softStopTokenValid = true;
+        softStopLocked = true;
+        softStopPhase = DECELERATING;
+        softStopRequest = SoftStopProtocol::DISABLE;
+        return;
+    }
+    if (action == STOP)
+    {
+        // Retries (including a delayed STOP after RELEASE) never restart a ramp.
+        if (softStopTokenValid && token == softStopToken) return;
+        softStopToken = token;
+        softStopTokenValid = true;
+        softStopLocked = true;
+        softStopPhase = DECELERATING;
+        softStopRequest = STOP;
+    }
+    else if (action == RELEASE && token == softStopToken && softStopLocked &&
+             softStopPhase == HOLDING)
+        softStopRequest = RELEASE;
+    else if (action == ENABLE_HOLD &&
+             (!softStopLocked || softStopPhase == DISABLED || softStopPhase == HOLDING))
+    {
+        if (softStopTokenValid && token == softStopToken && softStopPhase == NORMAL) return;
+        softStopKeepHold = softStopPhase == HOLDING;
+        softStopToken = token;
+        softStopTokenValid = true;
+        softStopLocked = true;
+        softStopPhase = DECELERATING;
+        softStopRequest = ENABLE_HOLD;
+    }
+}
+
+void Motor::Controller::DisableForStop()
+{
+    softStopRequest = 0;
+    softStopLocked = false;
+    softStopPhase = SoftStopProtocol::DISABLED;
+    softStopTokenValid = false;
+    goalDisable = true;
+    goalVelocity = 0;
+    goalCurrent = 0;
+    requestMode = MODE_STOP;
+}
+
+void Motor::Controller::CaptureStopPosition()
+{
+    softStopPosition = realPosition;
+    goalPosition = softPosition = softStopPosition;
+    goalVelocity = softVelocity = 0;
+    goalCurrent = softCurrent = 0;
+    modeRunning = requestMode = MODE_COMMAND_POSITION;
+    softNewCurve = false;
+    context->motionPlanner.positionTracker.NewTask(softStopPosition, 0);
+    ClearIntegral();
+    // Carry the current holding torque across the velocity -> position transition.
+    config->dce.outputKi = focCurrent * 1024;
+}
+
+float Motor::Controller::GetSoftStopPosition()
+{
+    const int32_t position = (softStopPhase == SoftStopProtocol::HOLDING ||
+                              softStopPhase == SoftStopProtocol::NORMAL) ?
+                             softStopPosition : realPosition;
+    return static_cast<float>(position - context->config.motionParams.encoderHomeOffset) /
+           MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+}
+
+bool Motor::Controller::TickSoftStop()
+{
+    using namespace SoftStopProtocol;
+    const uint8_t action = softStopRequest;
+    softStopRequest = 0;
+    if (action == SoftStopProtocol::DISABLE)
+    {
+        DisableForStop();
+        softStopTokenValid = true;
+        softDisable = true;
+        goalBrake = softBrake = false;
+        modeRunning = MODE_STOP;
+        softVelocity = softCurrent = 0;
+        return true;
+    }
+    if (action == ENABLE_HOLD)
+    {
+        if (isStalled || !context->encoder->IsCalibrated())
+        {
+            softStopPhase = FAULT;
+            goalDisable = softDisable = true;
+            requestMode = modeRunning = MODE_STOP;
+            return true;
+        }
+        goalDisable = softDisable = false;
+        goalBrake = softBrake = false;
+        if (!softStopKeepHold) CaptureStopPosition();
+        softStopKeepHold = false;
+        softStopLocked = false;
+        softStopPhase = NORMAL;
+    }
+    else if (action == RELEASE)
+    {
+        softStopLocked = false;
+        softStopPhase = NORMAL;
+        // Keep the captured position and existing holding torque.
+    }
+    else if (action == STOP)
+    {
+        softStopStableTicks = 0;
+        softStopStableAnchor = softStopStableMax = realPosition;
+        softStopVelocitySum = 0;
+        if (modeRunning == MODE_STOP || goalDisable || softDisable)
+            softStopPhase = DISABLED; // STOP never energizes a disabled motor.
+        else if (context->config.motionParams.ratedVelocityAcc <= 0)
+        {
+            softStopPhase = FAULT;
+            goalDisable = true;
+            requestMode = modeRunning = MODE_STOP;
+        }
+        else
+        {
+            context->motionPlanner.velocityTracker.SetVelocityAcc(
+                context->config.motionParams.ratedVelocityAcc);
+            context->motionPlanner.velocityTracker.NewTask(estVelocity);
+            softVelocity = estVelocity;
+            goalVelocity = goalCurrent = 0;
+            modeRunning = requestMode = MODE_COMMAND_VELOCITY;
+            softNewCurve = false;
+            ClearIntegral();
+            config->pid.vError = config->pid.vErrorLast = 0;
+            config->pid.outputKi = focCurrent * 1024;
+        }
+    }
+    if (!softStopLocked) return false;
+    if (isStalled || !context->encoder->IsCalibrated()) softStopPhase = FAULT;
+    if (softStopPhase == DECELERATING)
+    {
+        context->motionPlanner.velocityTracker.CalcSoftGoal(0);
+        softVelocity = context->motionPlanner.velocityTracker.goVelocity;
+        // A one-step encoder change at 20kHz produces 625 steps/s in the
+        // existing velocity estimator. Judge its mean over 50ms, while every
+        // position sample must remain inside an eight-step peak-to-peak range.
+        if (softVelocity == 0)
+        {
+            if (realPosition < softStopStableAnchor) softStopStableAnchor = realPosition;
+            if (realPosition > softStopStableMax) softStopStableMax = realPosition;
+            const int64_t range = static_cast<int64_t>(softStopStableMax) - softStopStableAnchor;
+            if (range > 8)
+            {
+                softStopStableTicks = 0;
+                softStopStableAnchor = softStopStableMax = realPosition;
+                softStopVelocitySum = 0;
+            }
+            else
+            {
+                softStopVelocitySum += estVelocity;
+                if (++softStopStableTicks >= 1000)
+                {
+                    const int64_t limit = static_cast<int64_t>(MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 100) *
+                                          softStopStableTicks;
+                    if (softStopVelocitySum >= -limit && softStopVelocitySum <= limit)
+                    {
+                        CaptureStopPosition();
+                        softStopPhase = HOLDING;
+                    }
+                    else
+                    {
+                        softStopStableTicks = 0;
+                        softStopStableAnchor = softStopStableMax = realPosition;
+                        softStopVelocitySum = 0;
+                    }
+                }
+            }
+        }
+        else
+        {
+            softStopStableTicks = 0;
+            softStopStableAnchor = softStopStableMax = realPosition;
+            softStopVelocitySum = 0;
+        }
+    }
+    return true;
 }
 
 
@@ -427,12 +629,14 @@ void Motor::Controller::AddTrajectorySetPoint(int32_t _pos, int32_t _vel)
 
 void Motor::Controller::SetPositionSetPoint(int32_t _pos)
 {
+    if (IsSoftStopLocked()) return;
     goalPosition = _pos + context->config.motionParams.encoderHomeOffset;
 }
 
 
 bool Motor::Controller::SetPositionSetPointWithTime(int32_t _pos, float _time)
 {
+    if (IsSoftStopLocked()) return false;
     int32_t deltaPos = abs(_pos - realPosition + context->config.motionParams.encoderHomeOffset);
 
     float pMax = (float) context->config.motionParams.ratedVelocityAcc * _time * _time / 4;
@@ -461,6 +665,7 @@ bool Motor::Controller::SetPositionSetPointWithTime(int32_t _pos, float _time)
 
 void Motor::Controller::SetVelocitySetPoint(int32_t _vel)
 {
+    if (IsSoftStopLocked()) return;
     if ((_vel >= -context->config.motionParams.ratedVelocity) &&
         (_vel <= context->config.motionParams.ratedVelocity))
     {
@@ -494,6 +699,7 @@ float Motor::Controller::GetFocCurrent()
 
 void Motor::Controller::SetCurrentSetPoint(int32_t _cur)
 {
+    if (IsSoftStopLocked()) return;
     if (_cur > context->config.motionParams.ratedCurrent)
         goalCurrent = context->config.motionParams.ratedCurrent;
     else if (_cur < -context->config.motionParams.ratedCurrent)

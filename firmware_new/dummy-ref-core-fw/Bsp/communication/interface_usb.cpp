@@ -4,6 +4,7 @@
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
 #include "interface_usb.hpp"
+extern DummyRobot dummy;
 
 osThreadId_t usbServerTaskHandle;
 USBStats_t usb_stats_ = {0};
@@ -102,6 +103,8 @@ struct USBInterface
     uint8_t *rx_buf = nullptr;
     uint32_t rx_len = 0;
     bool data_pending = false;
+    uint32_t rx_motion_epoch = 0;
+    bool rx_stop_locked = false;
     uint8_t out_ep;
     uint8_t in_ep;
     USBSender &usb_sender;
@@ -151,7 +154,9 @@ static void UsbServerTask(void *ctx)
             if (ODrive_interface.data_pending)
             {
                 ODrive_interface.data_pending = false;
-                usb_channel.process_packet(ODrive_interface.rx_buf, ODrive_interface.rx_len);
+                if (!dummy.IsStopLocked() && !ODrive_interface.rx_stop_locked &&
+                    ODrive_interface.rx_motion_epoch == dummy.GetMotionEpoch())
+                    usb_channel.process_packet(ODrive_interface.rx_buf, ODrive_interface.rx_len);
                 USBD_CDC_ReceivePacket(&hUsbDeviceFS, ODrive_interface.out_ep);  // Allow next packet
             }
         }
@@ -178,6 +183,8 @@ void usb_rx_process_packet(uint8_t *buf, uint32_t len, uint8_t endpoint_pair)
     // Therefore it's safe to write to these vars directly since we know previous processing is complete.
     usb_iface->rx_buf = buf;
     usb_iface->rx_len = len;
+    usb_iface->rx_motion_epoch = dummy.GetMotionEpoch();
+    usb_iface->rx_stop_locked = dummy.IsStopLocked();
     usb_iface->data_pending = true;
     osSemaphoreRelease(sem_usb_rx);
 }

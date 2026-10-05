@@ -25,6 +25,9 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
         /*----------------------- ↓ Add Your CAN1 Packet Protocol Here ↓ ------------------------*/
         switch (cmd)
         {
+            case SoftStopProtocol::COMMAND:
+                if (rxHeader->DLC == 8) dummy.SoftStopCallback(id, data);
+                return;
             case 0x23:
                 if (id == 8)
                     dummy.hand->UpdateAngleCallback(*(float*) (data), data[4]);

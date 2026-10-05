@@ -4,6 +4,7 @@
 #include "Motor/motion_planner.h"
 #include "Sensor/Encoder/encoder_base.h"
 #include "Driver/driver_base.h"
+#include "../../../stop_protocol.h"
 
 class Motor
 {
@@ -135,10 +136,29 @@ public:
         void SetBrake(bool _brake);
         void ApplyPosAsHomeOffset();
         void ClearStallFlag();
+        void RequestSoftStop(uint8_t action, uint16_t token);
+        void DisableForStop();
+        bool IsSoftStopLocked() const { return softStopLocked; }
+        uint8_t GetSoftStopPhase() const { return softStopPhase; }
+        uint16_t GetSoftStopToken() const { return softStopToken; }
+        float GetSoftStopPosition();
 
 
     private:
         Motor* context;
+        volatile bool softStopLocked = false;
+        volatile uint8_t softStopRequest = 0;
+        volatile uint8_t softStopPhase = SoftStopProtocol::NORMAL;
+        volatile uint16_t softStopToken = 0;
+        bool softStopTokenValid = false;
+        bool softStopKeepHold = false;
+        int32_t softStopPosition = 0;
+        int32_t softStopStableAnchor = 0;
+        int32_t softStopStableMax = 0;
+        int64_t softStopVelocitySum = 0;
+        uint32_t softStopStableTicks = 0;
+        bool TickSoftStop();
+        void CaptureStopPosition();
         int32_t realLapPosition{};
         int32_t realLapPositionLast{};
         int32_t realPosition{};

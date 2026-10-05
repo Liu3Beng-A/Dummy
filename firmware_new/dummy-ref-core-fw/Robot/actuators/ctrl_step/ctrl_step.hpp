@@ -3,6 +3,7 @@
 
 #include "fibre/protocol.hpp"
 #include "can.h"
+#include "../../../../stop_protocol.h"
 
 class CtrlStepMotor
 {
@@ -33,6 +34,7 @@ public:
     void SetAngleWithVelocityLimit(float _angle, float _vel);
     // CAN Command
     void SetEnable(bool _enable);
+    void SendSoftStop(uint8_t action, uint16_t token);
     void SetEnableTemp(bool _enable);
     void DoCalibration();
     void SetCurrentSetPoint(float _val);

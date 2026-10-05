@@ -7,6 +7,7 @@ extern Motor motor;
 
 void OnUartCmd(uint8_t* _data, uint16_t _len)
 {
+    if (motor.controller->IsSoftStopLocked()) return;
     float cur, pos, vel, time;
     char *token = NULL;
     switch (_data[0])

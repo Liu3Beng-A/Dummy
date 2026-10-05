@@ -38,6 +38,8 @@
 // defined in can.c
 extern CAN_HandleTypeDef hcan1;
 extern CAN_HandleTypeDef hcan2;
+extern DummyRobot dummy;
+extern osThreadId_t ControlLoopUpdateHandle;
 
 CAN_context can1Ctx;
 CAN_context can2Ctx;
@@ -247,6 +249,7 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
 
 void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader)
 {
+    const uint32_t epoch = dummy.GetMotionEpoch();
     osStatus semaphore_status;
     if (canCtx->handle->Instance == CAN1)
         semaphore_status = osSemaphoreAcquire(sem_can1_tx, osWaitForever);
@@ -257,6 +260,15 @@ void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* t
 
     if (semaphore_status == osOK)
     {
+        const uint8_t command = txHeader->StdId & 0x7F;
+        const bool stopTraffic = command == SoftStopProtocol::COMMAND || command == 0x23;
+        if (!stopTraffic && (dummy.IsStopLocked() || epoch != dummy.GetMotionEpoch() ||
+            (osThreadGetId() == ControlLoopUpdateHandle && dummy.commandHandler.IsTaskCancelled())))
+        {
+            if (canCtx->handle->Instance == CAN1) osSemaphoreRelease(sem_can1_tx);
+            else osSemaphoreRelease(sem_can2_tx);
+            return;
+        }
         // §8.6+ — bxCAN 3 mb 限制：等 mb 出现空位再入
         // 5ms 控制周期内 6 条 0x07：J1-J3 入 mb0/1/2 立即成功，J4-J6 HAL_BUSY
         // 等 mb 空后 J4-J6 也能入；总等待 ~340µs（占 5ms 周期 7%）

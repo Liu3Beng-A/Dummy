@@ -208,6 +208,10 @@ public:
 
     int process_bytes(const uint8_t *buffer, size_t length, size_t *processed_bytes);
 
+    // STOP cancels a partial native command before a later START can resume it.
+    void discard_pending_packet()
+    { header_index_ = packet_index_ = packet_length_ = 0; }
+
     size_t get_free_space()
     { return SIZE_MAX; }
 
