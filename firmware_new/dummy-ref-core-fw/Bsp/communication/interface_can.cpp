@@ -247,6 +247,27 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
         ctx->unexpected_errors++;
 }
 
+bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader)
+{
+    // Deferred parameter queries must never wait for CAN from the OLED task.
+    if (!canCtx || dummy.IsStopLocked()) return false;
+    const uint32_t epoch = dummy.GetMotionEpoch();
+    osSemaphoreId_t semaphore;
+    if (canCtx->handle->Instance == CAN1) semaphore = sem_can1_tx;
+    else if (canCtx->handle->Instance == CAN2) semaphore = sem_can2_tx;
+    else return false;
+    if (osSemaphoreAcquire(semaphore, 0) != osOK) return false;
+    if (dummy.IsStopLocked() || epoch != dummy.GetMotionEpoch() ||
+        HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData,
+                            &canCtx->last_heartbeat_mailbox) != HAL_OK)
+    {
+        osSemaphoreRelease(semaphore);
+        return false;
+    }
+    // The normal TX-complete callback releases the semaphore on success.
+    return true;
+}
+
 void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader)
 {
     const uint32_t epoch = dummy.GetMotionEpoch();

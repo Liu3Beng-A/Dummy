@@ -49,9 +49,23 @@ static void RespondStackStats(StreamSink& responseChannel)
             (unsigned long) xPortGetFreeHeapSize());
 }
 
+static bool HandleAccelerationSyncCommand(const char* cmd, size_t len, StreamSink& response)
+{
+    std::string command(cmd, len);
+    const size_t first = command.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return false;
+    const size_t last = command.find_last_not_of(" \t\r\n");
+    command = command.substr(first, last - first + 1);
+    if (command.rfind("#SYNC_ACC", 0) != 0) return false;
+    if (command != "#SYNC_ACC") Respond(response, "error SYNC_ACC syntax: #SYNC_ACC");
+    else if (!dummy.RequestMotorAccelerationSync(response)) Respond(response, "error SYNC_ACC busy");
+    return true;
+}
+
 void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
+    if (HandleAccelerationSyncCommand(_cmd, _len, _responseChannel)) return;
     uint8_t  i;
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
     if (_cmd[0] == '!' )

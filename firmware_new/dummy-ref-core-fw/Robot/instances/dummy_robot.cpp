@@ -182,6 +182,139 @@ void DummyRobot::SyncAllMotorAcceleration()
     if (hand) hand->QueryAcceleration();
 }
 
+static void FormatMotorNodeList(uint16_t mask, char (&list)[16])
+{
+    size_t length = 0;
+    for (uint8_t node = 1; node <= 8; ++node)
+    {
+        if (!(mask & (1U << node))) continue;
+        if (length) list[length++] = ',';
+        list[length++] = static_cast<char>('0' + node);
+    }
+    if (!length) list[length++] = '-';
+    list[length] = '\0';
+}
+
+bool DummyRobot::RequestMotorAccelerationSync(StreamSink& response)
+{
+    taskENTER_CRITICAL();
+    if (accSyncPhase != ACC_SYNC_IDLE)
+    {
+        taskEXIT_CRITICAL();
+        return false;
+    }
+    accSyncPhase = ACC_SYNC_ARMING;
+    if (++accSyncRequestId == 0) ++accSyncRequestId; // Zero belongs to ordinary queries.
+    accSyncEpoch = motionEpoch;
+    accSyncSentMask = accSyncReceivedMask = accSyncInvalidMask = 0;
+    accSyncResponse = &response;
+    taskEXIT_CRITICAL();
+
+    // Publish RUNNING only after pending has been sent, preserving reply order.
+    Respond(response, "ok SYNC_ACC pending");
+    taskENTER_CRITICAL();
+    accSyncStartedMs = HAL_GetTick();
+    accSyncPhase = ACC_SYNC_RUNNING;
+    taskEXIT_CRITICAL();
+    return true;
+}
+
+void DummyRobot::MotorAccelerationCallback(uint8_t node, float value, uint32_t requestId)
+{
+    if (node < 1 || node > 8) return;
+    if (requestId == 0)
+    {
+        // Preserve the existing startup and single-node query behavior.
+        jointAccRuntime[node] = value;
+        jointAccLastUpdateMs[node] = HAL_GetTick();
+        return;
+    }
+    const uint16_t bit = static_cast<uint16_t>(1U << node);
+    if (accSyncPhase != ACC_SYNC_RUNNING || requestId != accSyncRequestId ||
+        !(accSyncSentMask & bit) || (accSyncReceivedMask & bit) ||
+        static_cast<uint32_t>(HAL_GetTick() - accSyncStartedMs) >= ACC_SYNC_TIMEOUT_MS) return;
+    if (!IsFiniteCommandValue(value) || value <= 0)
+        accSyncInvalidMask |= bit;
+    else
+    {
+        accSyncValues[node] = value;
+        accSyncUpdateMs[node] = HAL_GetTick();
+    }
+    accSyncReceivedMask |= bit;
+}
+
+void DummyRobot::PollMotorAccelerationSync()
+{
+    enum Result { NONE, FINISHED, TIMED_OUT, INVALID, CANCELLED };
+    Result result = NONE;
+    uint8_t node = 0;
+    uint16_t missing = 0, invalid = 0;
+    uint32_t requestId;
+    StreamSink* response;
+    taskENTER_CRITICAL();
+    if (accSyncPhase != ACC_SYNC_RUNNING)
+    {
+        taskEXIT_CRITICAL();
+        return;
+    }
+    requestId = accSyncRequestId;
+    response = accSyncResponse;
+    missing = ACC_SYNC_ALL_NODES & ~accSyncReceivedMask;
+    invalid = accSyncInvalidMask;
+    if (IsStopLocked() || motionEpoch != accSyncEpoch) result = CANCELLED;
+    else if (!missing) result = invalid ? INVALID : FINISHED;
+    else if (static_cast<uint32_t>(HAL_GetTick() - accSyncStartedMs) >= ACC_SYNC_TIMEOUT_MS)
+        result = TIMED_OUT;
+
+    if (result != NONE)
+    {
+        if (result == FINISHED)
+        {
+            // Publish this job's complete sample set before reporting finish.
+            for (uint8_t i = 1; i <= 8; ++i)
+            {
+                jointAccRuntime[i] = accSyncValues[i];
+                jointAccLastUpdateMs[i] = accSyncUpdateMs[i];
+            }
+        }
+        accSyncPhase = ACC_SYNC_REPORTING;
+    }
+    else
+    {
+        // One nonblocking send attempt per 20ms tick; retry busy CAN next tick.
+        for (uint8_t i = 1; i <= 8; ++i)
+            if (!(accSyncSentMask & (1U << i))) { node = i; break; }
+        if (node) accSyncSentMask |= static_cast<uint16_t>(1U << node);
+    }
+    taskEXIT_CRITICAL();
+
+    if (result != NONE)
+    {
+        char missingList[16], invalidList[16];
+        FormatMotorNodeList(missing, missingList);
+        FormatMotorNodeList(invalid, invalidList);
+        if (result == FINISHED) Respond(*response, "ok SYNC_ACC finish");
+        else if (result == CANCELLED) Respond(*response, "error SYNC_ACC cancelled");
+        else if (result == INVALID) Respond(*response, "error SYNC_ACC invalid nodes=%s", invalidList);
+        else Respond(*response, "error SYNC_ACC timeout missing=%s invalid=%s", missingList, invalidList);
+        taskENTER_CRITICAL();
+        accSyncResponse = nullptr;
+        accSyncPhase = ACC_SYNC_IDLE;
+        taskEXIT_CRITICAL();
+    }
+    else if (node)
+    {
+        CtrlStepMotor* motor = node == 8 ? hand : motorJ[node];
+        if (!motor || !motor->TryQueryAcceleration(requestId))
+        {
+            taskENTER_CRITICAL();
+            if (accSyncPhase == ACC_SYNC_RUNNING && accSyncRequestId == requestId)
+                accSyncSentMask &= static_cast<uint16_t>(~(1U << node));
+            taskEXIT_CRITICAL();
+        }
+    }
+}
+
 void DummyRobot::SyncAllMotorCurrentLimit()
 {
     // 触发 8 个电机发 0x2D 回包

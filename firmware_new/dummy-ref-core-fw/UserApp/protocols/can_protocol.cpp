@@ -67,10 +67,12 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 }
                 break;
             case 0x2C:  // QueryAcceleration
-                if (id >= 1 && id <= 8) {
-                    int idx = (id == 7) ? 7 : (id == 8) ? 8 : (int)id;
-                    dummy.jointAccRuntime[idx] = *(float*)data;
-                    dummy.jointAccLastUpdateMs[idx] = HAL_GetTick();
+                if (id >= 1 && id <= 8 && rxHeader->DLC >= 4) {
+                    float value;
+                    uint32_t requestId = 0;
+                    memcpy(&value, data, sizeof(value));
+                    if (rxHeader->DLC == 8) memcpy(&requestId, data + 4, sizeof(requestId));
+                    dummy.MotorAccelerationCallback(id, value, requestId);
                 }
                 break;
             case 0x2D:  // QueryCurrentLimit

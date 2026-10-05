@@ -59,6 +59,7 @@ public:
     void QueryDceKi();
     void QueryDceKd();
     void QueryAcceleration();
+    bool TryQueryAcceleration(uint32_t requestId);
     void QueryCurrentLimit();
     void ApplyPositionAsHome();
     void SetEnableOnBoot(bool _enable);

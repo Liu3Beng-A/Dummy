@@ -96,6 +96,7 @@ void ThreadOledUpdate(void* argument)
         //   #GET_PID 0 ALL 模式 32 帧回包由 OledTask 分行打印；< 50µs 开销
         dummy.PollPidPrint();
         dummy.PollStopPrint();
+        dummy.PollMotorAccelerationSync();
 
         oled.clearBuffer();
         oled.setFont(u8g2_font_5x8_tr);

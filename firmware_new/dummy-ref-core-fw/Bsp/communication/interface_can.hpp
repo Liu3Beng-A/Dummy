@@ -42,6 +42,7 @@ struct CAN_context
 struct CAN_context* get_can_ctx(CAN_HandleTypeDef* hcan);
 bool StartCanServer(CAN_TypeDef* hcan);
 void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader);
+bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader);
 void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* data);
 
 #endif // __INTERFACE_CAN_HPP

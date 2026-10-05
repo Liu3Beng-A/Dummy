@@ -327,6 +327,19 @@ void CtrlStepMotor::QueryAcceleration()
     CanSendMessage(get_can_ctx(hcan), buf, &txHeader);
 }
 
+bool CtrlStepMotor::TryQueryAcceleration(uint32_t requestId)
+{
+    // The motor's existing 0x2C reply preserves request bytes 4..7.
+    CAN_TxHeaderTypeDef header = {
+        .StdId = static_cast<uint32_t>((nodeID << 7) | 0x2C),
+        .ExtId = 0, .IDE = CAN_ID_STD, .RTR = CAN_RTR_DATA,
+        .DLC = 8, .TransmitGlobalTime = DISABLE
+    };
+    uint8_t data[8] = {};
+    memcpy(data + 4, &requestId, sizeof(requestId));
+    return TryCanSendMessage(get_can_ctx(hcan), data, &header);
+}
+
 void CtrlStepMotor::QueryCurrentLimit()
 {
     uint8_t mode = 0x2D;

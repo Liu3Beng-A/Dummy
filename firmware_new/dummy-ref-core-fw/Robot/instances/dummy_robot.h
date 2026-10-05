@@ -255,6 +255,9 @@ public:
     //  - SyncAll* 被 #GET_PID 0 / #GETJACC 0 / #GETI 0 内部调用（ALL 模式触发）
     //  - PollPidPrint 由 OledTask 周期调用，print 4 帧合并完成的 PID 节点
     void SyncAllMotorAcceleration();
+    bool RequestMotorAccelerationSync(StreamSink& response);
+    void PollMotorAccelerationSync();
+    void MotorAccelerationCallback(uint8_t node, float value, uint32_t requestId);
     void SyncAllMotorCurrentLimit();
     void SyncAllMotorPid();
     void PollPidPrint();
@@ -327,6 +330,21 @@ public:
 
 
 private:
+    // A tagged, one-at-a-time USB synchronization job. ISR only records replies.
+    enum AccSyncPhase { ACC_SYNC_IDLE, ACC_SYNC_ARMING, ACC_SYNC_RUNNING, ACC_SYNC_REPORTING };
+    static constexpr uint16_t ACC_SYNC_ALL_NODES = 0x1FE; // J1..J8
+    static constexpr uint32_t ACC_SYNC_TIMEOUT_MS = 500;
+    volatile AccSyncPhase accSyncPhase = ACC_SYNC_IDLE;
+    uint32_t accSyncRequestId = 0;
+    uint32_t accSyncEpoch = 0;
+    uint32_t accSyncStartedMs = 0;
+    volatile uint16_t accSyncSentMask = 0;
+    volatile uint16_t accSyncReceivedMask = 0;
+    volatile uint16_t accSyncInvalidMask = 0;
+    float accSyncValues[9] = {};
+    uint32_t accSyncUpdateMs[9] = {};
+    StreamSink* accSyncResponse = nullptr;
+
     CAN_HandleTypeDef* hcan;
     float jointSpeed = DEFAULT_JOINT_SPEED;
     DOF6Kinematic::Joint6D_t dynamicJointSpeeds = {1, 1, 1, 1, 1, 1};

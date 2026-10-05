@@ -142,6 +142,8 @@ class RobotSerialAssistantOld:
         self._stop_locked = False
         self._tx_generation = 0
         self._stop_rx_fragment = ""
+        self._acc_sync_waiting = False
+        self._acc_sync_timeout_id = None
 
         self.create_widgets()
         self.refresh_ports()
@@ -348,10 +350,14 @@ class RobotSerialAssistantOld:
         self.btn_acc_save = ttk.Button(acc_f, text="保存", command=self._save_acc)
         self.btn_acc_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
-        # 全量回读电机加速度，刷新主控同步规划使用的 RAM 缓存。
-        tk.Button(param_f, text="同步加速度至主控", font=("Arial", 9, "bold"), bg="#1971c2", fg="white",
-                  relief=tk.FLAT, command=lambda: self.send_cmd("#GETJACC 0")
-                  ).pack(fill=tk.X, padx=2, pady=(2, 4))
+        # 异步回读八节点；主控确认本次回包齐全后返回 SYNC_ACC finish。
+        self.btn_acc_sync = tk.Button(param_f, text="同步加速度至主控", font=("Arial", 9, "bold"),
+                                      bg="#1971c2", fg="white", relief=tk.FLAT, command=self._sync_acc)
+        self.btn_acc_sync.pack(fill=tk.X, padx=2, pady=(2, 4))
+        ttk.Label(param_f, text="提示：建议在失能状态下同步加速度。\n"
+                               "使能时若超时，请支撑好机械臂后失能重试。",
+                  font=("Arial", 8), foreground="#b26a00", justify=tk.LEFT
+                  ).pack(fill=tk.X, padx=2, pady=(0, 4))
 
         # 电流限制（A）Entry + 读取 / 应用 / 保存 按钮
         # 应用 = #I_LIMIT_J n v（不写 EEPROM，掉电丢）；保存 = #I_LIMIT_J n v &（走 SetCurrentLimit_persist 写 EEPROM）
@@ -772,6 +778,7 @@ class RobotSerialAssistantOld:
             self._pending_sync = None
             self._sync_data = None
             self._seq_running = False
+            self._set_acc_sync_waiting(False)
             self.log("已断开串口")
 
     def serial_receive_loop(self):
@@ -795,16 +802,17 @@ class RobotSerialAssistantOld:
                 break
 
     def _split_rx_stop_status(self, text):
-        """STOP 回执允许跨串口读取分段，完整一行后再更新锁态。"""
+        """STOP / SYNC_ACC 回执允许跨读取分段，完整一行后再处理。"""
         text = self._stop_rx_fragment + text
         self._stop_rx_fragment = ""
         rows = text.split('\n')
         tail = rows[-1].strip()
         replies = ("Stopping ok", "STOP locked", "STOP locked disabled", "Start pending",
                    "Disable pending", "Started ok", "Disabled ok", "error STOP_LOCKED",
-                   "STOP fault ")
+                   "STOP fault ", "ok SYNC_ACC pending", "ok SYNC_ACC finish", "error SYNC_ACC ")
         if tail and len(rows[-1]) < 256 and (
-                any(reply.startswith(tail) for reply in replies) or tail.startswith("STOP fault ")):
+                any(reply.startswith(tail) for reply in replies) or
+                tail.startswith(("STOP fault ", "error SYNC_ACC "))):
             self._stop_rx_fragment = rows.pop()
         return self._split_rx_lines('\n'.join(rows))
 
@@ -839,6 +847,8 @@ class RobotSerialAssistantOld:
             return
 
         self.root.after(0, self.log, line, "RX")
+        if line in ("ok SYNC_ACC pending", "ok SYNC_ACC finish") or line.startswith("error SYNC_ACC "):
+            self.root.after(0, self._handle_acc_sync_status, line)
         if line in ("Stopping ok", "STOP locked", "STOP locked disabled", "Start pending",
                     "Disable pending", "Started ok", "Disabled ok", "error STOP_LOCKED") or line.startswith("STOP fault "):
             self.root.after(0, self._handle_stop_status, line)
@@ -933,6 +943,46 @@ class RobotSerialAssistantOld:
 
     def _qry_i(self):
         self.send_cmd(f"#GETI {self.param_node.get()}")
+
+    def _sync_acc(self):
+        """发起独立异步同步；查询按钮仍沿用 #GETJACC <node>。"""
+        if self._acc_sync_waiting:
+            return
+        if not self.is_connected or not self.serial_port or self._stop_locked:
+            self.send_cmd("#SYNC_ACC")  # 复用未连接 / STOP 锁定提示。
+            return
+        self._set_acc_sync_waiting(True)
+        self.send_cmd("#SYNC_ACC")
+
+    def _set_acc_sync_waiting(self, waiting):
+        """只由 Tk 主线程调用；2 秒无终结回执时允许重试。"""
+        if self._acc_sync_timeout_id is not None:
+            self.root.after_cancel(self._acc_sync_timeout_id)
+            self._acc_sync_timeout_id = None
+        self._acc_sync_waiting = waiting
+        self.btn_acc_sync.config(text="同步中…" if waiting else "同步加速度至主控",
+                                 state=tk.DISABLED if waiting else tk.NORMAL)
+        if waiting:
+            self._acc_sync_timeout_id = self.root.after(2000, self._acc_sync_no_reply)
+
+    def _acc_sync_no_reply(self):
+        self._acc_sync_timeout_id = None
+        self._set_acc_sync_waiting(False)
+        self.log("加速度同步未收到完成回执，请确认主控固件支持 #SYNC_ACC 后重试", "WARN")
+
+    def _handle_acc_sync_status(self, line):
+        if line == "ok SYNC_ACC pending":
+            self._set_acc_sync_waiting(True)
+        elif line == "ok SYNC_ACC finish":
+            self._set_acc_sync_waiting(False)
+            self.log("八节点加速度已回读并同步至主控缓存", "INFO")
+        elif line == "error SYNC_ACC busy":
+            # 已有同一 USB 通道的同步任务时，继续等它的终结回执。
+            if self._acc_sync_waiting:
+                self.log("主控已有加速度同步任务，继续等待结果", "WARN")
+        elif line.startswith("error SYNC_ACC "):
+            self._set_acc_sync_waiting(False)
+            self.log(f"加速度同步失败：{line}", "ERROR")
 
     def _fill_pid_entries(self, kp, kv, ki, kd):
         """PID 回包解析后回填 Entry（仅 UI 辅助，不影响主日志）"""
@@ -1189,6 +1239,7 @@ class RobotSerialAssistantOld:
     # 系统控制
     # ==============================================
     def _cancel_motion_for_stop(self):
+        self._set_acc_sync_waiting(False)
         self._tx_generation += 1
         self._seq_running = False
         self._seq_pending = []
