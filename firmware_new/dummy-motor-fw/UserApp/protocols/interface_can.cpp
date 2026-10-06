@@ -167,13 +167,20 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
 #endif
         case 0x12:  // Set Current-Limit and Store to EEPROM
-            if (!ProtectionSettings::Finite(*(float*)RxData) || *(float*)RxData < .1f || *(float*)RxData > 2.5f) break;
+        {
+#if MOTOR_TYPE == 57
+            constexpr float maxCurrentA = 3.0f;
+#else
+            constexpr float maxCurrentA = 2.5f;
+#endif
+            if (!ProtectionSettings::Finite(*(float*)RxData) || *(float*)RxData < .1f || *(float*)RxData > maxCurrentA) break;
             motor.config.motionParams.ratedCurrent = (int32_t) (*(float*) RxData * 1000);
             boardConfig.currentLimit = motor.config.motionParams.ratedCurrent;
             motor.controller->OnMotionLimitChange();
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
+        }
         case 0x13:  // Set Velocity-Limit and Store to EEPROM
             if (!ProtectionSettings::Finite(*(float*)RxData) || *(float*)RxData < .001f || *(float*)RxData > 30) break;
             motor.config.motionParams.ratedVelocity =

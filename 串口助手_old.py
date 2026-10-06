@@ -328,6 +328,10 @@ class RobotSerialAssistantOld:
         tk.Button(query_f, text="获取位姿", font=("Arial", 10), bg="#495057", fg="white",
                   relief=tk.FLAT, pady=5, command=self.read_pose_from_robot
                   ).pack(fill=tk.X, padx=1, pady=(1, 0))
+        self.btn_motion_status = tk.Button(query_f, text="查询运动状态", font=("Arial", 10),
+                                          bg="#495057", fg="white", relief=tk.FLAT, pady=5,
+                                          command=lambda: self.send_cmd("#MOTION_STATUS"))
+        self.btn_motion_status.pack(fill=tk.X, padx=1, pady=(2, 0))
 
         # --- 电机（旧固件只有 J1~J6，节点 1~6）---
         motor_f = ttk.LabelFrame(left_col, text="电机", padding=6)

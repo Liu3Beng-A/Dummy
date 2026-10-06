@@ -58,8 +58,8 @@ void Main()
             .velocityLimit = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
             .velocityAcc = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
             .calibrationCurrent = 2000,
-            // DCE 参数采用 firmware/motor_fw_f103_57 参考版本
-            .dce_kp = 300, .dce_kv = 120, .dce_ki = 150, .dce_kd = 50,
+            // J7 DCE defaults confirmed by the 2026-10-06 bidirectional 100-speed test.
+            .dce_kp = 300, .dce_kv = 50, .dce_ki = 30, .dce_kd = 100,
             .motor_temperature = 0.0,
             .enableMotorOnBoot = false,
             .enableStallProtect = true,    // 57 地轨默认开启堵转保护（覆盖 outer 块的 false）
