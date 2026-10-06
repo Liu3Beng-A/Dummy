@@ -19,13 +19,22 @@ bool MT6816Base::Init()
 
 uint16_t MT6816Base::UpdateAngle()
 {
+    angleData.sampleValid = false;
     dataTx[0] = (0x80 | 0x03) << 8;
     dataTx[1] = (0x80 | 0x04) << 8;
 
     for (uint8_t i = 0; i < 3; i++)
     {
         dataRx[0] = SpiTransmitAndRead16Bits(dataTx[0]);
+        const bool firstReadValid = SpiTransactionValid();
+        if (!firstReadValid) { spiRawData.checksumFlag = false; continue; }
         dataRx[1] = SpiTransmitAndRead16Bits(dataTx[1]);
+
+        if (!firstReadValid || !SpiTransactionValid())
+        {
+            spiRawData.checksumFlag = false;
+            continue;
+        }
 
         spiRawData.rawData = ((dataRx[0] & 0x00FF) << 8) | (dataRx[1] & 0x00FF);
 
@@ -50,10 +59,13 @@ uint16_t MT6816Base::UpdateAngle()
     {
         spiRawData.rawAngle = spiRawData.rawData >> 2;
         spiRawData.noMagFlag = (bool) (spiRawData.rawData & (0x0001 << 1));
+        if (!spiRawData.noMagFlag)
+        {
+            angleData.rawAngle = spiRawData.rawAngle;
+            angleData.rectifiedAngle = quickCaliDataPtr[angleData.rawAngle];
+            angleData.sampleValid = angleData.rectifiedAngle < 51200;
+        }
     }
-
-    angleData.rawAngle = spiRawData.rawAngle;
-    angleData.rectifiedAngle = quickCaliDataPtr[angleData.rawAngle];
 
     return angleData.rectifiedAngle;
 }

@@ -22,6 +22,51 @@ DEFAULT_SPEED = 35
 RAIL_RANGE = (-250, 250)
 RAIL_DEFAULT = 0
 
+# 普通堵转参数：电流为控制器命令值，并非实测电流。
+# 界面初值仅用于编辑；最终限额及整组合法性由实际节点检查。
+STALL_PARAMETERS = (
+    ("ENABLE", "普通堵转检测开关", "0=关闭 / 1=开启", 1, 0, 1),
+    ("CURRENT_A", "电流命令阈值", "A", 2.0, 0.1, None),
+    ("SPEED_RPS", "实际低速阈值", "电机 r/s", 0.02, 0.001, 0.2),
+    ("ERROR_R", "跟随误差阈值", "电机圈", 0.02, 0.0002, 1),
+    ("TRIGGER_MS", "连续触发时间", "ms", 150, 20, 2000),
+    ("STARTUP_MS", "启动豁免时间", "ms", 100, 0, 500),
+    ("CURRENT_FILTER_MS", "电流命令滤波", "ms", 10, 1, 100),
+    ("SPEED_FILTER_MS", "速度滤波", "ms", 20, 1, 100),
+    ("BACK_DEG", "关节回退距离", "关节 ° (J1–J6)", 5, 0, None),
+    ("BACK_MM", "地轨回退距离", "mm (J7)", 5, 0, None),
+    ("BACK_RPS", "回退速度上限", "电机 r/s", 3, 0, None),
+    ("BACK_ACCEL", "回退加速度", "电机 r/s²", 5, 0.1, 100),
+    ("BACK_CURRENT_A", "回退电流命令上限", "A", 2.5, 0, None),
+    ("HOLD_CURRENT_A", "保持电流命令上限", "A", 2.5, 0, None),
+    ("BACK_POS_TOL_R", "实际到位容差", "电机圈", 0.001, 0.0002, 0.01),
+    ("BACK_TIMEOUT_MS", "回退超时", "ms", 5000, 250, 30000),
+    ("REBLOCK_MS", "回退再次受阻时间", "ms", 100, 20, 500),
+    ("GRANT_WAIT_MS", "等待保护授权", "ms", 500, 100, 2000),
+)
+
+# 校准参数使用独立 #CAL_* 命令，J8 的接触判定不加入普通堵转保护。
+CAL_PARAMETERS = (
+    ("SEEK_RPS", "寻限位速度上限", "电机 r/s", 0.5, 0, None),
+    ("RETURN_RPS", "返回速度上限", "电机 r/s", 0.5, 0, None),
+    ("RETOUCH_RPS", "复触速度上限", "电机 r/s", 0.25, 0, None),
+    ("ACCEL", "校准加速度", "电机 r/s²", 5, 0.1, 100),
+    ("CURRENT_A", "校准电流命令上限", "A", 2.5, 0, None),
+    ("CONTACT_RATIO", "接触电流命令比率", "本次限流比例", 0.8, 0, 1),
+    ("SPEED_RPS", "接触低速阈值", "电机 r/s", 0.02, 0.001, 0.2),
+    ("ERROR_R", "参考/实际误差阈值", "电机圈", 0.02, 0.0002, 1),
+    ("TRIGGER_MS", "接触持续时间", "ms", 150, 20, 2000),
+    ("STARTUP_MS", "启动豁免时间", "ms", 100, 0, 500),
+    ("MAX_TRAVEL_R", "最大搜索行程", "电机圈", 101, 0, None),
+    ("SEEK_TIMEOUT_MS", "首次搜索超时", "ms", 220000, 1, None),
+    ("RETURN_TIMEOUT_MS", "返回超时", "ms", 120000, 1, None),
+    ("RETOUCH_TIMEOUT_MS", "复触超时", "ms", 5000, 1, None),
+    ("BACKOFF_R", "复触前退让距离", "电机圈", 0.2, 0, None),
+    ("REPEAT_TOL_R", "两次接触容差", "电机圈", 0.01, 0, None),
+    ("POSITION_TOL_R", "实际返回到位容差", "电机圈", 0.001, 0.0002, 0.01),
+    ("CONTACT_WINDOW_R", "已知端点接触窗口", "电机圈", 1, 0, None),
+)
+
 # MoveL 滑块范围（笛卡尔空间覆盖范围）
 POSE_LABELS = ['X', 'Y', 'Z', 'A', 'B', 'C']
 POSE_RANGES = [(-50, 300), (-100, 260), (-150, 250), (-180, 180), (-180, 180), (-180, 180)]
@@ -138,8 +183,13 @@ class RobotSerialAssistantOld:
         self._serial_write_lock = threading.Lock()
         self._tx_thread = None
         self.is_connected = False
-        self._motor_enabled = False  # 电机使能状态
+        self._motor_enabled = False  # 仅为 UI 缓存，未知状态不能证明八轴失能
+        self._motor_state_known = False
         self._stop_locked = False
+        self._calibration_busy = False
+        self._protection_window = None
+        self._protection_entries = {"STALL": {}, "CAL": {}}
+        self._protection_values = {"STALL": {}, "CAL": {}}
         self._tx_generation = 0
         self._stop_rx_fragment = ""
         self._acc_sync_waiting = False
@@ -190,7 +240,7 @@ class RobotSerialAssistantOld:
         self.lbl_status.pack(side=tk.LEFT, padx=6)
 
         # 电机使能状态指示
-        self.lbl_motor_state = tk.Label(top_bar, text="● 电机已失能", font=("Arial", 12, "bold"),
+        self.lbl_motor_state = tk.Label(top_bar, text="● 电机状态未知", font=("Arial", 12, "bold"),
                                          bg="#495057", fg="#ff6b6b", padx=20, pady=8)
         self.lbl_motor_state.pack(side=tk.RIGHT, padx=(0, 8), pady=8)
 
@@ -244,7 +294,7 @@ class RobotSerialAssistantOld:
 
         ttk.Separator(sys_f, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
 
-        # 置零(校准)：固件执行完会重启控制器，必须先确认
+        # 校准入口由主控检查八轴失能，完成后自动失能并保存，不重启。
         tk.Button(sys_f, text="置零(校准)", font=("Arial", 10, "bold"), bg="#c2255c", fg="white",
                   relief=tk.FLAT, pady=5, command=self._cmd_calibration
                   ).pack(fill=tk.X, padx=1)
@@ -383,6 +433,12 @@ class RobotSerialAssistantOld:
         self.param_node.trace_add("write", lambda *_: self._update_write_btn_state())
         self._update_write_btn_state()
 
+        ttk.Separator(param_f).pack(fill=tk.X, pady=6)
+        ttk.Button(param_f, text="堵转 / 校准参数…", command=self._open_protection_parameters
+                   ).pack(fill=tk.X, padx=2)
+        ttk.Label(param_f, text="普通保护仅 J1–J7；J8 仅校准寻限位。",
+                  font=("Arial", 8), foreground="#868e96").pack(fill=tk.X, padx=2, pady=2)
+
         # ==============================================
         # 右栏：Notebook（关节控制 / MoveL / 夹爪）
         # ==============================================
@@ -479,7 +535,7 @@ class RobotSerialAssistantOld:
                         now = time.time()
                         if now - self.last_movej_send_time > 0.1:
                             self.last_movej_send_time = now
-                            self.root.after(1, self.send_movej)
+                            self._schedule_motion_callback(self.send_movej)
                 return cb
             scl.config(command=make_jcb(lbl, ent))
 
@@ -516,7 +572,7 @@ class RobotSerialAssistantOld:
                 now = time.time()
                 if now - self.last_movej_send_time > 0.1:
                     self.last_movej_send_time = now
-                    self.root.after(1, self.send_movej)
+                    self._schedule_motion_callback(self.send_movej)
         self.scl_j7.config(command=j7_scl_cb)
 
         def j7_entry_cb(event):
@@ -634,7 +690,7 @@ class RobotSerialAssistantOld:
                         now = time.time()
                         if now - self.last_movel_send_time > 0.05:
                             self.last_movel_send_time = now
-                            self.root.after(1, self.send_movel)
+                            self._schedule_motion_callback(self.send_movel)
                 return cb
             scl.config(command=make_pcb(lbl, ent))
 
@@ -752,6 +808,9 @@ class RobotSerialAssistantOld:
                 self.serial_port.write_timeout = 1.0
                 self.is_connected = True
                 self._stop_rx_fragment = ""
+                self._calibration_busy = False
+                self._stop_locked = False
+                self._update_motor_state(None)
                 self.btn_connect.config(text="断开", bg="#c92a2a", activebackground="#a02222")
                 self._draw_led(True)
                 self.lbl_status.config(text=f"已连接 {port}  {BAUDRATE}", fg="#4ade80")
@@ -773,7 +832,9 @@ class RobotSerialAssistantOld:
             self.btn_connect.config(text="连接", bg="#2b8a3e", activebackground="#2f9e44")
             self._draw_led(False)
             self.lbl_status.config(text="未连接", fg="#ff6b6b")
-            self._update_motor_state(False)
+            self._calibration_busy = False
+            self._stop_locked = False
+            self._update_motor_state(None)
             # 清掉所有等待中的异步状态，避免重连后被上一轮的残留状态卡住
             self._pending_sync = None
             self._sync_data = None
@@ -802,17 +863,29 @@ class RobotSerialAssistantOld:
                 break
 
     def _split_rx_stop_status(self, text):
-        """STOP / SYNC_ACC 回执允许跨读取分段，完整一行后再处理。"""
+        """保护、校准和参数回执允许跨读取分段，完整一行后再处理。"""
         text = self._stop_rx_fragment + text
         self._stop_rx_fragment = ""
         rows = text.split('\n')
         tail = rows[-1].strip()
         replies = ("Stopping ok", "STOP locked", "STOP locked disabled", "Start pending",
                    "Disable pending", "Started ok", "Disabled ok", "error STOP_LOCKED",
-                   "STOP fault ", "ok SYNC_ACC pending", "ok SYNC_ACC finish", "error SYNC_ACC ")
+                   "STOP fault ", "ok SYNC_ACC pending", "ok SYNC_ACC finish", "error SYNC_ACC ",
+                   "!CALIBRATION pending", "!CALIBRATION ok", "CAL ", "error CALIBRATION ",
+                   "STALL ", "error STALL ", "ok STALL ", "ok STALL_SAVE ", "error STALL_SAVE ",
+                   "ok CAL ", "ok CAL_SAVE ", "error CAL ", "error CAL_SAVE ",
+                   "ok STALL_GET ", "ok STALL_SET ", "error STALL_GET ", "error STALL_SET ",
+                   "ok CAL_GET ", "ok CAL_SET ", "error CAL_GET ", "error CAL_SET ",
+                   "error START busy")
         if tail and len(rows[-1]) < 256 and (
                 any(reply.startswith(tail) for reply in replies) or
-                tail.startswith(("STOP fault ", "error SYNC_ACC "))):
+                tail.startswith(("STOP fault ", "error SYNC_ACC ", "CAL ", "STALL ",
+                                 "error CALIBRATION ", "error STALL ", "ok STALL ",
+                                 "ok STALL_SAVE ", "error STALL_SAVE ", "ok CAL ",
+                                 "ok CAL_SAVE ", "error CAL ", "error CAL_SAVE ",
+                                 "ok STALL_GET ", "ok STALL_SET ", "error STALL_GET ",
+                                 "error STALL_SET ", "ok CAL_GET ", "ok CAL_SET ",
+                                 "error CAL_GET ", "error CAL_SET "))):
             self._stop_rx_fragment = rows.pop()
         return self._split_rx_lines('\n'.join(rows))
 
@@ -838,7 +911,11 @@ class RobotSerialAssistantOld:
         return out
 
     def _handle_rx_line(self, line):
-        """单行回执处理（在 RX 线程调用，严禁直接操作控件）"""
+        """RX 线程只投递完整行，Tk 变量、顺序发送和控件均由主线程处理。"""
+        self.root.after(0, self._process_rx_line, line)
+
+    def _process_rx_line(self, line):
+        """在 Tk 主线程处理回执，避免从 RX 线程读取 IntVar 等 Tk 对象。"""
         # 裸数字 = 固件指令 FIFO 剩余空位：255 说明队列已满，其余仅是余量计数，静默过滤
         if line.isdigit():
             if line == "255":
@@ -851,7 +928,15 @@ class RobotSerialAssistantOld:
             self.root.after(0, self._handle_acc_sync_status, line)
         if line in ("Stopping ok", "STOP locked", "STOP locked disabled", "Start pending",
                     "Disable pending", "Started ok", "Disabled ok", "error STOP_LOCKED") or line.startswith("STOP fault "):
-            self.root.after(0, self._handle_stop_status, line)
+            self._handle_stop_status(line)
+
+        if line.startswith(("!CALIBRATION ", "CAL ", "error CALIBRATION ")):
+            self._handle_calibration_status(line)
+        elif line.startswith("STALL "):
+            self._handle_stall_status(line)
+        elif line == "error START busy":
+            self.log("参数任务正在进行，START 未受理；完成后请重新发送，不会自动使能", "WARN")
+        self._handle_protection_parameter_status(line)
 
         # 电机参数查询回包解析：节点匹配且非 0 时，把数值回填到右侧 Entry（仅 UI 辅助，不影响主日志）
         m = re.match(r'ok PID \[(\d+)\] kp=(-?\d+) kv=(-?\d+) ki=(-?\d+) kd=(-?\d+)', line)
@@ -905,6 +990,8 @@ class RobotSerialAssistantOld:
                     if generation != self._tx_generation:
                         continue
                     if self._stop_locked and cmd not in ("!STOP", "!START", "!DISABLE"):
+                        continue
+                    if self._calibration_busy and cmd not in ("!CALIBRATION", "!STOP", "!DISABLE"):
                         continue
                     port_obj = self.serial_port
                     if port_obj is None or not port_obj.is_open:
@@ -1006,6 +1093,148 @@ class RobotSerialAssistantOld:
         state = "disabled" if self.param_node.get() == 0 else "normal"
         for btn in self._write_buttons:
             btn.config(state=state)
+
+    def _open_protection_parameters(self):
+        """独立参数窗口，避免挤压原有控制面板；读取值按节点缓存。"""
+        if self._protection_window is not None and self._protection_window.winfo_exists():
+            self._protection_window.lift()
+            return
+        window = tk.Toplevel(self.root)
+        self._protection_window = window
+        window.title("堵转 / 校准参数")
+        window.geometry("840x810")
+        window.minsize(800, 620)
+        notebook = ttk.Notebook(window)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self._protection_nodes = {}
+        self._protection_rows = {"STALL": {}, "CAL": {}}
+        self._protection_entries = {"STALL": {}, "CAL": {}}
+        self._protection_save_buttons = {}
+        for kind, title, descriptors in (("STALL", "普通堵转 J1–J7", STALL_PARAMETERS),
+                                         ("CAL", "校准寻限位 J7/J8", CAL_PARAMETERS)):
+            page = ttk.Frame(notebook, padding=8)
+            notebook.add(page, text=title)
+            top = ttk.Frame(page)
+            top.pack(fill=tk.X)
+            ttk.Label(top, text="节点:").pack(side=tk.LEFT)
+            node_var = tk.IntVar(value=1 if kind == "STALL" else 7)
+            self._protection_nodes[kind] = node_var
+            ttk.Combobox(top, textvariable=node_var, width=5, state="readonly",
+                         values=list(range(9)) if kind == "STALL" else [7, 8]
+                         ).pack(side=tk.LEFT, padx=6)
+            ttk.Button(top, text="读取全部参数", command=lambda k=kind: self._query_protection(k)
+                       ).pack(side=tk.LEFT, padx=6)
+            save = ttk.Button(top, text="保存节点 EEPROM", command=lambda k=kind: self._save_protection(k))
+            save.pack(side=tk.LEFT, padx=6)
+            self._protection_save_buttons[kind] = save
+            hint = ("0=ALL 展开 J1–J7；J8 排除普通检测。回退速度为减速箱前电机轴。"
+                    if kind == "STALL" else "J8 接触检测仅用于 CALIBRATION，不参与普通堵转。")
+            ttk.Label(page, text=hint, foreground="#868e96").pack(anchor="w", pady=(8, 2))
+            ttk.Label(page, text="数值为建议初值，先读取实际节点。应用仅 RAM；保存必须失能。",
+                      foreground="#b26a00").pack(anchor="w", pady=(0, 8))
+            canvas_frame = ttk.Frame(page)
+            canvas_frame.pack(fill=tk.BOTH, expand=True)
+            canvas = tk.Canvas(canvas_frame, highlightthickness=0)
+            scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+            canvas.configure(yscrollcommand=scroll.set)
+            scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            table = ttk.Frame(canvas)
+            table_window = canvas.create_window((0, 0), window=table, anchor="nw")
+            table.bind("<Configure>", lambda event, c=canvas: c.configure(scrollregion=c.bbox("all")))
+            canvas.bind("<Configure>", lambda event, c=canvas, w=table_window: c.itemconfigure(w, width=event.width))
+            for col, label in enumerate(("参数 / 命令键", "单位", "值", "")):
+                ttk.Label(table, text=label, font=("Arial", 10, "bold")).grid(row=0, column=col, sticky="w", padx=4, pady=4)
+            table.columnconfigure(0, weight=1)
+            for row, (key, label, unit, default, _minimum, _maximum) in enumerate(descriptors, 1):
+                ttk.Label(table, text=f"{label}\n{key}").grid(row=row, column=0, sticky="w", padx=4, pady=3)
+                ttk.Label(table, text=unit).grid(row=row, column=1, sticky="w", padx=4)
+                entry = ttk.Entry(table, width=12)
+                entry.insert(0, f"{default:g}")
+                entry.grid(row=row, column=2, padx=6)
+                apply_button = ttk.Button(table, text="应用", width=7,
+                                          command=lambda k=kind, p=key: self._set_protection(k, p))
+                apply_button.grid(row=row, column=3, padx=4)
+                self._protection_entries[kind][key] = entry
+                self._protection_rows[kind][key] = apply_button
+            node_var.trace_add("write", lambda *_, k=kind: self._refresh_protection_node(k))
+            self._refresh_protection_node(kind)
+
+    def _refresh_protection_node(self, kind):
+        node = self._protection_nodes[kind].get()
+        descriptors = STALL_PARAMETERS if kind == "STALL" else CAL_PARAMETERS
+        cached = self._protection_values[kind].get(node, {})
+        for key, _label, _unit, default, _minimum, _maximum in descriptors:
+            applicable = not (kind == "STALL" and (node == 8 or
+                             (key == "BACK_DEG" and node == 7) or
+                             (key == "BACK_MM" and node not in (0, 7))))
+            self._protection_rows[kind][key].config(state=tk.NORMAL if applicable else tk.DISABLED)
+            entry = self._protection_entries[kind][key]
+            if kind == "STALL" and key == "BACK_RPS" and node == 7:
+                default = 0.5
+            elif kind == "CAL" and node == 8:
+                default = {"CURRENT_A": 1, "MAX_TRAVEL_R": 105 / 100 * 100 / 360 * 16,
+                           "SEEK_TIMEOUT_MS": 15000, "RETURN_TIMEOUT_MS": 15000,
+                           "BACKOFF_R": 2 / 100 * 100 / 360 * 16,
+                           "CONTACT_WINDOW_R": 5 / 100 * 100 / 360 * 16}.get(key, default)
+            value = cached.get(key, f"{default:g}")
+            entry.delete(0, tk.END)
+            entry.insert(0, value)
+        self._protection_save_buttons[kind].config(state=tk.DISABLED if kind == "STALL" and node == 8 else tk.NORMAL)
+
+    def _query_protection(self, kind):
+        self.send_cmd(f"#{kind}_GET {self._protection_nodes[kind].get()}")
+
+    def _set_protection(self, kind, key):
+        node = self._protection_nodes[kind].get()
+        descriptors = STALL_PARAMETERS if kind == "STALL" else CAL_PARAMETERS
+        descriptor = next(p for p in descriptors if p[0] == key)
+        if kind == "STALL" and (node == 8 or (key == "BACK_DEG" and node == 7) or
+                                (key == "BACK_MM" and node not in (0, 7))):
+            self.log("该普通堵转参数不适用于所选节点", "WARN")
+            return
+        try:
+            value = float(self._protection_entries[kind][key].get())
+            minimum, maximum = descriptor[4:6]
+            if (not math.isfinite(value) or value < minimum or
+                    (minimum == 0 and key not in ("STARTUP_MS", "ENABLE") and value == 0) or
+                    (maximum is not None and value > maximum)):
+                raise ValueError("超出参数范围")
+            if (key.endswith("_MS") or key == "ENABLE") and not value.is_integer():
+                raise ValueError("时间/开关参数必须为整数")
+        except ValueError as exc:
+            messagebox.showerror("参数错误", f"{key}: {exc}\n单位：{descriptor[2]}", parent=self._protection_window)
+            return
+        self.send_cmd(f"#{kind}_SET {node} {key} {value:g}")
+
+    def _save_protection(self, kind):
+        if self._motor_state_known and self._motor_enabled:
+            messagebox.showwarning("保存需要失能", "请先 DISABLE 并等待确认，再保存 EEPROM。",
+                                   parent=self._protection_window)
+            return
+        self.send_cmd(f"#{kind}_SAVE {self._protection_nodes[kind].get()}")
+
+    def _handle_protection_parameter_status(self, line):
+        match = re.fullmatch(r"ok (STALL|CAL)(?:_SET)? \[(\d+)\] ([A-Z_0-9]+)=([^\s]+)(?:\s+.*)?", line)
+        if not match:
+            return
+        kind, node, key, value = match.group(1), int(match.group(2)), match.group(3), match.group(4)
+        try:
+            if not math.isfinite(float(value)):
+                return
+        except ValueError:
+            return
+        if kind == "STALL" and key == "BACK_DISTANCE_R" and 1 <= node <= 7:
+            motor_r = float(value)
+            key = "BACK_MM" if node == 7 else "BACK_DEG"
+            value = f"{motor_r * 5 if node == 7 else motor_r * 360 / (30 if node == 6 else 50):.6g}"
+        self._protection_values[kind].setdefault(node, {})[key] = value
+        window = self._protection_window
+        if (window is not None and window.winfo_exists() and
+                self._protection_nodes[kind].get() == node and key in self._protection_entries[kind]):
+            entry = self._protection_entries[kind][key]
+            entry.delete(0, tk.END)
+            entry.insert(0, value)
 
     # ==============================================
     # 电机参数设置（#SET_PID / #ACC_J / #I_LIMIT_J）
@@ -1132,16 +1361,16 @@ class RobotSerialAssistantOld:
                   command=self._cmd_hand_close
                   ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
         # --- 位置设置 ---
-        pos_f = ttk.LabelFrame(parent, text="位置设置（0=闭合，100=张开撞限位）", padding=6)
+        pos_f = ttk.LabelFrame(parent, text="位置设置（0=闭合，100=张开）", padding=6)
         pos_f.pack(fill=tk.X, pady=(0, 6))
         pos_top = ttk.Frame(pos_f)
         pos_top.pack(fill=tk.X)
         ttk.Label(pos_top, text="位置:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
-        self.hand_pos = tk.IntVar(value=0)
+        self.hand_pos = tk.IntVar(value=100)
         self.scl_hand_pos = ttk.Scale(pos_top, from_=0, to=100, orient=tk.HORIZONTAL,
                                       variable=self.hand_pos)
         self.scl_hand_pos.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        self.lbl_hand_pos = ttk.Label(pos_top, text="0", width=4, font=("Arial", 10, "bold"))
+        self.lbl_hand_pos = ttk.Label(pos_top, text="100", width=4, font=("Arial", 10, "bold"))
         self.lbl_hand_pos.pack(side=tk.LEFT)
         def hand_pos_cb(val):
             v = int(float(val))
@@ -1151,7 +1380,7 @@ class RobotSerialAssistantOld:
                 now = time.time()
                 if now - self.last_hand_pos_send_time > 0.1:
                     self.last_hand_pos_send_time = now
-                    self.root.after(1, self._cmd_hand_set_pos)
+                    self._schedule_motion_callback(self._cmd_hand_set_pos)
         self.scl_hand_pos.config(command=hand_pos_cb)
         pos_btn_row = ttk.Frame(pos_f)
         pos_btn_row.pack(fill=tk.X, pady=(4, 0))
@@ -1220,11 +1449,21 @@ class RobotSerialAssistantOld:
         """所有指令的唯一出口：入队 + 记 TX 日志，由写线程串行发出"""
         if not self.is_connected or not self.serial_port:
             self.log("未连接串口", "WARN")
-            return
+            return False
         cmd = cmd.strip()
-        if self._stop_locked and cmd not in ("!START", "!DISABLE"):
-            self.log("STOP 锁定中，仅接受 !START 或 !DISABLE", "WARN")
-            return
+        if self._calibration_busy and cmd not in ("!STOP", "!DISABLE"):
+            self.log("校准及保存中，START 返回 busy，不挂起；可发送 STOP 或 DISABLE", "WARN")
+            return False
+        if self._stop_locked and cmd not in ("!STOP", "!START", "!DISABLE"):
+            self.log("保护锁定中，仅接受 START、DISABLE；STOP 可中断保护动作", "WARN")
+            return False
+        if cmd == "!CALIBRATION":
+            if self._motor_state_known and self._motor_enabled:
+                self._warn_calibration_disabled()
+                return False
+            self._cancel_motion_for_stop()
+            self._calibration_busy = True
+            self.lbl_motor_state.config(text="● 校准入口检查中", bg="#495057", fg="#ffd43b")
         if cmd in ("!STOP", "!DISABLE"):
             self._cancel_motion_for_stop()
             self._stop_locked = True
@@ -1232,8 +1471,10 @@ class RobotSerialAssistantOld:
         try:
             self._tx_queue.put((self._tx_generation, cmd))
             self.log(cmd, "TX")
+            return True
         except Exception as e:
             self.log(f"入队失败: {e}", "ERROR")
+            return False
 
     # ==============================================
     # 系统控制
@@ -1246,19 +1487,39 @@ class RobotSerialAssistantOld:
         self._seq_idx = 0
         self._pending_sync = None
         self._sync_data = None
+        # 解锁不重新开启拖发；迟到的 after 回调也受 send_cmd 门禁限制。
+        self.movej_drag_enable.set(False)
+        self.movel_drag_enable.set(False)
+        self.hand_pos_drag_enable.set(False)
         while True:
             try:
                 self._tx_queue.get_nowait()
             except queue.Empty:
                 break
 
+    def _schedule_motion_callback(self, callback):
+        """拖发 after 回调带世代；STOP/保护取消后，即使解锁也不能复活旧回调。"""
+        generation = self._tx_generation
+
+        def run_if_current():
+            if (generation == self._tx_generation and not self._stop_locked and
+                    not self._calibration_busy):
+                callback()
+
+        self.root.after(1, run_if_current)
+
     def _handle_stop_status(self, line):
         if line == "Started ok":
+            if self._calibration_busy:
+                self.log("校准忙态收到 Started ok，保持运动门禁并核查主控状态", "WARN")
+                return
             self._stop_locked = False
             self._update_motor_state(True)
         elif line == "Disabled ok":
             self._stop_locked = False
             self._update_motor_state(False)
+            if self._calibration_busy:
+                self.lbl_motor_state.config(text="● 校准中 / 已失能，等待保存结果", fg="#ffd43b")
         else:
             if not self._stop_locked:
                 self._cancel_motion_for_stop()
@@ -1275,8 +1536,11 @@ class RobotSerialAssistantOld:
                                         bg="#495057", fg="#ffd43b")
 
     def _update_motor_state(self, enabled):
-        self._motor_enabled = enabled
-        if enabled:
+        self._motor_state_known = enabled is not None
+        self._motor_enabled = enabled is True
+        if enabled is None:
+            self.lbl_motor_state.config(text="● 电机状态未知", bg="#495057", fg="#ffd43b")
+        elif enabled:
             self.lbl_motor_state.config(text="● 电机已使能", bg="#2b8a3e", fg="white")
         else:
             self.lbl_motor_state.config(text="● 电机已失能", bg="#495057", fg="#ff6b6b")
@@ -1288,15 +1552,73 @@ class RobotSerialAssistantOld:
         self.send_cmd("!DISABLE")
 
     def _cmd_calibration(self):
-        """置零(校准)：固件写完校准值后主控会重启，必须先确认"""
+        """失能入口检查由主控最终确认，不自动 DISABLE 或排队校准。"""
+        if self._calibration_busy:
+            self.send_cmd("!CALIBRATION")
+            return
+        if self._stop_locked or (self._motor_state_known and self._motor_enabled):
+            self._warn_calibration_disabled()
+            return
+        if not self.is_connected or not self.serial_port:
+            self.send_cmd("!CALIBRATION")
+            return
         if not messagebox.askyesno(
             "确认置零",
-            "置零(校准) 会写入当前位置作为关节零点，\n"
-            "并且控制器随后会重新启动。\n\n确定继续吗？"
+            "J1～J6 保持失能，仅将当前位置定义为 REST_POSE。\n"
+            "J8 会寻闭合限位并返回开度100；J7 会寻正限位并返回0。\n"
+            "全部完成后自动八轴失能并保存 EEPROM，不重启。\n\n"
+            "请支撑好当前六轴姿态，并留出地轨、夹爪运动空间。\n确定继续吗？",
+            parent=self.root,
         ):
             return
-        self._update_motor_state(False)
         self.send_cmd("!CALIBRATION")
+
+    def _warn_calibration_disabled(self):
+        messagebox.showwarning(
+            "校准需要失能",
+            "校准需要八轴失能。请先点击 DISABLE 并等待失能确认，\n"
+            "再重新点击校准。不会自动失能或排队校准。\n"
+            "校准完成后会自动失能并保存 EEPROM。",
+            parent=self.root,
+        )
+
+    def _handle_calibration_status(self, line):
+        if line == "!CALIBRATION pending" or line.startswith("CAL "):
+            if not self._calibration_busy:
+                self._cancel_motion_for_stop()
+            self._calibration_busy = True
+            stage = "校准进行中" if line == "!CALIBRATION pending" else line[4:]
+            self.lbl_motor_state.config(text=f"● 校准 {stage}", bg="#495057", fg="#ffd43b")
+        elif line == "!CALIBRATION ok":
+            self._cancel_motion_for_stop()
+            self._calibration_busy = False
+            self._stop_locked = False
+            self._update_motor_state(False)
+            self._fill_joints(JOINT_DEFAULTS + [RAIL_DEFAULT])
+            self.hand_pos.set(100)
+            self.lbl_hand_pos.config(text="100")
+            self.log("校准、八轴失能与 EEPROM 保存完成；再次 START 将保持当前位置", "INFO")
+        elif line == "error CALIBRATION busy":
+            # 拒绝 START/重复指令不能结束仍在进行的校准。
+            self._calibration_busy = True
+        elif line.startswith("error CALIBRATION "):
+            self._calibration_busy = False
+            self._cancel_motion_for_stop()
+            if "require DISABLE" in line or "state unavailable" in line:
+                self._update_motor_state(None)
+                self._warn_calibration_disabled()
+            else:
+                self._stop_locked = True
+                self.lbl_motor_state.config(text="● 校准失败或取消 / 保护锁定", bg="#495057", fg="#ffd43b")
+
+    def _handle_stall_status(self, line):
+        if "EXCLUDED" in line or re.search(r"\bphase=(?:IDLE|0)(?:\s|$)", line):
+            return
+        if not self._stop_locked:
+            self._cancel_motion_for_stop()
+        self._calibration_busy = False
+        self._stop_locked = True
+        self.lbl_motor_state.config(text=f"● 堵转保护 {line[6:]}", bg="#495057", fg="#ffd43b")
 
     def _cmd_reboot(self):
         node = self.cb_node.get()
@@ -1527,8 +1849,8 @@ class RobotSerialAssistantOld:
     def send_all_positions(self):
         """顺序发送全部点位：旧固件每条 ">" 执行完才回 "ok"，
         因此严格逐条下发——发第 N 条，等回 ok，再发第 N+1 条。"""
-        if self._stop_locked:
-            self.log("STOP 锁定中，不能启动顺序发送", "WARN")
+        if self._stop_locked or self._calibration_busy:
+            self.log("保护锁定或校准忙，不能启动顺序发送", "WARN")
             return
         if not self.stored_positions:
             self.log("没有存储的点位", "WARN")
@@ -1552,7 +1874,7 @@ class RobotSerialAssistantOld:
 
     def _send_next_position(self):
         """发下一个点位，等固件回 ok 后由 RX 线程再次调用"""
-        if self._stop_locked:
+        if self._stop_locked or self._calibration_busy:
             return
         if self._seq_idx >= len(self._seq_pending):
             return

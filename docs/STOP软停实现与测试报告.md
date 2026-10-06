@@ -212,3 +212,9 @@ motor-gripper.bin   AEFAEAC29BD8CA2D4654F6F6213FD811C11BB533BA83C7FB35583305EAFA
 | 既有编译警告 | [mt6816_base.h:42](E:/Dummy-code/firmware_new/dummy-motor-fw/Ctrl/Sensor/Encoder/mt6816_base.h:42) 空的非 void 虚函数缺少 return；链接器仍报告 LOAD segment RWX。编译成功，本轮未改这些独立问题。 |
 
 没有 commit；由用户决定后续烧录测试与提交。
+
+## 10. 2026-10-06 保护/校准融合后的补充
+
+上述为原STOP阶段记录。新一轮已授权实现堵转自动回退和CALIBRATION，仍复用本地软停与固定实际停点；普通STOP七轴、DISABLE八轴、START保持当前位置的语义保留。新增内部保护联动动作5、每次START的坐标范围同步，以及校准取消时J8专用停止/重新START解锁；编码器无效的DISABLED确认独立于位置有效性。
+
+为保护在CAN故障下不中断，新增邮箱complete/abort/TERR/ALST释放、有界等待及CAN1 BusOff恢复；普通0x23无效值不污染位置缓存。未全面重构普通运动发送缓冲、FINISH实际到位、其他UART路由和多通道解析问题。完整决策、改动与最终构建/回归见[堵转保护与自动回退及校准方案第13～14节](E:/Dummy-code/docs/堵转保护与自动回退及校准方案.md)。五目标构建及离线检查通过，实机仍待用户烧录；未commit。

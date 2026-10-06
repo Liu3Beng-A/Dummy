@@ -29,6 +29,14 @@ CAN_RxHeaderTypeDef RxHeader;
 uint8_t TxData[8];
 uint8_t RxData[8];
 uint32_t TxMailbox;
+// CAN callbacks cannot wait for a mailbox: motor feedback and protection are
+// retried by their callers. A bounded queue prevents Error_Handler on TX busy.
+typedef struct {
+    CAN_TxHeaderTypeDef header;
+    uint8_t data[8];
+} MotorCanPending;
+static MotorCanPending motorCanQueue[24];
+static volatile uint8_t motorCanRead, motorCanWrite;
 
 /* USER CODE END 0 */
 
@@ -52,7 +60,7 @@ void MX_CAN_Init(void)
   hcan.Init.TimeSeg1 = CAN_BS1_5TQ;
   hcan.Init.TimeSeg2 = CAN_BS2_3TQ;
   hcan.Init.TimeTriggeredMode = DISABLE;
-  hcan.Init.AutoBusOff = DISABLE;
+  hcan.Init.AutoBusOff = ENABLE;
   hcan.Init.AutoWakeUp = ENABLE;
   hcan.Init.AutoRetransmission = DISABLE;
   hcan.Init.ReceiveFifoLocked = DISABLE;
@@ -180,10 +188,32 @@ void HAL_CAN_MspDeInit(CAN_HandleTypeDef* canHandle)
 /* USER CODE BEGIN 1 */
 void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data)
 {
-    if (HAL_CAN_AddTxMessage(&hcan, pHeader, data, &TxMailbox) != HAL_OK)
-    {
-        Error_Handler();
+    uint32_t irq = __get_PRIMASK();
+    __disable_irq();
+    uint8_t next = (uint8_t)((motorCanWrite + 1) % 24);
+    if (next != motorCanRead) {
+        motorCanQueue[motorCanWrite].header = *pHeader;
+        for (uint8_t i = 0; i < 8; ++i) motorCanQueue[motorCanWrite].data[i] = data[i];
+        motorCanWrite = next;
     }
+    __set_PRIMASK(irq);
+}
+
+bool CAN_TrySend(CAN_TxHeaderTypeDef* pHeader, const uint8_t* data)
+{
+    if (!HAL_CAN_GetTxMailboxesFreeLevel(&hcan)) return false;
+    uint32_t mailbox;
+    return HAL_CAN_AddTxMessage(&hcan, pHeader, (uint8_t*)data, &mailbox) == HAL_OK;
+}
+
+void CAN_PollTransmit(void)
+{
+    uint32_t irq = __get_PRIMASK();
+    __disable_irq();
+    if (motorCanRead != motorCanWrite &&
+        CAN_TrySend(&motorCanQueue[motorCanRead].header, motorCanQueue[motorCanRead].data))
+        motorCanRead = (uint8_t)((motorCanRead + 1) % 24);
+    __set_PRIMASK(irq);
 }
 
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* CanHandle)
@@ -192,15 +222,18 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* CanHandle)
     if (HAL_CAN_GetRxMessage(CanHandle, CAN_RX_FIFO0, &RxHeader, RxData) != HAL_OK)
     {
         /* Reception Error */
-        Error_Handler();
+        return;
     }
 
+    if (RxHeader.IDE != CAN_ID_STD || RxHeader.RTR != CAN_RTR_DATA || RxHeader.DLC > 8) return;
     uint8_t id = (RxHeader.StdId >> 7); // 4Bits ID & 7Bits Msg
     uint8_t cmd = RxHeader.StdId & 0x7F; // 4Bits ID & 7Bits Msg
     if (id == 0 || id == boardConfig.canNodeId)
     {
         OnCanCmd(cmd, RxData, RxHeader.DLC);
     }
+    else if (cmd == 0x0B && id >= 1 && id <= 7)
+        OnProtectionPeerFrame(id, cmd, RxData, RxHeader.DLC);
 }
 /* USER CODE END 1 */
 

@@ -1,5 +1,6 @@
 #include "communication.hpp"
 #include "dummy_robot.h"
+#include "protection_coordinator.h"
 #include <cstring>
 #include "FreeRTOS.h"
 #include "task.h"
@@ -126,6 +127,7 @@ DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
     motorJ[7] = new CtrlStepMotor(_hcan, 7, true, 1, -250, 250);  //  -250/+250 单位是 mm（MoveJ 按 mm 比较），不是°。直连丝杆1605（5mm/圈）
 
     hand = new StepHand(_hcan, 8);   
+    protection = new ProtectionCoordinator(*this);
 
     dof6Solver = new DOF6Kinematic(0.165f, 0.0f, 0.170f, 0.117f, 0.0695f, 0.113f);
 }
@@ -138,6 +140,7 @@ DummyRobot::~DummyRobot()
 
     delete hand;
     delete dof6Solver;
+    delete protection;
 }
 
 
@@ -601,44 +604,22 @@ void DummyRobot::CalibrateHomeOffset()
 
 void DummyRobot::CalibrateForGeneration(uint32_t epoch)
 {
-    taskENTER_CRITICAL();
-    if (epoch != motionEpoch || IsStopLocked()) { taskEXIT_CRITICAL(); return; }
-    stopState = NORMAL; // Preserve the existing internal calibration/manual update flow.
-    // Disable FixUpdate, but not disable motors
-    isEnabled = false;
-    taskEXIT_CRITICAL();
-    motorJ[ALL]->SetEnable(true);
-
-    // 1.Manually move joints to L-Pose [precisely]
-    // ...
-    motorJ[2]->SetCurrentLimit(0.5);
-    motorJ[3]->SetCurrentLimit(0.5);
-    osDelay(500);
-    if (epoch != motionEpoch || IsStopLocked()) return;
-
-    // 2.Apply Home-Offset the first time
-    motorJ[ALL]->ApplyPositionAsHome();
-    osDelay(500);
-    if (epoch != motionEpoch || IsStopLocked()) return;
-
-    // 3.Go to Resting-Pose
-    initPose = DOF6Kinematic::Joint6D_t(0, 0, 90, 0, 0, 0);
-    currentJoints = DOF6Kinematic::Joint6D_t(0, 0, 90, 0, 0, 0);
-    RestingForGeneration(epoch);
-    osDelay(500);
-    if (epoch != motionEpoch || IsStopLocked()) return;
-
-    // 4.Apply Home-Offset the second time
-    motorJ[ALL]->ApplyPositionAsHome();
-    osDelay(500);
-    if (epoch != motionEpoch || IsStopLocked()) return;
-    motorJ[2]->SetCurrentLimit(1);
-    motorJ[3]->SetCurrentLimit(1);
-    osDelay(500);
-    if (epoch != motionEpoch || IsStopLocked()) return;
-
-    RebootForGeneration(epoch);
+    if (epoch == motionEpoch && protection)
+        protection->Command("!CALIBRATION", 12, *usbStreamOutputPtr);
 }
+
+bool DummyRobot::IsStopLocked() const
+{ return (stopState != NORMAL && stopState != DISABLED) || (protection && protection->Locked()); }
+bool DummyRobot::IsCalibrationBusy() const
+{ return protection && protection->CalibrationBusy(); }
+bool DummyRobot::IsProtectionParameterBusy() const
+{ return protection && protection->ParameterBusy(); }
+bool DummyRobot::HandleProtectionCommand(const char* cmd, unsigned len, StreamSink& response)
+{ return protection && protection->Command(cmd, len, response); }
+void DummyRobot::ProtectionCallback(uint8_t node, uint8_t command, const uint8_t* data)
+{ if (protection) protection->Receive(node, command, data); }
+void DummyRobot::PollProtection() { if (protection) protection->Poll(); }
+void DummyRobot::PollProtectionPrint() { if (protection) protection->Print(); }
 
 
 void DummyRobot::Homing()
@@ -700,12 +681,14 @@ void DummyRobot::ResetStopDiagnostics()
 
 void DummyRobot::RequestSoftStop()
 {
+    const bool cancelCalibration = IsCalibrationBusy();
+    if (protection) protection->Cancel(false);
     taskENTER_CRITICAL();
-    if (IsStopLocked()) { taskEXIT_CRITICAL(); return; }
     isEnabled = false;
     motionActive = false;
     ++motionEpoch;
     stopPerNodeTokens = stopToken == 0;
+    stopWithGripper = cancelCalibration;
     stopSyncedMask = 0;
     ++stopToken;
     stopAckMask = 0;
@@ -724,6 +707,7 @@ void DummyRobot::RequestSoftStop()
 
 void DummyRobot::RequestStart()
 {
+    if (protection && protection->InterceptStart()) return;
     taskENTER_CRITICAL();
     if (stopState == STOPPING || stopState == DISABLING)
     {
@@ -732,7 +716,7 @@ void DummyRobot::RequestStart()
     }
     else if (stopState == STOPPED || stopState == DISABLED)
     {
-        stopStartAllEight = stopState == DISABLED;
+        stopStartAllEight = stopState == DISABLED || stopWithGripper;
         stopPerNodeTokens = false;
         stopAction = SoftStopProtocol::QUERY;
         stopState = STARTING;
@@ -747,12 +731,14 @@ void DummyRobot::RequestStart()
 
 void DummyRobot::RequestDisable()
 {
+    if (protection) protection->Cancel(true);
     taskENTER_CRITICAL();
     isEnabled = false;
     motionActive = false;
     ++motionEpoch;
     ++stopToken;
     stopPerNodeTokens = false;
+    stopWithGripper = false;
     stopAckMask = 0;
     startPending = false;
     stopAction = SoftStopProtocol::DISABLE;
@@ -776,7 +762,7 @@ void DummyRobot::SoftStopCallback(uint8_t node, const uint8_t* data)
         stopRxTokens[node] = token;
         stopRxMask |= static_cast<uint16_t>(1U << node);
     }
-    if (stopState == STOPPING && stopPerNodeTokens && node <= 7 &&
+    if (stopState == STOPPING && stopPerNodeTokens && (node <= 7 || stopWithGripper) &&
         !(stopSyncedMask & (1U << node)))
     {
         // A restarted master synchronizes each axis independently: a missing
@@ -789,14 +775,21 @@ void DummyRobot::SoftStopCallback(uint8_t node, const uint8_t* data)
     if (stopState == STARTING && stopAction == SoftStopProtocol::QUERY)
     {
         if (node == 8 && (stopState == STOPPING || !stopStartAllEight)) return;
+        float position;
+        std::memcpy(&position, data, sizeof(position));
+        if (!IsFiniteCommandValue(position) || data[4] == SoftStopProtocol::FAULT) {
+            stopBadPositionMask |= static_cast<uint16_t>(1U << node);
+            return;
+        }
         stopNodeTokens[node] = token;
         stopAckMask |= static_cast<uint16_t>(1U << node);
         return;
     }
-    const uint16_t expectedToken = stopPerNodeTokens && node <= 7 ? stopNodeTokens[node] : stopToken;
+    const uint16_t expectedToken = stopPerNodeTokens && (node <= 7 || stopWithGripper) ? stopNodeTokens[node] : stopToken;
     if (token != expectedToken || !IsStopLocked()) return;
     const bool allEight = stopAction == SoftStopProtocol::DISABLE ||
-                          (stopState == STARTING && stopStartAllEight);
+                          (stopState == STARTING && stopStartAllEight) ||
+                          (stopState == STOPPING && stopWithGripper);
     if (node == 8 && !allEight) return;
     if (data[4] == SoftStopProtocol::FAULT)
     {
@@ -816,6 +809,8 @@ void DummyRobot::SoftStopCallback(uint8_t node, const uint8_t* data)
     if (!IsFiniteCommandValue(position))
     {
         stopBadPositionMask |= static_cast<uint16_t>(1U << node);
+        if (stopAction == SoftStopProtocol::DISABLE && data[4] == SoftStopProtocol::DISABLED)
+            stopAckMask |= static_cast<uint16_t>(1U << node);
         return;
     }
     stopBadPositionMask &= ~static_cast<uint16_t>(1U << node);
@@ -829,7 +824,8 @@ void DummyRobot::PollSoftStop()
     taskENTER_CRITICAL();
     if (IsStopLocked() && stopState != STOPPED) ++stopDiagPollCount;
     const uint16_t expectedMask = (stopAction == SoftStopProtocol::DISABLE ||
-                                   (stopState == STARTING && stopStartAllEight)) ? 0x1FE : 0xFE;
+                                   (stopState == STARTING && stopStartAllEight) ||
+                                   (stopState == STOPPING && stopWithGripper)) ? 0x1FE : 0xFE;
     if (IsStopLocked() && (stopAckMask & expectedMask) == expectedMask)
     {
         if (stopAction == SoftStopProtocol::QUERY)
@@ -852,7 +848,7 @@ void DummyRobot::PollSoftStop()
         {
             stopState = STOPPED;
             event = stopHoldingMask ? "STOP locked" : "STOP locked disabled";
-            if (startPending)
+            if (startPending && !protection)
             {
                 stopAction = SoftStopProtocol::QUERY;
                 stopStartAllEight = false;
@@ -868,6 +864,7 @@ void DummyRobot::PollSoftStop()
         {
             for (int node = 1; node <= 7; ++node)
                 motorJ[node]->UpdateAngleCallback(stopPositions[node], true);
+            if (stopStartAllEight) hand->UpdateAngleCallback(stopPositions[8], true);
             UpdateJointAnglesCallback();
             targetJoints = currentJoints;
             targetRailPos = currentRailPos;
@@ -876,6 +873,7 @@ void DummyRobot::PollSoftStop()
             isEnabled = true;
             stopState = NORMAL;
             stopAction = 0;
+            if (protection) protection->Started();
             event = "Started ok";
         }
         else if (stopState == DISABLING)
@@ -883,7 +881,8 @@ void DummyRobot::PollSoftStop()
             stopState = DISABLED;
             stopAction = 0;
             event = "Disabled ok";
-            if (startPending)
+            if (protection) protection->Disabled();
+            if (startPending && !protection)
             {
                 stopState = STARTING;
                 stopAction = SoftStopProtocol::QUERY;
@@ -906,13 +905,22 @@ void DummyRobot::PollSoftStop()
     if (event) pendingStopNotice = event;
     taskEXIT_CRITICAL();
     if (!send) return;
+    if (protection && !protection->StopSendSlot()) {
+        stopNeedsSend |= sendFirst;
+        return;
+    }
+    const uint32_t now = HAL_GetTick();
+    if (!sendFirst && now - stopLastSendMs < (watchingHold ? 40U : 10U)) return;
+    stopLastSendMs = now;
     const uint8_t lastNode = (action == SoftStopProtocol::DISABLE ||
-                              (stopState == STARTING && stopStartAllEight)) ? 8 : 7;
+                              (stopState == STARTING && stopStartAllEight) ||
+                              (stopWithGripper && (stopState == STOPPING || watchingHold))) ? 8 : 7;
     const auto sendNode = [&](uint8_t node)
     {
         if (token != stopToken || action != stopAction) return;
         const bool needsSync = perNodeTokens && !(stopSyncedMask & (1U << node));
-        const uint8_t nodeAction = watchingHold || needsSync ? SoftStopProtocol::QUERY : action;
+        const uint8_t nodeAction = watchingHold || needsSync ? SoftStopProtocol::QUERY :
+            (node == 8 && action == ProtectionProtocol::STOP_PROTECTION ? SoftStopProtocol::STOP : action);
         const uint16_t nodeToken = perNodeTokens ? stopNodeTokens[node] : token;
         stopDiagTxNode = node;
         stopDiagTxBusy = true;
@@ -959,7 +967,8 @@ void DummyRobot::PollStopPrint()
     const StopState state = stopState;
     const uint8_t action = stopAction;
     const uint16_t expectedMask = (action == SoftStopProtocol::DISABLE ||
-                                   (state == STARTING && stopStartAllEight)) ? 0x1FE : 0xFE;
+                                   (state == STARTING && stopStartAllEight) ||
+                                   (state == STOPPING && stopWithGripper)) ? 0x1FE : 0xFE;
     const uint16_t missing = expectedMask & ~stopAckMask;
     const bool printWait = stopDiagPending &&
                           (state == STOPPING || state == STARTING || state == DISABLING) &&
@@ -993,7 +1002,7 @@ void DummyRobot::PollStopPrint()
     if (printWait)
     {
         static const char* const states[] = {"NORMAL", "STOPPING", "STOPPED", "STARTING", "DISABLING", "DISABLED"};
-        static const char* const actions[] = {"QUERY", "STOP", "RELEASE", "ENABLE_HOLD", "DISABLE"};
+        static const char* const actions[] = {"QUERY", "STOP", "RELEASE", "ENABLE_HOLD", "DISABLE", "PROTECT_STOP"};
         // USB is the debugging port. Do not wait on the unused ESP32 UART for diagnostics.
         Respond(*usbStreamOutputPtr, "STOP wait state=%s action=%s", states[state], actions[action]);
         Respond(*usbStreamOutputPtr, "STOP ack=0x%03X wait=0x%03X rx=0x%03X badpos=0x%03X",
@@ -1059,6 +1068,7 @@ bool DummyRobot::IsEnabled()
 
 void DummyRobot::SetCommandMode(uint32_t _mode)
 {
+    if (IsStopLocked()) return;
     if (_mode < COMMAND_TARGET_POINT_SEQUENTIAL ||
         _mode > COMMAND_MOTOR_TUNING)
         return;

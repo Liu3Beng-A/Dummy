@@ -15,6 +15,7 @@ struct CAN_context
     uint32_t node_ids_in_use_1[4]; // 128 bits (indicats if a node ID was in use 1-2 seconds ago)
 
     uint32_t last_heartbeat_mailbox = 0;
+    volatile uint32_t inFlightMailboxes = 0;
     uint32_t tx_msg_cnt = 0;
 
     uint8_t node_id_rng_state = 0;

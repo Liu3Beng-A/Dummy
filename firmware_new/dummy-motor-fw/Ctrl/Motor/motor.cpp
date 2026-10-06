@@ -32,6 +32,17 @@ void Motor::CloseLoopControlTick()
     static bool isFirstCalled = true;
     if (isFirstCalled)
     {
+        if (!encoder->IsCalibrated() || !encoder->IsSampleValid())
+        {
+            // Even without a first usable sample, DISABLE/FAULT requests must
+            // complete; do not make a missing encoder strand the CAN state.
+            if (controller->invalidFeedbackTicks < 20000) ++controller->invalidFeedbackTicks;
+            controller->TickProtection();
+            const uint32_t irq = __get_PRIMASK(); __disable_irq();
+            controller->TickSoftStop(); __set_PRIMASK(irq);
+            driver->Sleep();
+            return;
+        }
         int32_t angle;
         if (config.motionParams.encoderHomeOffset < MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 2)
         {
@@ -53,6 +64,14 @@ void Motor::CloseLoopControlTick()
         controller->realLapPositionLast = angle;
         controller->realPosition = angle;
         controller->realPositionLast = angle;
+        controller->feedbackInitialized = true;
+#if MOTOR_TYPE == 8
+        // HAND maps 100% to -100deg*16/360 motor revolutions. Establish the
+        // assumed reference exactly once, after the first valid sample; no
+        // movement and no Flash write occur at boot.
+        config.motionParams.encoderHomeOffset = angle + static_cast<int32_t>(100.0f * 16 / 360 * MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
+#endif
+        controller->goalPosition = controller->softPosition = controller->softStopPosition = angle;
 
         isFirstCalled = false;
         return;
@@ -61,6 +80,26 @@ void Motor::CloseLoopControlTick()
     /********************************* Update Data *********************************/
     int32_t deltaLapPosition;
 
+    bool validSample = encoder->IsCalibrated() && encoder->IsSampleValid();
+    if (validSample)
+    {
+        int32_t candidateDelta = static_cast<int32_t>(encoder->angleData.rectifiedAngle) - controller->realLapPosition;
+        if (candidateDelta > MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 2) candidateDelta -= MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+        else if (candidateDelta < -MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 2) candidateDelta += MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
+        const int64_t allowed = static_cast<int64_t>(boardConfig.velocityLimit) *
+                                (controller->transportMissingTicks + 1) / motionPlanner.CONTROL_FREQUENCY + 64;
+        // A parity-valid discontinuity is still not usable feedback. Genuine
+        // SPI gaps get their elapsed-motion allowance; repeatedly implausible
+        // valid packets do not grow that allowance until a jump is accepted.
+        if (candidateDelta > allowed || candidateDelta < -allowed) validSample = false;
+        controller->transportMissingTicks = 0;
+    }
+    else if (controller->transportMissingTicks < 20000) ++controller->transportMissingTicks;
+    if (validSample) controller->invalidFeedbackTicks = 0;
+    else if (controller->invalidFeedbackTicks < 20000) ++controller->invalidFeedbackTicks;
+    // Invalid samples never advance the unwrap or the stability window.
+    if (validSample)
+    {
     // Read Encoder data
     controller->realLapPositionLast = controller->realLapPosition;
     controller->realLapPosition = encoder->angleData.rectifiedAngle;
@@ -75,6 +114,8 @@ void Motor::CloseLoopControlTick()
     // Naive-Position calculate
     controller->realPositionLast = controller->realPosition;
     controller->realPosition += deltaLapPosition;
+    }
+    else controller->realPositionLast = controller->realPosition;
 
     /********************************* Estimate Data *********************************/
     // Estimate Velocity
@@ -92,16 +133,18 @@ void Motor::CloseLoopControlTick()
     // Estimate Error
     controller->estError = controller->softPosition - controller->estPosition;
 
+    controller->TickProtection();
+
     // Requests are submitted by CAN; all ramp/hold transitions run at 20kHz.
     const uint32_t stopIrqMask = __get_PRIMASK();
     __disable_irq();
-    const bool softStopOwnsControl = controller->TickSoftStop();
+    const bool softStopOwnsControl = controller->TickInternalProtection() || controller->TickSoftStop();
     __set_PRIMASK(stopIrqMask);
 
     /************************************ Ctrl Loop ************************************/
     if (controller->isStalled ||
         controller->softDisable ||
-        !encoder->IsCalibrated())
+        !encoder->IsCalibrated() || controller->invalidFeedbackTicks >= 100)
     {
         controller->ClearIntegral();    // clear integrals
         controller->focPosition = 0;    // clear outputs
@@ -268,28 +311,8 @@ void Motor::CloseLoopControlTick()
     /******************************** State Check ********************************/
     int32_t current = abs(controller->focCurrent);
 
-    // Stall detect
-    if (controller->config->stallProtectSwitch)
-    {
-        if (// Current Mode
-            ((controller->modeRunning == MODE_COMMAND_CURRENT ||
-              controller->modeRunning == MODE_PWM_CURRENT) &&
-             (current != 0))
-            || // Other Mode
-            current == config.motionParams.ratedCurrent)
-        {
-            if (abs(controller->estVelocity) < MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 5)
-            {
-                if (controller->stalledTime >= 1000 * 1000)
-                    controller->isStalled = true;
-                else
-                    controller->stalledTime += motionPlanner.CONTROL_PERIOD;
-            }
-        } else // can ONLY clear stall flag  MANUALLY
-        {
-            controller->stalledTime = 0;
-        }
-    }
+    // Recoverable protection is owned by TickProtection. isStalled remains
+    // reserved for the existing electrical-encoder-calibration hard fault.
 
     // Overload detect
     if ((controller->modeRunning != MODE_COMMAND_CURRENT) &&
@@ -349,6 +372,9 @@ void Motor::CloseLoopControlTick()
 
 void Motor::Controller::CalcCurrentToOutput(int32_t current)
 {
+    const int32_t limit = EffectiveCurrentLimit();
+    if (current > limit) current = limit;
+    else if (current < -limit) current = -limit;
     focCurrent = current;
 
     if (focCurrent > 0)
@@ -374,18 +400,17 @@ void Motor::Controller::CalcPidToOutput(int32_t _speed)
     config->pid.integralRound -= (config->pid.integralRemainder << 10);
     config->pid.outputKi += config->pid.integralRemainder;
     // integralRound limitation is  ratedCurrent*1024
-    if (config->pid.outputKi > context->config.motionParams.ratedCurrent << 10)
-        config->pid.outputKi = context->config.motionParams.ratedCurrent << 10;
-    else if (config->pid.outputKi < -(context->config.motionParams.ratedCurrent << 10))
-        config->pid.outputKi = -(context->config.motionParams.ratedCurrent << 10);
+    const int32_t currentLimit = EffectiveCurrentLimit();
+    if (config->pid.outputKi > currentLimit * 1024)
+        config->pid.outputKi = currentLimit * 1024;
+    else if (config->pid.outputKi < -currentLimit * 1024)
+        config->pid.outputKi = -currentLimit * 1024;
 
     config->pid.outputKd = config->pid.kd * (config->pid.vError - config->pid.vErrorLast);
 
     config->pid.output = (config->pid.outputKp + config->pid.outputKi + config->pid.outputKd) >> 10;
-    if (config->pid.output > context->config.motionParams.ratedCurrent)
-        config->pid.output = context->config.motionParams.ratedCurrent;
-    else if (config->pid.output < -context->config.motionParams.ratedCurrent)
-        config->pid.output = -context->config.motionParams.ratedCurrent;
+    if (config->pid.output > currentLimit) config->pid.output = currentLimit;
+    else if (config->pid.output < -currentLimit) config->pid.output = -currentLimit;
 
     CalcCurrentToOutput(config->pid.output);
 }
@@ -407,18 +432,17 @@ void Motor::Controller::CalcDceToOutput(int32_t _location, int32_t _speed)
     config->dce.integralRound -= (config->dce.integralRemainder << 7);
     config->dce.outputKi += config->dce.integralRemainder;
     // limited to ratedCurrent * 1024, should be TUNED when use different scene
-    if (config->dce.outputKi > context->config.motionParams.ratedCurrent << 10)
-        config->dce.outputKi = context->config.motionParams.ratedCurrent << 10;
-    else if (config->dce.outputKi < -(context->config.motionParams.ratedCurrent << 10))
-        config->dce.outputKi = -(context->config.motionParams.ratedCurrent << 10);
+    const int32_t currentLimit = EffectiveCurrentLimit();
+    if (config->dce.outputKi > currentLimit * 1024)
+        config->dce.outputKi = currentLimit * 1024;
+    else if (config->dce.outputKi < -currentLimit * 1024)
+        config->dce.outputKi = -currentLimit * 1024;
 
     config->dce.outputKd = ((config->dce.kd) * (config->dce.vError));
 
     config->dce.output = (config->dce.outputKp + config->dce.outputKi + config->dce.outputKd) >> 10;
-    if (config->dce.output > context->config.motionParams.ratedCurrent)
-        config->dce.output = context->config.motionParams.ratedCurrent;
-    else if (config->dce.output < -context->config.motionParams.ratedCurrent)
-        config->dce.output = -context->config.motionParams.ratedCurrent;
+    if (config->dce.output > currentLimit) config->dce.output = currentLimit;
+    else if (config->dce.output < -currentLimit) config->dce.output = -currentLimit;
 
     CalcCurrentToOutput(config->dce.output);
 }
@@ -427,14 +451,23 @@ void Motor::Controller::CalcDceToOutput(int32_t _location, int32_t _speed)
 void Motor::Controller::SetCtrlMode(Motor::Mode_t _mode)
 {
     if (IsSoftStopLocked()) return;
+    if (requestMode != _mode) ResetDetection();
     requestMode = _mode;
 }
 
 void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
 {
     using namespace SoftStopProtocol;
+    if ((action == ENABLE_HOLD || action == RELEASE) &&
+        (saveRequested || parameterSaveRequested || parameterSavingInProgress || coordinateSavingInProgress ||
+         (calibrationTask && protectionPhase != ProtectionProtocol::CAL_FAILED) ||
+         protectionPhase == ProtectionProtocol::LOCAL_STOPPING || protectionPhase == ProtectionProtocol::WAIT_GRANT ||
+         protectionPhase == ProtectionProtocol::RETREATING || protectionPhase == ProtectionProtocol::PEER_STOPPING)) return;
     if (action == SoftStopProtocol::DISABLE)
     {
+        if (protectionPhase != ProtectionProtocol::CAL_DONE && protectionPhase != ProtectionProtocol::SAVED &&
+            protectionPhase != ProtectionProtocol::SAVE_PENDING)
+            CancelInternal(ProtectionProtocol::CANCELLED_DISABLE);
         if (softStopTokenValid && token == softStopToken && softStopPhase == DISABLED) return;
         softStopToken = token;
         softStopTokenValid = true;
@@ -443,10 +476,15 @@ void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
         softStopRequest = SoftStopProtocol::DISABLE;
         return;
     }
-    if (action == STOP)
+    const bool preservingProtection = action == ProtectionProtocol::STOP_PROTECTION;
+    const bool cancelInternal = action == STOP && protectionPhase != ProtectionProtocol::IDLE;
+    if (cancelInternal) CancelInternal(ProtectionProtocol::CANCELLED_STOP);
+    if (action == STOP || preservingProtection)
     {
         // Retries (including a delayed STOP after RELEASE) never restart a ramp.
-        if (softStopTokenValid && token == softStopToken) return;
+        if (!cancelInternal && softStopTokenValid && token == softStopToken) return;
+        // DISABLE already accepted is never overwritten by a later stop ramp.
+        if (softStopRequest == SoftStopProtocol::DISABLE) return;
         softStopToken = token;
         softStopTokenValid = true;
         softStopLocked = true;
@@ -457,8 +495,15 @@ void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
              softStopPhase == HOLDING)
         softStopRequest = RELEASE;
     else if (action == ENABLE_HOLD &&
-             (!softStopLocked || softStopPhase == DISABLED || softStopPhase == HOLDING))
+             (!softStopLocked || softStopPhase == DISABLED || softStopPhase == HOLDING || softStopPhase == FAULT))
     {
+        if (!IsFeedbackValid() || configurationFault)
+        {
+            softStopToken = token; softStopTokenValid = true;
+            softStopLocked = true; softStopPhase = FAULT;
+            goalDisable = softDisable = true; requestMode = modeRunning = MODE_STOP;
+            return;
+        }
         if (softStopTokenValid && token == softStopToken && softStopPhase == NORMAL) return;
         softStopKeepHold = softStopPhase == HOLDING;
         softStopToken = token;
@@ -471,14 +516,24 @@ void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
 
 void Motor::Controller::DisableForStop()
 {
+    const bool preserveCalibration = calibrationTask &&
+        (protectionPhase == ProtectionProtocol::CAL_DONE || protectionPhase == ProtectionProtocol::SAVED ||
+         protectionPhase == ProtectionProtocol::SAVE_PENDING);
+    if (!preserveCalibration)
+    {
+        CancelInternal(ProtectionProtocol::CANCELLED_DISABLE);
+        calibrationTask = false; protectionTask = 0; localStall = false;
+        SetProtectionPhase(ProtectionProtocol::IDLE);
+    }
     softStopRequest = 0;
     softStopLocked = false;
     softStopPhase = SoftStopProtocol::DISABLED;
     softStopTokenValid = false;
-    goalDisable = true;
+    goalDisable = softDisable = true;
     goalVelocity = 0;
     goalCurrent = 0;
-    requestMode = MODE_STOP;
+    requestMode = modeRunning = MODE_STOP;
+    ResetDetection();
 }
 
 void Motor::Controller::CaptureStopPosition()
@@ -497,8 +552,8 @@ void Motor::Controller::CaptureStopPosition()
 
 float Motor::Controller::GetSoftStopPosition()
 {
-    const int32_t position = (softStopPhase == SoftStopProtocol::HOLDING ||
-                              softStopPhase == SoftStopProtocol::NORMAL) ?
+    if (!IsFeedbackValid()) return NAN;
+    const int32_t position = (softStopPhase == SoftStopProtocol::HOLDING) ?
                              softStopPosition : realPosition;
     return static_cast<float>(position - context->config.motionParams.encoderHomeOffset) /
            MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
@@ -521,7 +576,7 @@ bool Motor::Controller::TickSoftStop()
     }
     if (action == ENABLE_HOLD)
     {
-        if (isStalled || !context->encoder->IsCalibrated())
+        if (isStalled || !IsFeedbackValid())
         {
             softStopPhase = FAULT;
             goalDisable = softDisable = true;
@@ -534,11 +589,17 @@ bool Motor::Controller::TickSoftStop()
         softStopKeepHold = false;
         softStopLocked = false;
         softStopPhase = NORMAL;
+        calibrationTask = false; protectionTask = 0; localStall = false;
+        SetProtectionPhase(ProtectionProtocol::IDLE);
+        ResetDetection();
     }
     else if (action == RELEASE)
     {
         softStopLocked = false;
         softStopPhase = NORMAL;
+        calibrationTask = false; protectionTask = 0; localStall = false;
+        SetProtectionPhase(ProtectionProtocol::IDLE);
+        ResetDetection();
         // Keep the captured position and existing holding torque.
     }
     else if (action == STOP)
@@ -569,7 +630,7 @@ bool Motor::Controller::TickSoftStop()
         }
     }
     if (!softStopLocked) return false;
-    if (isStalled || !context->encoder->IsCalibrated()) softStopPhase = FAULT;
+    if (isStalled || !context->encoder->IsCalibrated() || invalidFeedbackTicks >= 100) softStopPhase = FAULT;
     if (softStopPhase == DECELERATING)
     {
         context->motionPlanner.velocityTracker.CalcSoftGoal(0);
@@ -577,7 +638,7 @@ bool Motor::Controller::TickSoftStop()
         // A one-step encoder change at 20kHz produces 625 steps/s in the
         // existing velocity estimator. Judge its mean over 50ms, while every
         // position sample must remain inside an eight-step peak-to-peak range.
-        if (softVelocity == 0)
+        if (softVelocity == 0 && IsFeedbackValid())
         {
             if (realPosition < softStopStableAnchor) softStopStableAnchor = realPosition;
             if (realPosition > softStopStableMax) softStopStableMax = realPosition;
@@ -630,7 +691,14 @@ void Motor::Controller::AddTrajectorySetPoint(int32_t _pos, int32_t _vel)
 void Motor::Controller::SetPositionSetPoint(int32_t _pos)
 {
     if (IsSoftStopLocked()) return;
-    goalPosition = _pos + context->config.motionParams.encoderHomeOffset;
+    const int64_t target = static_cast<int64_t>(_pos) + context->config.motionParams.encoderHomeOffset;
+    if (target > INT32_MAX || target < INT32_MIN) return;
+    goalPosition = static_cast<int32_t>(target);
+    if (abs(goalPosition - realPosition) > positionTolerance)
+    {
+        if (!motionIntent) ResetDetection(true);
+        motionIntent = true;
+    }
 }
 
 
@@ -670,12 +738,15 @@ void Motor::Controller::SetVelocitySetPoint(int32_t _vel)
         (_vel <= context->config.motionParams.ratedVelocity))
     {
         goalVelocity = _vel;
+        if (_vel && !motionIntent) ResetDetection(true);
+        motionIntent = _vel != 0;
     }
 }
 
 
 float Motor::Controller::GetPosition(bool _isLap)
 {
+    if (!IsFeedbackValid()) return NAN;
     return _isLap ?
            (float) (realLapPosition - context->config.motionParams.encoderHomeOffset) /
            (float) (Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS)
@@ -780,13 +851,13 @@ void Motor::Controller::Init()
     goalPosition = context->config.motionParams.encoderHomeOffset;
     goalVelocity = 0;
     goalCurrent = 0;
-    goalDisable = false;
+    goalDisable = requestMode == MODE_STOP;
     goalBrake = false;
 
     softPosition = 0;
     softVelocity = 0;
     softCurrent = 0;
-    softDisable = false;
+    softDisable = goalDisable;
     softBrake = false;
     softNewCurve = false;
 
@@ -816,6 +887,7 @@ void Motor::Controller::Init()
     config->dce.integralRound = 0;
     config->dce.integralRemainder = 0;
     config->dce.output = 0;
+    if (goalDisable) softStopPhase = SoftStopProtocol::DISABLED;
 }
 
 

@@ -11,6 +11,8 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
     command = command.substr(first, last - first + 1);
     if (command == "!START")
     {
+        if (dummy.IsCalibrationBusy()) { Respond(response, "error CALIBRATION busy"); return true; }
+        if (dummy.IsProtectionParameterBusy()) { Respond(response, "error START busy"); return true; }
         dummy.RequestStart();
         Respond(response, dummy.IsEnabled() && !dummy.IsStopLocked() ? "Started ok" : "Start pending");
         return true;
@@ -21,17 +23,18 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
         Respond(response, "Disable pending");
         return true;
     }
-    if (dummy.IsStopLocked())
-    {
-        Respond(response, "error STOP_LOCKED");
-        return true;
-    }
     if (command == "!STOP")
     {
         dummy.RequestSoftStop();
         Respond(response, "Stopping ok");
         return true;
     }
+    if (dummy.IsStopLocked())
+    {
+        Respond(response, dummy.IsCalibrationBusy() ? "error CALIBRATION busy" : "error STOP_LOCKED");
+        return true;
+    }
+    if (dummy.HandleProtectionCommand(command.c_str(), command.size(), response)) return true;
     if (!dummy.IsEnabled() && (command[0] == '>' || command[0] == '@' || command[0] == '&'))
     {
         Respond(response, "error DISABLED");

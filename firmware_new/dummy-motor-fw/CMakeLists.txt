@@ -74,6 +74,13 @@ file(GLOB_RECURSE SOURCES
 
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/STM32F103CBTx_FLASH.ld)
 
+# The protection ISR/context implementation uses short scoped IRQ guards and
+# has no throwing operations. Do not pull the C++ exception unwinder into the
+# 95KB application area just for those guards. Existing sources retain their
+# original compiler options.
+set_source_files_properties(Ctrl/Motor/stall_protection.cpp PROPERTIES
+        COMPILE_OPTIONS "-fno-exceptions;-fno-rtti")
+
 # Define motor types and their corresponding MOTOR_TYPE values
 set(MOTOR_TARGETS motor-35 motor-42 motor-57 motor-gripper)
 set(MOTOR_TYPES 35 42 57 8)

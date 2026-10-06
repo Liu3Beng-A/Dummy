@@ -136,6 +136,12 @@ uint8_t eeprom_read_byte(const uint32_t pos)
 #endif /* _EEPROM_BASE */
 }
 
+uint8_t eeprom_flash_read_byte(uint32_t pos)
+{
+    if (pos > E2END) return 0xFF;
+    return *reinterpret_cast<volatile const uint8_t*>(FLASH_BASE_ADDRESS + pos);
+}
+
 /**
   * @brief  Function writes a byte to emulated eeprom (flash)
   * @param  pos : address to write

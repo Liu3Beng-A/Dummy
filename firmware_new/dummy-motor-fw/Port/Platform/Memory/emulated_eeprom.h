@@ -74,6 +74,8 @@ extern "C" {
 /* Exported functions ------------------------------------------------------- */
 
 uint8_t eeprom_read_byte(uint32_t pos);
+// Reads physical Flash directly, without filling/reusing the RAM cache.
+uint8_t eeprom_flash_read_byte(uint32_t pos);
 void eeprom_write_byte(uint32_t pos, uint8_t value);
 
 #if !defined(DATA_EEPROM_BASE)

@@ -18,6 +18,8 @@ private:
     void SpiInit() override;
 
     uint16_t SpiTransmitAndRead16Bits(uint16_t _data) override;
+    bool SpiTransactionValid() const override { return transactionValid; }
+    bool transactionValid = false;
 };
 
 #endif

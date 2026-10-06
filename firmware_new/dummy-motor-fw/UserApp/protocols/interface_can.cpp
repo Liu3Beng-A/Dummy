@@ -23,6 +23,10 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
     float tmpF;
     int32_t tmpI;
 
+    if (motor.controller->ProcessProtectionCan(_cmd, _data, _len)) return;
+    if (_len < 4) return;
+    motor.controller->OnMasterCommunication();
+
     if (motor.controller->IsSoftStopLocked() &&
         _cmd != SoftStopProtocol::COMMAND && _cmd != 0x23 &&
         !(_cmd == 0x01 && _len >= 4 && *(uint32_t*)_data == 0))
@@ -37,7 +41,8 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             // Gripper only participates in START from disabled, never STOP/RELEASE.
             if (_data[0] != SoftStopProtocol::ENABLE_HOLD &&
                 _data[0] != SoftStopProtocol::DISABLE &&
-                _data[0] != SoftStopProtocol::QUERY) break;
+                _data[0] != SoftStopProtocol::QUERY &&
+                !(_data[0] == SoftStopProtocol::STOP && motor.controller->IsCalibrationContext())) break;
 #endif
             const uint16_t token = static_cast<uint16_t>(_data[2] | (_data[3] << 8));
             motor.controller->RequestSoftStop(_data[0], token);
@@ -162,26 +167,32 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
 #endif
         case 0x12:  // Set Current-Limit and Store to EEPROM
+            if (!ProtectionSettings::Finite(*(float*)RxData) || *(float*)RxData < .1f || *(float*)RxData > 2.5f) break;
             motor.config.motionParams.ratedCurrent = (int32_t) (*(float*) RxData * 1000);
             boardConfig.currentLimit = motor.config.motionParams.ratedCurrent;
+            motor.controller->OnMotionLimitChange();
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
         case 0x13:  // Set Velocity-Limit and Store to EEPROM
+            if (!ProtectionSettings::Finite(*(float*)RxData) || *(float*)RxData < .001f || *(float*)RxData > 30) break;
             motor.config.motionParams.ratedVelocity =
                 (int32_t) (*(float*) RxData *
                            (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS);
             boardConfig.velocityLimit = motor.config.motionParams.ratedVelocity;
+            motor.controller->OnMotionLimitChange();
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
         case 0x14:  // Set Acceleration （and Store to EEPROM�?
+            if (!ProtectionSettings::Finite(*(float*)RxData) || *(float*)RxData < .1f || *(float*)RxData > 100) break;
             tmpF = *(float*) RxData * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 
             motor.config.motionParams.ratedVelocityAcc = (int32_t) tmpF;
             motor.motionPlanner.velocityTracker.SetVelocityAcc((int32_t) tmpF);
             motor.motionPlanner.positionTracker.SetVelocityAcc((int32_t) tmpF);
             boardConfig.velocityAcc = motor.config.motionParams.ratedVelocityAcc;
+            motor.controller->OnMotionLimitChange();
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;
@@ -227,6 +238,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
 #else
         case 0x1B:  // Set Enable Stall-Protect
             motor.config.ctrlParams.stallProtectSwitch = (*(uint32_t*) (RxData) == 1);
+            motor.controller->protectionSettings.value[ProtectionProtocol::ENABLE] = motor.config.ctrlParams.stallProtectSwitch ? 1 : 0;
             boardConfig.enableStallProtect = motor.config.ctrlParams.stallProtectSwitch;
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
@@ -371,5 +383,12 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
     }
 
+}
+
+extern "C" void OnProtectionPeerFrame(uint8_t node, uint8_t command, uint8_t* data, uint32_t length)
+{
+    if (command != ProtectionProtocol::EVENT || length != 8) return;
+    uint32_t event; memcpy(&event, data, 4);
+    motor.controller->OnPeerProtection(node, event, data[4], data[7]);
 }
 

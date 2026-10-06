@@ -37,7 +37,15 @@ void CtrlStepMotor::SendSoftStop(uint8_t action, uint16_t token)
     header.StdId = (nodeID << 7) | SoftStopProtocol::COMMAND;
     uint8_t data[8] = {action, 0, static_cast<uint8_t>(token),
                        static_cast<uint8_t>(token >> 8), 0, 0, 0, 0};
-    CanSendMessage(get_can_ctx(hcan), data, &header);
+    TryCanSendMessage(get_can_ctx(hcan), data, &header);
+}
+
+bool CtrlStepMotor::TrySendProtection(uint8_t command, const uint8_t* data)
+{
+    CAN_TxHeaderTypeDef header = txHeader;
+    header.StdId = (nodeID << 7) | command;
+    uint8_t frame[8]; memcpy(frame, data, 8);
+    return TryCanSendMessage(get_can_ctx(hcan), frame, &header);
 }
 
 void CtrlStepMotor::SetEnableTemp(bool _enable)

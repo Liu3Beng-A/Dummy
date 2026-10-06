@@ -32,6 +32,7 @@
 */
 
 #include "common_inc.h"
+#include "instances/protection_coordinator.h"
 #include <stm32f4xx_hal.h>
 #include <cmsis_os.h>
 
@@ -121,6 +122,9 @@ void tx_complete_callback(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx)
 //    if (!ctx) return;
 //    ctx->tx_msg_cnt++;
 
+    CAN_context* ctx = get_can_ctx(hcan);
+    if (!ctx || !(ctx->inFlightMailboxes & (1U << mailbox_idx))) return;
+    ctx->inFlightMailboxes &= ~(1U << mailbox_idx);
     if (hcan->Instance == CAN1)
         osSemaphoreRelease(sem_can1_tx);
     else if (hcan->Instance == CAN2)
@@ -132,10 +136,14 @@ void tx_aborted_callback(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx)
     if (!get_can_ctx(hcan))
         return;
     get_can_ctx(hcan)->TxMailboxAbortCallbackCnt++;
+    // An aborted protection transmission must not consume the sole send token.
+    tx_complete_callback(hcan, mailbox_idx);
 }
 
 void tx_error(CAN_context* ctx, uint8_t mailbox_idx)
 {
+    // HAL TERR calls only ErrorCallback, without complete/abort notification.
+    if (ctx) tx_complete_callback(ctx->handle, mailbox_idx);
 }
 
 void HAL_CAN_TxMailbox0CompleteCallback(CAN_HandleTypeDef* hcan)
@@ -209,7 +217,7 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
     // handle transmit errors in all three mailboxes
     if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST0)
     {
-        SET_BIT(hcan->Instance->sTxMailBox[0].TIR, CAN_TI0R_TXRQ);
+        tx_error(ctx, 0);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_ALST0;
     } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR0)
     {
@@ -221,7 +229,7 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
 
     if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST1)
     {
-        SET_BIT(hcan->Instance->sTxMailBox[1].TIR, CAN_TI1R_TXRQ);
+        tx_error(ctx, 1);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_ALST1;
     } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR1)
     {
@@ -233,7 +241,7 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
 
     if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST2)
     {
-        SET_BIT(hcan->Instance->sTxMailBox[2].TIR, CAN_TI2R_TXRQ);
+        tx_error(ctx, 2);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_ALST2;
     } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR2)
     {
@@ -250,16 +258,25 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
 bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader)
 {
     // Deferred parameter queries must never wait for CAN from the OLED task.
-    if (!canCtx || dummy.IsStopLocked()) return false;
+    if (!canCtx) return false;
+    const uint8_t command = txHeader->StdId & 0x7F;
+    const bool protectionTraffic = command == SoftStopProtocol::COMMAND ||
+        command == ProtectionProtocol::EVENT_ACK ||
+        (command >= ProtectionProtocol::PARAM_SET && command <= ProtectionProtocol::CONTEXT_REPLY);
+    if (!protectionTraffic && dummy.IsStopLocked()) return false;
     const uint32_t epoch = dummy.GetMotionEpoch();
     osSemaphoreId_t semaphore;
     if (canCtx->handle->Instance == CAN1) semaphore = sem_can1_tx;
     else if (canCtx->handle->Instance == CAN2) semaphore = sem_can2_tx;
     else return false;
     if (osSemaphoreAcquire(semaphore, 0) != osOK) return false;
-    if (dummy.IsStopLocked() || epoch != dummy.GetMotionEpoch() ||
-        HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData,
-                            &canCtx->last_heartbeat_mailbox) != HAL_OK)
+    taskENTER_CRITICAL();
+    const bool stale = !protectionTraffic && (dummy.IsStopLocked() || epoch != dummy.GetMotionEpoch());
+    const bool sent = !stale && HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData,
+                            &canCtx->last_heartbeat_mailbox) == HAL_OK;
+    if (sent) canCtx->inFlightMailboxes |= canCtx->last_heartbeat_mailbox;
+    taskEXIT_CRITICAL();
+    if (!sent)
     {
         osSemaphoreRelease(semaphore);
         return false;
@@ -273,9 +290,9 @@ void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* t
     const uint32_t epoch = dummy.GetMotionEpoch();
     osStatus semaphore_status;
     if (canCtx->handle->Instance == CAN1)
-        semaphore_status = osSemaphoreAcquire(sem_can1_tx, osWaitForever);
+        semaphore_status = osSemaphoreAcquire(sem_can1_tx, 1);
     else if (canCtx->handle->Instance == CAN2)
-        semaphore_status = osSemaphoreAcquire(sem_can2_tx, osWaitForever);
+        semaphore_status = osSemaphoreAcquire(sem_can2_tx, 1);
     else
         return;
 
@@ -296,9 +313,13 @@ void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* t
         // 1ms 超时兜底，防止总线故障永久阻塞信号量
         uint32_t start = micros();
         HAL_StatusTypeDef status;
-        while ((status = HAL_CAN_AddTxMessage(
-                    canCtx->handle, txHeader, txData, &canCtx->last_heartbeat_mailbox)) != HAL_OK)
+        for (;;)
         {
+            taskENTER_CRITICAL();
+            status = HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData, &canCtx->last_heartbeat_mailbox);
+            if (status == HAL_OK) canCtx->inFlightMailboxes |= canCtx->last_heartbeat_mailbox;
+            taskEXIT_CRITICAL();
+            if (status == HAL_OK) break;
             if ((micros() - start) > 1000)   // 1ms 超时
             {
                 canCtx->tx_busy_errors++;   // 用于诊断（健康时应 ≈ 0）

@@ -29,6 +29,7 @@ void ThreadControlLoopFixUpdate(void* argument)
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         queryTick++;
         dummy.PollSoftStop();
+        dummy.PollProtection();
 
         if (dummy.IsEnabled())
         {
@@ -96,6 +97,7 @@ void ThreadOledUpdate(void* argument)
         //   #GET_PID 0 ALL 模式 32 帧回包由 OledTask 分行打印；< 50µs 开销
         dummy.PollPidPrint();
         dummy.PollStopPrint();
+        dummy.PollProtectionPrint();
         dummy.PollMotorAccelerationSync();
 
         oled.clearBuffer();

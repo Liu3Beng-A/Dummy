@@ -26,6 +26,7 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include <stdbool.h>
 
 /* USER CODE BEGIN Includes */
 extern CAN_HandleTypeDef hcan;
@@ -47,6 +48,9 @@ void MX_CAN_Init(void);
 
 /* USER CODE BEGIN Prototypes */
 void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data);
+bool CAN_TrySend(CAN_TxHeaderTypeDef* pHeader, const uint8_t* data);
+void CAN_PollTransmit(void);
+void OnProtectionPeerFrame(uint8_t node, uint8_t command, uint8_t* data, uint32_t length);
 
 /* USER CODE END Prototypes */
 

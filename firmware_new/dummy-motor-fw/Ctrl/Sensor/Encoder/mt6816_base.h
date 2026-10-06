@@ -40,6 +40,7 @@ private:
     virtual void SpiInit() {};
 
     virtual uint16_t SpiTransmitAndRead16Bits(uint16_t _dataTx) {};
+    virtual bool SpiTransactionValid() const { return true; }
 
 };
 

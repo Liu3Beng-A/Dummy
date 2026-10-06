@@ -5,6 +5,7 @@
 #include "actuators/ctrl_step/ctrl_step.hpp"
 #include "string"
 #define ALL 0
+class ProtectionCoordinator;
 
 // 地轨相关常量
 #define RAIL_FIXED_NODE_ID 7   // 地轨电机固定 Node ID（与 configurations.h 对齐）
@@ -35,7 +36,7 @@ constexpr float JOINT_ACC_FALLBACK[7] = {30.0f, 150.0f, 100.0f, 200.0f, 200.0f, 
  * @brief 夹爪控制类（继承闭环步进电机基类，参考 firmware/ref_core_f405 StepHand 实现）
  * @note  reduction=16（物理减速比），inverse=true（与 ref 对齐，基类 SetPositionWithMotorRps 自动取反）
  *        角度范围 -100~100（电机轴目标角度单位 = 度，由 SetAngleWithMotorRps 内部做 _angle/360*reduction 度→圈换算）
- *        物理方向：motor 沿正方向 → 张开；pos0=闭合，pos100=张开（沿电机正方向走 100 圈撞开限位）
+ *        pos0=闭合，pos100=张开；100 是开度，经 inverse 映射为 -100/360*16 电机圈。
  *        不 override SetAngle / SetAngleWithVelocityLimit / UpdateAngleCallback（与 ref 一致）
  *        MakeProtocolDefinitions 注册 4 条 fibre，set_enable/set_current_limit 用 R1 强转写法避免 fibre 库继承二义性
  */
@@ -55,8 +56,7 @@ public:
 
     // 标定语义：
     //   pos0 (ClosedMotorAngle) = 夹爪闭合时电机目标角
-    //   pos100 (OpenMotorAngle) = 夹爪全开时电机目标角（沿正方向 100 圈撞限位即为张开）
-    // 物理方向：motor 沿正方向 → 张开
+    //   pos100 (OpenMotorAngle) = 全开100度映射（约4.444电机圈，inverse后为负）。
     float ClosedMotorAngle = 0.0f;   // pos0   时电机目标角（默认标定零点 = 0 度）
     float OpenMotorAngle   = 100.0f; // pos100 时电机目标角（正方向 100 度）
 
@@ -69,7 +69,7 @@ public:
      *
      * 映射：用户开度 0~100 → 电机目标角 ClosedMotorAngle~OpenMotorAngle
      *   _angle=0   → motor=ClosedMotorAngle   (闭合)
-     *   _angle=100 → motor=OpenMotorAngle     (张开，沿正方向 100 圈)
+     *   _angle=100 → motor=OpenMotorAngle     (张开100开度，约4.444电机圈)
      * 内部走 SetAngleWithMotorRps：inverseDirection 取反 + _angle/360*reduction 度→圈换算
      */
     void SetAngleWithSpeedLimit(float _angle)
@@ -179,7 +179,13 @@ public:
     volatile uint8_t jointsStateFlag = 0b00000000;
     CommandMode commandMode = DEFAULT_COMMAND_MODE;
     enum StopState { NORMAL, STOPPING, STOPPED, STARTING, DISABLING, DISABLED };
-    bool IsStopLocked() const { return stopState != NORMAL && stopState != DISABLED; }
+    bool IsStopLocked() const;
+    bool IsCalibrationBusy() const;
+    bool IsProtectionParameterBusy() const;
+    bool HandleProtectionCommand(const char* cmd, unsigned len, StreamSink& response);
+    void ProtectionCallback(uint8_t node, uint8_t command, const uint8_t* data);
+    void PollProtection();
+    void PollProtectionPrint();
     uint32_t GetMotionEpoch() const { return motionEpoch; }
     void RequestSoftStop();
     void RequestStart();
@@ -330,6 +336,8 @@ public:
 
 
 private:
+    friend class ProtectionCoordinator;
+    ProtectionCoordinator* protection = nullptr;
     // A tagged, one-at-a-time USB synchronization job. ISR only records replies.
     enum AccSyncPhase { ACC_SYNC_IDLE, ACC_SYNC_ARMING, ACC_SYNC_RUNNING, ACC_SYNC_REPORTING };
     static constexpr uint16_t ACC_SYNC_ALL_NODES = 0x1FE; // J1..J8
@@ -357,6 +365,7 @@ private:
     volatile uint8_t stopAction = 0;
     volatile bool startPending = false;
     bool stopStartAllEight = true;
+    bool stopWithGripper = false; // Only cancellation of J8's internal calibration.
     volatile uint16_t stopHoldingMask = 0;
     bool stopPerNodeTokens = false;
     volatile uint16_t stopSyncedMask = 0;
@@ -364,6 +373,7 @@ private:
     volatile bool motionDispatchPending = false;
     volatile bool stopNeedsSend = false;
     uint8_t stopPollNode = 1;
+    uint32_t stopLastSendMs = 0;
     float stopPositions[9] = {};
     volatile uint16_t stopNodeTokens[9] = {};
     const char* volatile pendingStopNotice = nullptr;

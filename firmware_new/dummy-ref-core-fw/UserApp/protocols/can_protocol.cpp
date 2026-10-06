@@ -1,4 +1,5 @@
 #include "common_inc.h"
+#include "instances/protection_coordinator.h"
 
 
 // Used for response CAN message.
@@ -25,15 +26,27 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
         /*----------------------- ↓ Add Your CAN1 Packet Protocol Here ↓ ------------------------*/
         switch (cmd)
         {
+            case ProtectionProtocol::EVENT:
+            case ProtectionProtocol::PARAM_REPLY:
+            case ProtectionProtocol::CONTEXT_REPLY:
+                if (rxHeader->DLC == 8) dummy.ProtectionCallback(id, cmd, data);
+                return;
             case SoftStopProtocol::COMMAND:
                 if (rxHeader->DLC == 8) dummy.SoftStopCallback(id, data);
                 return;
             case 0x23:
+            {
+                if (id < 1 || id > 8 || rxHeader->DLC < 5) return;
+                uint32_t bits; float position;
+                memcpy(&bits, data, 4); memcpy(&position, data, 4);
+                // Invalid encoder snapshots must not poison pose/IK caches.
+                if ((bits & 0x7f800000U) == 0x7f800000U) return;
                 if (id == 8)
-                    dummy.hand->UpdateAngleCallback(*(float*) (data), data[4]);
+                    dummy.hand->UpdateAngleCallback(position, data[4]);
                 else
-                    dummy.motorJ[id]->UpdateAngleCallback(*(float*) (data), data[4]);
+                    dummy.motorJ[id]->UpdateAngleCallback(position, data[4]);
                 break;
+            }
             case 0x25:
                 if (id == 8)
                     memcpy(&dummy.hand->temperature, data, sizeof(uint32_t));

@@ -2,6 +2,7 @@
 #include "configurations.h"
 #include "Platform/Utils/st_hardware.h"
 #include <tim.h>
+#include <can.h>
 
 
 /* Component Definitions -----------------------------------------------------*/
@@ -83,6 +84,9 @@ void Main()
     boardConfig.canNodeId = RAIL_FIXED_NODE_ID;
 #elif MOTOR_TYPE == 8
     boardConfig.canNodeId = GRIPPER_FIXED_NODE_ID;
+    // The confirmed gripper boot contract is always disabled and motionless,
+    // even if an older EEPROM enabled automatic startup.
+    boardConfig.enableMotorOnBoot = false;
 #endif
     motor.config.motionParams.encoderHomeOffset = boardConfig.encoderHomeOffset;
     motor.config.motionParams.ratedCurrent = boardConfig.currentLimit;
@@ -121,6 +125,7 @@ void Main()
     motor.AttachDriver(&tb67H450);
     motor.AttachEncoder(&mt6816);
     motor.controller->Init();
+    motor.controller->InitProtection();
     motor.driver->Init();
     motor.encoder->Init();
 
@@ -141,6 +146,8 @@ void Main()
 
     for (;;)
     {
+        CAN_PollTransmit();
+        motor.controller->PollProtectionMain();
 //        if ( encoderCalibrator.FlashRun() == 0)
             encoderCalibrator.TickMainLoop();
 

@@ -62,7 +62,8 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 20K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 128K
+/* 0x08017C00..0x0801FBFF encoder table, 0x0801FC00.. user EEPROM. */
+FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 95K
 }
 
 /* Define output sections */

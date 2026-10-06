@@ -5,6 +5,7 @@
 #include "Sensor/Encoder/encoder_base.h"
 #include "Driver/driver_base.h"
 #include "../../../stop_protocol.h"
+#include "protection_config.h"
 
 class Motor
 {
@@ -142,6 +143,20 @@ public:
         uint8_t GetSoftStopPhase() const { return softStopPhase; }
         uint16_t GetSoftStopToken() const { return softStopToken; }
         float GetSoftStopPosition();
+        bool IsFeedbackValid() const;
+        bool IsActuallyDisabled() const { return goalDisable && softDisable && modeRunning == MODE_STOP; }
+        bool IsCalibrationContext() const { return calibrationTask; }
+        bool ProcessProtectionCan(uint8_t command, const uint8_t* data, uint32_t length);
+        void OnMasterCommunication();
+        void OnPeerProtection(uint8_t node, uint32_t event, uint8_t phase, uint8_t flags);
+        void PollProtectionMain();
+        void InitProtection();
+        void OnMotionLimitChange();
+        void BuildProtectionEvent(uint8_t* data) const;
+        void BuildProtectionContext(uint8_t* data, uint16_t query = 0, bool probe = false) const;
+        uint8_t GetProtectionPhase() const { return protectionPhase; }
+        uint8_t GetCoordinateVersion() const { return coordinateVersion; }
+        ProtectionSettings protectionSettings;
 
 
     private:
@@ -157,6 +172,87 @@ public:
         int32_t softStopStableMax = 0;
         int64_t softStopVelocitySum = 0;
         uint32_t softStopStableTicks = 0;
+        bool feedbackInitialized = false;
+        uint32_t invalidFeedbackTicks = 0;
+        uint32_t transportMissingTicks = 0;
+        uint32_t masterSilenceTicks = 0;
+        bool masterSeen = false;
+        volatile uint8_t protectionPhase = ProtectionProtocol::IDLE;
+        volatile uint8_t protectionReason = ProtectionProtocol::NONE;
+        volatile uint32_t protectionEvent = 0;
+        uint32_t eventCounter = 0;
+        uint16_t bootSession = 0;
+        uint32_t peerEvents[8]{};
+        volatile uint16_t protectionTask = 0;
+        uint16_t lastCancelledTask = 0;
+        uint16_t lastSavedTask = 0;
+        uint32_t lastGrantedEvent = 0;
+        volatile uint8_t coordinateVersion = 1;
+        bool assumedBoot = true, coordinateDirty = false, profileValid = false;
+        bool configurationFault = false;
+        bool distanceClipped = false, localStall = false;
+        bool calibrationTask = false, calibrationCoordinateSet = false;
+        float captureCoordinateLabel = 0;
+        bool coordinateCapturePending = false;
+        float pendingCaptureLabel = 0;
+        uint32_t capturePendingTicks = 0;
+        bool protectionTakenOver = false;
+        uint32_t phaseTicks = 0, leaseTicks = 0;
+        uint32_t candidateTicks = 0, startupTicks = 0, directionTicks = 0;
+        int8_t motionDirection = 0, stallDirection = 0;
+        bool motionIntent = false;
+        int32_t filteredCurrentQ = 0, filteredVelocityQ = 0;
+        int32_t detectorCurrent = 2000, detectorSpeed = 1024, detectorError = 1024;
+        uint32_t detectorTriggerTicks = 3000, detectorStartupTicks = 2000;
+        uint32_t currentFilterTicks = 200, velocityFilterTicks = 400;
+        uint32_t reblockTicks = 2000, grantWaitTicks = 10000;
+        int32_t retreatDistance = 0, retreatVelocity = 0, retreatAcceleration = 0;
+        int32_t retreatCurrent = 0, holdingCurrent = 0, positionTolerance = 51;
+        uint32_t retreatTimeoutTicks = 100000;
+        int32_t profileLow = 0, profileHigh = 0;
+        uint8_t profileDirections = 3;
+        MotionPlanner internalPlanner;
+        MotionPlanner::Config_t internalConfig{};
+        int32_t internalTarget = 0, internalStart = 0;
+        int32_t firstContact = 0, searchStart = 0, referenceTravel = 0;
+        uint32_t referenceFinishedTicks = 0;
+        int32_t searchDirection = 0, contactCurrent = 0, contactSpeed = 0, contactError = 0;
+        int32_t searchMaxTravel = 0, contactWindow = 0, repeatTolerance = 0;
+        uint32_t contactTriggerTicks = 0, contactStartupTicks = 0, searchTimeoutTicks = 0;
+        int32_t calibrationCurrent = 0;
+        bool internalStopping = false;
+        bool saveRequested = false, parameterSaveRequested = false;
+        bool parameterSavingInProgress = false;
+        bool coordinateSavingInProgress = false;
+        uint16_t lastParameterSavedTransaction = 0;
+        uint8_t lastParameterSaveStatus = ProtectionProtocol::OK;
+        bool eventAcknowledged = false;
+        uint32_t eventSendMillis = 0;
+        ProtectionSettings stagedSettings;
+        uint16_t configTransaction = 0;
+        uint8_t lastConfigOperation = 0;
+        bool configStaging = false, stagedProfileChanged = false;
+        volatile uint8_t contextRequest = 0;
+        volatile uint16_t contextRequestTask = 0;
+        volatile uint8_t contextRequestVersion = 0;
+        volatile uint32_t contextRequestValue = 0;
+        void TickProtection();
+        bool TickInternalProtection();
+        void ResetDetection(bool newMotion = false);
+        void UpdateProtectionLimits();
+        void SetProtectionPhase(uint8_t phase, uint8_t reason = ProtectionProtocol::NONE);
+        void BeginLocalProtection(uint8_t reason, bool isLocal);
+        void FailProtection(uint8_t reason);
+        void CancelInternal(uint8_t reason);
+        void BeginInternalMove(int32_t target, int32_t velocity, int32_t acceleration,
+                               int32_t current, uint8_t phase);
+        void BeginSearch(bool retouch);
+        bool TickStableWindow(bool eligible);
+        void ResetStableWindow();
+        void SetCaptureCoordinate(float motorR);
+        int32_t EffectiveCurrentLimit() const;
+        void ReplyParameter(uint8_t id, uint8_t status, uint16_t transaction, float value);
+        void ReplyConfiguration(uint8_t operation, uint8_t status, uint16_t transaction);
         bool TickSoftStop();
         void CaptureStopPosition();
         int32_t realLapPosition{};

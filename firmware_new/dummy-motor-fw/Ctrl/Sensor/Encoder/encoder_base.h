@@ -12,6 +12,7 @@ public:
         uint16_t rawAngle;          // raw data
         uint16_t rectifiedAngle;    // calibrated rawAngle data
         bool rectifyValid;
+        bool sampleValid;          // this SPI sample passed transport/parity/magnet checks
     } AngleData_t;
     AngleData_t angleData{0};
 
@@ -28,6 +29,7 @@ public:
     virtual uint16_t UpdateAngle() = 0;
 
     virtual bool IsCalibrated() = 0;
+    virtual bool IsSampleValid() const { return angleData.sampleValid; }
 
 
 private:
