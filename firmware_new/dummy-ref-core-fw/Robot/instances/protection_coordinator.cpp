@@ -64,12 +64,18 @@ bool ProtectionCoordinator::Send(uint8_t node, uint8_t command, const uint8_t* d
 }
 bool ProtectionCoordinator::Context(uint8_t n, uint8_t op, uint16_t id, float v, uint32_t event) {
     uint8_t frame[8] = {op, nodes[n].version, uint8_t(id), uint8_t(id >> 8)};
-    if (op == RETREAT_GO || op == PROTECT_PREPARE) std::memcpy(frame + 4, &event, 4);
+    if (op == RETREAT_GO || op == PROTECT_PREPARE || op == RENEW) std::memcpy(frame + 4, &event, 4);
     else std::memcpy(frame + 4, &v, 4);
     uint16_t previous = nodes[n].issuedProbe;
     if (op == QUERY) nodes[n].issuedProbe = id;
     bool sent = Send(n, CONTEXT, frame);
     if (op == QUERY && !sent) nodes[n].issuedProbe = previous;
+    if (op == QUERY && sent) {
+        Node& a = nodes[n];
+        if (previous != id || !a.probePending) a.probeFirstMs = HAL_GetTick();
+        else ++a.probeRetry;
+        a.probeSentMs = HAL_GetTick(); a.probePending = true; ++a.probeTx;
+    }
     return sent;
 }
 bool ProtectionCoordinator::Config(uint8_t n, uint8_t op, uint32_t arg) {
@@ -83,6 +89,7 @@ bool ProtectionCoordinator::Parameter(uint8_t n, bool set, uint8_t p, float v) {
 void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* data) {
     if (n < 1 || n > 8) return;
     Node& a = nodes[n]; uint32_t now = HAL_GetTick();
+    a.aliveMs = now;
     if (command == EVENT) {
         uint32_t event; std::memcpy(&event, data, 4);
         const bool bootReset = !event && a.event && data[4] == IDLE &&
@@ -98,9 +105,10 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
         if (event == a.event && (data[7] & LOCAL_STALL) &&
             ((a.eventPhase == IDLE && seenEvents[n] == event) ||
              (data[4] != IDLE && data[4] < a.eventPhase && a.eventPhase <= HOLD_FAILED))) return;
+        const bool changed = event != a.event || data[4] != a.eventPhase || data[5] != a.reason;
         a.event = event; a.eventPhase = data[4]; a.reason = data[5];
         a.version = data[6]; a.flags = data[7]; a.eventMs = now;
-        a.dirty = a.ack = true;
+        a.dirty |= changed; a.ack = true;
         if (data[4] == IDLE && (data[7] & ASSUMED_BOOT) && !(data[7] & PROFILE_VALID))
             seenEvents[n] = 0; // A fresh boot invalidates the former episode namespace.
         if (!suppressEpisodes && robot.stopState != DummyRobot::DISABLING && n <= 7 && (data[7] & LOCAL_STALL) &&
@@ -111,20 +119,34 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
             robot.motionActive = false; robot.isEnabled = false;
             locked = alarm = trigger = true;
         }
+    } else if (command == PROBE_REPLY) {
+        const uint16_t probe = Read16(data + 2);
+        const bool ownerQuery = job == START_QUERY || job == START_VERIFY || job == CAL_QUERY;
+        if (!probe || (probe != a.issuedProbe && !(ownerQuery && probe == queryProbe))) return;
+        float position; std::memcpy(&position, data + 4, 4);
+        a.probe = probe; a.healthMs = now; a.probeFlags = data[1];
+        if (!Finite(position)) a.probeFlags &= ~FEEDBACK_VALID;
+        a.version = a.probeVersion = data[0]; a.probePending = false; ++a.probeRx;
+        if (Finite(position)) a.position = position;
+        if (ownerQuery && probe == queryProbe) {
+            if (data[0] && (data[1] & FEEDBACK_VALID) && Finite(position)) received |= uint16_t(1U << n);
+            else failed |= uint16_t(1U << n);
+        }
     } else if (command == CONTEXT_REPLY) {
+        if (data[0] & LEASE_REPLY_FLAG) {
+            uint32_t nonce; std::memcpy(&nonce, data + 4, 4);
+            const uint8_t nextVersion = a.leaseVersion == 255 ? 1 : uint8_t(a.leaseVersion + 1);
+            if (nonce && nonce == a.leaseNonce && Read16(data + 2) == a.leaseTask &&
+                (data[1] == a.leaseVersion || (calibration && data[1] == nextVersion))) {
+                a.leaseAckMs = now; a.leaseNonce = 0;
+            }
+            return;
+        }
         float position; std::memcpy(&position, data + 4, 4);
         if (data[0] & QUERY_REPLY_FLAG) {
-            const uint16_t probe = Read16(data + 2);
-            if (!probe || (probe != a.issuedProbe &&
-                !((job == START_QUERY || job == CAL_QUERY) && probe == queryProbe))) return;
-            a.probe = probe; a.healthMs = now;
-            a.probeFlags = data[1];
-            if (Finite(position)) a.position = position;
-            // A tagged QUERY cannot impersonate a task acknowledgement.
-            if ((job == START_QUERY || job == CAL_QUERY) && a.probe == queryProbe) {
-                if ((data[1] & FEEDBACK_VALID) && Finite(position)) received |= uint16_t(1U << n);
-                else failed |= uint16_t(1U << n);
-            }
+            // Old firmware lacks a coherent coordinate version. It is alive,
+            // but cannot satisfy the new unlock/protection status proof.
+            return;
         } else {
             a.task = Read16(data + 2); a.phase = data[0];
             a.reason = data[1]; a.contextMs = now; a.position = position;
@@ -136,6 +158,9 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
             replyStatus = INVALID;
         std::memcpy(&replyValue, data + 4, 4); replyReady = true;
     }
+}
+void ProtectionCoordinator::ObserveCommunication(uint8_t node) {
+    if (node >= 1 && node <= 8) nodes[node].aliveMs = HAL_GetTick();
 }
 void ProtectionCoordinator::BeginStop(bool protecting, bool includeHand) {
     taskENTER_CRITICAL();
@@ -214,7 +239,8 @@ void ProtectionCoordinator::Error(const char* reason, uint8_t n) {
         Log("error %s_%s J%u %s", calParameters ? "CAL" : "STALL",
             job == SETTINGS_GET ? "GET" : job == SETTINGS_SET ? "SET" : "SAVE", n, reason);
     if (job == SETTINGS_SET || job == SETTINGS_SAVE) Log("error config partial applied=0x%03X", received);
-    else Log("STALL J%u failed reason=%s", n, reason);
+    else if (!wasCal && job != SETTINGS_GET)
+        Log(stalled ? "STALL J%u failed reason=%s" : "PROTECT J%u failed reason=%s", n, reason);
     const bool readOnly = job == SETTINGS_GET;
     for (uint8_t id = 1; id <= 8; ++id)
         if ((wasCal || (stalled & (1U << id))) && task) {
@@ -258,10 +284,9 @@ void ProtectionCoordinator::PollProfile() {
         lastSend = HAL_GetTick() - 25; phaseAt = HAL_GetTick();
         if (++stage == 5) {
             nodes[active].flags |= PROFILE_VALID;
+            nodes[active].profileVersion = nodes[active].version;
             stage = 0; if (++active > 7) {
-                job = NONE;
-                suppressEpisodes = false;
-                internal = true; robot.RequestStart(); internal = false;
+                task = NextId(); queryProbe = task; Enter(START_VERIFY, 0x1FE);
                 return;
             }
             task = NextId();
@@ -302,33 +327,60 @@ void ProtectionCoordinator::PollGroup(uint8_t op, uint8_t phase, uint16_t mask) 
 }
 void ProtectionCoordinator::Lease() {
     uint32_t now = HAL_GetTick();
-    if (now - lastRenew < 35) return;
-    // Rotate even if the first mailbox is busy: a low ID cannot starve J7/J8.
+    // Only moving CAL nodes need leases. Ordinary WAIT_GRANT nodes also have
+    // a local deadline. Every eligible node gets an 80ms renewal with 20ms
+    // acknowledged retries, instead of a fragile 320ms eight-node round.
     for (uint8_t count = 0; count < 8; ++count) {
         if (renewNode > 8) renewNode = 1;
         uint8_t n = renewNode++;
-        if ((calibration && nodes[n].task == task && nodes[n].phase >= CAL_READY && nodes[n].phase <= SAVED) ||
-            ((stalled & (1U << n)) && !(finished & (1U << n)) && nodes[n].task == task)) {
-            if (Context(n, RENEW, task)) lastRenew = now;
-            else renewNode = n;
-            break;
+        Node& a = nodes[n];
+        const bool movingCal = calibration && n == active && (job == CAL_HAND || job == CAL_RAIL);
+        if (a.task != task || !(movingCal || ((stalled & (1U << n)) && !(finished & (1U << n))))) continue;
+        if (a.leaseTask != task) { a.leaseTask = task; a.leaseNonce = 0; a.leaseAckMs = now - 80; }
+        if (a.leaseNonce ? now - a.leaseSentMs < 20 : now - a.leaseAckMs < 80) continue;
+        if (!a.leaseNonce) {
+            if (!++leaseSerial) ++leaseSerial;
+            a.leaseNonce = leaseSerial; a.leaseVersion = a.version; a.leaseSentMs = now - 20;
         }
+        if (Context(n, RENEW, task, 0, a.leaseNonce)) { a.leaseSentMs = now; lastRenew = now; }
+        break; // Rotate on busy as well: a missing low ID cannot starve a peer.
     }
+}
+void ProtectionCoordinator::HealthFault(uint8_t n, const char* reason) {
+    sink = nullptr; const uint32_t now = HAL_GetTick(); const Node& a = nodes[n];
+    Log("PROTECT J%u failed reason=%s", n, reason);
+    Log("PROTECT J%u age rx=%lu probe=%lu flags=%02X", n,
+        (unsigned long)(now-a.aliveMs), (unsigned long)(now-a.healthMs), a.probeFlags);
+    Log("PROTECT J%u queued=%lu rx=%lu retry=%lu", n,
+        (unsigned long)a.probeTx, (unsigned long)a.probeRx, (unsigned long)a.probeRetry);
+    const CAN_context* ctx = get_can_ctx(robot.hcan);
+    if (ctx) Log("PROTECT CAN alst=%lu terr=%lu full=%lu", (unsigned long)ctx->tx_arbitration_losses,
+        (unsigned long)ctx->tx_transmission_errors, (unsigned long)ctx->RxFifo0FullCallbackCnt);
+    locked = alarm = protectionSeen = true; robot.startPending = false;
+    BeginStop(false);
 }
 void ProtectionCoordinator::Health() {
     uint32_t now = HAL_GetTick();
-    if (now - lastHealth < 20) return;
-    uint16_t probe = NextId();
-    if (Context(healthNode, QUERY, probe)) {
-        lastHealth = now; if (++healthNode > 8) healthNode = 1;
+    if (now - lastHealth >= 20) {
+        for (uint8_t count = 0; count < 8; ++count) {
+            if (healthNode > 8) healthNode = 1;
+            const uint8_t n = healthNode++; Node& a = nodes[n];
+            if (a.probePending && now - a.probeFirstMs > 300) a.probePending = false;
+            if (a.probePending ? now - a.probeSentMs < 40 : now - a.healthMs < 100) continue;
+            const uint16_t probe = a.probePending ? a.issuedProbe : NextId();
+            if (Context(n, QUERY, probe)) lastHealth = now;
+            break;
+        }
     }
     if (robot.stopState == DummyRobot::NORMAL && robot.isEnabled) {
         for (uint8_t n = 1; n <= 7; ++n) {
-            if (now - nodes[n].healthMs > 1000 || !(nodes[n].flags & PROFILE_VALID)) {
-                sink = nullptr; Log("STALL J%u failed reason=NODE_OFFLINE_OR_RESTART", n);
-                locked = alarm = protectionSeen = true; robot.startPending = false;
-                BeginStop(false); break;
-            }
+            const Node& a = nodes[n];
+            const char* reason = now-a.aliveMs > 1000 ? "NODE_UNRESPONSIVE" :
+                now-a.healthMs > 1000 ? "PROTECTION_STATUS_TIMEOUT" :
+                !(a.probeFlags & FEEDBACK_VALID) ? "NO_VALID_ENCODER" :
+                !(a.probeFlags & PROFILE_VALID) ? "PROFILE_INVALID" :
+                a.probeVersion != a.profileVersion ? "COORDINATE_CHANGED" : nullptr;
+            if (reason) { HealthFault(n, reason); break; }
         }
     }
 }
@@ -346,10 +398,11 @@ void ProtectionCoordinator::Poll() {
     pollEpoch = robot.motionEpoch;
     const uint8_t round = ++pollRound & 7;
     txUsed = false;
-    // Reserved slots separate lease/cancellation, event ACK and normal jobs.
-    // STOP gets the even 10ms slots first. Eight leases rotate within 320ms.
-    allowTransmit = round == 1;
-    if (allowTransmit) { Lease(); if (!txUsed) CancelContexts(); }
+    // STOP gets its even 10ms slots first. Leases use other available cycles
+    // by elapsed time, with an ACK and short retry budget for every node.
+    allowTransmit = !stopUsed; stopUsed = false;
+    if (allowTransmit) Lease();
+    if (round == 1 && !txUsed) CancelContexts();
     allowTransmit = round == 5;
     if (allowTransmit && (pollRound & 8)) CancelContexts();
     // Snapshots are copied under interrupt masking by the task; never print in ISR.
@@ -399,13 +452,13 @@ void ProtectionCoordinator::Poll() {
             robot.startPending = false; InterceptStart();
         } else Health();
         break;
-    case START_QUERY: case CAL_QUERY:
+    case START_QUERY: case START_VERIFY: case CAL_QUERY:
         if (failed) { Error("NO_VALID_ENCODER"); break; }
         if ((received & expected) == expected) {
-            // EVENT carries the live coordinate version; tagged QUERY proves feedback.
+            // PROBE_REPLY carries version, flags and real feedback atomically.
             bool fresh = true;
             for (uint8_t n = 1; n <= 8; ++n)
-                if (!nodes[n].version || now - nodes[n].eventMs > 1000) fresh = false;
+                if (!nodes[n].version || nodes[n].probe != queryProbe || now - nodes[n].healthMs > 300) fresh = false;
             if (fresh) {
                 if (job == CAL_QUERY) {
                     for (uint8_t n = 1; n <= 8; ++n) if (!(nodes[n].probeFlags & DISABLED_FLAG)) {
@@ -415,7 +468,17 @@ void ProtectionCoordinator::Poll() {
                     }
                     task = NextId(); Enter(CAL_START, 0x1FE);
                 }
-                else { active = 1; stage = 0; task = NextId(); Enter(PROFILE); }
+                else if (job == START_VERIFY) {
+                    bool valid = true;
+                    for (uint8_t n = 1; n <= 7; ++n)
+                        if (!(nodes[n].probeFlags & PROFILE_VALID) || nodes[n].probeVersion != nodes[n].profileVersion) {
+                            Error("START_PROFILE_CHANGED", n); valid = false; break;
+                        }
+                    if (valid) {
+                        job = NONE; suppressEpisodes = false;
+                        internal = true; robot.RequestStart(); internal = false;
+                    }
+                } else { active = 1; stage = 0; task = NextId(); Enter(PROFILE); }
                 break;
             }
         }

@@ -273,6 +273,21 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
             break;
         case 0x23: // Get Position
         {
+            if (_len == 8 && _data[4] == MotionCompletionProtocol::QUERY_MARKER)
+            {
+                float expected;
+                memcpy(&expected, _data, sizeof(expected));
+                const uint32_t irq = __get_PRIMASK(); __disable_irq();
+                tmpF = motor.controller->GetPosition();
+                const uint8_t flags = motor.controller->GetPositionCompletionStatus(expected);
+                __set_PRIMASK(irq);
+                memcpy(_data, &tmpF, sizeof(tmpF));
+                _data[4] = flags; // Preserve the nonce; legacy ACKs have no marker.
+                CAN_TxHeaderTypeDef header = txHeader;
+                header.StdId = (boardConfig.canNodeId << 7) | MotionCompletionProtocol::COMMAND;
+                CAN_Send(&header, _data);
+                break;
+            }
             tmpF = motor.controller->GetPosition();
             auto* b = (unsigned char*) &tmpF;
             for (int i = 0; i < 4; i++)

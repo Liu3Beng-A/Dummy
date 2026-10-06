@@ -212,7 +212,10 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
     CAN_context* ctx = get_can_ctx(hcan);
     if (!ctx) return;
     volatile uint32_t original_error = hcan->ErrorCode;
-    (void) original_error;
+    if (original_error & (HAL_CAN_ERROR_TX_ALST0 | HAL_CAN_ERROR_TX_ALST1 | HAL_CAN_ERROR_TX_ALST2))
+        ++ctx->tx_arbitration_losses;
+    if (original_error & (HAL_CAN_ERROR_TX_TERR0 | HAL_CAN_ERROR_TX_TERR1 | HAL_CAN_ERROR_TX_TERR2))
+        ++ctx->tx_transmission_errors;
 
     // handle transmit errors in all three mailboxes
     if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST0)
@@ -262,7 +265,7 @@ bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef
     const uint8_t command = txHeader->StdId & 0x7F;
     const bool protectionTraffic = command == SoftStopProtocol::COMMAND ||
         command == ProtectionProtocol::EVENT_ACK ||
-        (command >= ProtectionProtocol::PARAM_SET && command <= ProtectionProtocol::CONTEXT_REPLY);
+        (command >= ProtectionProtocol::PARAM_SET && command <= ProtectionProtocol::PROBE_REPLY);
     if (!protectionTraffic && dummy.IsStopLocked()) return false;
     const uint32_t epoch = dummy.GetMotionEpoch();
     osSemaphoreId_t semaphore;

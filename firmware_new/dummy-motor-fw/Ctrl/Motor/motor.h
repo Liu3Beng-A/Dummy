@@ -5,6 +5,7 @@
 #include "Sensor/Encoder/encoder_base.h"
 #include "Driver/driver_base.h"
 #include "../../../stop_protocol.h"
+#include "../../../motion_completion_protocol.h"
 #include "protection_config.h"
 
 class Motor
@@ -132,6 +133,7 @@ public:
         float GetPosition(bool _isLap = false);
         float GetVelocity();
         float GetFocCurrent();
+        uint8_t GetPositionCompletionStatus(float expectedMotorR) const;
         void AddTrajectorySetPoint(int32_t _pos, int32_t _vel);
         void SetDisable(bool _disable);
         void SetBrake(bool _brake);
@@ -161,6 +163,13 @@ public:
 
     private:
         Motor* context;
+        void ResetPositionCompletion();
+        bool TickPositionCompletion();
+        uint16_t positionStableTicks = 0;
+        int32_t positionStableMin = 0, positionStableMax = 0;
+        int64_t positionVelocitySum = 0;
+        int32_t positionCompletionTarget = 0;
+        bool positionSettled = false;
         volatile bool softStopLocked = false;
         volatile uint8_t softStopRequest = 0;
         volatile uint8_t softStopPhase = SoftStopProtocol::NORMAL;

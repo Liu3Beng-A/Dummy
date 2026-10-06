@@ -330,6 +330,7 @@ void Motor::CloseLoopControlTick()
     }
 
     /******************************** Update State ********************************/
+    const bool positionFinished = controller->TickPositionCompletion();
     if (controller->IsSoftStopLocked())
         controller->state = controller->softStopPhase == SoftStopProtocol::HOLDING ?
                             STATE_FINISH : STATE_RUNNING;
@@ -345,8 +346,7 @@ void Motor::CloseLoopControlTick()
     {
         if (controller->modeRunning == MODE_COMMAND_POSITION)
         {
-            if ((controller->softPosition == controller->goalPosition)
-                && (controller->softVelocity == 0))
+            if (positionFinished)
                 controller->state = STATE_FINISH;
             else
                 controller->state = STATE_RUNNING;
@@ -693,12 +693,90 @@ void Motor::Controller::SetPositionSetPoint(int32_t _pos)
     if (IsSoftStopLocked()) return;
     const int64_t target = static_cast<int64_t>(_pos) + context->config.motionParams.encoderHomeOffset;
     if (target > INT32_MAX || target < INT32_MIN) return;
-    goalPosition = static_cast<int32_t>(target);
+    const uint32_t irq = __get_PRIMASK(); __disable_irq();
+    if (goalPosition != target)
+    {
+        goalPosition = static_cast<int32_t>(target);
+        ResetPositionCompletion();
+        state = STATE_RUNNING; // The immediate 0x07 ACK must not carry old FINISH.
+    }
     if (abs(goalPosition - realPosition) > positionTolerance)
     {
         if (!motionIntent) ResetDetection(true);
         motionIntent = true;
     }
+    __set_PRIMASK(irq);
+}
+
+void Motor::Controller::ResetPositionCompletion()
+{
+    positionStableTicks = 0;
+    positionStableMin = positionStableMax = realPosition;
+    positionVelocitySum = 0;
+    positionCompletionTarget = goalPosition;
+    positionSettled = false;
+}
+
+bool Motor::Controller::TickPositionCompletion()
+{
+    using namespace MotionCompletionProtocol;
+    const int64_t error = static_cast<int64_t>(realPosition) - goalPosition;
+    const int32_t tolerance = PositionToleranceSteps(static_cast<uint8_t>(boardConfig.canNodeId));
+    if (positionCompletionTarget != goalPosition || modeRunning != MODE_COMMAND_POSITION ||
+        requestMode != MODE_COMMAND_POSITION || IsSoftStopLocked() || !IsFeedbackValid() ||
+        goalDisable || softDisable || goalBrake || softBrake || isStalled || overloadFlag ||
+        softPosition != goalPosition || softVelocity != 0 || error < -tolerance || error > tolerance)
+    {
+        ResetPositionCompletion();
+        return false;
+    }
+    if (!positionStableTicks && !positionSettled)
+        positionStableMin = positionStableMax = realPosition;
+    if (realPosition < positionStableMin) positionStableMin = realPosition;
+    if (realPosition > positionStableMax) positionStableMax = realPosition;
+    if (static_cast<int64_t>(positionStableMax) - positionStableMin > STABLE_RANGE_STEPS)
+    {
+        ResetPositionCompletion();
+        return false;
+    }
+    positionVelocitySum += estVelocity;
+    if (++positionStableTicks >= STABLE_TICKS)
+    {
+        const int64_t limit = static_cast<int64_t>(STABLE_SPEED_STEPS) * positionStableTicks;
+        if (positionVelocitySum < -limit || positionVelocitySum > limit)
+        {
+            ResetPositionCompletion();
+            return false;
+        }
+        positionSettled = true;
+        positionStableTicks = 0;
+        positionStableMin = positionStableMax = realPosition;
+        positionVelocitySum = 0;
+    }
+    return positionSettled;
+}
+
+uint8_t Motor::Controller::GetPositionCompletionStatus(float expectedMotorR) const
+{
+    using namespace MotionCompletionProtocol;
+    uint8_t flags = REPLY_MARKER;
+    if (!MotionCompletionProtocol::Finite(expectedMotorR)) return flags;
+    const float expectedSteps = expectedMotorR * STEPS_PER_REV;
+    // Check before conversion, including float rounding at the int32 boundary.
+    if (expectedSteps < -2147483648.0f || expectedSteps >= 2147483648.0f) return flags;
+    const int64_t expected = static_cast<int32_t>(expectedSteps) +
+                             static_cast<int64_t>(context->config.motionParams.encoderHomeOffset);
+    if (expected != goalPosition || modeRunning != MODE_COMMAND_POSITION ||
+        requestMode != MODE_COMMAND_POSITION || IsSoftStopLocked() || !IsFeedbackValid() ||
+        goalDisable || softDisable || goalBrake || softBrake || isStalled || overloadFlag)
+        return flags;
+    flags |= TARGET_READY;
+    const int64_t error = static_cast<int64_t>(realPosition) - goalPosition;
+    const int32_t tolerance = PositionToleranceSteps(static_cast<uint8_t>(boardConfig.canNodeId));
+    if (positionSettled && positionCompletionTarget == goalPosition && state == STATE_FINISH &&
+        softPosition == goalPosition && softVelocity == 0 && error >= -tolerance && error <= tolerance)
+        flags |= SETTLED;
+    return flags;
 }
 
 

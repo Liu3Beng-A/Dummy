@@ -184,6 +184,7 @@ public:
     bool IsProtectionParameterBusy() const;
     bool HandleProtectionCommand(const char* cmd, unsigned len, StreamSink& response);
     void ProtectionCallback(uint8_t node, uint8_t command, const uint8_t* data);
+    void ObserveMotorCommunication(uint8_t node);
     void PollProtection();
     void PollProtectionPrint();
     uint32_t GetMotionEpoch() const { return motionEpoch; }
@@ -233,6 +234,7 @@ public:
     void SetJointAcceleration(float _acc); // 电机轴 r/s²，J1..J7，运行时应用
     void UpdateJointAngles();
     void UpdateJointAnglesCallback();
+    void MotionCompletionCallback(uint8_t node, const uint8_t* data);
     void UpdateJointPose6D();
     void Reboot();
     /** 重启全部电机 + 夹爪（**不**重启主控系统）。用于串口 #REBOOT 0。
@@ -371,6 +373,19 @@ private:
     volatile uint16_t stopSyncedMask = 0;
     volatile bool motionActive = false;
     volatile bool motionDispatchPending = false;
+    volatile uint32_t motionCompletionGeneration = 0;
+    uint32_t motionQueryCounter = 0;
+    volatile uint32_t motionQueryNonce[8] = {};
+    volatile uint32_t motionQueryGeneration[8] = {};
+    volatile uint32_t motionQueryAt[8] = {};
+    volatile uint32_t motionReplyAt[8] = {};
+    volatile float motionMotorTargets[8] = {};
+    volatile uint16_t motionConfirmedMask = 0;
+    uint16_t FreshMotionCompletionMask();
+    bool NeedsMotionCompletion() const {
+        return isEnabled && motionActive && commandMode >= COMMAND_TARGET_POINT_SEQUENTIAL &&
+               commandMode <= COMMAND_CONTINUES_TRAJECTORY && !IsStopLocked();
+    }
     volatile bool stopNeedsSend = false;
     uint8_t stopPollNode = 1;
     uint32_t stopLastSendMs = 0;
@@ -393,8 +408,8 @@ private:
                    float rail, float speed, uint32_t epoch);
     bool PlanMoveL(float x, float y, float z, float a, float b, float c, uint32_t epoch);
     void SetMotionSpeed(float speed, uint32_t epoch);
-    void HomingForGeneration(uint32_t epoch);
-    void RestingForGeneration(uint32_t epoch);
+    bool HomingForGeneration(uint32_t epoch);
+    bool RestingForGeneration(uint32_t epoch);
     void CalibrateForGeneration(uint32_t epoch);
     void RebootForGeneration(uint32_t epoch);
     bool isRGBEnabled = true;

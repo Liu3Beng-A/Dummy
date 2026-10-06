@@ -26,11 +26,11 @@ RAIL_DEFAULT = 0
 # 界面初值仅用于编辑；最终限额及整组合法性由实际节点检查。
 STALL_PARAMETERS = (
     ("ENABLE", "普通堵转检测开关", "0=关闭 / 1=开启", 1, 0, 1),
-    ("CURRENT_A", "电流命令阈值", "A", 2.0, 0.1, None),
+    ("CURRENT_A", "电流命令阈值", "A", 2.25, 0.1, None),
     ("SPEED_RPS", "实际低速阈值", "电机 r/s", 0.02, 0.001, 0.2),
-    ("ERROR_R", "跟随误差阈值", "电机圈", 0.02, 0.0002, 1),
-    ("TRIGGER_MS", "连续触发时间", "ms", 150, 20, 2000),
-    ("STARTUP_MS", "启动豁免时间", "ms", 100, 0, 500),
+    ("ERROR_R", "跟随误差阈值", "电机圈", 0.5 / 360 * 50, 0.0002, 1),
+    ("TRIGGER_MS", "连续触发时间", "ms", 300, 20, 2000),
+    ("STARTUP_MS", "启动豁免时间", "ms", 200, 0, 500),
     ("CURRENT_FILTER_MS", "电流命令滤波", "ms", 10, 1, 100),
     ("SPEED_FILTER_MS", "速度滤波", "ms", 20, 1, 100),
     ("BACK_DEG", "关节回退距离", "关节 ° (J1–J6)", 5, 0, None),
@@ -872,14 +872,14 @@ class RobotSerialAssistantOld:
                    "Disable pending", "Started ok", "Disabled ok", "error STOP_LOCKED",
                    "STOP fault ", "ok SYNC_ACC pending", "ok SYNC_ACC finish", "error SYNC_ACC ",
                    "!CALIBRATION pending", "!CALIBRATION ok", "CAL ", "error CALIBRATION ",
-                   "STALL ", "error STALL ", "ok STALL ", "ok STALL_SAVE ", "error STALL_SAVE ",
+                   "STALL ", "PROTECT ", "error STALL ", "ok STALL ", "ok STALL_SAVE ", "error STALL_SAVE ",
                    "ok CAL ", "ok CAL_SAVE ", "error CAL ", "error CAL_SAVE ",
                    "ok STALL_GET ", "ok STALL_SET ", "error STALL_GET ", "error STALL_SET ",
                    "ok CAL_GET ", "ok CAL_SET ", "error CAL_GET ", "error CAL_SET ",
                    "error START busy")
         if tail and len(rows[-1]) < 256 and (
                 any(reply.startswith(tail) for reply in replies) or
-                tail.startswith(("STOP fault ", "error SYNC_ACC ", "CAL ", "STALL ",
+                tail.startswith(("STOP fault ", "error SYNC_ACC ", "CAL ", "STALL ", "PROTECT ",
                                  "error CALIBRATION ", "error STALL ", "ok STALL ",
                                  "ok STALL_SAVE ", "error STALL_SAVE ", "ok CAL ",
                                  "ok CAL_SAVE ", "error CAL ", "error CAL_SAVE ",
@@ -934,6 +934,8 @@ class RobotSerialAssistantOld:
             self._handle_calibration_status(line)
         elif line.startswith("STALL "):
             self._handle_stall_status(line)
+        elif line.startswith("PROTECT ") and " failed reason=" in line:
+            self._handle_communication_protection(line)
         elif line == "error START busy":
             self.log("参数任务正在进行，START 未受理；完成后请重新发送，不会自动使能", "WARN")
         self._handle_protection_parameter_status(line)
@@ -1172,6 +1174,8 @@ class RobotSerialAssistantOld:
             entry = self._protection_entries[kind][key]
             if kind == "STALL" and key == "BACK_RPS" and node == 7:
                 default = 0.5
+            elif kind == "STALL" and key == "ERROR_R":
+                default = 0.1 if node == 7 else 0.5 / 360 * (30 if node == 6 else 50)
             elif kind == "CAL" and node == 8:
                 default = {"CURRENT_A": 1, "MAX_TRAVEL_R": 105 / 100 * 100 / 360 * 16,
                            "SEEK_TIMEOUT_MS": 15000, "RETURN_TIMEOUT_MS": 15000,
@@ -1619,6 +1623,13 @@ class RobotSerialAssistantOld:
         self._calibration_busy = False
         self._stop_locked = True
         self.lbl_motor_state.config(text=f"● 堵转保护 {line[6:]}", bg="#495057", fg="#ffd43b")
+
+    def _handle_communication_protection(self, line):
+        if not self._stop_locked:
+            self._cancel_motion_for_stop()
+        self._calibration_busy = False
+        self._stop_locked = True
+        self.lbl_motor_state.config(text=f"● 通信/状态保护 {line[8:]}", bg="#495057", fg="#ffd43b")
 
     def _cmd_reboot(self):
         node = self.cb_node.get()

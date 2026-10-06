@@ -244,8 +244,12 @@ bool Motor::Controller::ProcessProtectionCan(uint8_t command, const uint8_t* dat
         const uint32_t value = U32(data + 4);
         if (op == QUERY) {
             uint8_t reply[8]{}, event[8]{};
-            { IrqGuard guard; BuildProtectionContext(reply, task, true); BuildProtectionEvent(event); }
-            Send(CONTEXT_REPLY, reply); Send(EVENT, event);
+            bool needsEvent;
+            { IrqGuard guard; BuildProtectionContext(reply, task, true);
+              reply[0] = coordinateVersion; BuildProtectionEvent(event);
+              needsEvent = protectionPhase != IDLE && !eventAcknowledged; }
+            Send(PROBE_REPLY, reply);
+            if (needsEvent) Send(EVENT, event);
             __set_PRIMASK(irq); return true;
         }
         const bool validCalParams = op != CAL_RUN || protectionSettings.Validate(boardConfig.canNodeId, boardConfig.currentLimit, boardConfig.velocityLimit, boardConfig.velocityAcc);
@@ -273,9 +277,12 @@ bool Motor::Controller::ProcessProtectionCan(uint8_t command, const uint8_t* dat
             }
         } else if (op == RENEW) {
             const uint8_t previousVersion = coordinateVersion == 1 ? 255 : static_cast<uint8_t>(coordinateVersion - 1);
-            if (task == protectionTask && protectionTakenOver &&
-                (version == coordinateVersion || (calibrationTask && calibrationCoordinateSet && version == previousVersion)))
+            if (value && task == protectionTask && protectionTakenOver &&
+                (version == coordinateVersion || (calibrationTask && calibrationCoordinateSet && version == previousVersion))) {
                 leaseTicks = 0;
+                uint8_t reply[8] = {LEASE_REPLY_FLAG, coordinateVersion, uint8_t(task), uint8_t(task >> 8)};
+                memcpy(reply + 4, &value, 4); Send(CONTEXT_REPLY, reply);
+            }
             // A delayed keepalive cannot modify a task or overwrite its actual
             // completion snapshot with a BAD_TASK pseudo-failure. Missing or
             // wrong leases naturally reach the existing bounded timeout.

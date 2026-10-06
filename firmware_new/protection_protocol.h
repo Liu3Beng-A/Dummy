@@ -11,10 +11,16 @@ constexpr uint8_t VERSION = 1;
 constexpr uint8_t EVENT = 0x0B, EVENT_ACK = 0x0C;
 constexpr uint8_t PARAM_SET = 0x30, PARAM_GET = 0x31, PARAM_REPLY = 0x32;
 constexpr uint8_t CONFIG = 0x33, CONTEXT = 0x34, CONTEXT_REPLY = 0x35;
+// Coherent QUERY snapshot: coordinateVersion[0], flags[1], probe u16[2..3],
+// real motor-r float32[4..7]. Storage VERSION stays 1: no EEPROM migration.
+constexpr uint8_t PROBE_REPLY = 0x36;
 // Extended 0x0A action: ramps the seven axes without cancelling their current
 // protection episode. Plain STOP(1) always cancels internal retreat/calibration.
 constexpr uint8_t STOP_PROTECTION = 5;
 constexpr uint8_t QUERY_REPLY_FLAG = 0x80;
+// CONTEXT_REPLY lease ACK: LEASE_REPLY_FLAG[0], current coordinateVersion[1],
+// task u16[2..3], echoed renewal nonce u32[4..7]. Never a motion completion.
+constexpr uint8_t LEASE_REPLY_FLAG = 0x40;
 
 // EVENT: eventId u32[0..3], phase[4], reason[5], coordinateVersion[6], flags[7].
 // EVENT_ACK: eventId u32[0..3], acknowledged phase[4], zero[5..7]. QUERY event
@@ -76,15 +82,17 @@ enum Status : uint8_t { OK = 0, INVALID = 1, LOCKED = 2,
 enum ConfigOperation : uint8_t { BEGIN = 1, COMMIT = 2, SAVE = 3, ABORT = 4 };
 
 // CONTEXT: operation[0], coordinateVersion[1], task u16[2..3], value[4..7].
-// QUERY returns EVENT plus a fresh probe snapshot: phase|QUERY_REPLY_FLAG[0],
-// flags[1], echoed query task[2..3], actual motor-r[4..7]. CAL_BEGIN
+// QUERY returns PROBE_REPLY, plus an unacknowledged active EVENT if needed.
+// Both endpoints must support PROBE_REPLY; legacy tagged snapshots cannot
+// authorize START or refresh the verified protection status. CAL_BEGIN
 // locks a disabled node under this task. SET_CAPTURE_COORD labels the current
 // real encoder position with the signed motor-r float value (six joints use
 // zero). CAL_RUN (J7/J8 only) runs seek/backoff/retouch/origin/return internally;
 // value is an optional current command cap A (>0) bounded by CAL_CURRENT_A.
 // RETREAT_GO value is the exact EVENT u32, rather than float; it requires the
 // same valid coordinate version and is idempotent for task/event. RENEW is
-// bound to the active task/version; its lease is 500ms. CANCEL invalidates the
+// bound to the active task/version; value is a nonzero renewal nonce, echoed
+// only after that lease was refreshed. Its lease remains 500ms. CANCEL invalidates the
 // task and stops internal motion (including J8 ONLY in its CAL context).
 // SAVE_COORD queues a disabled, completed task for main-loop flash save.
 // CAL_END clears only a completed calibration context while remaining disabled.

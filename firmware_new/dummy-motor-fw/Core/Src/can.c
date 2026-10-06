@@ -29,14 +29,89 @@ CAN_RxHeaderTypeDef RxHeader;
 uint8_t TxData[8];
 uint8_t RxData[8];
 uint32_t TxMailbox;
-// CAN callbacks cannot wait for a mailbox: motor feedback and protection are
-// retried by their callers. A bounded queue prevents Error_Handler on TX busy.
+// Mailbox acceptance is not delivery when NART is enabled. Protection replies
+// remain owned here until TXOK, with bounded retries independent of the master's
+// 5ms motion cycle. Ordinary position feedback keeps its best-effort semantics.
 typedef struct {
     CAN_TxHeaderTypeDef header;
     uint8_t data[8];
 } MotorCanPending;
 static MotorCanPending motorCanQueue[24];
 static volatile uint8_t motorCanRead, motorCanWrite;
+
+#define MOTOR_CAN_PROTECTION_SLOTS 12U
+#define MOTOR_CAN_PROTECTION_MAX_AGE_MS 100U
+#define MOTOR_CAN_PROTECTION_MAX_ATTEMPTS 16U
+typedef struct {
+    MotorCanPending frame;
+    uint32_t createdMs, retryAtMs;
+    uint8_t attempts;
+} MotorCanProtectionPending;
+static MotorCanProtectionPending motorCanProtectionQueue[MOTOR_CAN_PROTECTION_SLOTS];
+static volatile uint8_t motorCanProtectionRead, motorCanProtectionWrite;
+static volatile uint32_t motorCanProtectionMailbox;
+// One owned transmission also prevents reuse of a hardware-free mailbox whose
+// previous RQCP interrupt has not yet been handled (normal or protected frame).
+static volatile uint32_t motorCanTransmitMailbox;
+static volatile bool motorCanProtectionAborting;
+
+static bool MotorCanIsProtection(uint32_t id)
+{
+    const uint8_t command = (uint8_t)(id & 0x7F);
+    // stop_protocol.h / protection_protocol.h: motor-to-master replies only.
+    return command == 0x0A || command == 0x0B || command == 0x32 ||
+           command == 0x35 || command == 0x36;
+}
+
+static void MotorCanCopy(MotorCanPending* frame, CAN_TxHeaderTypeDef* header, const uint8_t* data)
+{
+    frame->header = *header;
+    for (uint8_t i = 0; i < 8; ++i) frame->data[i] = data[i];
+}
+
+static bool MotorCanSameReply(const MotorCanPending* frame, CAN_TxHeaderTypeDef* header, const uint8_t* data)
+{
+    if (frame->header.StdId != header->StdId) return false;
+    const uint8_t command = (uint8_t)(header->StdId & 0x7F);
+    if (command == 0x32) {
+        // Keep distinct parameters/transactions and BEGIN/COMMIT/SAVE replies.
+        return frame->data[0] == data[0] && frame->data[2] == data[2] &&
+               frame->data[3] == data[3] && (data[0] || frame->data[4] == data[4]);
+    }
+    // A lease ACK must never replace a motion-completion context, or vice versa.
+    if (command == 0x35) return (frame->data[0] & 0xC0) == (data[0] & 0xC0);
+    if (command == 0x23) return frame->data[5] == data[5] &&
+        frame->data[6] == data[6] && frame->data[7] == data[7];
+    return true;
+}
+
+static void MotorCanPopProtection(void)
+{
+    motorCanProtectionRead = (uint8_t)((motorCanProtectionRead + 1U) % MOTOR_CAN_PROTECTION_SLOTS);
+    motorCanProtectionMailbox = 0;
+    motorCanProtectionAborting = false;
+}
+
+static void MotorCanProtectionResult(CAN_HandleTypeDef* handle, uint8_t mailbox, bool success)
+{
+    if (handle != &hcan) return;
+    const uint32_t irq = __get_PRIMASK(); __disable_irq();
+    if (motorCanTransmitMailbox == (1UL << mailbox)) motorCanTransmitMailbox = 0;
+    if (motorCanProtectionMailbox == (1UL << mailbox)) {
+        MotorCanProtectionPending* pending = &motorCanProtectionQueue[motorCanProtectionRead];
+        const uint32_t now = HAL_GetTick();
+        if (success || motorCanProtectionAborting ||
+            pending->attempts >= MOTOR_CAN_PROTECTION_MAX_ATTEMPTS ||
+            now - pending->createdMs >= MOTOR_CAN_PROTECTION_MAX_AGE_MS) {
+            MotorCanPopProtection();
+        } else {
+            motorCanProtectionMailbox = 0;
+            // 1..4ms backoff breaks the fixed phase of 5ms motion bursts.
+            pending->retryAtMs = now + 1U + ((pending->attempts + boardConfig.canNodeId) & 3U);
+        }
+    }
+    __set_PRIMASK(irq);
+}
 
 /* USER CODE END 0 */
 
@@ -190,10 +265,44 @@ void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data)
 {
     uint32_t irq = __get_PRIMASK();
     __disable_irq();
+    // motion_completion_protocol.h: tagged 0x23 replies must not be replaced
+    // by legacy position samples. Reuse the bounded TXOK/retry path.
+    if (MotorCanIsProtection(pHeader->StdId) ||
+        ((pHeader->StdId & 0x7F) == 0x23 && (data[4] & 0x80))) {
+        uint8_t index = motorCanProtectionRead;
+        while (index != motorCanProtectionWrite) {
+            // Never overwrite the frame whose hardware completion is pending.
+            if (!(index == motorCanProtectionRead && motorCanProtectionMailbox) &&
+                MotorCanSameReply(&motorCanProtectionQueue[index].frame, pHeader, data)) {
+                MotorCanCopy(&motorCanProtectionQueue[index].frame, pHeader, data);
+                __set_PRIMASK(irq); return;
+            }
+            index = (uint8_t)((index + 1U) % MOTOR_CAN_PROTECTION_SLOTS);
+        }
+        const uint8_t next = (uint8_t)((motorCanProtectionWrite + 1U) % MOTOR_CAN_PROTECTION_SLOTS);
+        if (next != motorCanProtectionRead) {
+            MotorCanProtectionPending* pending = &motorCanProtectionQueue[motorCanProtectionWrite];
+            MotorCanCopy(&pending->frame, pHeader, data);
+            pending->createdMs = pending->retryAtMs = HAL_GetTick(); pending->attempts = 0;
+            motorCanProtectionWrite = next;
+        }
+        __set_PRIMASK(irq); return;
+    }
+    // Periodic 0x23 samples supersede unsent older samples instead of filling
+    // the normal queue while a protection reply is being retried.
+    if ((pHeader->StdId & 0x7F) == 0x23) {
+        uint8_t index = motorCanRead;
+        while (index != motorCanWrite) {
+            if (motorCanQueue[index].header.StdId == pHeader->StdId) {
+                MotorCanCopy(&motorCanQueue[index], pHeader, data);
+                __set_PRIMASK(irq); return;
+            }
+            index = (uint8_t)((index + 1U) % 24U);
+        }
+    }
     uint8_t next = (uint8_t)((motorCanWrite + 1) % 24);
     if (next != motorCanRead) {
-        motorCanQueue[motorCanWrite].header = *pHeader;
-        for (uint8_t i = 0; i < 8; ++i) motorCanQueue[motorCanWrite].data[i] = data[i];
+        MotorCanCopy(&motorCanQueue[motorCanWrite], pHeader, data);
         motorCanWrite = next;
     }
     __set_PRIMASK(irq);
@@ -201,19 +310,68 @@ void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data)
 
 bool CAN_TrySend(CAN_TxHeaderTypeDef* pHeader, const uint8_t* data)
 {
-    if (!HAL_CAN_GetTxMailboxesFreeLevel(&hcan)) return false;
+    const uint32_t irq = __get_PRIMASK(); __disable_irq();
+    if (motorCanTransmitMailbox || !HAL_CAN_GetTxMailboxesFreeLevel(&hcan)) {
+        __set_PRIMASK(irq); return false;
+    }
     uint32_t mailbox;
-    return HAL_CAN_AddTxMessage(&hcan, pHeader, (uint8_t*)data, &mailbox) == HAL_OK;
+    const bool sent = HAL_CAN_AddTxMessage(&hcan, pHeader, (uint8_t*)data, &mailbox) == HAL_OK;
+    if (sent) motorCanTransmitMailbox = mailbox;
+    __set_PRIMASK(irq); return sent;
 }
 
 void CAN_PollTransmit(void)
 {
     uint32_t irq = __get_PRIMASK();
     __disable_irq();
+    const uint32_t now = HAL_GetTick();
+    while (motorCanProtectionRead != motorCanProtectionWrite) {
+        MotorCanProtectionPending* pending = &motorCanProtectionQueue[motorCanProtectionRead];
+        if (motorCanProtectionMailbox) {
+            if (!motorCanProtectionAborting && now - pending->createdMs >= MOTOR_CAN_PROTECTION_MAX_AGE_MS) {
+                // An absent bus cannot retain a stale proof indefinitely.
+                motorCanProtectionAborting = true;
+                HAL_CAN_AbortTxRequest(&hcan, motorCanProtectionMailbox);
+            }
+            __set_PRIMASK(irq); return;
+        }
+        if (now - pending->createdMs >= MOTOR_CAN_PROTECTION_MAX_AGE_MS ||
+            pending->attempts >= MOTOR_CAN_PROTECTION_MAX_ATTEMPTS) {
+            MotorCanPopProtection(); continue;
+        }
+        if ((int32_t)(now - pending->retryAtMs) >= 0) {
+            uint32_t mailbox;
+            if (!motorCanTransmitMailbox && HAL_CAN_GetTxMailboxesFreeLevel(&hcan) &&
+                HAL_CAN_AddTxMessage(&hcan, &pending->frame.header, pending->frame.data, &mailbox) == HAL_OK) {
+                motorCanTransmitMailbox = motorCanProtectionMailbox = mailbox; ++pending->attempts;
+            }
+            __set_PRIMASK(irq); return;
+        }
+        break; // A deferred retry does not block ordinary position samples.
+    }
     if (motorCanRead != motorCanWrite &&
         CAN_TrySend(&motorCanQueue[motorCanRead].header, motorCanQueue[motorCanRead].data))
         motorCanRead = (uint8_t)((motorCanRead + 1) % 24);
     __set_PRIMASK(irq);
+}
+
+void HAL_CAN_TxMailbox0CompleteCallback(CAN_HandleTypeDef* handle) { MotorCanProtectionResult(handle, 0, true); }
+void HAL_CAN_TxMailbox1CompleteCallback(CAN_HandleTypeDef* handle) { MotorCanProtectionResult(handle, 1, true); }
+void HAL_CAN_TxMailbox2CompleteCallback(CAN_HandleTypeDef* handle) { MotorCanProtectionResult(handle, 2, true); }
+void HAL_CAN_TxMailbox0AbortCallback(CAN_HandleTypeDef* handle) { MotorCanProtectionResult(handle, 0, false); }
+void HAL_CAN_TxMailbox1AbortCallback(CAN_HandleTypeDef* handle) { MotorCanProtectionResult(handle, 1, false); }
+void HAL_CAN_TxMailbox2AbortCallback(CAN_HandleTypeDef* handle) { MotorCanProtectionResult(handle, 2, false); }
+
+void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* handle)
+{
+    if (handle != &hcan) return;
+    const uint32_t errors = handle->ErrorCode;
+    if (errors & (HAL_CAN_ERROR_TX_ALST0 | HAL_CAN_ERROR_TX_TERR0)) MotorCanProtectionResult(handle, 0, false);
+    if (errors & (HAL_CAN_ERROR_TX_ALST1 | HAL_CAN_ERROR_TX_TERR1)) MotorCanProtectionResult(handle, 1, false);
+    if (errors & (HAL_CAN_ERROR_TX_ALST2 | HAL_CAN_ERROR_TX_TERR2)) MotorCanProtectionResult(handle, 2, false);
+    handle->ErrorCode &= ~(HAL_CAN_ERROR_TX_ALST0 | HAL_CAN_ERROR_TX_TERR0 |
+                           HAL_CAN_ERROR_TX_ALST1 | HAL_CAN_ERROR_TX_TERR1 |
+                           HAL_CAN_ERROR_TX_ALST2 | HAL_CAN_ERROR_TX_TERR2);
 }
 
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* CanHandle)

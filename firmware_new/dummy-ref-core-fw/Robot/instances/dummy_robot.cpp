@@ -401,6 +401,10 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
                           float _j5, float _j6, float _j7_mm, float _speed, uint32_t epoch)
 {
     if (IsStopLocked() || epoch != motionEpoch) return false;
+    if (!IsFiniteCommandValue(_j1) || !IsFiniteCommandValue(_j2) ||
+        !IsFiniteCommandValue(_j3) || !IsFiniteCommandValue(_j4) ||
+        !IsFiniteCommandValue(_j5) || !IsFiniteCommandValue(_j6) ||
+        !IsFiniteCommandValue(_j7_mm)) return false;
     DOF6Kinematic::Joint6D_t targetJointsTmp(_j1, _j2, _j3, _j4, _j5, _j6);
 
     // 地轨限位
@@ -465,6 +469,16 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
     }
 
     jointsStateFlag = 0;
+    ++motionCompletionGeneration;
+    motionConfirmedMask = 0;
+    for (uint8_t node = 1; node <= 7; ++node)
+    {
+        motorJ[node]->state = CtrlStepMotor::RUNNING;
+        motionQueryNonce[node] = 0;
+        float motorR = node == 7 ? _j7_mm / RAIL_MM_PER_CIRCLE :
+            (targetJointsTmp.a[node - 1] - initPose.a[node - 1]) / 360.0f * motorJ[node]->reduction;
+        motionMotorTargets[node] = motorJ[node]->inverseDirection ? -motorR : motorR;
+    }
     targetJoints = targetJointsTmp;
     targetRailPos = _j7_mm;
     motionActive = true;
@@ -544,7 +558,23 @@ void DummyRobot::UpdateJointAngles()
 {
     // 轮询查询 1~7（J1~J7，含地轨），每帧查一个电机，100Hz 下约 14Hz/轴
     static int currentIndex = 1;
-    motorJ[currentIndex]->UpdateAngle();
+    const uint8_t node = static_cast<uint8_t>(currentIndex);
+    taskENTER_CRITICAL();
+    const bool confirming = NeedsMotionCompletion();
+    const uint32_t generation = motionCompletionGeneration;
+    const float target = motionMotorTargets[node];
+    uint32_t nonce = 0;
+    if (confirming)
+    {
+        do { nonce = ++motionQueryCounter & MotionCompletionProtocol::NONCE_MASK; } while (!nonce);
+        motionQueryNonce[node] = nonce;
+        motionQueryGeneration[node] = generation;
+        motionQueryAt[node] = HAL_GetTick();
+    }
+    taskEXIT_CRITICAL();
+    if (confirming)
+        motorJ[node]->QueryPositionCompletion(target, nonce);
+    else motorJ[node]->UpdateAngle();
     currentIndex++;
     if (currentIndex > 7) currentIndex = 1;
 }
@@ -569,6 +599,42 @@ void DummyRobot::UpdateJointAnglesCallback()
         jointsStateFlag |= (1 << 7);
     else
         jointsStateFlag &= ~(1 << 7);
+    if (NeedsMotionCompletion())
+    {
+        jointsStateFlag = FreshMotionCompletionMask();
+        for (uint8_t node = 1; node <= 7; ++node)
+            motorJ[node]->state = (jointsStateFlag & (1U << node)) ? CtrlStepMotor::FINISH : CtrlStepMotor::RUNNING;
+    }
+}
+
+uint16_t DummyRobot::FreshMotionCompletionMask()
+{
+    const uint32_t now = HAL_GetTick();
+    for (uint8_t node = 1; node <= 7; ++node)
+        if (now - motionReplyAt[node] > MotionCompletionProtocol::FEEDBACK_FRESH_MS)
+            motionConfirmedMask &= ~(1U << node);
+    return motionConfirmedMask;
+}
+
+void DummyRobot::MotionCompletionCallback(uint8_t node, const uint8_t* data)
+{
+    using namespace MotionCompletionProtocol;
+    if (node < 1 || node > 7 || !NeedsMotionCompletion() ||
+        !(data[4] & REPLY_MARKER)) return;
+    const uint32_t nonce = Nonce(data), now = HAL_GetTick();
+    if (!nonce || nonce != motionQueryNonce[node] ||
+        motionQueryGeneration[node] != motionCompletionGeneration ||
+        now - motionQueryAt[node] > FEEDBACK_FRESH_MS) return;
+    motionQueryNonce[node] = 0; // A repeated old reply cannot refresh freshness.
+    float position;
+    std::memcpy(&position, data, sizeof(position));
+    const float error = position - motionMotorTargets[node];
+    const float tolerance = static_cast<float>(PositionToleranceSteps(node) + 1) / STEPS_PER_REV;
+    const bool finished = MotionCompletionProtocol::Finite(position) && (data[4] & (TARGET_READY | SETTLED)) == (TARGET_READY | SETTLED) &&
+                          error >= -tolerance && error <= tolerance;
+    motionReplyAt[node] = now;
+    if (finished) motionConfirmedMask |= 1U << node;
+    else motionConfirmedMask &= ~(1U << node);
 }
 
 
@@ -619,6 +685,9 @@ bool DummyRobot::HandleProtectionCommand(const char* cmd, unsigned len, StreamSi
 void DummyRobot::ProtectionCallback(uint8_t node, uint8_t command, const uint8_t* data)
 { if (protection) protection->Receive(node, command, data); }
 void DummyRobot::PollProtection() { if (protection) protection->Poll(); }
+void DummyRobot::ObserveMotorCommunication(uint8_t node) {
+    if (protection) protection->ObserveCommunication(node);
+}
 void DummyRobot::PollProtectionPrint() { if (protection) protection->Print(); }
 
 
@@ -627,18 +696,23 @@ void DummyRobot::Homing()
     HomingForGeneration(motionEpoch);
 }
 
-void DummyRobot::HomingForGeneration(uint32_t epoch)
+bool DummyRobot::HomingForGeneration(uint32_t epoch)
 {
-    if (epoch != motionEpoch || IsStopLocked()) return;
+    if (epoch != motionEpoch || IsStopLocked()) return false;
     float lastSpeed = jointSpeed;
     SetMotionSpeed(10, epoch);
 
-    PlanMoveJ(0, 0, 90, 0, 0, 0, 0, 10, epoch);
+    if (!PlanMoveJ(0, 0, 90, 0, 0, 0, 0, 10, epoch))
+    {
+        SetMotionSpeed(lastSpeed, epoch);
+        return false;
+    }
     MoveJoints(targetJoints);
     while (epoch == motionEpoch && !IsStopLocked() && IsMoving())
         osDelay(10);
-    if (epoch != motionEpoch || IsStopLocked()) return;
+    if (epoch != motionEpoch || IsStopLocked()) return false;
     SetMotionSpeed(lastSpeed, epoch);
+    return true;
 }
 
 
@@ -647,19 +721,24 @@ void DummyRobot::Resting()
     RestingForGeneration(motionEpoch);
 }
 
-void DummyRobot::RestingForGeneration(uint32_t epoch)
+bool DummyRobot::RestingForGeneration(uint32_t epoch)
 {
-    if (epoch != motionEpoch || IsStopLocked()) return;
+    if (epoch != motionEpoch || IsStopLocked()) return false;
     float lastSpeed = jointSpeed;
     SetMotionSpeed(10, epoch);
 
-    PlanMoveJ(REST_POSE.a[0], REST_POSE.a[1], REST_POSE.a[2],
-          REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5], 0, 10, epoch);
+    if (!PlanMoveJ(REST_POSE.a[0], REST_POSE.a[1], REST_POSE.a[2],
+          REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5], 0, 10, epoch))
+    {
+        SetMotionSpeed(lastSpeed, epoch);
+        return false;
+    }
     MoveJoints(targetJoints);
     while (epoch == motionEpoch && !IsStopLocked() && IsMoving())
         osDelay(10);
-    if (epoch != motionEpoch || IsStopLocked()) return;
+    if (epoch != motionEpoch || IsStopLocked()) return false;
     SetMotionSpeed(lastSpeed, epoch);
+    return true;
 }
 
 
@@ -924,6 +1003,7 @@ void DummyRobot::PollSoftStop()
         const uint16_t nodeToken = perNodeTokens ? stopNodeTokens[node] : token;
         stopDiagTxNode = node;
         stopDiagTxBusy = true;
+        if (protection) protection->StopAttempted();
         (node == 8 ? static_cast<CtrlStepMotor*>(hand) : motorJ[node])->SendSoftStop(nodeAction, nodeToken);
         stopDiagTxBusy = false;
     };
@@ -936,6 +1016,7 @@ void DummyRobot::PollSoftStop()
             {
                 stopDiagTxNode = ALL;
                 stopDiagTxBusy = true;
+                if (protection) protection->StopAttempted();
                 motorJ[ALL]->SendSoftStop(action, token);
                 stopDiagTxBusy = false;
             }
@@ -1056,6 +1137,13 @@ bool DummyRobot::IsMoving()
     if (stopState == STOPPING) return true;
     if (stopState == STOPPED || stopState == STARTING || stopState == DISABLING ||
         stopState == DISABLED) return false;
+    if (NeedsMotionCompletion())
+    {
+        taskENTER_CRITICAL();
+        const bool moving = (FreshMotionCompletionMask() & 0xFE) != 0xFE;
+        taskEXIT_CRITICAL();
+        return moving;
+    }
     return (jointsStateFlag & 0b11111110) != 0b11111110;  // bit1~7 全置位 → FINISH（夹爪位 bit8 不参与）
 }
 
@@ -1148,12 +1236,13 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
     ExecutionScope executing(*this, epoch);
     if (_cmd == "!HOME" || _cmd == "!RESET" || _cmd == "!CALIBRATION")
     {
-        if (_cmd == "!HOME") context->HomingForGeneration(epoch);
-        else if (_cmd == "!RESET") context->RestingForGeneration(epoch);
+        bool completed = true;
+        if (_cmd == "!HOME") completed = context->HomingForGeneration(epoch);
+        else if (_cmd == "!RESET") completed = context->RestingForGeneration(epoch);
         else context->CalibrateForGeneration(epoch);
         if (epoch == context->motionEpoch && !context->IsStopLocked())
         {
-            const char* notice = _cmd == "!HOME" ? "Home ok" :
+            const char* notice = !completed ? "error motion plan failed" : _cmd == "!HOME" ? "Home ok" :
                                  (_cmd == "!RESET" ? "Reset ok" : "calibration ok");
             Respond(*usbStreamOutputPtr, "%s", notice);
             Respond(*uart4StreamOutputPtr, "%s", notice);
@@ -1176,11 +1265,21 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
                 if (_cmd[0] == '&')
                     argNum = sscanf(_cmd.c_str(), "&%f,%f,%f,%f,%f,%f,%f,%f",
                                     &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
+                bool planned = false;
                 if (argNum >= 7 && IsFiniteCommandValue(speed))
                 {
                     if (argNum == 8) context->SetMotionSpeed(speed, epoch);
                     // 七参数为六关节 + 地轨；省略速度时沿用当前档位。
-                    context->PlanMoveJ(j1, j2, j3, j4, j5, j6, j7, speed, epoch);
+                    planned = context->PlanMoveJ(j1, j2, j3, j4, j5, j6, j7, speed, epoch);
+                }
+                if (!planned)
+                {
+                    if (epoch == context->motionEpoch && !context->IsStopLocked())
+                    {
+                        Respond(*usbStreamOutputPtr, "error motion plan failed");
+                        Respond(*uart4StreamOutputPtr, "error motion plan failed");
+                    }
+                    return GetSpace();
                 }
                 // Periodic control task owns transmissions, including STOP transitions.
 
@@ -1197,14 +1296,27 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
 
                 argNum = sscanf(_cmd.c_str(), "@%f,%f,%f,%f,%f,%f,%f", pose, pose + 1, pose + 2,
                                 pose + 3, pose + 4, pose + 5, &speed);
+                bool planned = false;
                 if (argNum == 6)
                 {
-                    context->PlanMoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], epoch);
+                    planned = context->PlanMoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], epoch);
                 } else if (argNum == 7 && IsFiniteCommandValue(speed))
                 {
                     context->SetMotionSpeed(speed, epoch);
-                    context->PlanMoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], epoch);
+                    planned = context->PlanMoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], epoch);
                 }
+                if (!planned)
+                {
+                    if (epoch == context->motionEpoch && !context->IsStopLocked())
+                    {
+                        Respond(*usbStreamOutputPtr, "error motion plan failed");
+                        Respond(*uart4StreamOutputPtr, "error motion plan failed");
+                    }
+                    return GetSpace();
+                }
+                while (context->IsMoving() && context->IsEnabled() &&
+                       !context->IsStopLocked() && epoch == context->motionEpoch)
+                    osDelay(5);
                 if (epoch != context->motionEpoch || context->IsStopLocked()) return GetSpace();
                 Respond(*usbStreamOutputPtr, "ok");
                 Respond(*uart4StreamOutputPtr, "ok");

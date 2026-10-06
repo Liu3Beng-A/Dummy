@@ -398,10 +398,23 @@ void CtrlStepMotor::SetAngleWithVelocityLimit(float _angle, float _vel)
 
 void CtrlStepMotor::UpdateAngle()
 {
-    uint8_t mode = 0x23;
-    txHeader.StdId = nodeID << 7 | mode;
+    CAN_TxHeaderTypeDef header = txHeader;
+    header.StdId = (nodeID << 7) | MotionCompletionProtocol::COMMAND;
+    uint8_t data[8] = {}; // Do not accidentally reuse the extended-query marker.
+    CanSendMessage(get_can_ctx(hcan), data, &header);
+}
 
-    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+void CtrlStepMotor::QueryPositionCompletion(float expectedMotorR, uint32_t nonce)
+{
+    CAN_TxHeaderTypeDef header = txHeader;
+    header.StdId = (nodeID << 7) | MotionCompletionProtocol::COMMAND;
+    uint8_t data[8] = {};
+    memcpy(data, &expectedMotorR, sizeof(expectedMotorR));
+    data[4] = MotionCompletionProtocol::QUERY_MARKER;
+    MotionCompletionProtocol::PutNonce(data, nonce);
+    // Same bounded 1ms acquisition as the previous position query. A zero-wait
+    // attempt immediately after the last 0x07 could starve every query.
+    CanSendMessage(get_can_ctx(hcan), data, &header);
 }
 
 

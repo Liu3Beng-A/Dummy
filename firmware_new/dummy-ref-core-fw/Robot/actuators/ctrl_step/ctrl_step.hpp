@@ -4,6 +4,7 @@
 #include "fibre/protocol.hpp"
 #include "can.h"
 #include "../../../../stop_protocol.h"
+#include "../../../../motion_completion_protocol.h"
 
 class CtrlStepMotor
 {
@@ -70,6 +71,7 @@ public:
     void EraseConfigs();
 
     void UpdateAngle();
+    void QueryPositionCompletion(float expectedMotorR, uint32_t nonce);
     void UpdateAngleCallback(float _pos, bool _isFinished);
 
 

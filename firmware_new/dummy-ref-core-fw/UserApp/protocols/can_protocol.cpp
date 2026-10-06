@@ -29,22 +29,31 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
             case ProtectionProtocol::EVENT:
             case ProtectionProtocol::PARAM_REPLY:
             case ProtectionProtocol::CONTEXT_REPLY:
+            case ProtectionProtocol::PROBE_REPLY:
                 if (rxHeader->DLC == 8) dummy.ProtectionCallback(id, cmd, data);
                 return;
             case SoftStopProtocol::COMMAND:
-                if (rxHeader->DLC == 8) dummy.SoftStopCallback(id, data);
+                if (rxHeader->DLC == 8) {
+                    dummy.ObserveMotorCommunication(id);
+                    dummy.SoftStopCallback(id, data);
+                }
                 return;
             case 0x23:
             {
                 if (id < 1 || id > 8 || rxHeader->DLC < 5) return;
                 uint32_t bits; float position;
                 memcpy(&bits, data, 4); memcpy(&position, data, 4);
+                const bool extended = rxHeader->DLC == 8 && (data[4] & MotionCompletionProtocol::REPLY_MARKER);
+                // A fresh invalid snapshot revokes completion immediately while
+                // leaving the last usable pose untouched.
+                if (extended) dummy.MotionCompletionCallback(id, data);
                 // Invalid encoder snapshots must not poison pose/IK caches.
                 if ((bits & 0x7f800000U) == 0x7f800000U) return;
+                dummy.ObserveMotorCommunication(id);
                 if (id == 8)
-                    dummy.hand->UpdateAngleCallback(position, data[4]);
+                    dummy.hand->UpdateAngleCallback(position, extended ? (data[4] & MotionCompletionProtocol::SETTLED) != 0 : data[4] != 0);
                 else
-                    dummy.motorJ[id]->UpdateAngleCallback(position, data[4]);
+                    dummy.motorJ[id]->UpdateAngleCallback(position, extended ? (data[4] & MotionCompletionProtocol::SETTLED) != 0 : data[4] != 0);
                 break;
             }
             case 0x25:

@@ -37,8 +37,9 @@ void ProtectionSettings::Defaults(uint8_t node, int32_t currentMa) {
     memset(value, 0, sizeof(value));
     const float current = currentMa / 1000.0f;
     value[ProtectionProtocol::ENABLE] = node >= 1 && node <= 7 ? 1 : 0;
-    value[CURRENT_A] = current * 0.8f; value[SPEED_RPS] = .02f; value[ERROR_R] = .02f;
-    value[TRIGGER_MS] = 150; value[STARTUP_MS] = 100;
+    value[CURRENT_A] = current * 0.9f; value[SPEED_RPS] = .02f;
+    value[ERROR_R] = node == 7 ? .1f : .5f / 360.0f * (node == 6 ? 30.0f : 50.0f);
+    value[TRIGGER_MS] = 300; value[STARTUP_MS] = 200;
     value[CURRENT_FILTER_MS] = 10; value[SPEED_FILTER_MS] = 20;
     value[BACK_DISTANCE_R] = node == 7 ? 1.0f : 5.0f / 360.0f * (node == 6 ? 30.0f : 50.0f);
     value[BACK_RPS] = node == 7 ? .5f : 3.0f; value[BACK_ACCEL] = 5;
