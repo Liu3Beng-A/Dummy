@@ -369,26 +369,31 @@ void DummyRobot::PollPidPrint()
     }
 }
 
-void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t _joints)
+void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t)
 {
-    if (IsStopLocked() || !motionActive) return;
-    const uint32_t epoch = motionEpoch;
-    for (int j = 1; j <= 6; j++)
-    {
-        if (IsStopLocked() || epoch != motionEpoch) return;
-        motorJ[j]->SetAngleWithVelocityLimit(_joints.a[j - 1] - initPose.a[j - 1],
-                                             dynamicJointSpeeds.a[j - 1]);
+    float targets[8], speeds[8]; uint32_t epoch, generation;
+    taskENTER_CRITICAL();
+    epoch = motionTaskEpoch; generation = motionCompletionGeneration;
+    if (!CanSendMotion(epoch, generation)) { taskEXIT_CRITICAL(); return; }
+    for (uint8_t n = 1; n <= 7; ++n) {
+        targets[n] = motionMotorTargets[n]; speeds[n] = motionMotorSpeeds[n];
     }
-    // [FIX] 地轨：reduction=1 直连丝杆1605（5mm/圈）。
-    // targetRailPos 单位是 mm；motorJ[7]->angleLimitMin/Max 在此处按 **mm** 直接比较
-    // （不要按 CtrlStepMotor 默认°语义解读，否则会把 250 当成 250°=6.94mm，误以为软限位过窄）。
-    // 下发必须用 SetPositionWithVelocityLimit 直接传电机圈数（mm/5），
-    // 否则被 SetAngle* 按°解读，实际走 1/72（100 mm → 1.39 mm）。
-    if (IsStopLocked() || epoch != motionEpoch) return;
-    motorJ[7]->SetPositionWithVelocityLimit(targetRailPos / RAIL_MM_PER_CIRCLE,
-                                            dynamicJointSpeeds7[0]);
-    if (epoch == motionEpoch) motionDispatchPending = false;
+    taskEXIT_CRITICAL();
+    for (uint8_t n = 1; n <= 7; ++n) {
+        taskENTER_CRITICAL();
+        const bool needed = CanSendMotion(epoch, generation) && !(motionTargetReadyMask & (1U << n)) &&
+            (!(motionSentMask & (1U << n)) || HAL_GetTick() - motionSendAt[n] >= 100);
+        if (needed) motionSendAt[n] = HAL_GetTick();
+        taskEXIT_CRITICAL();
+        if (!CanSendMotion(epoch, generation)) return;
+        if (needed && motorJ[n]->SendMotionTarget(targets[n], speeds[n], epoch, generation)) {
+            taskENTER_CRITICAL();
+            if (CanSendMotion(epoch, generation)) { motionSentMask |= 1U << n; ++motionSendCount; }
+            taskEXIT_CRITICAL();
+        }
+    }
 }
+
 
 
 bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4,
@@ -398,9 +403,10 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4,
 }
 
 bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
-                          float _j5, float _j6, float _j7_mm, float _speed, uint32_t epoch)
+                          float _j5, float _j6, float _j7_mm, float _speed, uint32_t epoch, uint32_t id, const char* kind)
 {
-    if (IsStopLocked() || epoch != motionEpoch) return false;
+    if (IsStopLocked() || epoch != motionEpoch || commandMode > COMMAND_CONTINUES_TRAJECTORY) return false;
+    const uint32_t planningGeneration = motionCompletionGeneration;
     if (!IsFiniteCommandValue(_j1) || !IsFiniteCommandValue(_j2) ||
         !IsFiniteCommandValue(_j3) || !IsFiniteCommandValue(_j4) ||
         !IsFiniteCommandValue(_j5) || !IsFiniteCommandValue(_j6) ||
@@ -431,6 +437,7 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
     float sliderSpeedRps = slider * 0.30f;  // 100 → 30 r/s
 
     // 各轴目标位移：索引 0=地轨(mm)，1..6=关节(°)
+    taskENTER_CRITICAL();
     float deltaRails[7] = {
         _j7_mm - currentRailPos,
         targetJointsTmp.a[0] - currentJoints.a[0],
@@ -450,13 +457,14 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
         jointAccRuntime[4], jointAccRuntime[5], jointAccRuntime[6],
     };
 
+    taskEXIT_CRITICAL();
     float outSpeeds[7] = {0};
     float timeBudget = ComputeSyncSpeeds(deltaRails, SLIDER_CAPS_V, jointAcc,
                                         sliderSpeedRps, outSpeeds);
 
     // Publish only if this command still belongs to the current motion generation.
     taskENTER_CRITICAL();
-    if (IsStopLocked() || epoch != motionEpoch)
+    if (IsStopLocked() || epoch != motionEpoch || planningGeneration != motionCompletionGeneration)
     {
         taskEXIT_CRITICAL();
         return false;
@@ -470,11 +478,19 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
 
     jointsStateFlag = 0;
     ++motionCompletionGeneration;
-    motionConfirmedMask = 0;
+    motionConfirmedMask = motionTargetReadyMask = motionSentMask = motionProgressMask = 0;
+    motionTaskId = id ? id : AllocateMotionTaskId();
+    motionTaskEpoch = epoch; motionMode = commandMode; motionKind = kind;
+    motionStartedAt = HAL_GetTick(); motionCompletedAt = 0;
+    motionRejectedReplies = motionSendCount = motionQueryCount = 0;
     for (uint8_t node = 1; node <= 7; ++node)
     {
         motorJ[node]->state = CtrlStepMotor::RUNNING;
         motionQueryNonce[node] = 0;
+        motionMotorSpeeds[node] = outSpeeds[node == 7 ? 0 : node];
+        motionReplyAt[node] = motionReplyFlags[node] = 0;
+        motionReplyPositions[node] = motorJ[node]->angle / 360.0f * motorJ[node]->reduction *
+                                    (motorJ[node]->inverseDirection ? -1.0f : 1.0f);
         float motorR = node == 7 ? _j7_mm / RAIL_MM_PER_CIRCLE :
             (targetJointsTmp.a[node - 1] - initPose.a[node - 1]) / 360.0f * motorJ[node]->reduction;
         motionMotorTargets[node] = motorJ[node]->inverseDirection ? -motorR : motorR;
@@ -483,6 +499,8 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
     targetRailPos = _j7_mm;
     motionActive = true;
     motionDispatchPending = true;
+    motionPhase = MOTION_DISPATCHING;
+    BeginMotionRound();
     taskEXIT_CRITICAL();
 
     return true;
@@ -495,7 +513,7 @@ bool DummyRobot::MoveL(float _x, float _y, float _z, float _a, float _b, float _
 }
 
 bool DummyRobot::PlanMoveL(float _x, float _y, float _z, float _a, float _b, float _c,
-                          uint32_t epoch)
+                          uint32_t epoch, uint32_t id)
 {
     if (IsStopLocked() || epoch != motionEpoch) return false;
     DOF6Kinematic::Pose6D_t pose6D(_x, _y, _z, _a, _b, _c);
@@ -548,7 +566,7 @@ bool DummyRobot::PlanMoveL(float _x, float _y, float _z, float _a, float _b, flo
         return PlanMoveJ(ikSolves.config[indexConfig].a[0], ikSolves.config[indexConfig].a[1],
                      ikSolves.config[indexConfig].a[2], ikSolves.config[indexConfig].a[3],
                      ikSolves.config[indexConfig].a[4], ikSolves.config[indexConfig].a[5],
-                     currentRailPos, 0, epoch);
+                     currentRailPos, 0, epoch, id, "MOVEL");
     }
 
     return false;
@@ -556,56 +574,46 @@ bool DummyRobot::PlanMoveL(float _x, float _y, float _z, float _a, float _b, flo
 
 void DummyRobot::UpdateJointAngles()
 {
-    // 轮询查询 1~7（J1~J7，含地轨），每帧查一个电机，100Hz 下约 14Hz/轴
-    static int currentIndex = 1;
-    const uint8_t node = static_cast<uint8_t>(currentIndex);
+    const uint8_t node = motionQueryNode;
+    if (++motionQueryNode > 7) motionQueryNode = 1;
     taskENTER_CRITICAL();
     const bool confirming = NeedsMotionCompletion();
-    const uint32_t generation = motionCompletionGeneration;
+    const uint32_t generation = motionCompletionGeneration, epoch = motionTaskEpoch;
     const float target = motionMotorTargets[node];
     uint32_t nonce = 0;
-    if (confirming)
-    {
-        do { nonce = ++motionQueryCounter & MotionCompletionProtocol::NONCE_MASK; } while (!nonce);
-        motionQueryNonce[node] = nonce;
-        motionQueryGeneration[node] = generation;
-        motionQueryAt[node] = HAL_GetTick();
+    if (confirming && !(motionRoundSeenMask & (1U << node))) {
+        const uint32_t now = HAL_GetTick();
+        if (!motionQueryNonce[node]) {
+            do { motionQueryNonce[node] = ++motionQueryCounter & MotionCompletionProtocol::NONCE_MASK; }
+            while (!motionQueryNonce[node]);
+            motionQueryGeneration[node] = generation; motionQueryRound[node] = motionRound;
+            motionQueryAt[node] = now; motionQueryAttemptAt[node] = now - 35;
+        }
+        if (now - motionQueryAttemptAt[node] >= 35) {
+            nonce = motionQueryNonce[node]; motionQueryAttemptAt[node] = now;
+        }
     }
     taskEXIT_CRITICAL();
-    if (confirming)
-        motorJ[node]->QueryPositionCompletion(target, nonce);
-    else motorJ[node]->UpdateAngle();
-    currentIndex++;
-    if (currentIndex > 7) currentIndex = 1;
+    if (nonce) {
+        if (motorJ[node]->QueryPositionCompletion(target, nonce, epoch, generation)) ++motionQueryCount;
+    } else if (!confirming) motorJ[node]->UpdateAngle();
 }
+
 
 
 void DummyRobot::UpdateJointAnglesCallback()
 {
-    for (int i = 1; i <= 6; i++)
-    {
-        currentJoints.a[i - 1] = motorJ[i]->angle + initPose.a[i - 1];
-
-        if (motorJ[i]->state == CtrlStepMotor::FINISH)
-            jointsStateFlag |= (1 << i);
-        else
-            jointsStateFlag &= ~(1 << i);
+    uint8_t live = 0;
+    for (uint8_t n = 1; n <= 6; ++n) {
+        currentJoints.a[n - 1] = motorJ[n]->angle + initPose.a[n - 1];
+        if (motorJ[n]->state == CtrlStepMotor::FINISH) live |= 1U << n;
     }
-    // 地轨：motorJ[7]->angle 单位是"电机轴圈×360"（reduction=1）
-    // 反推 mm: angle / 360 × 5
     currentRailPos = motorJ[7]->angle / 360.0f * RAIL_MM_PER_CIRCLE;
-    // bit7 跟随地轨 FINISH 状态，参与 OLED *-_ 指示
-    if (motorJ[7]->state == CtrlStepMotor::FINISH)
-        jointsStateFlag |= (1 << 7);
-    else
-        jointsStateFlag &= ~(1 << 7);
-    if (NeedsMotionCompletion())
-    {
-        jointsStateFlag = FreshMotionCompletionMask();
-        for (uint8_t node = 1; node <= 7; ++node)
-            motorJ[node]->state = (jointsStateFlag & (1U << node)) ? CtrlStepMotor::FINISH : CtrlStepMotor::RUNNING;
-    }
+    if (motorJ[7]->state == CtrlStepMotor::FINISH) live |= 1U << 7;
+    // OLED reports progress of this goal, not a continuously reopened old task.
+    jointsStateFlag = motionActive || (isEnabled && !IsStopLocked() && motionPhase == MOTION_COMPLETED) ? motionProgressMask : live;
 }
+
 
 uint16_t DummyRobot::FreshMotionCompletionMask()
 {
@@ -616,26 +624,31 @@ uint16_t DummyRobot::FreshMotionCompletionMask()
     return motionConfirmedMask;
 }
 
-void DummyRobot::MotionCompletionCallback(uint8_t node, const uint8_t* data)
+bool DummyRobot::MotionCompletionCallback(uint8_t node, const uint8_t* data)
 {
     using namespace MotionCompletionProtocol;
-    if (node < 1 || node > 7 || !NeedsMotionCompletion() ||
-        !(data[4] & REPLY_MARKER)) return;
+    if (node < 1 || node > 7 || !NeedsMotionCompletion() || !(data[4] & REPLY_MARKER)) return false;
     const uint32_t nonce = Nonce(data), now = HAL_GetTick();
     if (!nonce || nonce != motionQueryNonce[node] ||
-        motionQueryGeneration[node] != motionCompletionGeneration ||
-        now - motionQueryAt[node] > FEEDBACK_FRESH_MS) return;
-    motionQueryNonce[node] = 0; // A repeated old reply cannot refresh freshness.
-    float position;
-    std::memcpy(&position, data, sizeof(position));
+        motionQueryGeneration[node] != motionCompletionGeneration || motionQueryRound[node] != motionRound ||
+        now - motionQueryAt[node] > FEEDBACK_FRESH_MS) { ++motionRejectedReplies; return false; }
+    motionQueryNonce[node] = 0;
+    float position; std::memcpy(&position, data, sizeof(position));
+    const uint16_t bit = 1U << node;
     const float error = position - motionMotorTargets[node];
     const float tolerance = static_cast<float>(PositionToleranceSteps(node) + 1) / STEPS_PER_REV;
     const bool finished = MotionCompletionProtocol::Finite(position) && (data[4] & (TARGET_READY | SETTLED)) == (TARGET_READY | SETTLED) &&
                           error >= -tolerance && error <= tolerance;
-    motionReplyAt[node] = now;
-    if (finished) motionConfirmedMask |= 1U << node;
-    else motionConfirmedMask &= ~(1U << node);
+    motionReplyAt[node] = now; motionReplyFlags[node] = data[4]; motionReplyPositions[node] = position;
+    if (data[4] & TARGET_READY) motionTargetReadyMask |= bit;
+    else motionTargetReadyMask &= ~bit;
+    motionRoundSeenMask |= bit;
+    if (finished) {
+        motionConfirmedMask |= bit; motionRoundGoodMask |= bit; motionProgressMask |= bit;
+    } else { motionConfirmedMask &= ~bit; motionRoundGoodMask &= ~bit; }
+    return true;
 }
+
 
 
 void DummyRobot::SetJointSpeed(float _speed)
@@ -696,24 +709,14 @@ void DummyRobot::Homing()
     HomingForGeneration(motionEpoch);
 }
 
-bool DummyRobot::HomingForGeneration(uint32_t epoch)
+bool DummyRobot::HomingForGeneration(uint32_t epoch, uint32_t id)
 {
     if (epoch != motionEpoch || IsStopLocked()) return false;
-    float lastSpeed = jointSpeed;
-    SetMotionSpeed(10, epoch);
-
-    if (!PlanMoveJ(0, 0, 90, 0, 0, 0, 0, 10, epoch))
-    {
-        SetMotionSpeed(lastSpeed, epoch);
-        return false;
-    }
-    MoveJoints(targetJoints);
-    while (epoch == motionEpoch && !IsStopLocked() && IsMoving())
-        osDelay(10);
-    if (epoch != motionEpoch || IsStopLocked()) return false;
-    SetMotionSpeed(lastSpeed, epoch);
-    return true;
+    if (!PlanMoveJ(0, 0, 90, 0, 0, 0, 0, 10, epoch, id, "HOME")) return false;
+    const uint32_t ownId = motionTaskId;
+    return WaitMotionCompletion(ownId, epoch);
 }
+
 
 
 void DummyRobot::Resting()
@@ -721,25 +724,14 @@ void DummyRobot::Resting()
     RestingForGeneration(motionEpoch);
 }
 
-bool DummyRobot::RestingForGeneration(uint32_t epoch)
+bool DummyRobot::RestingForGeneration(uint32_t epoch, uint32_t id)
 {
     if (epoch != motionEpoch || IsStopLocked()) return false;
-    float lastSpeed = jointSpeed;
-    SetMotionSpeed(10, epoch);
-
-    if (!PlanMoveJ(REST_POSE.a[0], REST_POSE.a[1], REST_POSE.a[2],
-          REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5], 0, 10, epoch))
-    {
-        SetMotionSpeed(lastSpeed, epoch);
-        return false;
-    }
-    MoveJoints(targetJoints);
-    while (epoch == motionEpoch && !IsStopLocked() && IsMoving())
-        osDelay(10);
-    if (epoch != motionEpoch || IsStopLocked()) return false;
-    SetMotionSpeed(lastSpeed, epoch);
-    return true;
+    if (!PlanMoveJ(REST_POSE.a[0], REST_POSE.a[1], REST_POSE.a[2], REST_POSE.a[3], REST_POSE.a[4], REST_POSE.a[5], 0, 10, epoch, id, "RESET")) return false;
+    const uint32_t ownId = motionTaskId;
+    return WaitMotionCompletion(ownId, epoch);
 }
+
 
 
 void DummyRobot::SetEnable(bool _enable)
@@ -764,7 +756,7 @@ void DummyRobot::RequestSoftStop()
     if (protection) protection->Cancel(false);
     taskENTER_CRITICAL();
     isEnabled = false;
-    motionActive = false;
+    CancelMotion();
     ++motionEpoch;
     stopPerNodeTokens = stopToken == 0;
     stopWithGripper = cancelCalibration;
@@ -813,7 +805,7 @@ void DummyRobot::RequestDisable()
     if (protection) protection->Cancel(true);
     taskENTER_CRITICAL();
     isEnabled = false;
-    motionActive = false;
+    CancelMotion();
     ++motionEpoch;
     ++stopToken;
     stopPerNodeTokens = false;
@@ -947,7 +939,10 @@ void DummyRobot::PollSoftStop()
             UpdateJointAnglesCallback();
             targetJoints = currentJoints;
             targetRailPos = currentRailPos;
-            motionActive = false; // Motor-local hold persists until a fresh motion command.
+            CancelMotion(); // Motor-local hold persists until a fresh motion command.
+            motionPhase = MOTION_IDLE; motionProgressMask = jointsStateFlag = 0xFE;
+            motionTaskId = 0; motionKind = "NONE"; motionStartedAt = HAL_GetTick();
+            for (uint8_t node = 1; node <= 7; ++node) motionMotorTargets[node] = stopPositions[node];
             commandHandler.ClearFifo();
             isEnabled = true;
             stopState = NORMAL;
@@ -1133,19 +1128,12 @@ void DummyRobot::UpdateJointPose6D()
 
 bool DummyRobot::IsMoving()
 {
-    if (isEnabled && motionActive && motionDispatchPending) return true;
     if (stopState == STOPPING) return true;
-    if (stopState == STOPPED || stopState == STARTING || stopState == DISABLING ||
-        stopState == DISABLED) return false;
-    if (NeedsMotionCompletion())
-    {
-        taskENTER_CRITICAL();
-        const bool moving = (FreshMotionCompletionMask() & 0xFE) != 0xFE;
-        taskEXIT_CRITICAL();
-        return moving;
-    }
-    return (jointsStateFlag & 0b11111110) != 0b11111110;  // bit1~7 全置位 → FINISH（夹爪位 bit8 不参与）
+    if (stopState != NORMAL) return false;
+    if (commandMode <= COMMAND_CONTINUES_TRAJECTORY) return motionActive;
+    return (jointsStateFlag & 0xFE) != 0xFE;
 }
+
 
 
 bool DummyRobot::IsEnabled()
@@ -1154,56 +1142,45 @@ bool DummyRobot::IsEnabled()
 }
 
 
-void DummyRobot::SetCommandMode(uint32_t _mode)
+void DummyRobot::SetCommandMode(uint32_t mode) { TrySetCommandMode(mode); }
+
+
+
+uint32_t DummyRobot::CommandHandler::Push(const std::string& cmd, StreamSink* response)
 {
-    if (IsStopLocked()) return;
-    if (_mode < COMMAND_TARGET_POINT_SEQUENTIAL ||
-        _mode > COMMAND_MOTOR_TUNING)
-        return;
-
-    commandMode = static_cast<CommandMode>(_mode);
-
-    // 切换 SEQ/INT/TRJ/TUN 保留速度档位及电机加速度设置。
-    // 启动时也不覆盖 EEPROM 中的加速度，由 Init() 的查询回填。
-}
-
-
-uint32_t DummyRobot::CommandHandler::Push(const std::string &_cmd)
-{
-    if (_cmd.size() >= sizeof(QueueItem::command)) return 0xFF;
+    if (cmd.empty() || cmd.size() >= sizeof(QueueItem::command)) return 0xFF;
     QueueItem item{};
     taskENTER_CRITICAL();
-    if (context->IsStopLocked() || !context->IsEnabled())
-    {
-        taskEXIT_CRITICAL();
-        return 0xFF;
-    }
-    item.epoch = context->motionEpoch;
-    std::memcpy(item.command, _cmd.c_str(), _cmd.size() + 1);
-    osStatus_t status = osMessageQueuePut(commandFifo, &item, 0U, 0U);
+    if (context->IsStopLocked() || !context->IsEnabled()) { taskEXIT_CRITICAL(); return 0xFF; }
+    item.epoch = context->motionEpoch; item.id = context->AllocateMotionTaskId();
+    item.mode = context->commandMode; item.response = response;
+    std::memcpy(item.command, cmd.c_str(), cmd.size() + 1);
+    const osStatus_t status = osMessageQueuePut(commandFifo, &item, 0U, 0U);
     taskEXIT_CRITICAL();
-    if (status == osOK)
-        return osMessageQueueGetSpace(commandFifo);
-
-    return 0xFF; // failed
+    if (status != osOK) return 0xFF;
+    Announce(item);
+    return GetSpace();
 }
 
-uint32_t DummyRobot::CommandHandler::PushSystem(const std::string& cmd)
+
+uint32_t DummyRobot::CommandHandler::PushSystem(const std::string& cmd, StreamSink* response)
 {
     if (cmd != "!HOME" && cmd != "!RESET" && cmd != "!CALIBRATION") return 0xFF;
     QueueItem item{};
     taskENTER_CRITICAL();
     if (context->IsStopLocked() || (!context->IsEnabled() && cmd != "!CALIBRATION"))
-    { taskEXIT_CRITICAL(); return 0xFF; }
-    ++context->motionEpoch;
-    context->motionActive = false;
-    ClearFifo();
-    item.epoch = context->motionEpoch;
+        { taskEXIT_CRITICAL(); return 0xFF; }
+    ++context->motionEpoch; context->CancelMotion(); ClearFifo();
+    item.epoch = context->motionEpoch; item.id = context->AllocateMotionTaskId();
+    item.mode = context->commandMode; item.response = response;
     std::memcpy(item.command, cmd.c_str(), cmd.size() + 1);
     const osStatus_t status = osMessageQueuePut(commandFifo, &item, 1U, 0U);
     taskEXIT_CRITICAL();
-    return status == osOK ? GetSpace() : 0xFF;
+    if (status != osOK) return 0xFF;
+    Announce(item);
+    return GetSpace();
 }
+
 
 
 void DummyRobot::CommandHandler::EmergencyStop()
@@ -1216,9 +1193,10 @@ std::string DummyRobot::CommandHandler::Pop(uint32_t timeout)
 {
     QueueItem item{};
     if (osMessageQueueGet(commandFifo, &item, nullptr, timeout) != osOK) return {};
-    poppedEpoch = item.epoch;
+    poppedEpoch = item.epoch; poppedId = item.id; poppedMode = item.mode; poppedResponse = item.response;
     return std::string{item.command};
 }
+
 
 
 uint32_t DummyRobot::CommandHandler::GetSpace()
@@ -1227,156 +1205,79 @@ uint32_t DummyRobot::CommandHandler::GetSpace()
 }
 
 
-uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string &_cmd)
+uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string& cmd)
 {
-    const uint32_t epoch = poppedEpoch;
-    if (_cmd.empty() || context->IsStopLocked() ||
-        (!context->IsEnabled() && _cmd != "!CALIBRATION") ||
-        epoch != context->motionEpoch) return GetSpace();
+    if (cmd.empty()) return GetSpace();
+    const uint32_t epoch = poppedId ? poppedEpoch : context->motionEpoch;
+    const uint32_t id = poppedId ? poppedId : context->AllocateMotionTaskId();
+    const CommandMode mode = poppedId ? poppedMode : context->commandMode;
+    StreamSink* response = poppedResponse ? poppedResponse : usbStreamOutputPtr;
+    const bool announced = poppedResponse != nullptr;
+    poppedId = 0; poppedResponse = nullptr;
     ExecutionScope executing(*this, epoch);
-    if (_cmd == "!HOME" || _cmd == "!RESET" || _cmd == "!CALIBRATION")
-    {
-        bool completed = true;
-        if (_cmd == "!HOME") completed = context->HomingForGeneration(epoch);
-        else if (_cmd == "!RESET") completed = context->RestingForGeneration(epoch);
-        else context->CalibrateForGeneration(epoch);
-        if (epoch == context->motionEpoch && !context->IsStopLocked())
-        {
-            const char* notice = !completed ? "error motion plan failed" : _cmd == "!HOME" ? "Home ok" :
-                                 (_cmd == "!RESET" ? "Reset ok" : "calibration ok");
-            Respond(*usbStreamOutputPtr, "%s", notice);
-            Respond(*uart4StreamOutputPtr, "%s", notice);
+    while (announced && !IsAnnounced(id, response)) osDelay(1);
+    const char* kind = Name(cmd);
+    auto cancelled = [&]() { return epoch != context->motionEpoch || context->IsStopLocked() || !context->IsEnabled(); };
+    auto failure = [&](const char* reason) { Respond(*response, "error %s id=%lu reason=%s", kind, (unsigned long)id, reason); };
+    if (cancelled()) { failure("CANCELLED"); return GetSpace(); }
+    const uint32_t planningGeneration = context->motionCompletionGeneration;
+    bool planned = false, wait = mode != COMMAND_TARGET_POINT_INTERRUPTABLE;
+    if (cmd == "!HOME" || cmd == "!RESET") {
+        planned = cmd == "!HOME" ? context->HomingForGeneration(epoch, id) : context->RestingForGeneration(epoch, id);
+        wait = true;
+    } else if (cmd == "!CALIBRATION") {
+        context->CalibrateForGeneration(epoch); return GetSpace(); // ASCII calibration belongs to the protection coordinator.
+    } else if (cmd[0] == '>' || cmd[0] == '&') {
+        float j[7], speed = 0; int count;
+        count = sscanf(cmd.c_str() + 1, "%f,%f,%f,%f,%f,%f,%f,%f", &j[0], &j[1], &j[2], &j[3], &j[4], &j[5], &j[6], &speed);
+        if (count >= 7 && IsFiniteCommandValue(speed) && mode <= COMMAND_CONTINUES_TRAJECTORY) {
+            planned = context->PlanMoveJ(j[0], j[1], j[2], j[3], j[4], j[5], j[6], speed, epoch, id, kind);
+            if (planned && count == 8) context->SetMotionSpeed(speed, epoch);
         }
-        return GetSpace();
+    } else if (cmd[0] == '@') {
+        float p[6], speed = 0;
+        const int count = sscanf(cmd.c_str() + 1, "%f,%f,%f,%f,%f,%f,%f", &p[0], &p[1], &p[2], &p[3], &p[4], &p[5], &speed);
+        if (count >= 6 && IsFiniteCommandValue(speed) && mode <= COMMAND_CONTINUES_TRAJECTORY) {
+            if (count == 7) context->SetMotionSpeed(speed, epoch);
+            planned = context->PlanMoveL(p[0], p[1], p[2], p[3], p[4], p[5], epoch, id);
+        }
     }
-    uint8_t argNum;
-
-    switch (context->commandMode)
-    {
-        case COMMAND_TARGET_POINT_SEQUENTIAL:
-        case COMMAND_CONTINUES_TRAJECTORY:
-            if (_cmd[0] == '>' || _cmd[0] == '&')
-            {
-                float j1, j2, j3, j4, j5, j6, j7;
-                float speed = 0.0f;
-                if (_cmd[0] == '>')
-                    argNum = sscanf(_cmd.c_str(), ">%f,%f,%f,%f,%f,%f,%f,%f",
-                                    &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
-                if (_cmd[0] == '&')
-                    argNum = sscanf(_cmd.c_str(), "&%f,%f,%f,%f,%f,%f,%f,%f",
-                                    &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
-                bool planned = false;
-                if (argNum >= 7 && IsFiniteCommandValue(speed))
-                {
-                    if (argNum == 8) context->SetMotionSpeed(speed, epoch);
-                    // 七参数为六关节 + 地轨；省略速度时沿用当前档位。
-                    planned = context->PlanMoveJ(j1, j2, j3, j4, j5, j6, j7, speed, epoch);
-                }
-                if (!planned)
-                {
-                    if (epoch == context->motionEpoch && !context->IsStopLocked())
-                    {
-                        Respond(*usbStreamOutputPtr, "error motion plan failed");
-                        Respond(*uart4StreamOutputPtr, "error motion plan failed");
-                    }
-                    return GetSpace();
-                }
-                // Periodic control task owns transmissions, including STOP transitions.
-
-                while (context->IsMoving() && context->IsEnabled() &&
-                       !context->IsStopLocked() && epoch == context->motionEpoch)
-                    osDelay(5);
-                if (epoch != context->motionEpoch || context->IsStopLocked()) return GetSpace();
-                Respond(*usbStreamOutputPtr, "ok");
-                Respond(*uart4StreamOutputPtr, "ok");
-            } else if (_cmd[0] == '@')
-            {
-                float pose[6];
-                float speed;
-
-                argNum = sscanf(_cmd.c_str(), "@%f,%f,%f,%f,%f,%f,%f", pose, pose + 1, pose + 2,
-                                pose + 3, pose + 4, pose + 5, &speed);
-                bool planned = false;
-                if (argNum == 6)
-                {
-                    planned = context->PlanMoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], epoch);
-                } else if (argNum == 7 && IsFiniteCommandValue(speed))
-                {
-                    context->SetMotionSpeed(speed, epoch);
-                    planned = context->PlanMoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], epoch);
-                }
-                if (!planned)
-                {
-                    if (epoch == context->motionEpoch && !context->IsStopLocked())
-                    {
-                        Respond(*usbStreamOutputPtr, "error motion plan failed");
-                        Respond(*uart4StreamOutputPtr, "error motion plan failed");
-                    }
-                    return GetSpace();
-                }
-                while (context->IsMoving() && context->IsEnabled() &&
-                       !context->IsStopLocked() && epoch == context->motionEpoch)
-                    osDelay(5);
-                if (epoch != context->motionEpoch || context->IsStopLocked()) return GetSpace();
-                Respond(*usbStreamOutputPtr, "ok");
-                Respond(*uart4StreamOutputPtr, "ok");
+    if (!planned) {
+        const bool aborted = cancelled() || planningGeneration != context->motionCompletionGeneration;
+        if (!aborted) {
+            taskENTER_CRITICAL();
+            if (!context->motionActive && epoch == context->motionEpoch && !context->IsStopLocked()) {
+                context->motionTaskId = id; context->motionTaskEpoch = epoch;
+                context->motionKind = kind; context->motionMode = mode; context->motionPhase = MOTION_FAILED;
+                context->motionStartedAt = context->motionCompletedAt = HAL_GetTick();
             }
-
-            break;
-
-        case COMMAND_TARGET_POINT_INTERRUPTABLE:
-            if (_cmd[0] == '>' || _cmd[0] == '&')
-            {
-                float j1, j2, j3, j4, j5, j6, j7;
-                float speed = 0.0f;
-                if (_cmd[0] == '>')
-                    argNum = sscanf(_cmd.c_str(), ">%f,%f,%f,%f,%f,%f,%f,%f",
-                                    &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
-                if (_cmd[0] == '&')
-                    argNum = sscanf(_cmd.c_str(), "&%f,%f,%f,%f,%f,%f,%f,%f",
-                                    &j1, &j2, &j3, &j4, &j5, &j6, &j7, &speed);
-                if (argNum >= 7 && IsFiniteCommandValue(speed))
-                {
-                    if (argNum == 8) context->SetMotionSpeed(speed, epoch);
-                    // 七参数为六关节 + 地轨；省略速度时沿用当前档位。
-                    context->PlanMoveJ(j1, j2, j3, j4, j5, j6, j7, speed, epoch);
-                }
-                if (epoch != context->motionEpoch || context->IsStopLocked()) return GetSpace();
-                Respond(*usbStreamOutputPtr, "ok");
-                Respond(*uart4StreamOutputPtr, "ok");
-            } else if (_cmd[0] == '@')
-            {
-                float pose[6];
-                float speed;
-
-                argNum = sscanf(_cmd.c_str(), "@%f,%f,%f,%f,%f,%f,%f", pose, pose + 1, pose + 2,
-                                pose + 3, pose + 4, pose + 5, &speed);
-                if (argNum == 6)
-                {
-                    context->PlanMoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], epoch);
-                } else if (argNum == 7 && IsFiniteCommandValue(speed))
-                {
-                    context->SetMotionSpeed(speed, epoch);
-                    context->PlanMoveL(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], epoch);
-                }
-                if (epoch != context->motionEpoch || context->IsStopLocked()) return GetSpace();
-                Respond(*usbStreamOutputPtr, "ok");
-                Respond(*uart4StreamOutputPtr, "ok");
-            }
-            break;
-
-        case COMMAND_MOTOR_TUNING:
-            break;
+            taskEXIT_CRITICAL();
+        }
+        failure(aborted ? "CANCELLED" : mode > COMMAND_CONTINUES_TRAJECTORY ? "MODE_UNSUPPORTED" : "PLAN_FAILED"); return GetSpace();
     }
-
-    return osMessageQueueGetSpace(commandFifo);
+    if (wait && !context->WaitMotionCompletion(id, epoch)) { failure("CANCELLED"); return GetSpace(); }
+    taskENTER_CRITICAL();
+    const bool successful = !cancelled() && context->motionTaskId == id &&
+        (!wait || context->motionPhase == MOTION_COMPLETED);
+    const uint32_t elapsed = context->motionCompletedAt - context->motionStartedAt;
+    taskEXIT_CRITICAL();
+    if (!successful) failure("CANCELLED");
+    else if (wait) Respond(*response, "ok %s id=%lu ms=%lu", kind, (unsigned long)id, (unsigned long)elapsed);
+    else Respond(*response, "accepted %s id=%lu", kind, (unsigned long)id);
+    return GetSpace();
 }
+
 
 
 void DummyRobot::CommandHandler::ClearFifo()
 {
-    osMessageQueueReset(commandFifo);
+    QueueItem item{};
+    while (osMessageQueueGet(commandFifo, &item, nullptr, 0) == osOK) {
+        const CancelledItem notice{item.id, item.response, Name(item.command)};
+        if (item.response && osMessageQueuePut(cancelledFifo, &notice, 0U, 0U) != osOK) ++droppedCancellationNotices;
+    }
 }
+
 
 void DummyRobot::SetMotionSpeed(float speed, uint32_t epoch)
 {
@@ -1413,4 +1314,123 @@ void DummyRobot::TuningHelper::SetFreqAndAmp(float _freq, float _amp)
 
     frequency = _freq;
     amplitude = _amp;
+}
+
+void DummyRobot::BeginMotionRound()
+{
+    ++motionRound; motionRoundAt = HAL_GetTick();
+    motionRoundSeenMask = motionRoundGoodMask = 0;
+    for (uint8_t n = 1; n <= 7; ++n) motionQueryNonce[n] = 0;
+}
+
+void DummyRobot::ObserveMotionFeedback(uint8_t node, float position, bool finished)
+{
+    if (node < 1 || node > 7 || !NeedsMotionCompletion()) return;
+    const float error = position - motionMotorTargets[node];
+    const float tolerance = static_cast<float>(MotionCompletionProtocol::PositionToleranceSteps(node) + 1) /
+                            MotionCompletionProtocol::STEPS_PER_REV;
+    if (!MotionCompletionProtocol::Finite(position) || !finished || error < -tolerance || error > tolerance) {
+        motionConfirmedMask &= ~(1U << node); motionRoundGoodMask &= ~(1U << node);
+        // A reply sampled before this contradictory live feedback cannot restore proof.
+        motionQueryNonce[node] = 0;
+    }
+}
+
+void DummyRobot::PollMotionCompletion()
+{
+    taskENTER_CRITICAL();
+    if (motionActive && (!isEnabled || IsStopLocked() || motionTaskEpoch != motionEpoch)) CancelMotion();
+    if (NeedsMotionCompletion()) {
+        motionDispatchPending = (motionTargetReadyMask & 0xFE) != 0xFE;
+        motionPhase = motionDispatchPending ? MOTION_DISPATCHING : MOTION_RUNNING;
+        if (!motionDispatchPending && motionRoundSeenMask == 0xFE && motionRoundGoodMask == 0xFE &&
+            FreshMotionCompletionMask() == 0xFE) {
+            motionPhase = MOTION_COMPLETED; motionCompletedAt = HAL_GetTick();
+            motionActive = motionDispatchPending = false; motionProgressMask = jointsStateFlag = 0xFE;
+            for (uint8_t n = 1; n <= 7; ++n) motionQueryNonce[n] = 0;
+        } else if (motionRoundSeenMask == 0xFE ||
+                   HAL_GetTick() - motionRoundAt >= MotionCompletionProtocol::FEEDBACK_FRESH_MS) BeginMotionRound();
+    }
+    taskEXIT_CRITICAL();
+}
+
+void DummyRobot::CancelMotion()
+{
+    taskENTER_CRITICAL();
+    if (motionActive) motionPhase = MOTION_CANCELLED;
+    motionActive = motionDispatchPending = false;
+    ++motionCompletionGeneration;
+    motionConfirmedMask = motionRoundSeenMask = motionRoundGoodMask = 0;
+    for (uint8_t n = 1; n <= 7; ++n) motionQueryNonce[n] = 0;
+    taskEXIT_CRITICAL();
+}
+
+bool DummyRobot::WaitMotionCompletion(uint32_t id, uint32_t epoch)
+{
+    while (epoch == motionEpoch && !IsStopLocked() && isEnabled && motionTaskId == id && motionActive) osDelay(5);
+    return epoch == motionEpoch && !IsStopLocked() && isEnabled &&
+           motionTaskId == id && motionPhase == MOTION_COMPLETED;
+}
+
+bool DummyRobot::TrySetCommandMode(uint32_t mode)
+{
+    taskENTER_CRITICAL();
+    const bool allowed = !IsStopLocked() && !motionActive && !commandHandler.IsBusy() &&
+        mode >= COMMAND_TARGET_POINT_SEQUENTIAL && mode <= COMMAND_MOTOR_TUNING;
+    if (allowed) commandMode = static_cast<CommandMode>(mode);
+    taskEXIT_CRITICAL();
+    return allowed;
+}
+
+void DummyRobot::PrintMotionStatus(StreamSink& response)
+{
+    uint32_t id, elapsed, rejected, sends, queries, ages[8];
+    uint16_t ready, live, progress; MotionPhase phase; CommandMode mode;
+    float goals[8], actual[8]; uint8_t flags[8]; const char* kind;
+    taskENTER_CRITICAL();
+    id = motionTaskId; kind = motionKind; phase = motionPhase; mode = motionMode;
+    elapsed = (phase == MOTION_COMPLETED ? motionCompletedAt : HAL_GetTick()) - motionStartedAt;
+    ready = motionTargetReadyMask; live = motionConfirmedMask; progress = motionProgressMask;
+    rejected = motionRejectedReplies; sends = motionSendCount; queries = motionQueryCount;
+    for (uint8_t n = 1; n <= 7; ++n) {
+        goals[n] = motionMotorTargets[n];
+        actual[n] = motorJ[n]->angle / 360.0f * motorJ[n]->reduction *
+                    (motorJ[n]->inverseDirection ? -1.0f : 1.0f);
+        flags[n] = motionReplyFlags[n]; ages[n] = HAL_GetTick() - motionReplyAt[n];
+    }
+    taskEXIT_CRITICAL();
+    Respond(response, "MOTION id=%lu kind=%s phase=%u mode=%u ms=%lu", (unsigned long)id, kind,
+            unsigned(phase), unsigned(mode), (unsigned long)elapsed);
+    Respond(response, "MOTION ready=%03X confirmed=%03X progress=%03X", ready, live, progress);
+    Respond(response, "MOTION send=%lu query=%lu reject=%lu", (unsigned long)sends,
+            (unsigned long)queries, (unsigned long)rejected);
+    if (commandHandler.CancellationNoticeLosses())
+        Respond(response, "MOTION cancelled_drop=%lu", (unsigned long)commandHandler.CancellationNoticeLosses());
+    for (uint8_t n = 1; n <= 7; ++n)
+        Respond(response, "MOTION J%u goal=%.4f real=%.4f f=%02X age=%lu", n,
+                double(goals[n]), double(actual[n]), flags[n], (unsigned long)ages[n]);
+}
+
+bool DummyRobot::CommandHandler::IsAnnounced(uint32_t id, StreamSink* response) const
+{
+    const uint8_t slot = response == usbStreamOutputPtr ? 0 : response == uart4StreamOutputPtr ? 1 : 2;
+    return static_cast<uint32_t>(announcedId[slot] - id) < 0x80000000U;
+}
+void DummyRobot::CommandHandler::Announce(const QueueItem& item)
+{
+    if (!item.response) return;
+    static const char* const modes[] = {"?", "SEQ", "INT", "TRJ", "TUN"};
+    Respond(*item.response, "queued %s id=%lu mode=%s", Name(item.command), (unsigned long)item.id, modes[item.mode]);
+    const uint8_t slot = item.response == usbStreamOutputPtr ? 0 : item.response == uart4StreamOutputPtr ? 1 : 2;
+    taskENTER_CRITICAL(); announcedId[slot] = item.id; taskEXIT_CRITICAL();
+}
+void DummyRobot::CommandHandler::PollCancelled()
+{
+    CancelledItem item{};
+    if (osMessageQueueGet(cancelledFifo, &item, nullptr, 0) != osOK) return;
+    if (!IsAnnounced(item.id, item.response)) {
+        if (osMessageQueuePut(cancelledFifo, &item, 0U, 0U) != osOK) ++droppedCancellationNotices;
+        return;
+    }
+    Respond(*item.response, "error %s id=%lu reason=CANCELLED", item.kind, (unsigned long)item.id);
 }

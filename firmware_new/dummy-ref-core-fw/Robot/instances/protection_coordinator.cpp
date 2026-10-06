@@ -116,7 +116,7 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
             seenEvents[n] != event) {
             // Interrupt the regular dispatch immediately; queue cleanup is deferred.
             if (!trigger && !protectionSeen) ++robot.motionEpoch;
-            robot.motionActive = false; robot.isEnabled = false;
+            robot.CancelMotion(); robot.isEnabled = false;
             locked = alarm = trigger = true;
         }
     } else if (command == PROBE_REPLY) {
@@ -164,7 +164,7 @@ void ProtectionCoordinator::ObserveCommunication(uint8_t node) {
 }
 void ProtectionCoordinator::BeginStop(bool protecting, bool includeHand) {
     taskENTER_CRITICAL();
-    robot.isEnabled = robot.motionActive = false; ++robot.motionEpoch;
+    robot.isEnabled = false; robot.CancelMotion(); ++robot.motionEpoch;
     robot.stopPerNodeTokens = protecting || robot.stopToken == 0;
     robot.stopWithGripper = includeHand;
     robot.stopSyncedMask = robot.stopAckMask = robot.stopHoldingMask = 0;

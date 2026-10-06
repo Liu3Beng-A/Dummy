@@ -120,23 +120,16 @@ void CtrlStepMotor::SetPositionSetPoint(float _val)
 }
 
 
-void CtrlStepMotor::SetPositionWithVelocityLimit(float _pos, float _vel)
+void CtrlStepMotor::SetPositionWithVelocityLimit(float position, float velocity)
 {
-    _pos = inverseDirection ? -_pos : _pos;  // [FIX] inverseDirection 下放到最底层
-
-    uint8_t mode = 0x07;
-    txHeader.StdId = nodeID << 7 | mode;
-
-    // Float to Bytes
-    auto* b = (unsigned char*) &_pos;
-    for (int i = 0; i < 4; i++)
-        canBuf[i] = *(b + i);
-    b = (unsigned char*) &_vel;
-    for (int i = 4; i < 8; i++)
-        canBuf[i] = *(b + i - 4);
-
-    CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+    position = inverseDirection ? -position : position;
+    CAN_TxHeaderTypeDef header = {};
+    header.IDE = CAN_ID_STD; header.RTR = CAN_RTR_DATA; header.DLC = 8;
+    header.StdId = (nodeID << 7) | 0x07;
+    uint8_t data[8]; memcpy(data, &position, 4); memcpy(data + 4, &velocity, 4);
+    CanSendMessage(get_can_ctx(hcan), data, &header);
 }
+
 
 
 // [Step 6] 与 ref 对齐：补 SetPositionWithMotorRps（去掉 inverse 取反，由 SetAngleWithMotorRps 在外层统一处理）
@@ -404,18 +397,17 @@ void CtrlStepMotor::UpdateAngle()
     CanSendMessage(get_can_ctx(hcan), data, &header);
 }
 
-void CtrlStepMotor::QueryPositionCompletion(float expectedMotorR, uint32_t nonce)
+bool CtrlStepMotor::QueryPositionCompletion(float expectedMotorR, uint32_t nonce, uint32_t epoch, uint32_t generation)
 {
-    CAN_TxHeaderTypeDef header = txHeader;
+    CAN_TxHeaderTypeDef header = {};
+    header.IDE = CAN_ID_STD; header.RTR = CAN_RTR_DATA; header.DLC = 8;
     header.StdId = (nodeID << 7) | MotionCompletionProtocol::COMMAND;
     uint8_t data[8] = {};
-    memcpy(data, &expectedMotorR, sizeof(expectedMotorR));
-    data[4] = MotionCompletionProtocol::QUERY_MARKER;
+    memcpy(data, &expectedMotorR, 4); data[4] = MotionCompletionProtocol::QUERY_MARKER;
     MotionCompletionProtocol::PutNonce(data, nonce);
-    // Same bounded 1ms acquisition as the previous position query. A zero-wait
-    // attempt immediately after the last 0x07 could starve every query.
-    CanSendMessage(get_can_ctx(hcan), data, &header);
+    return CanSendMotionMessage(get_can_ctx(hcan), data, &header, epoch, generation);
 }
+
 
 
 void CtrlStepMotor::UpdateAngleCallback(float _pos, bool _isFinished)
@@ -480,4 +472,13 @@ void CtrlStepMotor::SetDceKd(int32_t _val)
     canBuf[4] = 1; // Need save to EEPROM or not
 
     CanSendMessage(get_can_ctx(hcan), canBuf, &txHeader);
+}
+
+bool CtrlStepMotor::SendMotionTarget(float signedMotorR, float velocity, uint32_t epoch, uint32_t generation)
+{
+    CAN_TxHeaderTypeDef header = {};
+    header.IDE = CAN_ID_STD; header.RTR = CAN_RTR_DATA; header.DLC = 8;
+    header.StdId = (nodeID << 7) | 0x07;
+    uint8_t data[8]; memcpy(data, &signedMotorR, 4); memcpy(data + 4, &velocity, 4);
+    return CanSendMotionMessage(get_can_ctx(hcan), data, &header, epoch, generation);
 }

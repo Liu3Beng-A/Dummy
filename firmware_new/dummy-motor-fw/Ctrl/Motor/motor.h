@@ -163,13 +163,14 @@ public:
 
     private:
         Motor* context;
-        void ResetPositionCompletion();
+        void ResetPositionCompletion(bool newGoal = false);
         bool TickPositionCompletion();
         uint16_t positionStableTicks = 0;
         int32_t positionStableMin = 0, positionStableMax = 0;
         int64_t positionVelocitySum = 0;
         int32_t positionCompletionTarget = 0;
         bool positionSettled = false;
+        bool positionCompleted = false; // Result of this local goal, separate from live settlement.
         volatile bool softStopLocked = false;
         volatile uint8_t softStopRequest = 0;
         volatile uint8_t softStopPhase = SoftStopProtocol::NORMAL;

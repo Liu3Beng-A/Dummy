@@ -341,3 +341,26 @@ void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* t
     }
 }
 
+
+bool CanSendMotionMessage(CAN_context* ctx, uint8_t* data, CAN_TxHeaderTypeDef* header,
+                          uint32_t epoch, uint32_t generation)
+{
+    if (!ctx || !dummy.CanSendMotion(epoch, generation)) return false;
+    osSemaphoreId_t sem;
+    if (ctx->handle->Instance == CAN1) sem = sem_can1_tx;
+    else if (ctx->handle->Instance == CAN2) sem = sem_can2_tx;
+    else return false;
+    if (osSemaphoreAcquire(sem, 1) != osOK) return false;
+    bool sent = false;
+    const uint32_t start = micros();
+    do {
+        taskENTER_CRITICAL();
+        const bool current = dummy.CanSendMotion(epoch, generation);
+        sent = current && HAL_CAN_AddTxMessage(ctx->handle, header, data, &ctx->last_heartbeat_mailbox) == HAL_OK;
+        if (sent) ctx->inFlightMailboxes |= ctx->last_heartbeat_mailbox;
+        taskEXIT_CRITICAL();
+        if (sent || !current) break;
+    } while (micros() - start <= 1000);
+    if (!sent) { ++ctx->tx_busy_errors; osSemaphoreRelease(sem); }
+    return sent;
+}

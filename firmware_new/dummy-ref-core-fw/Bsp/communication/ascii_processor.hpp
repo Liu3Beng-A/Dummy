@@ -27,9 +27,15 @@ template<typename ... TArgs>
 void Respond(StreamSink &output , const char *fmt, TArgs &&... args)
 {
     char response[64];
-    size_t len = snprintf(response, sizeof(response), fmt, std::forward<TArgs>(args)...);
-    output.process_bytes((uint8_t *) response, len, nullptr);
-    output.process_bytes((const uint8_t *) "\r\n", 2, nullptr);
+    const int needed = snprintf(response, sizeof(response) - 2, fmt, std::forward<TArgs>(args)...);
+    size_t len;
+    if (needed < 0 || needed >= static_cast<int>(sizeof(response) - 2))
+        len = snprintf(response, sizeof(response) - 2, "error response too long");
+    else len = static_cast<size_t>(needed);
+    response[len++] = '\r';
+    response[len++] = '\n';
+    // USB and UART copy each <=64-byte packet under their existing send token.
+    output.process_bytes((const uint8_t *) response, len, nullptr);
 }
 
 

@@ -98,7 +98,16 @@ class RobotSerialAssistantOld:
 
         # 点位示教
         self.stored_positions = []  # [(name, [j1..j6])]
-        self._seq_running = False   # 顺序发送运行标志
+        self._seq_running = False   # 当前点位等待状态
+        self._seq_active = False
+        self._seq_motion_id = None
+        self._seq_id_floor = 0
+        self._seq_session = 0
+        self._mode_request_counter = 0
+        self._mode_request = None
+        self._mode_pending = None
+        self._mode_set_token = None
+        self._seq_wait_mode = False
         self._seq_pending = []      # 待发送点位
         self._seq_idx = 0           # 当前发送索引
         self._seq_speed = DEFAULT_SPEED
@@ -786,7 +795,8 @@ class RobotSerialAssistantOld:
 
     def log(self, msg, tag="INFO"):
         """终端日志（所有线程的输出最终都要通过 root.after 走到这里）"""
-        time_str = time.strftime("%H:%M:%S")
+        now = time.time()
+        time_str = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int(now % 1 * 1000):03d}"
         tag_color = {"TX": "TX", "RX": "RX", "ERROR": "ERROR", "WARN": "WARN"}.get(tag, "INFO")
         self.txt_log.insert(tk.END, f"[{time_str}] [{tag}] {msg}\n", tag_color)
         self.txt_log.see(tk.END)
@@ -808,6 +818,8 @@ class RobotSerialAssistantOld:
                 self.serial_port.write_timeout = 1.0
                 self.is_connected = True
                 self._stop_rx_fragment = ""
+                self.current_cmdmode = None
+                self._mode_pending = self._mode_request = None
                 self._calibration_busy = False
                 self._stop_locked = False
                 self._update_motor_state(None)
@@ -838,7 +850,8 @@ class RobotSerialAssistantOld:
             # 清掉所有等待中的异步状态，避免重连后被上一轮的残留状态卡住
             self._pending_sync = None
             self._sync_data = None
-            self._seq_running = False
+            self._cancel_motion_for_stop()
+            self.current_cmdmode = None
             self._set_acc_sync_waiting(False)
             self.log("已断开串口")
 
@@ -863,52 +876,19 @@ class RobotSerialAssistantOld:
                 break
 
     def _split_rx_stop_status(self, text):
-        """保护、校准和参数回执允许跨读取分段，完整一行后再处理。"""
+        """所有回复均按完整行解析，部分读取不能形成运动完成事件。"""
         text = self._stop_rx_fragment + text
-        self._stop_rx_fragment = ""
         rows = text.split('\n')
-        tail = rows[-1].strip()
-        replies = ("Stopping ok", "STOP locked", "STOP locked disabled", "Start pending",
-                   "Disable pending", "Started ok", "Disabled ok", "error STOP_LOCKED",
-                   "STOP fault ", "ok SYNC_ACC pending", "ok SYNC_ACC finish", "error SYNC_ACC ",
-                   "!CALIBRATION pending", "!CALIBRATION ok", "CAL ", "error CALIBRATION ",
-                   "STALL ", "PROTECT ", "error STALL ", "ok STALL ", "ok STALL_SAVE ", "error STALL_SAVE ",
-                   "ok CAL ", "ok CAL_SAVE ", "error CAL ", "error CAL_SAVE ",
-                   "ok STALL_GET ", "ok STALL_SET ", "error STALL_GET ", "error STALL_SET ",
-                   "ok CAL_GET ", "ok CAL_SET ", "error CAL_GET ", "error CAL_SET ",
-                   "error START busy")
-        if tail and len(rows[-1]) < 256 and (
-                any(reply.startswith(tail) for reply in replies) or
-                tail.startswith(("STOP fault ", "error SYNC_ACC ", "CAL ", "STALL ", "PROTECT ",
-                                 "error CALIBRATION ", "error STALL ", "ok STALL ",
-                                 "ok STALL_SAVE ", "error STALL_SAVE ", "ok CAL ",
-                                 "ok CAL_SAVE ", "error CAL ", "error CAL_SAVE ",
-                                 "ok STALL_GET ", "ok STALL_SET ", "error STALL_GET ",
-                                 "error STALL_SET ", "ok CAL_GET ", "ok CAL_SET ",
-                                 "error CAL_GET ", "error CAL_SET "))):
-            self._stop_rx_fragment = rows.pop()
+        self._stop_rx_fragment = rows.pop()
+        if len(self._stop_rx_fragment) > 1024:
+            rows.append(self._stop_rx_fragment)
+            self._stop_rx_fragment = ""
         return self._split_rx_lines('\n'.join(rows))
 
     @staticmethod
     def _split_rx_lines(text):
-        """把一次串口读取切成若干条独立回执。
-
-        固件每条 Respond 都以 "\\r\\n" 结尾，正常情况下一行一条；但 CAN 回调里的
-        printf 可能不带换行，把多条回执粘到一行，所以这里额外按 "ok " 拆一次。
-        """
-        out = []
-        for raw in text.split('\n'):
-            raw = raw.strip()
-            if not raw:
-                continue
-            if raw == "ok":
-                out.append("ok")
-            elif raw.startswith("ok "):
-                parts = raw.split("ok ")
-                out.extend("ok " + p.strip() for p in parts[1:] if p.strip())
-            else:
-                out.append(raw)
-        return out
+        """保留完整回复；不猜测 ok 子串边界。"""
+        return [row.strip() for row in text.split('\n') if row.strip()]
 
     def _handle_rx_line(self, line):
         """RX 线程只投递完整行，Tk 变量、顺序发送和控件均由主线程处理。"""
@@ -970,15 +950,103 @@ class RobotSerialAssistantOld:
             if nums is not None and len(nums) == expected:
                 self._sync_data = nums
 
-        # 顺序发送：固件每执行完一条 ">" 回一个 "ok"，收到后再发下一条
-        if self._seq_running and line == "ok":
+        self._handle_motion_receipt(line)
+
+    def _stop_sequence(self, reason):
+        self._seq_active = self._seq_running = self._seq_wait_mode = False
+        self._seq_motion_id = None
+        self._seq_session += 1
+        self.log(f"顺序发送停止：{reason}", "WARN")
+
+    def _query_command_mode(self):
+        self._mode_request_counter = (self._mode_request_counter + 1) & 0xFFFFFFFF or 1
+        self._mode_request = self._mode_request_counter
+        if not self.send_cmd(f"#GET_CMDMODE {self._mode_request}"):
+            self._mode_request = None
+            if self._seq_active:
+                self._stop_sequence("模式查询未发送")
+            return
+        self.root.after(3000, self._mode_query_timeout, self._mode_request)
+
+    def _mode_query_timeout(self, request):
+        if self._mode_request != request:
+            return
+        self._mode_request = None
+        self.log("主控模式查询超时；未启动顺序发送", "WARN")
+        if self._seq_active:
+            self._stop_sequence("模式未确认")
+
+    def _mode_set_timeout(self, mode, token):
+        if self._mode_pending == mode and self._mode_set_token == token:
+            self._mode_pending = None
+            self.current_cmdmode = None
+            self.log("模式设置回执超时，模式状态未知，请查询确认", "WARN")
+
+    def _sequence_queue_timeout(self, session, index):
+        if self._seq_active and session == self._seq_session and index == self._seq_idx and self._seq_motion_id is None:
+            self._stop_sequence("未收到本条点位的 queued 编号；请检查固件版本和日志")
+
+    def _handle_motion_receipt(self, line):
+        m = re.fullmatch(r'ok CMDMODE mode=(\d+) busy=(\d+) issued=(\d+) req=(\d+)', line)
+        if m:
+            mode, busy, issued, request = map(int, m.groups())
+            if request != self._mode_request:
+                return
+            self._mode_request = None
+            self.current_cmdmode = mode
+            if self._seq_wait_mode:
+                self._seq_wait_mode = False
+                if mode != 1 or busy:
+                    self._stop_sequence("主控必须处于空闲 SEQ；请切换模式并等待当前运动完成")
+                else:
+                    self._seq_id_floor = issued
+                    self.log(f"开始顺序发送 {len(self._seq_pending)} 个点位，等待各自编号完成", "INFO")
+                    self._send_next_position()
+            return
+        m = re.fullmatch(r'ok CMDMODE mode=(\d+)', line)
+        if m:
+            mode = int(m.group(1))
+            if mode == self._mode_pending:
+                self._mode_pending = None
+                self.current_cmdmode = mode
+                self.log(f"主控确认模式 {mode} ({self._MODE_NAME.get(mode, '?')})", "INFO")
+            return
+        if line.startswith('error CMDMODE'):
+            self._mode_pending = self._mode_request = None
+            if self._seq_active:
+                self._stop_sequence("主控拒绝模式请求")
+            return
+        if not self._seq_active or not self._seq_running:
+            return
+        m = re.fullmatch(r'queued MOVEJ id=(\d+) mode=(\w+)', line)
+        if m:
+            motion_id, mode = int(m.group(1)), m.group(2)
+            delta = (motion_id - self._seq_id_floor) & 0xFFFFFFFF
+            if self._seq_motion_id is None and 0 < delta < 0x80000000:
+                if mode != 'SEQ':
+                    self._stop_sequence("点位实际使用模式不是 SEQ")
+                    self.send_cmd("!STOP")
+                else:
+                    self._seq_motion_id = motion_id
+                    self._seq_id_floor = motion_id
+            return
+        m = re.fullmatch(r'ok MOVEJ id=(\d+)(?: ms=\d+)?', line)
+        if m and int(m.group(1)) == self._seq_motion_id:
             self._seq_running = False
+            self._seq_motion_id = None
             self._seq_idx += 1
             if self._seq_idx < len(self._seq_pending):
-                self.root.after(0, self._send_next_position)
+                session = self._seq_session
+                self.root.after(0, lambda: self._send_next_position() if self._seq_active and session == self._seq_session else None)
             else:
-                total = len(self._seq_pending)
-                self.root.after(0, lambda t=total: self.log(f"顺序发送完成,共{t}个点位", "INFO"))
+                self._seq_active = False
+                self.log(f"顺序发送完成，共 {len(self._seq_pending)} 个点位", "INFO")
+            return
+        m = re.fullmatch(r'error MOVEJ id=(\d+) reason=(\w+)', line)
+        if m and int(m.group(1)) == self._seq_motion_id:
+            self._stop_sequence(m.group(2))
+        elif line == 'error motion queue full' and self._seq_motion_id is None:
+            self._stop_sequence("主控队列已满")
 
     def _serial_write_loop(self):
         """守护发送线程：从队列取命令，经串口写出。"""
@@ -1449,12 +1517,15 @@ class RobotSerialAssistantOld:
         self.hand_pos.set(p)
         self.send_cmd(f"!HAND_POS {p}")
 
-    def send_cmd(self, cmd):
+    def send_cmd(self, cmd, sequence=False):
         """所有指令的唯一出口：入队 + 记 TX 日志，由写线程串行发出"""
         if not self.is_connected or not self.serial_port:
             self.log("未连接串口", "WARN")
             return False
         cmd = cmd.strip()
+        if self._seq_active and not sequence and (cmd.startswith(('>', '&', '@', '#CMDMODE')) or cmd in ('!HOME', '!RESET')):
+            self.log("顺序发送中，请等待完成或先 STOP；当前运动回执由顺序任务占用", "WARN")
+            return False
         if self._calibration_busy and cmd not in ("!STOP", "!DISABLE"):
             self.log("校准及保存中，START 返回 busy，不挂起；可发送 STOP 或 DISABLE", "WARN")
             return False
@@ -1486,7 +1557,10 @@ class RobotSerialAssistantOld:
     def _cancel_motion_for_stop(self):
         self._set_acc_sync_waiting(False)
         self._tx_generation += 1
-        self._seq_running = False
+        self._seq_running = self._seq_active = self._seq_wait_mode = False
+        self._seq_motion_id = None
+        self._seq_session += 1
+        self._mode_pending = self._mode_request = None
         self._seq_pending = []
         self._seq_idx = 0
         self._pending_sync = None
@@ -1519,6 +1593,8 @@ class RobotSerialAssistantOld:
                 return
             self._stop_locked = False
             self._update_motor_state(True)
+            if self._mode_request is None and self._mode_pending is None:
+                self._query_command_mode()
         elif line == "Disabled ok":
             self._stop_locked = False
             self._update_motor_state(False)
@@ -1636,12 +1712,17 @@ class RobotSerialAssistantOld:
         self.send_cmd(f"#REBOOT {node}")
 
     def _set_cmdmode(self, mode):
-        """点击「模式」按钮：更新本地缓存 + 转发指令到固件。
-        固件 OLED 上同步刷新，串口助手本地缓存跟随。
-        """
-        self.current_cmdmode = mode
-        self.send_cmd(f"#CMDMODE {mode}")
-        self.log(f"已切换至模式 {mode} ({self._MODE_NAME.get(mode, '?')})", "INFO")
+        """仅主控确认后更新模式，活动任务中不切换。"""
+        if self._seq_active or self._mode_pending is not None or self._mode_request is not None:
+            self.log("顺序发送或模式确认中，请等待完成", "WARN")
+            return
+        self._mode_pending = mode
+        self._mode_request_counter = (self._mode_request_counter + 1) & 0xFFFFFFFF or 1
+        self._mode_set_token = self._mode_request_counter
+        if not self.send_cmd(f"#CMDMODE {mode}"):
+            self._mode_pending = None
+            return
+        self.root.after(3000, self._mode_set_timeout, mode, self._mode_set_token)
 
     def _warn_drag_mode(self):
         """拖发开关切换后回调。若不是「连续模式(3)」则弹提示（不自动切换）。"""
@@ -1858,42 +1939,40 @@ class RobotSerialAssistantOld:
         self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:7]) + f",{speed:g}")
 
     def send_all_positions(self):
-        """顺序发送全部点位：旧固件每条 ">" 执行完才回 "ok"，
-        因此严格逐条下发——发第 N 条，等回 ok，再发第 N+1 条。"""
+        """先确认主控 SEQ 且无任务，再逐条等待匹配编号的完成。"""
         if self._stop_locked or self._calibration_busy:
             self.log("保护锁定或校准忙，不能启动顺序发送", "WARN")
             return
         if not self.stored_positions:
             self.log("没有存储的点位", "WARN")
             return
-        if self._seq_running:
-            self.log("顺序发送正在进行中，请等待完成", "WARN")
+        if self._seq_active or self._mode_pending is not None or self._mode_request is not None:
+            self.log("顺序发送或模式确认正在进行中", "WARN")
+            return
+        speed = self._get_pos_speed()
+        if speed is None:
             return
         self._seq_pending = list(self.stored_positions)
         self._seq_idx = 0
-        self._seq_speed = self._get_pos_speed()
-        if self._seq_speed is None:
-            return
-        total = len(self._seq_pending)
-
-        # 模式提示（不自动切换，不阻塞发送）
-        self._warn_seqsend_mode()
-
-        self._seq_running = True
-        self.log(f"开始顺序发送 {total} 个点位 (逐条等 ok)...", "INFO")
-        self._send_next_position()
+        self._seq_speed = speed
+        self._seq_active = self._seq_wait_mode = True
+        self._seq_session += 1
+        self._query_command_mode()
 
     def _send_next_position(self):
-        """发下一个点位，等固件回 ok 后由 RX 线程再次调用"""
-        if self._stop_locked or self._calibration_busy:
+        """只发当前会话的一条点位，旧 after 回调不能恢复取消的任务。"""
+        if not self._seq_active or self._stop_locked or self._calibration_busy:
             return
         if self._seq_idx >= len(self._seq_pending):
             return
         _name, pos = self._seq_pending[self._seq_idx]
-        # 必须在 send_cmd 之前置位标志，避免固件 ok 先到导致漏接
         self._seq_running = True
-        # [v3.1] >j1,j2,j3,j4,j5,j6,j7(rail),speed （8 个值）
-        self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:7]) + f",{self._seq_speed:g}")
+        self._seq_motion_id = None
+        if not self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:7]) + f",{self._seq_speed:g}", sequence=True):
+            self._stop_sequence("点位发送失败")
+            return
+        session, index = self._seq_session, self._seq_idx
+        self.root.after(3000, self._sequence_queue_timeout, session, index)
 
     # ==============================================
     # 命令历史

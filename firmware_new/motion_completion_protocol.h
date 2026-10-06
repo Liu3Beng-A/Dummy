@@ -13,6 +13,9 @@ constexpr uint8_t QUERY_MARKER = 0xA5;
 constexpr uint8_t REPLY_MARKER = 0x80;
 constexpr uint8_t TARGET_READY = 0x02;
 constexpr uint8_t SETTLED = 0x01;
+constexpr uint8_t PLANNER_READY = 0x04;
+constexpr uint8_t ENCODER_READY = 0x08;
+constexpr uint8_t POSITION_READY = 0x10;
 constexpr uint32_t NONCE_MASK = 0xFFFFFF;
 constexpr uint32_t FEEDBACK_FRESH_MS = 300;
 constexpr uint32_t STABLE_TICKS = 1000; // 50ms at 20kHz.
@@ -24,6 +27,10 @@ constexpr int32_t STEPS_PER_REV = 51200;
 // J8 is excluded from whole-machine completion; retain its fine tolerance.
 constexpr int32_t PositionToleranceSteps(uint8_t node) {
     return node == 7 ? 1024 : node == 6 ? 426 : node >= 1 && node <= 5 ? 711 : 51;
+}
+// Ordinary motion: 0.02 joint degree / 0.02 rail mm. STOP uses its own window.
+constexpr int32_t StableRangeSteps(uint8_t node) {
+    return node == 7 ? 204 : node == 6 ? 85 : node >= 1 && node <= 5 ? 142 : STABLE_RANGE_STEPS;
 }
 inline bool Finite(float value) {
     uint32_t bits;

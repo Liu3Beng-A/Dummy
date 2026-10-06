@@ -697,7 +697,7 @@ void Motor::Controller::SetPositionSetPoint(int32_t _pos)
     if (goalPosition != target)
     {
         goalPosition = static_cast<int32_t>(target);
-        ResetPositionCompletion();
+        ResetPositionCompletion(true);
         state = STATE_RUNNING; // The immediate 0x07 ACK must not carry old FINISH.
     }
     if (abs(goalPosition - realPosition) > positionTolerance)
@@ -708,13 +708,14 @@ void Motor::Controller::SetPositionSetPoint(int32_t _pos)
     __set_PRIMASK(irq);
 }
 
-void Motor::Controller::ResetPositionCompletion()
+void Motor::Controller::ResetPositionCompletion(bool newGoal)
 {
     positionStableTicks = 0;
     positionStableMin = positionStableMax = realPosition;
     positionVelocitySum = 0;
     positionCompletionTarget = goalPosition;
     positionSettled = false;
+    if (newGoal) positionCompleted = false;
 }
 
 bool Motor::Controller::TickPositionCompletion()
@@ -724,20 +725,24 @@ bool Motor::Controller::TickPositionCompletion()
     const int32_t tolerance = PositionToleranceSteps(static_cast<uint8_t>(boardConfig.canNodeId));
     if (positionCompletionTarget != goalPosition || modeRunning != MODE_COMMAND_POSITION ||
         requestMode != MODE_COMMAND_POSITION || IsSoftStopLocked() || !IsFeedbackValid() ||
-        goalDisable || softDisable || goalBrake || softBrake || isStalled || overloadFlag ||
-        softPosition != goalPosition || softVelocity != 0 || error < -tolerance || error > tolerance)
+        goalDisable || softDisable || goalBrake || softBrake || isStalled || overloadFlag)
+    {
+        ResetPositionCompletion(true);
+        return false;
+    }
+    if (softPosition != goalPosition || softVelocity != 0 || error < -tolerance || error > tolerance)
     {
         ResetPositionCompletion();
-        return false;
+        return boardConfig.canNodeId != 8 && positionCompleted;
     }
     if (!positionStableTicks && !positionSettled)
         positionStableMin = positionStableMax = realPosition;
     if (realPosition < positionStableMin) positionStableMin = realPosition;
     if (realPosition > positionStableMax) positionStableMax = realPosition;
-    if (static_cast<int64_t>(positionStableMax) - positionStableMin > STABLE_RANGE_STEPS)
+    if (static_cast<int64_t>(positionStableMax) - positionStableMin > StableRangeSteps(boardConfig.canNodeId))
     {
         ResetPositionCompletion();
-        return false;
+        return boardConfig.canNodeId != 8 && positionCompleted;
     }
     positionVelocitySum += estVelocity;
     if (++positionStableTicks >= STABLE_TICKS)
@@ -746,14 +751,15 @@ bool Motor::Controller::TickPositionCompletion()
         if (positionVelocitySum < -limit || positionVelocitySum > limit)
         {
             ResetPositionCompletion();
-            return false;
+            return boardConfig.canNodeId != 8 && positionCompleted;
         }
         positionSettled = true;
+        positionCompleted = true;
         positionStableTicks = 0;
         positionStableMin = positionStableMax = realPosition;
         positionVelocitySum = 0;
     }
-    return positionSettled;
+    return boardConfig.canNodeId == 8 ? positionSettled : positionCompleted;
 }
 
 uint8_t Motor::Controller::GetPositionCompletionStatus(float expectedMotorR) const
@@ -766,13 +772,16 @@ uint8_t Motor::Controller::GetPositionCompletionStatus(float expectedMotorR) con
     if (expectedSteps < -2147483648.0f || expectedSteps >= 2147483648.0f) return flags;
     const int64_t expected = static_cast<int32_t>(expectedSteps) +
                              static_cast<int64_t>(context->config.motionParams.encoderHomeOffset);
+    if (IsFeedbackValid()) flags |= ENCODER_READY;
+    if (softPosition == goalPosition && softVelocity == 0) flags |= PLANNER_READY;
+    const int64_t error = static_cast<int64_t>(realPosition) - goalPosition;
+    const int32_t tolerance = PositionToleranceSteps(static_cast<uint8_t>(boardConfig.canNodeId));
+    if (error >= -tolerance && error <= tolerance) flags |= POSITION_READY;
     if (expected != goalPosition || modeRunning != MODE_COMMAND_POSITION ||
         requestMode != MODE_COMMAND_POSITION || IsSoftStopLocked() || !IsFeedbackValid() ||
         goalDisable || softDisable || goalBrake || softBrake || isStalled || overloadFlag)
         return flags;
     flags |= TARGET_READY;
-    const int64_t error = static_cast<int64_t>(realPosition) - goalPosition;
-    const int32_t tolerance = PositionToleranceSteps(static_cast<uint8_t>(boardConfig.canNodeId));
     if (positionSettled && positionCompletionTarget == goalPosition && state == STATE_FINISH &&
         softPosition == goalPosition && softVelocity == 0 && error >= -tolerance && error <= tolerance)
         flags |= SETTLED;

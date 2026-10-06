@@ -71,7 +71,8 @@ public:
     void EraseConfigs();
 
     void UpdateAngle();
-    void QueryPositionCompletion(float expectedMotorR, uint32_t nonce);
+    bool QueryPositionCompletion(float expectedMotorR, uint32_t nonce, uint32_t epoch, uint32_t generation);
+    bool SendMotionTarget(float signedMotorR, float velocity, uint32_t epoch, uint32_t generation);
     void UpdateAngleCallback(float _pos, bool _isFinished);
 
 

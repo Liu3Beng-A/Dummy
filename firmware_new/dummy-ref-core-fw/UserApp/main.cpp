@@ -30,6 +30,7 @@ void ThreadControlLoopFixUpdate(void* argument)
         queryTick++;
         dummy.PollSoftStop();
         dummy.PollProtection();
+        dummy.PollMotionCompletion();
 
         if (dummy.IsEnabled())
         {
@@ -41,7 +42,7 @@ void ThreadControlLoopFixUpdate(void* argument)
                 case DummyRobot::COMMAND_CONTINUES_TRAJECTORY:
                     dummy.MoveJoints(dummy.targetJoints);
                     dummy.UpdateJointPose6D();
-                    if ((queryTick & 0x03) == 0)
+                    if (dummy.IsMotionBusy() || (queryTick & 0x03) == 0)
                         dummy.UpdateJointAngles();
                     break;
                 case DummyRobot::COMMAND_MOTOR_TUNING:
@@ -97,6 +98,7 @@ void ThreadOledUpdate(void* argument)
         //   #GET_PID 0 ALL 模式 32 帧回包由 OledTask 分行打印；< 50µs 开销
         dummy.PollPidPrint();
         dummy.PollStopPrint();
+        dummy.commandHandler.PollCancelled();
         dummy.PollProtectionPrint();
         dummy.PollMotorAccelerationSync();
 

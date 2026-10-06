@@ -43,6 +43,30 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
     return false;
 }
 
+static bool HandleMotionCommand(const char* cmd, size_t len, StreamSink& response)
+{
+    std::string command(cmd, len);
+    const size_t end = command.find_last_not_of(" \t\r\n");
+    if (end != std::string::npos) command.resize(end + 1);
+    if (command == "#MOTION_STATUS") { dummy.PrintMotionStatus(response); return true; }
+    if (command.rfind("#GET_CMDMODE", 0) == 0) {
+        unsigned long request = 0; char extra;
+        if (command != "#GET_CMDMODE" && sscanf(command.c_str(), "#GET_CMDMODE %lu %c", &request, &extra) != 1) {
+            Respond(response, "error CMDMODE query syntax"); return true;
+        }
+        Respond(response, "ok CMDMODE mode=%u busy=%u issued=%lu req=%lu", unsigned(dummy.commandMode),
+                unsigned(dummy.IsMotionBusy() || dummy.commandHandler.IsBusy()), (unsigned long)dummy.LastIssuedMotionId(), request);
+        return true;
+    }
+    if (command.rfind("#CMDMODE", 0) != 0) return false;
+    unsigned long mode; char tail;
+    if (sscanf(command.c_str(), "#CMDMODE %lu %c", &mode, &tail) != 1 || mode < 1 || mode > 4)
+        Respond(response, "error CMDMODE range=1..4");
+    else if (!dummy.TrySetCommandMode(mode)) Respond(response, "error CMDMODE busy");
+    else Respond(response, "ok CMDMODE mode=%u", unsigned(dummy.commandMode));
+    return true;
+}
+
 static void RespondStackStats(StreamSink& responseChannel)
 {
     // Minimum unused stack since boot, in bytes (not current free stack).
@@ -68,6 +92,7 @@ static bool HandleAccelerationSyncCommand(const char* cmd, size_t len, StreamSin
 void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
+    if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;
     if (HandleAccelerationSyncCommand(_cmd, _len, _responseChannel)) return;
     uint8_t  i;
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
@@ -76,7 +101,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
         std::string s(_cmd);
         if (s.find("HOME") != std::string::npos)
         {
-            Respond(_responseChannel, dummy.commandHandler.PushSystem("!HOME") == 0xFF ?
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!HOME", &_responseChannel) == 0xFF ?
                     "error DISABLED" : "Home pending");
         } else if (s.find("CALIBRATION") != std::string::npos)
         {
@@ -84,7 +109,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
                     "error STOP_LOCKED" : "Calibration pending");
         } else if (s.find("RESET") != std::string::npos)
         {
-            Respond(_responseChannel, dummy.commandHandler.PushSystem("!RESET") == 0xFF ?
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!RESET", &_responseChannel) == 0xFF ?
                     "error DISABLED" : "Reset pending");
         }
         // [Step 3] !HAND_* 12 条命令（运行时 4 条 + 配置 8 条；UART4 仅允许运行时 4 条）
@@ -478,18 +503,12 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
             {
                 Respond(_responseChannel, "error REBOOT MOTOR [%lu] is wrong (range 1~8, 0=ALL)", node);
             }
-        }else if (s.find("CMDMODE") != std::string::npos)
-        {
-            uint32_t mode;
-            sscanf(_cmd, "#CMDMODE %lu", &mode);
-            dummy.SetCommandMode(mode);
-            Respond(_responseChannel, "ok Set command mode to [%lu]", mode);
         } else
             Respond(_responseChannel, "ok");
     } else if (_cmd[0] == '>' || _cmd[0] == '@' || _cmd[0] == '&')
     {
-        uint32_t freeSize = dummy.commandHandler.Push(_cmd);
-        Respond(_responseChannel, "%d", freeSize);
+        if (dummy.commandHandler.Push(_cmd, &_responseChannel) == 0xFF)
+            Respond(_responseChannel, "error motion queue full");
     }
 
 /*---------------------------- ↑ Add Your CMDs Here ↑ -----------------------------*/
@@ -499,13 +518,14 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
+    if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
     if (_cmd[0] == '!' || !dummy.IsEnabled())
     {
         std::string s(_cmd);
         if (s.find("HOME") != std::string::npos)
         {
-            Respond(_responseChannel, dummy.commandHandler.PushSystem("!HOME") == 0xFF ?
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!HOME", &_responseChannel) == 0xFF ?
                     "error DISABLED" : "Home pending");
         } else if (s.find("CALIBRATION") != std::string::npos)
         {
@@ -513,7 +533,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                     "error STOP_LOCKED" : "Calibration pending");
         } else if (s.find("RESET") != std::string::npos)
         {
-            Respond(_responseChannel, dummy.commandHandler.PushSystem("!RESET") == 0xFF ?
+            Respond(_responseChannel, dummy.commandHandler.PushSystem("!RESET", &_responseChannel) == 0xFF ?
                     "error DISABLED" : "Reset pending");
         }
         // [Step 3] UART4 仅允许 !HAND_O/C/POS/I 4 条运行时（顺序匹配避免 !HAND_ONBOOT 抢先匹配 !HAND_O）
@@ -583,18 +603,12 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
                     dummy.currentPose6D.X, dummy.currentPose6D.Y,
                     dummy.currentPose6D.Z, dummy.currentPose6D.A,
                     dummy.currentPose6D.B, dummy.currentPose6D.C);
-        } else if (s.find("CMDMODE") != std::string::npos)
-        {
-            uint32_t mode;
-            sscanf(_cmd, "#CMDMODE %lu", &mode);
-            dummy.SetCommandMode(mode);
-            Respond(_responseChannel, "Set command mode to [%lu]", mode);
         } else
             Respond(_responseChannel, "ok");
     } else if (_cmd[0] == '>' || _cmd[0] == '@' || _cmd[0] == '&')
     {
-        uint32_t freeSize = dummy.commandHandler.Push(_cmd);
-        Respond(_responseChannel, "%d", freeSize);
+        if (dummy.commandHandler.Push(_cmd, &_responseChannel) == 0xFF)
+            Respond(_responseChannel, "error motion queue full");
     }
 /*---------------------------- ↑ Add Your CMDs Here ↑ -----------------------------*/
 }

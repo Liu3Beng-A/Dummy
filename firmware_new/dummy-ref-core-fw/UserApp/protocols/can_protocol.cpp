@@ -46,7 +46,8 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
                 const bool extended = rxHeader->DLC == 8 && (data[4] & MotionCompletionProtocol::REPLY_MARKER);
                 // A fresh invalid snapshot revokes completion immediately while
                 // leaving the last usable pose untouched.
-                if (extended) dummy.MotionCompletionCallback(id, data);
+                if (extended && !dummy.MotionCompletionCallback(id, data)) return;
+                if (!extended) dummy.ObserveMotionFeedback(id, position, data[4] != 0);
                 // Invalid encoder snapshots must not poison pose/IK caches.
                 if ((bits & 0x7f800000U) == 0x7f800000U) return;
                 dummy.ObserveMotorCommunication(id);

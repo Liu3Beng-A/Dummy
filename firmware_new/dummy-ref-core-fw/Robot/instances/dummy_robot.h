@@ -4,6 +4,7 @@
 #include "algorithms/kinematic/6dof_kinematic.h"
 #include "actuators/ctrl_step/ctrl_step.hpp"
 #include "string"
+#include <cstring>
 #define ALL 0
 class ProtectionCoordinator;
 
@@ -234,7 +235,23 @@ public:
     void SetJointAcceleration(float _acc); // 电机轴 r/s²，J1..J7，运行时应用
     void UpdateJointAngles();
     void UpdateJointAnglesCallback();
-    void MotionCompletionCallback(uint8_t node, const uint8_t* data);
+    bool MotionCompletionCallback(uint8_t node, const uint8_t* data);
+    void ObserveMotionFeedback(uint8_t node, float position, bool finished);
+    enum MotionPhase { MOTION_IDLE, MOTION_DISPATCHING, MOTION_RUNNING,
+                       MOTION_COMPLETED, MOTION_CANCELLED, MOTION_FAILED };
+    uint32_t GetMotionGeneration() const { return motionCompletionGeneration; }
+    bool IsMotionBusy() const { return motionActive; }
+    bool CanSendMotion(uint32_t epoch, uint32_t generation) const {
+        return motionActive && isEnabled && !IsStopLocked() &&
+               epoch == motionEpoch && generation == motionCompletionGeneration;
+    }
+    void PollMotionCompletion();
+    void CancelMotion();
+    bool WaitMotionCompletion(uint32_t id, uint32_t epoch);
+    bool TrySetCommandMode(uint32_t mode);
+    void PrintMotionStatus(StreamSink& response);
+    uint32_t AllocateMotionTaskId() { if (!++issuedMotionId) ++issuedMotionId; return issuedMotionId; }
+    uint32_t LastIssuedMotionId() const { return issuedMotionId; }
     void UpdateJointPose6D();
     void Reboot();
     /** 重启全部电机 + 夹爪（**不**重启主控系统）。用于串口 #REBOOT 0。
@@ -306,10 +323,21 @@ public:
         explicit CommandHandler(DummyRobot* _context) : context(_context)
         {
             commandFifo = osMessageQueueNew(16, sizeof(QueueItem), nullptr);
+            cancelledFifo = osMessageQueueNew(32, sizeof(CancelledItem), nullptr);
         }
 
-        uint32_t Push(const std::string &_cmd);
-        uint32_t PushSystem(const std::string& cmd);
+        uint32_t Push(const std::string &_cmd, StreamSink* response = nullptr);
+        uint32_t PushSystem(const std::string& cmd, StreamSink* response = nullptr);
+        bool IsBusy() const { return parsing || osMessageQueueGetSpace(commandFifo) != 16; }
+        void PollCancelled();
+        uint32_t CancellationNoticeLosses() const { return droppedCancellationNotices; }
+        static const char* Name(const std::string& cmd) {
+            return Name(cmd.c_str());
+        }
+        static const char* Name(const char* cmd) {
+            return std::strcmp(cmd, "!HOME") == 0 ? "HOME" : std::strcmp(cmd, "!RESET") == 0 ? "RESET" :
+                   std::strcmp(cmd, "!CALIBRATION") == 0 ? "CALIBRATION" : cmd[0] == '@' ? "MOVEL" : "MOVEJ";
+        }
         bool IsTaskCancelled() const { return parsing && activeEpoch != context->GetMotionEpoch(); }
         std::string Pop(uint32_t timeout);
         uint32_t ParseCommand(const std::string &_cmd);
@@ -322,7 +350,21 @@ public:
         DummyRobot* context;
         osMessageQueueId_t commandFifo;
         char strBuffer[64]{};
-        struct QueueItem { uint32_t epoch; char command[64]; };
+        struct QueueItem {
+            uint32_t epoch, id;
+            CommandMode mode;
+            StreamSink* response;
+            char command[64];
+        };
+        struct CancelledItem { uint32_t id; StreamSink* response; const char* kind; };
+        osMessageQueueId_t cancelledFifo;
+        uint32_t poppedId = 0;
+        CommandMode poppedMode = COMMAND_TARGET_POINT_INTERRUPTABLE;
+        StreamSink* poppedResponse = nullptr;
+        volatile uint32_t announcedId[3] = {};
+        uint32_t droppedCancellationNotices = 0;
+        void Announce(const QueueItem& item);
+        bool IsAnnounced(uint32_t id, StreamSink* response) const;
         uint32_t poppedEpoch = 0;
         bool parsing = false;
         uint32_t activeEpoch = 0;
@@ -381,10 +423,30 @@ private:
     volatile uint32_t motionReplyAt[8] = {};
     volatile float motionMotorTargets[8] = {};
     volatile uint16_t motionConfirmedMask = 0;
+    volatile MotionPhase motionPhase = MOTION_IDLE;
+    volatile uint32_t motionTaskId = 0;
+    uint32_t issuedMotionId = 0;
+    uint32_t motionTaskEpoch = 0, motionStartedAt = 0, motionCompletedAt = 0;
+    CommandMode motionMode = DEFAULT_COMMAND_MODE;
+    const char* motionKind = "MOVEJ";
+    float motionMotorSpeeds[8] = {};
+    volatile uint16_t motionTargetReadyMask = 0, motionSentMask = 0;
+    volatile uint16_t motionProgressMask = 0;
+    uint32_t motionSendAt[8] = {}, motionQueryAttemptAt[8] = {};
+    volatile uint32_t motionRound = 0;
+    volatile uint32_t motionQueryRound[8] = {};
+    uint32_t motionRoundAt = 0;
+    volatile uint16_t motionRoundSeenMask = 0, motionRoundGoodMask = 0;
+    volatile uint8_t motionReplyFlags[8] = {};
+    volatile float motionReplyPositions[8] = {};
+    volatile uint32_t motionRejectedReplies = 0;
+    uint32_t motionSendCount = 0, motionQueryCount = 0;
+    uint8_t motionQueryNode = 1;
+    void BeginMotionRound();
     uint16_t FreshMotionCompletionMask();
     bool NeedsMotionCompletion() const {
-        return isEnabled && motionActive && commandMode >= COMMAND_TARGET_POINT_SEQUENTIAL &&
-               commandMode <= COMMAND_CONTINUES_TRAJECTORY && !IsStopLocked();
+        return isEnabled && motionActive && motionMode >= COMMAND_TARGET_POINT_SEQUENTIAL &&
+               motionMode <= COMMAND_CONTINUES_TRAJECTORY && !IsStopLocked();
     }
     volatile bool stopNeedsSend = false;
     uint8_t stopPollNode = 1;
@@ -405,11 +467,11 @@ private:
     bool stopDiagPending = false;
     void ResetStopDiagnostics();
     bool PlanMoveJ(float j1, float j2, float j3, float j4, float j5, float j6,
-                   float rail, float speed, uint32_t epoch);
-    bool PlanMoveL(float x, float y, float z, float a, float b, float c, uint32_t epoch);
+                   float rail, float speed, uint32_t epoch, uint32_t id = 0, const char* kind = "MOVEJ");
+    bool PlanMoveL(float x, float y, float z, float a, float b, float c, uint32_t epoch, uint32_t id = 0);
     void SetMotionSpeed(float speed, uint32_t epoch);
-    bool HomingForGeneration(uint32_t epoch);
-    bool RestingForGeneration(uint32_t epoch);
+    bool HomingForGeneration(uint32_t epoch, uint32_t id = 0);
+    bool RestingForGeneration(uint32_t epoch, uint32_t id = 0);
     void CalibrateForGeneration(uint32_t epoch);
     void RebootForGeneration(uint32_t epoch);
     bool isRGBEnabled = true;
