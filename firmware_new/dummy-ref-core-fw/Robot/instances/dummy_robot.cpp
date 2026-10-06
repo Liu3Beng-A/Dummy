@@ -371,24 +371,32 @@ void DummyRobot::PollPidPrint()
 
 void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t)
 {
-    float targets[8], speeds[8]; uint32_t epoch, generation;
+    float targets[8], speeds[8]; uint32_t epoch, generation; uint8_t first;
     taskENTER_CRITICAL();
     epoch = motionTaskEpoch; generation = motionCompletionGeneration;
     if (!CanSendMotion(epoch, generation)) { taskEXIT_CRITICAL(); return; }
     for (uint8_t n = 1; n <= 7; ++n) {
         targets[n] = motionMotorTargets[n]; speeds[n] = motionMotorSpeeds[n];
     }
+    first = motionSendCursor;
+    motionSendCursor = first == 7 ? 1 : first + 1;
     taskEXIT_CRITICAL();
-    for (uint8_t n = 1; n <= 7; ++n) {
+    for (uint8_t offset = 0; offset < 7; ++offset) {
+        const uint8_t n = (first - 1 + offset) % 7 + 1;
         taskENTER_CRITICAL();
-        const bool needed = CanSendMotion(epoch, generation) && !(motionTargetReadyMask & (1U << n)) &&
-            (!(motionSentMask & (1U << n)) || HAL_GetTick() - motionSendAt[n] >= 100);
-        if (needed) motionSendAt[n] = HAL_GetTick();
+        const uint16_t bit = 1U << n;
+        const bool needed = CanSendMotion(epoch, generation) && !(motionTxOkMask & bit) &&
+            !(motionTxPendingMask & bit) && motionTxAttempts[n] < MOTION_TX_MAX_ATTEMPTS &&
+            static_cast<int32_t>(HAL_GetTick() - motionRetryAt[n]) >= 0;
+        if (needed) motionTxPendingMask |= bit; // Reserve before a wait or an immediate IRQ result.
         taskEXIT_CRITICAL();
         if (!CanSendMotion(epoch, generation)) return;
-        if (needed && motorJ[n]->SendMotionTarget(targets[n], speeds[n], epoch, generation)) {
+        if (needed && !motorJ[n]->SendMotionTarget(targets[n], speeds[n], epoch, generation)) {
             taskENTER_CRITICAL();
-            if (CanSendMotion(epoch, generation)) { motionSentMask |= 1U << n; ++motionSendCount; }
+            if (CanSendMotion(epoch, generation)) {
+                motionTxPendingMask &= ~bit;
+                motionRetryAt[n] = HAL_GetTick() + 5;
+            }
             taskEXIT_CRITICAL();
         }
     }
@@ -479,6 +487,9 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
     jointsStateFlag = 0;
     ++motionCompletionGeneration;
     motionConfirmedMask = motionTargetReadyMask = motionSentMask = motionProgressMask = 0;
+    motionTxPendingMask = motionTxOkMask = motionTxHistoryMask = 0;
+    motionSendCursor = 1; motionMovingMask = 0; motionFailureReason = nullptr;
+    motionPlanMs = timeBudget * 1000.0f;
     motionTaskId = id ? id : AllocateMotionTaskId();
     motionTaskEpoch = epoch; motionMode = commandMode; motionKind = kind;
     motionStartedAt = HAL_GetTick(); motionCompletedAt = 0;
@@ -489,6 +500,16 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
         motionQueryNonce[node] = 0;
         motionMotorSpeeds[node] = outSpeeds[node == 7 ? 0 : node];
         motionReplyAt[node] = motionReplyFlags[node] = 0;
+        motionRetryAt[node] = motionStartedAt;
+        motionTxAttempts[node] = motionTxFailures[node] = 0;
+        motionFirstTxMs[node] = motionFirstReadyMs[node] = MOTION_TIME_MISSING;
+        motionFirstPlannerMs[node] = motionFirstPositionMs[node] = motionFirstSettledMs[node] = MOTION_TIME_MISSING;
+        const uint8_t index = node == 7 ? 0 : node;
+        motionPlanAcceleration[node] = jointAcc[index] > 1e-6f ? jointAcc[index] : JOINT_ACC_FALLBACK[index];
+        motionPlanDistance[node] = node == 7 ? fabsf(deltaRails[0]) / RAIL_MM_PER_CIRCLE :
+                                   fabsf(deltaRails[node]) * MOTOR_REDUCTION[node] / 360.0f;
+        if (motionPlanDistance[node] > static_cast<float>(MotionCompletionProtocol::PositionToleranceSteps(node)) /
+                                       MotionCompletionProtocol::STEPS_PER_REV) motionMovingMask |= 1U << node;
         motionReplyPositions[node] = motorJ[node]->angle / 360.0f * motorJ[node]->reduction *
                                     (motorJ[node]->inverseDirection ? -1.0f : 1.0f);
         float motorR = node == 7 ? _j7_mm / RAIL_MM_PER_CIRCLE :
@@ -501,6 +522,7 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
     motionDispatchPending = true;
     motionPhase = MOTION_DISPATCHING;
     BeginMotionRound();
+    PollCanMotionTransmit(get_can_ctx(hcan)); // Abort only older task identities, before new dispatch.
     taskEXIT_CRITICAL();
 
     return true;
@@ -581,7 +603,7 @@ void DummyRobot::UpdateJointAngles()
     const uint32_t generation = motionCompletionGeneration, epoch = motionTaskEpoch;
     const float target = motionMotorTargets[node];
     uint32_t nonce = 0;
-    if (confirming && !(motionRoundSeenMask & (1U << node))) {
+    if (confirming && (motionTxOkMask & (1U << node)) && !(motionRoundSeenMask & (1U << node))) {
         const uint32_t now = HAL_GetTick();
         if (!motionQueryNonce[node]) {
             do { motionQueryNonce[node] = ++motionQueryCounter & MotionCompletionProtocol::NONCE_MASK; }
@@ -628,6 +650,7 @@ bool DummyRobot::MotionCompletionCallback(uint8_t node, const uint8_t* data)
 {
     using namespace MotionCompletionProtocol;
     if (node < 1 || node > 7 || !NeedsMotionCompletion() || !(data[4] & REPLY_MARKER)) return false;
+    if (!(motionTxOkMask & (1U << node))) { ++motionRejectedReplies; return false; }
     const uint32_t nonce = Nonce(data), now = HAL_GetTick();
     if (!nonce || nonce != motionQueryNonce[node] ||
         motionQueryGeneration[node] != motionCompletionGeneration || motionQueryRound[node] != motionRound ||
@@ -640,13 +663,56 @@ bool DummyRobot::MotionCompletionCallback(uint8_t node, const uint8_t* data)
     const bool finished = MotionCompletionProtocol::Finite(position) && (data[4] & (TARGET_READY | SETTLED)) == (TARGET_READY | SETTLED) &&
                           error >= -tolerance && error <= tolerance;
     motionReplyAt[node] = now; motionReplyFlags[node] = data[4]; motionReplyPositions[node] = position;
-    if (data[4] & TARGET_READY) motionTargetReadyMask |= bit;
-    else motionTargetReadyMask &= ~bit;
+    if (data[4] & TARGET_READY) {
+        motionTargetReadyMask |= bit;
+        const uint32_t elapsed = now - motionStartedAt;
+        if (motionFirstReadyMs[node] == MOTION_TIME_MISSING) motionFirstReadyMs[node] = elapsed;
+        if ((data[4] & PLANNER_READY) && motionFirstPlannerMs[node] == MOTION_TIME_MISSING) motionFirstPlannerMs[node] = elapsed;
+        if ((data[4] & POSITION_READY) && motionFirstPositionMs[node] == MOTION_TIME_MISSING) motionFirstPositionMs[node] = elapsed;
+        if (finished && motionFirstSettledMs[node] == MOTION_TIME_MISSING) motionFirstSettledMs[node] = elapsed;
+    } else {
+        // A fresh post-TXOK query says the addressed node has not accepted the
+        // goal. Retry the immutable target, then require another fresh nonce.
+        motionTargetReadyMask &= ~bit; motionTxOkMask &= ~bit;
+        motionRetryAt[node] = now + 5;
+    }
     motionRoundSeenMask |= bit;
     if (finished) {
         motionConfirmedMask |= bit; motionRoundGoodMask |= bit; motionProgressMask |= bit;
     } else { motionConfirmedMask &= ~bit; motionRoundGoodMask &= ~bit; }
     return true;
+}
+
+void DummyRobot::MotionTargetQueued(uint8_t node, uint32_t epoch, uint32_t generation)
+{
+    // Caller holds the CAN send critical section. HAL acceptance is not TXOK.
+    if (node < 1 || node > 7 || !CanSendMotion(epoch, generation)) return;
+    const uint16_t bit = 1U << node;
+    motionSentMask |= bit; motionTxPendingMask |= bit;
+    ++motionTxAttempts[node]; ++motionSendCount;
+    motionSendAt[node] = HAL_GetTick();
+    motionQueryNonce[node] = 0;
+    motionTargetReadyMask &= ~bit; motionConfirmedMask &= ~bit;
+    motionRoundSeenMask &= ~bit; motionRoundGoodMask &= ~bit;
+}
+
+void DummyRobot::MotionTargetResult(uint8_t node, uint32_t epoch, uint32_t generation, bool delivered)
+{
+    // CAN ISR and receive ISR share priority 5; task-side mutations hold a
+    // critical section. Late results release CAN ownership but cannot touch a new task.
+    if (node < 1 || node > 7 || !CanSendMotion(epoch, generation)) return;
+    const uint16_t bit = 1U << node;
+    motionTxPendingMask &= ~bit;
+    motionQueryNonce[node] = 0;
+    if (delivered) {
+        motionTxOkMask |= bit; motionTxHistoryMask |= bit;
+        if (motionFirstTxMs[node] == MOTION_TIME_MISSING) motionFirstTxMs[node] = HAL_GetTick() - motionStartedAt;
+    } else {
+        motionTxOkMask &= ~bit;
+        ++motionTxFailures[node];
+        // 5/10/15ms backoff plus a rotating send cursor avoids a fixed collision phase.
+        motionRetryAt[node] = HAL_GetTick() + 5U * (1U + ((node + motionTxAttempts[node]) % 3U));
+    }
 }
 
 
@@ -1036,6 +1102,9 @@ void DummyRobot::PollStopPrint()
     uint8_t phases[9] = {};
     uint16_t rxTokens[9] = {}, expectedTokens[9] = {};
     taskENTER_CRITICAL();
+    const bool printMotionFailure = motionFailurePrintPending;
+    const MotionFailureNotice motionFailure = motionFailureNotice;
+    motionFailurePrintPending = false;
     const char* notice = pendingStopNotice;
     pendingStopNotice = nullptr;
     const uint16_t faults = stopFaultMask & ~stopFaultPrinted;
@@ -1065,6 +1134,12 @@ void DummyRobot::PollStopPrint()
     }
     taskEXIT_CRITICAL();
     // This runs in the display task; USB/UART send waits never block motor control.
+    if (printMotionFailure) {
+        Respond(*usbStreamOutputPtr, "MOTION fail id=%lu reason=%s", (unsigned long)motionFailure.id, motionFailure.reason);
+        Respond(*usbStreamOutputPtr, "MOTION wait=%03X txok=%03X ready=%03X", motionFailure.wait, motionFailure.txok, motionFailure.ready);
+        for (uint8_t node = 1; node <= 7; ++node) if (motionFailure.wait & (1U << node))
+            Respond(*usbStreamOutputPtr, "MOTION J%u target not confirmed", node);
+    }
     if (notice)
     {
         Respond(*usbStreamOutputPtr, "%s", notice);
@@ -1242,6 +1317,9 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string& cmd)
             planned = context->PlanMoveL(p[0], p[1], p[2], p[3], p[4], p[5], epoch, id);
         }
     }
+    if (context->motionTaskId == id && context->motionPhase == MOTION_FAILED && context->motionFailureReason) {
+        failure(context->motionFailureReason); return GetSpace();
+    }
     if (!planned) {
         const bool aborted = cancelled() || planningGeneration != context->motionCompletionGeneration;
         if (!aborted) {
@@ -1255,7 +1333,10 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string& cmd)
         }
         failure(aborted ? "CANCELLED" : mode > COMMAND_CONTINUES_TRAJECTORY ? "MODE_UNSUPPORTED" : "PLAN_FAILED"); return GetSpace();
     }
-    if (wait && !context->WaitMotionCompletion(id, epoch)) { failure("CANCELLED"); return GetSpace(); }
+    if (wait && !context->WaitMotionCompletion(id, epoch)) {
+        failure(context->motionTaskId == id && context->motionPhase == MOTION_FAILED && context->motionFailureReason ?
+                context->motionFailureReason : "CANCELLED"); return GetSpace();
+    }
     taskENTER_CRITICAL();
     const bool successful = !cancelled() && context->motionTaskId == id &&
         (!wait || context->motionPhase == MOTION_COMPLETED);
@@ -1338,9 +1419,25 @@ void DummyRobot::ObserveMotionFeedback(uint8_t node, float position, bool finish
 
 void DummyRobot::PollMotionCompletion()
 {
+    PollCanMotionTransmit(get_can_ctx(hcan));
     taskENTER_CRITICAL();
     if (motionActive && (!isEnabled || IsStopLocked() || motionTaskEpoch != motionEpoch)) CancelMotion();
     if (NeedsMotionCompletion()) {
+        const char* failure = nullptr;
+        uint16_t wait = 0;
+        for (uint8_t n = 1; n <= 7; ++n)
+            if (!(motionTxOkMask & (1U << n)) && !(motionTxPendingMask & (1U << n)) &&
+                motionTxAttempts[n] >= MOTION_TX_MAX_ATTEMPTS) wait |= 1U << n;
+        if (wait) failure = "TARGET_TX_RETRIES";
+        else if (HAL_GetTick() - motionStartedAt >= MOTION_TX_TIMEOUT_MS && motionTxHistoryMask != 0xFE) {
+            wait = 0xFE & ~motionTxHistoryMask; failure = "TARGET_TX_TIMEOUT";
+        } else if (HAL_GetTick() - motionStartedAt >= MOTION_READY_TIMEOUT_MS && motionTargetReadyMask != 0xFE) {
+            wait = 0xFE & ~motionTargetReadyMask; failure = "TARGET_READY_TIMEOUT";
+        }
+        if (failure) {
+            FailMotionDispatch(motionTaskEpoch, motionCompletionGeneration, failure, wait);
+            taskEXIT_CRITICAL(); return;
+        }
         motionDispatchPending = (motionTargetReadyMask & 0xFE) != 0xFE;
         motionPhase = motionDispatchPending ? MOTION_DISPATCHING : MOTION_RUNNING;
         if (!motionDispatchPending && motionRoundSeenMask == 0xFE && motionRoundGoodMask == 0xFE &&
@@ -1354,14 +1451,31 @@ void DummyRobot::PollMotionCompletion()
     taskEXIT_CRITICAL();
 }
 
+void DummyRobot::FailMotionDispatch(uint32_t epoch, uint32_t generation, const char* reason, uint16_t wait)
+{
+    taskENTER_CRITICAL();
+    if (CanSendMotion(epoch, generation)) {
+        motionFailureReason = reason;
+        motionFailureNotice = {motionTaskId, reason, wait, motionTxOkMask, motionTargetReadyMask};
+        motionFailurePrintPending = true;
+        motionPhase = MOTION_FAILED; motionCompletedAt = HAL_GetTick(); motionActive = false;
+        // Atomically block new ordinary targets, then use the existing seven-axis
+        // soft-stop/hold path. No automatic resumption or default power-off.
+        RequestSoftStop();
+    }
+    taskEXIT_CRITICAL();
+}
+
 void DummyRobot::CancelMotion()
 {
     taskENTER_CRITICAL();
-    if (motionActive) motionPhase = MOTION_CANCELLED;
+    if (motionActive) { motionPhase = MOTION_CANCELLED; motionCompletedAt = HAL_GetTick(); }
     motionActive = motionDispatchPending = false;
     ++motionCompletionGeneration;
+    motionTxPendingMask = 0;
     motionConfirmedMask = motionRoundSeenMask = motionRoundGoodMask = 0;
     for (uint8_t n = 1; n <= 7; ++n) motionQueryNonce[n] = 0;
+    PollCanMotionTransmit(get_can_ctx(hcan));
     taskEXIT_CRITICAL();
 }
 
@@ -1385,18 +1499,26 @@ bool DummyRobot::TrySetCommandMode(uint32_t mode)
 void DummyRobot::PrintMotionStatus(StreamSink& response)
 {
     uint32_t id, elapsed, rejected, sends, queries, ages[8];
-    uint16_t ready, live, progress; MotionPhase phase; CommandMode mode;
-    float goals[8], actual[8]; uint8_t flags[8]; const char* kind;
+    uint32_t tx[8], readyAt[8], planner[8], position[8], settled[8];
+    uint16_t ready, live, progress, txok, pending, moving; MotionPhase phase; CommandMode mode;
+    float goals[8], actual[8], speeds[8], acceleration[8], distance[8], planMs;
+    uint8_t flags[8], attempts[8], failures[8]; const char* kind;
     taskENTER_CRITICAL();
     id = motionTaskId; kind = motionKind; phase = motionPhase; mode = motionMode;
-    elapsed = (phase == MOTION_COMPLETED ? motionCompletedAt : HAL_GetTick()) - motionStartedAt;
+    elapsed = (phase == MOTION_COMPLETED || phase == MOTION_CANCELLED || phase == MOTION_FAILED ?
+               motionCompletedAt : HAL_GetTick()) - motionStartedAt;
     ready = motionTargetReadyMask; live = motionConfirmedMask; progress = motionProgressMask;
+    txok = motionTxOkMask; pending = motionTxPendingMask; moving = motionMovingMask; planMs = motionPlanMs;
     rejected = motionRejectedReplies; sends = motionSendCount; queries = motionQueryCount;
     for (uint8_t n = 1; n <= 7; ++n) {
         goals[n] = motionMotorTargets[n];
         actual[n] = motorJ[n]->angle / 360.0f * motorJ[n]->reduction *
                     (motorJ[n]->inverseDirection ? -1.0f : 1.0f);
         flags[n] = motionReplyFlags[n]; ages[n] = HAL_GetTick() - motionReplyAt[n];
+        tx[n] = motionFirstTxMs[n]; readyAt[n] = motionFirstReadyMs[n];
+        planner[n] = motionFirstPlannerMs[n]; position[n] = motionFirstPositionMs[n]; settled[n] = motionFirstSettledMs[n];
+        speeds[n] = motionMotorSpeeds[n]; acceleration[n] = motionPlanAcceleration[n]; distance[n] = motionPlanDistance[n];
+        attempts[n] = motionTxAttempts[n]; failures[n] = motionTxFailures[n];
     }
     taskEXIT_CRITICAL();
     Respond(response, "MOTION id=%lu kind=%s phase=%u mode=%u ms=%lu", (unsigned long)id, kind,
@@ -1404,11 +1526,33 @@ void DummyRobot::PrintMotionStatus(StreamSink& response)
     Respond(response, "MOTION ready=%03X confirmed=%03X progress=%03X", ready, live, progress);
     Respond(response, "MOTION send=%lu query=%lu reject=%lu", (unsigned long)sends,
             (unsigned long)queries, (unsigned long)rejected);
+    Respond(response, "MOTION plan_ms=%.1f moving=%03X txok=%03X pending=%03X", double(planMs), moving, txok, pending);
+    const auto spread = [&](const uint32_t* times) -> uint32_t {
+        uint32_t first = MOTION_TIME_MISSING, last = 0;
+        if (!moving) return 0;
+        for (uint8_t n = 1; n <= 7; ++n) if (moving & (1U << n)) {
+            if (times[n] == MOTION_TIME_MISSING) return MOTION_TIME_MISSING;
+            if (times[n] < first) first = times[n];
+            if (times[n] > last) last = times[n];
+        }
+        return last - first;
+    };
+    Respond(response, "MOTION spread tx=%ld settled_obs=%ld", (long)spread(tx), (long)spread(settled));
+    CAN_context* ctx = get_can_ctx(hcan);
+    if (ctx) Respond(response, "MOTION CAN alst=%lu terr=%lu busy=%lu", (unsigned long)ctx->tx_arbitration_losses,
+                     (unsigned long)ctx->tx_transmission_errors, (unsigned long)ctx->tx_busy_errors);
     if (commandHandler.CancellationNoticeLosses())
         Respond(response, "MOTION cancelled_drop=%lu", (unsigned long)commandHandler.CancellationNoticeLosses());
-    for (uint8_t n = 1; n <= 7; ++n)
+    for (uint8_t n = 1; n <= 7; ++n) {
         Respond(response, "MOTION J%u goal=%.4f real=%.4f f=%02X age=%lu", n,
                 double(goals[n]), double(actual[n]), flags[n], (unsigned long)ages[n]);
+        Respond(response, "MOTION J%u tx=%ld ready=%ld try=%u fail=%u", n,
+                (long)tx[n], (long)readyAt[n], attempts[n], failures[n]);
+        Respond(response, "MOTION J%u plan=%ld pos=%ld settled=%ld", n,
+                (long)planner[n], (long)position[n], (long)settled[n]);
+        Respond(response, "MOTION J%u v=%.5f a=%.3f d=%.4f", n,
+                double(speeds[n]), double(acceleration[n]), double(distance[n]));
+    }
 }
 
 bool DummyRobot::CommandHandler::IsAnnounced(uint32_t id, StreamSink* response) const

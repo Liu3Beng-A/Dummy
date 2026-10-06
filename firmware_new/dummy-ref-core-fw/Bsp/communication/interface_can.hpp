@@ -16,6 +16,13 @@ struct CAN_context
 
     uint32_t last_heartbeat_mailbox = 0;
     volatile uint32_t inFlightMailboxes = 0;
+    // Only ordinary 0x07 targets carry a task identity. Keep it until the
+    // hardware result is consumed, including cancellation/abort completion.
+    struct MotionTx {
+        uint32_t epoch = 0, generation = 0, queuedAt = 0;
+        uint8_t node = 0;
+        bool aborting = false;
+    } motionTx[3];
     uint32_t tx_msg_cnt = 0;
 
     uint8_t node_id_rng_state = 0;
@@ -46,6 +53,7 @@ bool StartCanServer(CAN_TypeDef* hcan);
 void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader);
 bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader);
 bool CanSendMotionMessage(CAN_context* ctx, uint8_t* data, CAN_TxHeaderTypeDef* header, uint32_t epoch, uint32_t generation);
+void PollCanMotionTransmit(CAN_context* ctx);
 void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* data);
 
 #endif // __INTERFACE_CAN_HPP

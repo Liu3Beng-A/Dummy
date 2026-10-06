@@ -237,6 +237,8 @@ public:
     void UpdateJointAnglesCallback();
     bool MotionCompletionCallback(uint8_t node, const uint8_t* data);
     void ObserveMotionFeedback(uint8_t node, float position, bool finished);
+    void MotionTargetQueued(uint8_t node, uint32_t epoch, uint32_t generation);
+    void MotionTargetResult(uint8_t node, uint32_t epoch, uint32_t generation, bool delivered);
     enum MotionPhase { MOTION_IDLE, MOTION_DISPATCHING, MOTION_RUNNING,
                        MOTION_COMPLETED, MOTION_CANCELLED, MOTION_FAILED };
     uint32_t GetMotionGeneration() const { return motionCompletionGeneration; }
@@ -431,6 +433,25 @@ private:
     const char* motionKind = "MOVEJ";
     float motionMotorSpeeds[8] = {};
     volatile uint16_t motionTargetReadyMask = 0, motionSentMask = 0;
+    volatile uint16_t motionTxPendingMask = 0, motionTxOkMask = 0, motionTxHistoryMask = 0;
+    static constexpr uint32_t MOTION_TX_TIMEOUT_MS = 100, MOTION_READY_TIMEOUT_MS = 300;
+    static constexpr uint8_t MOTION_TX_MAX_ATTEMPTS = 16;
+    static constexpr uint32_t MOTION_TIME_MISSING = UINT32_MAX;
+    uint8_t motionSendCursor = 1;
+    volatile uint32_t motionRetryAt[8] = {};
+    volatile uint8_t motionTxAttempts[8] = {}, motionTxFailures[8] = {};
+    volatile uint32_t motionFirstTxMs[8] = {}, motionFirstReadyMs[8] = {};
+    volatile uint32_t motionFirstPlannerMs[8] = {}, motionFirstPositionMs[8] = {}, motionFirstSettledMs[8] = {};
+    float motionPlanAcceleration[8] = {}, motionPlanDistance[8] = {}, motionPlanMs = 0;
+    uint16_t motionMovingMask = 0;
+    const char* motionFailureReason = nullptr;
+    struct MotionFailureNotice {
+        uint32_t id = 0;
+        const char* reason = nullptr;
+        uint16_t wait = 0, txok = 0, ready = 0;
+    } motionFailureNotice;
+    volatile bool motionFailurePrintPending = false;
+    void FailMotionDispatch(uint32_t epoch, uint32_t generation, const char* reason, uint16_t wait);
     volatile uint16_t motionProgressMask = 0;
     uint32_t motionSendAt[8] = {}, motionQueryAttemptAt[8] = {};
     volatile uint32_t motionRound = 0;

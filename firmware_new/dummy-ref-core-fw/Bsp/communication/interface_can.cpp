@@ -116,20 +116,23 @@ bool StartCanServer(CAN_TypeDef* hcan)
     return true;
 }
 
-void tx_complete_callback(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx)
+static void FinishCanTransmit(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx, bool delivered)
 {
-//    CAN_context* ctx = get_can_ctx(hcan);
-//    if (!ctx) return;
-//    ctx->tx_msg_cnt++;
-
     CAN_context* ctx = get_can_ctx(hcan);
-    if (!ctx || !(ctx->inFlightMailboxes & (1U << mailbox_idx))) return;
+    if (!ctx || mailbox_idx > 2 || !(ctx->inFlightMailboxes & (1U << mailbox_idx))) return;
+    const CAN_context::MotionTx target = ctx->motionTx[mailbox_idx];
+    ctx->motionTx[mailbox_idx] = {};
     ctx->inFlightMailboxes &= ~(1U << mailbox_idx);
+    if (delivered) ++ctx->TxMailboxCompleteCallbackCnt;
+    if (target.node) dummy.MotionTargetResult(target.node, target.epoch, target.generation, delivered);
     if (hcan->Instance == CAN1)
         osSemaphoreRelease(sem_can1_tx);
     else if (hcan->Instance == CAN2)
         osSemaphoreRelease(sem_can2_tx);
 }
+
+void tx_complete_callback(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx)
+{ FinishCanTransmit(hcan, mailbox_idx, true); }
 
 void tx_aborted_callback(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx)
 {
@@ -137,13 +140,13 @@ void tx_aborted_callback(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx)
         return;
     get_can_ctx(hcan)->TxMailboxAbortCallbackCnt++;
     // An aborted protection transmission must not consume the sole send token.
-    tx_complete_callback(hcan, mailbox_idx);
+    FinishCanTransmit(hcan, mailbox_idx, false);
 }
 
 void tx_error(CAN_context* ctx, uint8_t mailbox_idx)
 {
     // HAL TERR calls only ErrorCallback, without complete/abort notification.
-    if (ctx) tx_complete_callback(ctx->handle, mailbox_idx);
+    if (ctx) FinishCanTransmit(ctx->handle, mailbox_idx, false);
 }
 
 void HAL_CAN_TxMailbox0CompleteCallback(CAN_HandleTypeDef* hcan)
@@ -357,10 +360,35 @@ bool CanSendMotionMessage(CAN_context* ctx, uint8_t* data, CAN_TxHeaderTypeDef* 
         taskENTER_CRITICAL();
         const bool current = dummy.CanSendMotion(epoch, generation);
         sent = current && HAL_CAN_AddTxMessage(ctx->handle, header, data, &ctx->last_heartbeat_mailbox) == HAL_OK;
-        if (sent) ctx->inFlightMailboxes |= ctx->last_heartbeat_mailbox;
+        if (sent) {
+            const uint32_t mailbox = ctx->last_heartbeat_mailbox;
+            const uint8_t index = mailbox == CAN_TX_MAILBOX0 ? 0 : mailbox == CAN_TX_MAILBOX1 ? 1 : 2;
+            const uint8_t node = header->StdId >> 7;
+            if ((header->StdId & 0x7F) == 0x07 && node >= 1 && node <= 7) {
+                ctx->motionTx[index] = {epoch, generation, HAL_GetTick(), node, false};
+                dummy.MotionTargetQueued(node, epoch, generation);
+            } else ctx->motionTx[index] = {};
+            ctx->inFlightMailboxes |= mailbox;
+        }
         taskEXIT_CRITICAL();
         if (sent || !current) break;
     } while (micros() - start <= 1000);
     if (!sent) { ++ctx->tx_busy_errors; osSemaphoreRelease(sem); }
     return sent;
+}
+
+void PollCanMotionTransmit(CAN_context* ctx)
+{
+    if (!ctx || !ctx->handle) return;
+    taskENTER_CRITICAL();
+    for (uint8_t index = 0; index < 3; ++index) {
+        CAN_context::MotionTx& target = ctx->motionTx[index];
+        if (!target.node || target.aborting || !(ctx->inFlightMailboxes & (1U << index))) continue;
+        if (!dummy.CanSendMotion(target.epoch, target.generation) || HAL_GetTick() - target.queuedAt >= 20) {
+            // Nonblocking hardware abort. The result callback remains the sole
+            // owner of semaphore release; never reuse a mailbox on a timeout.
+            if (HAL_CAN_AbortTxRequest(ctx->handle, 1U << index) == HAL_OK) target.aborting = true;
+        }
+    }
+    taskEXIT_CRITICAL();
 }
