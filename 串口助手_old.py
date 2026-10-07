@@ -436,12 +436,18 @@ class RobotSerialAssistantOld:
         self.btn_i_save = ttk.Button(i_f, text="保存", command=self._save_i)
         self.btn_i_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
-        # 写入按钮的可用性受节点下拉控制：节点=0 (ALL) 时禁用，避免误写广播
-        # 共 5 个写入按钮：1 个 PID 保存 + 2 个 ACC（应用/保存）+ 2 个 I（应用/保存）
+        self.btn_encoder_cal = ttk.Button(param_f, text="磁编码器校准（选中节点）",
+                                          command=self._cmd_encoder_calibration)
+        self.btn_encoder_cal.pack(fill=tk.X, padx=2, pady=(6, 2))
+        ttk.Label(param_f, text="先失能；校准会正反转，成功后该电机自动重启。",
+                  font=("Arial", 8), foreground="#b26a00").pack(fill=tk.X, padx=2, pady=2)
+
+        # 节点=0 (ALL) 时禁用参数写入和磁编码器校准，避免广播。
         self._write_buttons = [
             self.btn_pid_save,
             self.btn_acc_apply, self.btn_acc_save,
             self.btn_i_apply, self.btn_i_save,
+            self.btn_encoder_cal,
         ]
         self.param_node.trace_add("write", lambda *_: self._update_write_btn_state())
         self._update_write_btn_state()
@@ -922,6 +928,8 @@ class RobotSerialAssistantOld:
             self._handle_communication_protection(line)
         elif line == "error START busy":
             self.log("参数任务正在进行，START 未受理；完成后请重新发送，不会自动使能", "WARN")
+        elif re.fullmatch(r"ok ENC_CAL \[[1-8]\] dispatched", line):
+            self.log("磁编码器校准 CAN 帧已提交；协议没有完成回执，请观察电机校准及重启结果", "INFO")
         self._handle_protection_parameter_status(line)
 
         # 电机参数查询回包解析：节点匹配且非 0 时，把数值回填到右侧 Entry（仅 UI 辅助，不影响主日志）
@@ -1313,7 +1321,7 @@ class RobotSerialAssistantOld:
             entry.insert(0, value)
 
     # ==============================================
-    # 电机参数设置（#SET_PID / #ACC_J / #I_LIMIT_J）
+    # 电机参数设置与磁编码器校准（#SET_PID / #ACC_J / #I_LIMIT_J / #ENC_CAL）
     # 与查询共用 param_node 下拉；写入语义由 panel 注释写明（决策 #1/#2，2026-10-04）：
     #   - #SET_PID        ：永远写 EEPROM（固件无 RAM/EEPROM 区分）
     #   - #ACC_J          ：默认不写 EEPROM；末尾追加 `&` 才写 EEPROM
@@ -1321,6 +1329,37 @@ class RobotSerialAssistantOld:
     # 因此 ACC/I 各有两个回调：_set_* 发不带 & 的命令（应用），
     # _save_* 复用同一份入参校验，仅在 send_cmd 字符串末尾追加 `&`（保存）。
     # ==============================================
+    def _cmd_encoder_calibration(self):
+        """对电机参数区选中的单个节点触发磁编码器校准。"""
+        try:
+            node = self.param_node.get()
+        except (ValueError, tk.TclError):
+            self.log("请选择单个节点 1～8 进行磁编码器校准", "WARN")
+            return
+        if node not in range(1, 9):
+            self.log("磁编码器校准仅支持单个节点 1～8，禁止 ALL 广播", "WARN")
+            return
+        cmd = f"#ENC_CAL {node}"
+        if not self.is_connected or not self.serial_port:
+            self.send_cmd(cmd)
+            return
+        if (self._stop_locked or self._calibration_busy or self._seq_active or self._acc_sync_waiting or
+                not self._motor_state_known or self._motor_enabled):
+            self.log("请先结束当前任务、支撑好机械臂并失能，等待 Disabled ok 后再校准磁编码器", "WARN")
+            return
+        target = f"J{node}" if node <= 6 else "地轨 J7" if node == 7 else "夹爪 J8"
+        if not messagebox.askyesno(
+            "确认磁编码器校准",
+            f"将校准 {target}（节点 {node}）的磁编码器。\n"
+            "该电机会主动正反转采样、写入校准表，成功后自动重启。\n"
+            "请支撑好机械臂，并确认该轴有足够运动空间。\n"
+            "校准期间请勿发送其他控制命令；完成结果需观察电机。\n\n"
+            "确定开始吗？",
+            parent=self.root,
+        ):
+            return
+        self.send_cmd(cmd)
+
     def _set_pid(self):
         """写 4 个 PID 值到指定节点（写 EEPROM，#SET_PID 一次发 4 个值）"""
         try:
@@ -1536,6 +1575,14 @@ class RobotSerialAssistantOld:
         if self._stop_locked and cmd not in ("!STOP", "!START", "!DISABLE"):
             self.log("保护锁定中，仅接受 START、DISABLE；STOP 可中断保护动作", "WARN")
             return False
+        if cmd.startswith("#ENC_CAL"):
+            if re.fullmatch(r"#ENC_CAL[ \t]+[1-8]", cmd) is None:
+                self.log("磁编码器校准格式为 #ENC_CAL <1～8>，禁止 ALL 广播", "WARN")
+                return False
+            if (self._seq_active or self._acc_sync_waiting or
+                    not self._motor_state_known or self._motor_enabled):
+                self.log("请先结束当前任务并失能，等待 Disabled ok 后再校准磁编码器", "WARN")
+                return False
         if cmd == "!CALIBRATION":
             if self._motor_state_known and self._motor_enabled:
                 self._warn_calibration_disabled()

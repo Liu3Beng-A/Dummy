@@ -1,5 +1,14 @@
 # SESSION STATUS（2026-10-06）
 
+## 当前任务：串口助手增加指定节点磁编码器校准（2026-10-07）
+
+- **授权范围**：用户确认执行此前列出的三个文件改动：主控 `UserApp/protocols/ascii_protocol.cpp`、根目录 `串口助手_old.py`、本状态文档；随后明确授权将刚才的改动单独 commit。仅按片段提交本功能及本节状态记录，保留原有未提交改动；未授权烧录或实机运动。
+- **已确认事实**：电机 `UserApp/protocols/interface_can.cpp:80` 的 `0x02` 设置 `encoderCalibrator.isTriggered`；`UserApp/main.cpp:143` 上电时双按钮按下设置同一标志。StdId 为 `(node << 7) | 0x02`，接收入口要求 DLC 至少4；本次发8字节全零标准数据帧。`Ctrl/Sensor/Encoder/encoder_calibrator_base.cpp` 正反转采样、写入校准表，成功后 `HAL_NVIC_SystemReset()`；没有校准完成 CAN 回执。
+- **已排除方向**：不复用 `!CALIBRATION`，该指令是整机坐标置零及 J7/J8 寻限位。电机固件已有磁编码器校准支持，无需修改；Fibre 的 `do_calibration` 定义不等于现有 ASCII 串口入口。节点0是广播，拒绝磁编码器校准 ALL。
+- **最新改动**：主控 USB 新增严格匹配的 `#ENC_CAL <1..8>`，仅在失能且无运动/保护/队列任务时提交 CAN `0x02`；通过现有 `TrySendProtection` 使用局部全零帧并检查提交结果，回复 `ok ENC_CAL [n] dispatched` 或发送错误，UART4 明确 forbidden。上位机电机参数区增加“磁编码器校准（选中节点）”，沿用节点选择并在0禁用；校准前确认节点/运动/写表/重启，按钮及手输命令均要求已收到失能状态且无活动任务。回复仅提示 CAN 帧提交，不宣称校准完成。
+- **验证结果**：主控 `dummy-ref-core-fw/build` 中 Ninja 编译成功，生成 ELF/HEX/BIN，FLASH 433632 B、普通 RAM 56384 B；链接器报告 LOAD RWX 警告，本次未改链接脚本。使用真实隐藏 Tk 控件及模拟串口，验证节点1～8发送、0禁用、非法节点拒绝、取消确认不发送、使能/未知/锁定/任务忙拒绝、弹窗后状态再次检查、发送线程实际写出 `#ENC_CAL n\n`、dispatched回复仅打印发送提示；初次测试发现确认分支写反，已修正并通过复测。提取真实 ASCII 解析函数及真实 `CtrlStepMotor::TrySendProtection` 做临时本机编译测试，验证节点路由、StdId/DLC/全零数据、空参数/ALL/符号/溢出/多余参数拒绝、门禁、CAN失败/空节点错误、UART4 forbidden、不吞无关指令；全部通过。临时本机测试产物已清理，不连接真实串口或机械臂。
+- **未完成/待确认**：改动与离线验证完成，按用户授权单独提交本功能。尚未烧录或实机验证；使用前需烧录本次主控 HEX/BIN，重新启动 `串口助手_old.py`，失能并等 `Disabled ok`，选择单个节点后点击磁编码器校准并确认。主控 USB 接口支持此命令，UART4仍禁止配置校准。校准完成与成功需观察电机；当前协议没有完成状态，未添加计时猜测或自动 START。
+
 ## 当前工作：用户确认J7新DCE参数消除本轮高速拖尾，更新默认值并编译提交（2026-10-06 22:37实机反馈）
 
 - **最新授权**：用户已实测反馈最终参数下未再出现问题，明确要求把`KP=300、KV=50、KI=30、KD=100`改为固件默认PID，同步文档后commit。修改前已说明文件和用途；本次新增生产改动仅电机端`firmware_new/dummy-motor-fw/UserApp/main.cpp`的MOTOR_TYPE==57默认DCE表及其注释，并同步`docs/地轨电机加入方案.md`与本文。既有未提交的57电流设置上限及目标助手查询按钮一并纳入本次用户授权提交，使用仓库本地Git身份。

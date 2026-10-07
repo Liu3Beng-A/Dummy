@@ -89,11 +89,54 @@ static bool HandleAccelerationSyncCommand(const char* cmd, size_t len, StreamSin
     return true;
 }
 
+static bool HandleEncoderCalibrationCommand(const char* cmd, size_t len, StreamSink& response)
+{
+    std::string command(cmd, len);
+    const size_t first = command.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return false;
+    const size_t last = command.find_last_not_of(" \t\r\n");
+    command = command.substr(first, last - first + 1);
+    if (command.rfind("#ENC_CAL", 0) != 0) return false;
+    if (response.channelType != StreamSink::CHANNEL_TYPE_USB)
+    {
+        Respond(response, "error ENC_CAL forbidden on UART4");
+        return true;
+    }
+
+    // A single node digit avoids overflow/sign aliases accidentally selecting a motor.
+    const size_t nodeAt = command.find_first_not_of(" \t", 8);
+    if (command.size() <= 8 || (command[8] != ' ' && command[8] != '\t') ||
+        nodeAt == std::string::npos || nodeAt + 1 != command.size() ||
+        command[nodeAt] < '1' || command[nodeAt] > '8')
+    {
+        Respond(response, "error ENC_CAL syntax: #ENC_CAL <1..8> (0=ALL forbidden)");
+        return true;
+    }
+    if (dummy.IsEnabled())
+        Respond(response, "error ENC_CAL require DISABLE");
+    else if (dummy.IsStopLocked() || dummy.IsCalibrationBusy() ||
+             dummy.IsProtectionParameterBusy() || dummy.IsMotionBusy() || dummy.commandHandler.IsBusy())
+        Respond(response, "error ENC_CAL busy");
+    else
+    {
+        const unsigned node = unsigned(command[nodeAt] - '0');
+        CtrlStepMotor* motor = node == 8 ? dummy.hand : dummy.motorJ[node];
+        const uint8_t frame[8] = {};
+        // Use the checked, local-frame sender; 0x02 has no motor completion ACK.
+        if (!motor || !motor->TrySendProtection(0x02, frame))
+            Respond(response, "error ENC_CAL [%u] CAN send failed", node);
+        else
+            Respond(response, "ok ENC_CAL [%u] dispatched", node);
+    }
+    return true;
+}
+
 void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
     if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;
     if (HandleAccelerationSyncCommand(_cmd, _len, _responseChannel)) return;
+    if (HandleEncoderCalibrationCommand(_cmd, _len, _responseChannel)) return;
     uint8_t  i;
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
     if (_cmd[0] == '!' )
@@ -519,6 +562,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
 {
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
     if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;
+    if (HandleEncoderCalibrationCommand(_cmd, _len, _responseChannel)) return;
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
     if (_cmd[0] == '!' || !dummy.IsEnabled())
     {
