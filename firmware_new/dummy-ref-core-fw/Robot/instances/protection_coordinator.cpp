@@ -27,6 +27,7 @@ uint16_t ProtectionCoordinator::NextId() {
 }
 void ProtectionCoordinator::Enter(Job next, uint16_t mask) {
     job = next; expected = mask; received = failed = 0; cursor = 1;
+    goPriorityPending = next == PROTECT_RUN;
     phaseAt = HAL_GetTick(); lastSend = phaseAt - 25; replyReady = false;
 }
 void ProtectionCoordinator::Log(const char* format, ...) {
@@ -49,6 +50,90 @@ void ProtectionCoordinator::Print() {
         taskEXIT_CRITICAL();
         if (n.sink) Respond(*n.sink, "%s", n.text);
         else Respond(*usbStreamOutputPtr, "%s", n.text);
+    }
+    PrintDiagnostic();
+}
+void ProtectionCoordinator::PollDiagnostic() {
+    const uint32_t now = HAL_GetTick();
+    taskENTER_CRITICAL();
+    if (diagnosticState == DIAG_COLLECT && now - diagnosticAt >= 1500)
+        diagnosticState = DIAG_TIMEOUT;
+    const bool send = diagnosticState == DIAG_COLLECT && now - diagnosticLastSend >= 100;
+    const uint8_t node = diagnosticNode;
+    const uint8_t selector = diagnosticSelector;
+    const uint16_t request = diagnosticRequest;
+    taskEXIT_CRITICAL();
+    if (!send) return;
+    uint8_t frame[8] = {selector, DIAG_VERSION, uint8_t(request), uint8_t(request >> 8)};
+    if (Send(node, DIAG_QUERY, frame)) diagnosticLastSend = now;
+}
+void ProtectionCoordinator::PrintDiagnostic() {
+    static const char* const gates[] = {"ELIGIBLE", "PROTECTED", "EXCLUDED", "SWITCH_OFF",
+        "STOP_LOCKED", "DISABLED", "BAD_FEEDBACK", "MODE", "NO_MOTION", "STARTUP", "FILTER", "ARRIVAL"};
+    static const char* const resets[] = {"NONE", "CONDITIONS", "GATE", "DIRECTION",
+        "STARTUP", "CONTROL_RESET", "PARAMETERS", "TRIGGERED", "COMPLETED"};
+    for (unsigned i = 0; i < 4; ++i) {
+        uint32_t s[DIAG_FIELD_COUNT], mask;
+        uint8_t node, line; uint16_t request; StreamSink* output;
+        taskENTER_CRITICAL();
+        if (diagnosticState != DIAG_READY && diagnosticState != DIAG_TIMEOUT) {
+            taskEXIT_CRITICAL(); break;
+        }
+        const bool timeout = diagnosticState == DIAG_TIMEOUT;
+        std::memcpy(s, diagnosticValues, sizeof(s)); mask = diagnosticMask;
+        node = diagnosticNode; request = diagnosticRequest; output = diagnosticSink;
+        line = diagnosticLine++;
+        const bool noTrigger = (s[D_DIRECTION] >> 24) == DS_NO_TRIGGER;
+        if (timeout || line == 20 || (noTrigger && line == 1)) diagnosticState = DIAG_IDLE;
+        taskEXIT_CRITICAL();
+        if (timeout) {
+            Respond(*output, "error STALL_STATUS J%u req=%u missing=%05lX", node, request,
+                (unsigned long)(((1U << DIAG_FIELD_COUNT) - 1) & ~mask));
+            break;
+        }
+        const uint32_t flags = s[D_FLAGS], reset = s[D_RESET];
+        const unsigned gate = s[D_META] >> 24, cause = reset & 255;
+        int64_t error; std::memcpy(&error, s + D_ERROR_LOW, sizeof(error));
+        int64_t goalError; std::memcpy(&goalError, s + D_GOAL_ERROR_LOW, sizeof(goalError));
+        char text[44]{}; // Prefix + body + CRLF must fit Respond's 64-byte line.
+        if (noTrigger) {
+            Respond(*output, line == 0 ? "STALL_STATUS [%u] no_trigger_record req=%u" :
+                "STALL_STATUS [%u] end req=%u", node, request);
+            continue;
+        }
+        switch (line) {
+        case 0: snprintf(text, sizeof(text), "req=%u session=%u at_ms=%lu", request,
+            unsigned(reset >> 16), (unsigned long)s[D_CAPTURE_MS]); break;
+        case 1: snprintf(text, sizeof(text), "mode=%u reqmode=%u phase=%u gate=%s",
+            unsigned(s[D_META] & 255), unsigned((s[D_META] >> 8) & 255), unsigned((s[D_META] >> 16) & 255),
+            gate <= DG_ARRIVAL ? gates[gate] : "UNKNOWN"); break;
+        case 2: snprintf(text, sizeof(text), "intent=%u fb=%u enabled=%u detect=%u",
+            unsigned(flags & 1), unsigned((flags >> 1) & 1), unsigned((flags >> 2) & 1), unsigned((flags >> 3) & 1)); break;
+        case 3: snprintf(text, sizeof(text), "unmet=%u stop_lock=%u", unsigned((flags >> 8) & 7), unsigned((flags >> 4) & 1)); break;
+        case 4: snprintf(text, sizeof(text), "I_cmd=%.5g I_filt=%.5g I_thr=%.5g A",
+            double(int16_t(s[D_CURRENT] & 65535)) / 1000, double(s[D_CURRENT] >> 16) / 1000,
+            double(s[D_CURRENT_LIMIT]) / 1000); break;
+        case 5: snprintf(text, sizeof(text), "v_raw=%.6g r/s", double(int32_t(s[D_RAW_SPEED])) / 51200); break;
+        case 6: snprintf(text, sizeof(text), "v_filt=%.6g v_thr=%.6g r/s",
+            double(s[D_FILTER_SPEED]) / 51200, double(s[D_SPEED_LIMIT]) / 51200); break;
+        case 7: snprintf(text, sizeof(text), "err=%.6g err_thr=%.6g r",
+            double(error) / 51200, double(s[D_ERROR_LIMIT]) / 51200); break;
+        case 8: snprintf(text, sizeof(text), "timer_ms=%.6g need_ms=%.6g", double(s[D_TIMER]) / 20, double(s[D_TRIGGER]) / 20); break;
+        case 9: snprintf(text, sizeof(text), "peak_ms=%.6g", double(s[D_PEAK_TIMER]) / 20); break;
+        case 10: snprintf(text, sizeof(text), "clear=%s detail=%u", cause <= DR_COMPLETED ? resets[cause] : "UNKNOWN", unsigned((reset >> 8) & 255)); break;
+        case 11: snprintf(text, sizeof(text), "last_ms=%.6g", double(s[D_LAST_TIMER]) / 20); break;
+        case 12: snprintf(text, sizeof(text), "bad_total=%lu", (unsigned long)s[D_BAD_TOTAL]); break;
+        case 13: snprintf(text, sizeof(text), "bad_run_peak_ms=%.6g", double(s[D_BAD_PEAK]) / 20); break;
+        case 14: snprintf(text, sizeof(text), "startup_left_ms=%.6g", double(s[D_STARTUP]) / 20); break;
+        case 15: snprintf(text, sizeof(text), "record=%s event=%08lX",
+            (s[D_DIRECTION] >> 24) == DS_TRIGGER ? "LAST" : "LIVE", (unsigned long)s[D_EVENT]); break;
+        case 16: snprintf(text, sizeof(text), "v_ref=%.6g r/s", double(int32_t(s[D_REFERENCE_SPEED])) / 51200); break;
+        case 17: snprintf(text, sizeof(text), "goal_err=%.6g r", double(goalError) / 51200); break;
+        case 18: snprintf(text, sizeof(text), "dir=%d stall_dir=%d", int(int8_t(s[D_DIRECTION] & 255)), int(int8_t((s[D_DIRECTION] >> 8) & 255))); break;
+        case 19: snprintf(text, sizeof(text), "trigger_reason=%s", ReasonName(uint8_t(s[D_DIRECTION] >> 16))); break;
+        case 20: snprintf(text, sizeof(text), "end req=%u", request); break;
+        }
+        Respond(*output, "STALL_STATUS [%u] %s", node, text);
     }
 }
 bool ProtectionCoordinator::Send(uint8_t node, uint8_t command, const uint8_t* data) {
@@ -88,6 +173,16 @@ bool ProtectionCoordinator::Parameter(uint8_t n, bool set, uint8_t p, float v) {
 }
 void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* data) {
     if (n < 1 || n > 8) return;
+    if (command == DIAG_REPLY) {
+        // CAN ISR: copy only. No task critical-section API or printing here.
+        if (diagnosticState == DIAG_COLLECT && n == diagnosticNode && data[1] == DIAG_VERSION &&
+            Read16(data + 2) == diagnosticRequest && data[0] < DIAG_FIELD_COUNT) {
+            std::memcpy(diagnosticValues + data[0], data + 4, 4);
+            diagnosticMask |= 1U << data[0];
+            if (diagnosticMask == (1U << DIAG_FIELD_COUNT) - 1) diagnosticState = DIAG_READY;
+        }
+        return;
+    }
     Node& a = nodes[n]; uint32_t now = HAL_GetTick();
     a.aliveMs = now;
     if (command == EVENT) {
@@ -105,8 +200,8 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
         if (event == a.event && (data[7] & LOCAL_STALL) &&
             ((a.eventPhase == IDLE && seenEvents[n] == event) ||
              (data[4] != IDLE && data[4] < a.eventPhase && a.eventPhase <= HOLD_FAILED))) return;
-        const bool changed = event != a.event || data[4] != a.eventPhase || data[5] != a.reason;
-        a.event = event; a.eventPhase = data[4]; a.reason = data[5];
+        const bool changed = event != a.event || data[4] != a.eventPhase || data[5] != a.eventReason;
+        a.event = event; a.eventPhase = data[4]; a.eventReason = data[5];
         a.version = data[6]; a.flags = data[7]; a.eventMs = now;
         a.dirty |= changed; a.ack = true;
         if (data[4] == IDLE && (data[7] & ASSUMED_BOOT) && !(data[7] & PROFILE_VALID))
@@ -114,9 +209,10 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
         if (!suppressEpisodes && robot.stopState != DummyRobot::DISABLING && n <= 7 && (data[7] & LOCAL_STALL) &&
             data[4] >= LOCAL_STOPPING && data[4] <= HOLD_FAILED &&
             seenEvents[n] != event) {
-            // Interrupt the regular dispatch immediately; queue cleanup is deferred.
+            // CAN ISR: invalidate dispatch immediately. Task-only cancellation,
+            // CAN mailbox cleanup and queue operations run in Poll/BeginStop.
             if (!trigger && !protectionSeen) ++robot.motionEpoch;
-            robot.CancelMotion(); robot.isEnabled = false;
+            robot.isEnabled = false;
             locked = alarm = trigger = true;
         }
     } else if (command == PROBE_REPLY) {
@@ -228,6 +324,13 @@ void ProtectionCoordinator::Cancel(bool disable) {
     calibration = false; robot.startPending = false; trigger = false;
     job = NONE; stalled = finished = 0; locked = !disable;
     protectionSeen = !disable; abortedCalibration = false; sink = nullptr;
+}
+void ProtectionCoordinator::MotionDispatchFailed() {
+    // Internal failure stops all seven axes without cancelling a local stall
+    // whose event may still be in flight. Only a real event permits PREPARE/GO.
+    locked = alarm = protectionSeen = true;
+    robot.startPending = false;
+    BeginStop(true);
 }
 void ProtectionCoordinator::Error(const char* reason, uint8_t n) {
     bool wasCal = calibration;
@@ -397,13 +500,16 @@ void ProtectionCoordinator::FinishProtection() {
 void ProtectionCoordinator::Poll() {
     pollEpoch = robot.motionEpoch;
     const uint8_t round = ++pollRound & 7;
-    txUsed = false;
-    // STOP gets its even 10ms slots first. Leases use other available cycles
-    // by elapsed time, with an ACK and short retry budget for every node.
-    allowTransmit = !stopUsed; stopUsed = false;
-    if (allowTransmit) Lease();
-    if (round == 1 && !txUsed) CancelContexts();
-    allowTransmit = round == 5;
+    const bool firstGo = goPriorityPending && job == PROTECT_RUN && active >= 1 && active <= 7 &&
+        nodes[active].task == task && nodes[active].phase == WAIT_GRANT;
+    txUsed = stopUsed; stopUsed = false;
+    // Count only a submitted STOP against this cycle's one-frame budget.
+    // First GO gets one opportunity; retries use normal slots so leases/ACKs
+    // cannot be starved by a missing GO reply or a busy CAN mailbox.
+    allowTransmit = !txUsed;
+    if (!firstGo && allowTransmit) Lease();
+    if (!firstGo && round == 1 && !txUsed) CancelContexts();
+    allowTransmit = !firstGo && round == 5;
     if (allowTransmit && (pollRound & 8)) CancelContexts();
     // Snapshots are copied under interrupt masking by the task; never print in ISR.
     for (uint8_t n = 1; n <= 8; ++n) {
@@ -417,7 +523,7 @@ void ProtectionCoordinator::Poll() {
         }
         if (nodes[n].dirty) {
             taskENTER_CRITICAL(); nodes[n].dirty = false;
-            uint8_t phase = nodes[n].eventPhase, reason = nodes[n].reason; taskEXIT_CRITICAL();
+            uint8_t phase = nodes[n].eventPhase, reason = nodes[n].eventReason; taskEXIT_CRITICAL();
             if (calibration) Log("CAL J%u phase=%u reason=%s", n, phase, ReasonName(reason));
             else if (n == 8 && phase != IDLE && phase < CAL_READY)
                 Log("HAND protection phase=%u reason=%s", phase, ReasonName(reason));
@@ -425,8 +531,9 @@ void ProtectionCoordinator::Poll() {
         }
     }
     if (round == 5) { if (++ackCursor > 8) ackCursor = 1; }
-    allowTransmit = round == 3 || round == 7;
-    if (trigger) {
+    allowTransmit = round == 3 || round == 7 || firstGo;
+    taskENTER_CRITICAL();
+    if (trigger && !suppressEpisodes && robot.stopState != DummyRobot::DISABLING) {
         trigger = false;
         if (calibration) {
             Log("error CALIBRATION abnormal contact; retreat required");
@@ -445,6 +552,7 @@ void ProtectionCoordinator::Poll() {
                 stalled |= uint16_t(1U << n); seenEvents[n] = nodes[n].event;
             }
     }
+    taskEXIT_CRITICAL();
     uint32_t now = HAL_GetTick();
     switch (job) {
     case NONE:
@@ -491,7 +599,7 @@ void ProtectionCoordinator::Poll() {
     case PROFILE: PollProfile(); break;
     case PROTECT_STOP:
         for (uint8_t n = 1; n <= 7; ++n) if (stalled & (1U << n)) {
-            if (nodes[n].eventPhase == HOLD_FAILED) { Error(ReasonName(nodes[n].reason), n); return; }
+            if (nodes[n].eventPhase == HOLD_FAILED) { Error(ReasonName(nodes[n].eventReason), n); return; }
             if (nodes[n].task != task) Context(n, PROTECT_PREPARE, task, 0, seenEvents[n]);
         }
         if (robot.stopState == DummyRobot::STOPPED) {
@@ -502,7 +610,7 @@ void ProtectionCoordinator::Poll() {
         break;
     case PROTECT_RUN:
         for (uint8_t n = 1; n <= 7; ++n) if ((stalled & (1U << n)) && !(finished & (1U << n))) {
-            if (nodes[n].eventPhase == HOLD_FAILED) { Error(ReasonName(nodes[n].reason), n); return; }
+            if (nodes[n].eventPhase == HOLD_FAILED) { Error(ReasonName(nodes[n].eventReason), n); return; }
             // A late event still needs its own PREPARE before GO or lease.
             if (nodes[n].task != task) Context(n, PROTECT_PREPARE, task, 0, seenEvents[n]);
         }
@@ -513,11 +621,19 @@ void ProtectionCoordinator::Poll() {
             while (active <= 7 && (!(stalled & (1U << active)) || (finished & (1U << active)))) ++active;
             if (active > 7) { FinishProtection(); break; }
             phaseAt = now; lastSend = now - 25;
+            goPriorityPending = true;
         } else if ((nodes[active].eventPhase == HOLD_FAILED || nodes[active].phase == HOLD_FAILED) ||
                    now - phaseAt > 31000 || (now - phaseAt > 1500 && now - nodes[active].contextMs > 1500)) {
-            Error(nodes[active].reason ? ReasonName(nodes[active].reason) : "RETREAT_TIMEOUT_OR_OFFLINE", active); break;
+            const uint8_t reason = nodes[active].eventPhase == HOLD_FAILED ?
+                nodes[active].eventReason : nodes[active].reason;
+            Error(reason ? ReasonName(reason) : "RETREAT_TIMEOUT_OR_OFFLINE", active); break;
         }
-        if (now - lastSend >= 20 && Context(active, RETREAT_GO, task, 0, seenEvents[active])) lastSend = now;
+        if (now - lastSend >= 20) {
+            if (firstGo && !txUsed) goPriorityPending = false;
+            if (Context(active, RETREAT_GO, task, 0, seenEvents[active])) {
+                lastSend = now; goPriorityPending = false;
+            }
+        }
         break;
     case CAL_START:
         PollGroup(ProtectionProtocol::CAL_BEGIN, CAL_READY, 0x1FE);
@@ -582,6 +698,10 @@ void ProtectionCoordinator::Poll() {
         break;
     case SETTINGS_SET: case SETTINGS_SAVE: PollParameters(); break;
     }
+    // Reuse an unused cancellation slot; regular health probes otherwise use
+    // both query slots. STOP/leases/cancellation already had first priority.
+    allowTransmit = round == 1 || round == 3 || round == 7;
+    PollDiagnostic();
 }
 
 const char* ProtectionCoordinator::ParameterName(uint8_t id, uint8_t n) const {
@@ -601,6 +721,30 @@ bool ProtectionCoordinator::Command(const char* cmd, unsigned len, StreamSink& r
     size_t first = text.find_first_not_of(" \t\r\n"), last = text.find_last_not_of(" \t\r\n");
     if (first == std::string::npos) return false;
     text = text.substr(first, last-first+1);
+    if (text.rfind("#STALL_STATUS", 0) == 0) {
+        const size_t at = text.find_first_not_of(" \t", 13);
+        const bool separated = text.size() > 13 && (text[13] == ' ' || text[13] == '\t');
+        const bool validNode = at != std::string::npos && text[at] >= '1' && text[at] <= '7';
+        const size_t after = validNode ? text.find_first_not_of(" \t", at + 1) : std::string::npos;
+        const bool lastTrigger = validNode && after != std::string::npos && after > at + 1 && text.substr(after) == "LAST";
+        if (!separated || !validNode || (after != std::string::npos && !lastTrigger)) {
+            Respond(response, "error STALL_STATUS syntax J1..J7 [LAST]"); return true;
+        }
+        const uint8_t node = uint8_t(text[at] - '0');
+        taskENTER_CRITICAL();
+        if (diagnosticState != DIAG_IDLE) {
+            taskEXIT_CRITICAL(); Respond(response, "error STALL_STATUS busy"); return true;
+        }
+        if (!diagnosticSerial) diagnosticSerial = uint16_t(HAL_GetTick() ^ 0xD135U);
+        if (!++diagnosticSerial) ++diagnosticSerial;
+        diagnosticRequest = diagnosticSerial; diagnosticNode = uint8_t(node);
+        diagnosticSelector = lastTrigger ? DS_TRIGGER : DS_LIVE;
+        diagnosticSink = &response; diagnosticMask = 0; diagnosticLine = 0;
+        diagnosticAt = HAL_GetTick(); diagnosticLastSend = diagnosticAt - 100;
+        diagnosticState = DIAG_COLLECT;
+        taskEXIT_CRITICAL();
+        Respond(response, "ok STALL_STATUS [%u] pending", unsigned(node)); return true;
+    }
     if (text == "!CALIBRATION") {
         if (Locked() || robot.stopState != DummyRobot::DISABLED) {
             Respond(response, "error CALIBRATION require DISABLE"); return true;

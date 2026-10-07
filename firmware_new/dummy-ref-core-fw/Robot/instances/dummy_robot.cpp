@@ -491,6 +491,7 @@ bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
     motionSendCursor = 1; motionMovingMask = 0; motionFailureReason = nullptr;
     motionPlanMs = timeBudget * 1000.0f;
     motionTaskId = id ? id : AllocateMotionTaskId();
+    motionCurrentLimitedPrintMask = 0; motionCurrentLimitedPrintId = motionTaskId;
     motionTaskEpoch = epoch; motionMode = commandMode; motionKind = kind;
     motionStartedAt = HAL_GetTick(); motionCompletedAt = 0;
     motionRejectedReplies = motionSendCount = motionQueryCount = 0;
@@ -660,8 +661,11 @@ bool DummyRobot::MotionCompletionCallback(uint8_t node, const uint8_t* data)
     const uint16_t bit = 1U << node;
     const float error = position - motionMotorTargets[node];
     const float tolerance = static_cast<float>(PositionToleranceSteps(node) + 1) / STEPS_PER_REV;
-    const bool finished = MotionCompletionProtocol::Finite(position) && (data[4] & (TARGET_READY | SETTLED)) == (TARGET_READY | SETTLED) &&
+    const bool finished = MotionCompletionProtocol::Finite(position) && !(data[4] & (DRIVE_BLOCKED | CURRENT_CMD_LIMITED)) &&
+                          (data[4] & (TARGET_READY | SETTLED)) == (TARGET_READY | SETTLED) &&
                           error >= -tolerance && error <= tolerance;
+    if ((data[4] & CURRENT_CMD_LIMITED) && !(motionReplyFlags[node] & CURRENT_CMD_LIMITED))
+        motionCurrentLimitedPrintMask |= bit;
     motionReplyAt[node] = now; motionReplyFlags[node] = data[4]; motionReplyPositions[node] = position;
     if (data[4] & TARGET_READY) {
         motionTargetReadyMask |= bit;
@@ -671,10 +675,12 @@ bool DummyRobot::MotionCompletionCallback(uint8_t node, const uint8_t* data)
         if ((data[4] & POSITION_READY) && motionFirstPositionMs[node] == MOTION_TIME_MISSING) motionFirstPositionMs[node] = elapsed;
         if (finished && motionFirstSettledMs[node] == MOTION_TIME_MISSING) motionFirstSettledMs[node] = elapsed;
     } else {
-        // A fresh post-TXOK query says the addressed node has not accepted the
-        // goal. Retry the immutable target, then require another fresh nonce.
-        motionTargetReadyMask &= ~bit; motionTxOkMask &= ~bit;
-        motionRetryAt[node] = now + 5;
+        motionTargetReadyMask &= ~bit;
+        // Retry only an unaccepted goal. Faults or loss of an adopted goal
+        // belong to protection, not to retransmission of the old target.
+        if (!(data[4] & DRIVE_BLOCKED) && motionFirstReadyMs[node] == MOTION_TIME_MISSING) {
+            motionTxOkMask &= ~bit; motionRetryAt[node] = now + 5;
+        }
     }
     motionRoundSeenMask |= bit;
     if (finished) {
@@ -810,6 +816,7 @@ void DummyRobot::SetEnable(bool _enable)
 void DummyRobot::ResetStopDiagnostics()
 {
     // Called with the task critical section held. Diagnostics never release a lock.
+    stopPollNode = 1; // Reset once per operation/stage, never per node reply.
     stopRxMask = stopBadPositionMask = 0;
     stopDiagPollCount = 0;
     stopDiagSinceMs = HAL_GetTick();
@@ -1035,6 +1042,7 @@ void DummyRobot::PollSoftStop()
             }
         }
     }
+    const uint32_t epoch = motionEpoch;
     const uint16_t token = stopToken;
     const uint8_t action = stopAction;
     const bool sendFirst = stopNeedsSend;
@@ -1046,54 +1054,57 @@ void DummyRobot::PollSoftStop()
     taskEXIT_CRITICAL();
     if (!send) return;
     if (protection && !protection->StopSendSlot()) {
-        stopNeedsSend |= sendFirst;
+        taskENTER_CRITICAL();
+        if (epoch == motionEpoch && token == stopToken && action == stopAction) stopNeedsSend |= sendFirst;
+        taskEXIT_CRITICAL();
         return;
     }
     const uint32_t now = HAL_GetTick();
-    if (!sendFirst && now - stopLastSendMs < (watchingHold ? 40U : 10U)) return;
-    stopLastSendMs = now;
+    const uint32_t interval = watchingHold ? 40U :
+        (protection && protection->FastStopConfirm() ? 5U : 10U);
+    if (!sendFirst && now - stopLastSendMs < interval) return;
     const uint8_t lastNode = (action == SoftStopProtocol::DISABLE ||
                               (stopState == STARTING && stopStartAllEight) ||
                               (stopWithGripper && (stopState == STOPPING || watchingHold))) ? 8 : 7;
-    const auto sendNode = [&](uint8_t node)
+    const auto submit = [&](uint8_t node) -> bool
     {
-        if (token != stopToken || action != stopAction) return;
+        taskENTER_CRITICAL();
+        if (epoch != motionEpoch || token != stopToken || action != stopAction) {
+            taskEXIT_CRITICAL(); return false;
+        }
         const bool needsSync = perNodeTokens && !(stopSyncedMask & (1U << node));
-        const uint8_t nodeAction = watchingHold || needsSync ? SoftStopProtocol::QUERY :
+        const uint8_t nodeAction = node == ALL ? action : watchingHold || needsSync ? SoftStopProtocol::QUERY :
             (node == 8 && action == ProtectionProtocol::STOP_PROTECTION ? SoftStopProtocol::STOP : action);
         const uint16_t nodeToken = perNodeTokens ? stopNodeTokens[node] : token;
         stopDiagTxNode = node;
         stopDiagTxBusy = true;
-        if (protection) protection->StopAttempted();
-        (node == 8 ? static_cast<CtrlStepMotor*>(hand) : motorJ[node])->SendSoftStop(nodeAction, nodeToken);
+        const bool sent = (node == 8 ? static_cast<CtrlStepMotor*>(hand) : motorJ[node])->SendSoftStop(nodeAction, nodeToken);
+        if (sent) {
+            stopLastSendMs = now;
+            if (protection) protection->StopAttempted();
+        } else stopNeedsSend = true; // Keep it pending; a busy mailbox is not an ACK.
         stopDiagTxBusy = false;
+        taskEXIT_CRITICAL();
+        return sent;
     };
-    if (sendFirst)
+    if (sendFirst && action == SoftStopProtocol::DISABLE)
     {
-        stopPollNode = 1;
-        if (action == SoftStopProtocol::DISABLE)
-        {
-            if (token == stopToken && action == stopAction)
-            {
-                stopDiagTxNode = ALL;
-                stopDiagTxBusy = true;
-                if (protection) protection->StopAttempted();
-                motorJ[ALL]->SendSoftStop(action, token);
-                stopDiagTxBusy = false;
-            }
-        }
-        else
-            for (uint8_t node = 1; node <= lastNode; ++node)
-            {
-                if (token != stopToken || action != stopAction) return;
-                sendNode(node);
-            }
+        submit(ALL); // Preserve prompt all-eight DISABLE, then retry missing nodes.
+        return;
     }
-    else
+    // One CAN submission per slot, fair even when a low-ID node is missing.
+    // A token-sync reply only wakes sending; it must not restart from J1.
+    for (uint8_t count = 0; count < lastNode; ++count)
     {
+        taskENTER_CRITICAL();
+        if (epoch != motionEpoch || token != stopToken || action != stopAction) {
+            taskEXIT_CRITICAL(); return;
+        }
         if (stopPollNode > lastNode) stopPollNode = 1;
         const uint8_t node = stopPollNode++;
-        sendNode(node);
+        const bool pending = watchingHold || !(stopAckMask & (1U << node));
+        taskEXIT_CRITICAL();
+        if (pending) { submit(node); return; }
     }
 }
 
@@ -1105,6 +1116,9 @@ void DummyRobot::PollStopPrint()
     const bool printMotionFailure = motionFailurePrintPending;
     const MotionFailureNotice motionFailure = motionFailureNotice;
     motionFailurePrintPending = false;
+    const uint16_t limited = motionCurrentLimitedPrintMask;
+    const uint32_t limitedId = motionCurrentLimitedPrintId;
+    motionCurrentLimitedPrintMask = 0;
     const char* notice = pendingStopNotice;
     pendingStopNotice = nullptr;
     const uint16_t faults = stopFaultMask & ~stopFaultPrinted;
@@ -1134,11 +1148,13 @@ void DummyRobot::PollStopPrint()
     }
     taskEXIT_CRITICAL();
     // This runs in the display task; USB/UART send waits never block motor control.
+    for (uint8_t node = 1; node <= 7; ++node) if (limited & (1U << node))
+        Respond(*usbStreamOutputPtr, "MOTION id=%lu J%u CURRENT_CMD_LIMITED", (unsigned long)limitedId, node);
     if (printMotionFailure) {
         Respond(*usbStreamOutputPtr, "MOTION fail id=%lu reason=%s", (unsigned long)motionFailure.id, motionFailure.reason);
         Respond(*usbStreamOutputPtr, "MOTION wait=%03X txok=%03X ready=%03X", motionFailure.wait, motionFailure.txok, motionFailure.ready);
         for (uint8_t node = 1; node <= 7; ++node) if (motionFailure.wait & (1U << node))
-            Respond(*usbStreamOutputPtr, "MOTION J%u target not confirmed", node);
+            Respond(*usbStreamOutputPtr, "MOTION J%u status f=%02X", node, motionFailure.flags[node]);
     }
     if (notice)
     {
@@ -1426,12 +1442,23 @@ void DummyRobot::PollMotionCompletion()
         const char* failure = nullptr;
         uint16_t wait = 0;
         for (uint8_t n = 1; n <= 7; ++n)
-            if (!(motionTxOkMask & (1U << n)) && !(motionTxPendingMask & (1U << n)) &&
-                motionTxAttempts[n] >= MOTION_TX_MAX_ATTEMPTS) wait |= 1U << n;
-        if (wait) failure = "TARGET_TX_RETRIES";
-        else if (HAL_GetTick() - motionStartedAt >= MOTION_TX_TIMEOUT_MS && motionTxHistoryMask != 0xFE) {
+            if (motionReplyFlags[n] & MotionCompletionProtocol::DRIVE_BLOCKED) wait |= 1U << n;
+        if (wait) failure = "MOTOR_DRIVE_BLOCKED";
+        else {
+            for (uint8_t n = 1; n <= 7; ++n)
+                if (motionFirstReadyMs[n] != MOTION_TIME_MISSING &&
+                    !(motionReplyFlags[n] & MotionCompletionProtocol::TARGET_READY)) wait |= 1U << n;
+            if (wait) failure = "TARGET_CHANGED";
+        }
+        if (!failure) {
+            for (uint8_t n = 1; n <= 7; ++n)
+                if (!(motionTxOkMask & (1U << n)) && !(motionTxPendingMask & (1U << n)) &&
+                    motionTxAttempts[n] >= MOTION_TX_MAX_ATTEMPTS) wait |= 1U << n;
+            if (wait) failure = "TARGET_TX_RETRIES";
+        }
+        if (!failure && HAL_GetTick() - motionStartedAt >= MOTION_TX_TIMEOUT_MS && motionTxHistoryMask != 0xFE) {
             wait = 0xFE & ~motionTxHistoryMask; failure = "TARGET_TX_TIMEOUT";
-        } else if (HAL_GetTick() - motionStartedAt >= MOTION_READY_TIMEOUT_MS && motionTargetReadyMask != 0xFE) {
+        } else if (!failure && HAL_GetTick() - motionStartedAt >= MOTION_READY_TIMEOUT_MS && motionTargetReadyMask != 0xFE) {
             wait = 0xFE & ~motionTargetReadyMask; failure = "TARGET_READY_TIMEOUT";
         }
         if (failure) {
@@ -1457,11 +1484,13 @@ void DummyRobot::FailMotionDispatch(uint32_t epoch, uint32_t generation, const c
     if (CanSendMotion(epoch, generation)) {
         motionFailureReason = reason;
         motionFailureNotice = {motionTaskId, reason, wait, motionTxOkMask, motionTargetReadyMask};
+        for (uint8_t n = 1; n <= 7; ++n) motionFailureNotice.flags[n] = motionReplyFlags[n];
         motionFailurePrintPending = true;
         motionPhase = MOTION_FAILED; motionCompletedAt = HAL_GetTick(); motionActive = false;
-        // Atomically block new ordinary targets, then use the existing seven-axis
-        // soft-stop/hold path. No automatic resumption or default power-off.
-        RequestSoftStop();
+        // Internal failure preserves confirmed or in-flight local protection.
+        // User STOP/DISABLE still cancel it through RequestSoftStop/Disable.
+        if (protection) protection->MotionDispatchFailed();
+        else RequestSoftStop();
     }
     taskEXIT_CRITICAL();
 }

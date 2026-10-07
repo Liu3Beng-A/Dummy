@@ -35,7 +35,7 @@ public:
     void SetAngleWithVelocityLimit(float _angle, float _vel);
     // CAN Command
     void SetEnable(bool _enable);
-    void SendSoftStop(uint8_t action, uint16_t token);
+    bool SendSoftStop(uint8_t action, uint16_t token);
     bool TrySendProtection(uint8_t command, const uint8_t* data);
     void SetEnableTemp(bool _enable);
     void DoCalibration();

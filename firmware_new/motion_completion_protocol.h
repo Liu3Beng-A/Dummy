@@ -16,6 +16,10 @@ constexpr uint8_t SETTLED = 0x01;
 constexpr uint8_t PLANNER_READY = 0x04;
 constexpr uint8_t ENCODER_READY = 0x08;
 constexpr uint8_t POSITION_READY = 0x10;
+// Goal acceptance is independent of live control health. Saturation is a
+// current-command diagnostic, not measured overcurrent or a stall event.
+constexpr uint8_t DRIVE_BLOCKED = 0x20;
+constexpr uint8_t CURRENT_CMD_LIMITED = 0x40;
 constexpr uint32_t NONCE_MASK = 0xFFFFFF;
 constexpr uint32_t FEEDBACK_FRESH_MS = 300;
 constexpr uint32_t STABLE_TICKS = 1000; // 50ms at 20kHz.

@@ -165,6 +165,7 @@ public:
         Motor* context;
         void ResetPositionCompletion(bool newGoal = false);
         bool TickPositionCompletion();
+        bool IsOrdinaryPositionArrival(bool referenceFinished = true) const;
         uint16_t positionStableTicks = 0;
         int32_t positionStableMin = 0, positionStableMax = 0;
         int64_t positionVelocitySum = 0;
@@ -176,6 +177,7 @@ public:
         volatile uint8_t softStopPhase = SoftStopProtocol::NORMAL;
         volatile uint16_t softStopToken = 0;
         bool softStopTokenValid = false;
+        uint8_t softStopTokenAction = 0; // Idempotence key is action + token.
         bool softStopKeepHold = false;
         int32_t softStopPosition = 0;
         int32_t softStopStableAnchor = 0;
@@ -215,6 +217,17 @@ public:
         int32_t detectorCurrent = 2000, detectorSpeed = 1024, detectorError = 1024;
         uint32_t detectorTriggerTicks = 3000, detectorStartupTicks = 2000;
         uint32_t currentFilterTicks = 200, velocityFilterTicks = 400;
+        uint32_t detectionPeak = 0, detectionLastTimer = 0, detectionBadTotal = 0, detectionBadPeak = 0;
+        uint16_t detectionSession = 0;
+        uint8_t detectionGate = ProtectionProtocol::DG_DISABLED, detectionUnmet = 0;
+        uint8_t detectionReset = ProtectionProtocol::DR_NONE, detectionResetDetail = 0;
+        uint32_t diagnosticSnapshot[ProtectionProtocol::DIAG_FIELD_COUNT]{};
+        uint32_t triggerSnapshot[ProtectionProtocol::DIAG_FIELD_COUNT]{};
+        bool triggerSnapshotValid = false;
+        uint16_t diagnosticRequest = 0;
+        uint8_t diagnosticSelector = ProtectionProtocol::DS_LIVE;
+        uint8_t diagnosticCursor = ProtectionProtocol::DIAG_FIELD_COUNT;
+        uint32_t diagnosticSendMs = 0;
         uint32_t reblockTicks = 2000, grantWaitTicks = 10000;
         int32_t retreatDistance = 0, retreatVelocity = 0, retreatAcceleration = 0;
         int32_t retreatCurrent = 0, holdingCurrent = 0, positionTolerance = 51;
@@ -249,6 +262,10 @@ public:
         void TickProtection();
         bool TickInternalProtection();
         void ResetDetection(bool newMotion = false);
+        void ClearDetectionTimer(uint8_t reason, uint8_t detail = 0);
+        void FillStallDiagnostic(uint32_t* snapshot, uint8_t source, uint8_t reason = ProtectionProtocol::NONE) const;
+        void CaptureStallDiagnostic(uint16_t request, uint8_t selector);
+        void PollStallDiagnostic();
         void UpdateProtectionLimits();
         void SetProtectionPhase(uint8_t phase, uint8_t reason = ProtectionProtocol::NONE);
         void BeginLocalProtection(uint8_t reason, bool isLocal);

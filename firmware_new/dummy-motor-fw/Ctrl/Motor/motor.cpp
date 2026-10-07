@@ -455,6 +455,10 @@ void Motor::Controller::SetCtrlMode(Motor::Mode_t _mode)
     requestMode = _mode;
 }
 
+// Low-frequency CAN entry; keep STOP compatibility within the 95KiB app area.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
 {
     using namespace SoftStopProtocol;
@@ -471,23 +475,36 @@ void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
         if (softStopTokenValid && token == softStopToken && softStopPhase == DISABLED) return;
         softStopToken = token;
         softStopTokenValid = true;
+        softStopTokenAction = action;
         softStopLocked = true;
         softStopPhase = DECELERATING;
         softStopRequest = SoftStopProtocol::DISABLE;
         return;
     }
     const bool preservingProtection = action == ProtectionProtocol::STOP_PROTECTION;
-    const bool cancelInternal = action == STOP && protectionPhase != ProtectionProtocol::IDLE;
-    if (cancelInternal) CancelInternal(ProtectionProtocol::CANCELLED_STOP);
     if (action == STOP || preservingProtection)
     {
-        // Retries (including a delayed STOP after RELEASE) never restart a ramp.
-        if (!cancelInternal && softStopTokenValid && token == softStopToken) return;
+        // Check before cancellation: the first user STOP cancels protection,
+        // but its retransmission must not restart the 50ms stable window.
+        // Action is part of the key: user STOP can reuse a protection token.
+        if (softStopTokenValid && token == softStopToken && action == softStopTokenAction) return;
         // DISABLE already accepted is never overwritten by a later stop ramp.
         if (softStopRequest == SoftStopProtocol::DISABLE) return;
+        const bool keepHold = preservingProtection && softStopLocked &&
+            softStopPhase == HOLDING && !softStopRequest && !contextRequest && !internalStopping &&
+            (protectionPhase == ProtectionProtocol::WAIT_GRANT || protectionPhase == ProtectionProtocol::PEER_HOLD) &&
+            modeRunning == MODE_COMMAND_POSITION && !goalDisable && !softDisable &&
+            IsFeedbackValid() && !isStalled && !configurationFault &&
+            abs(static_cast<int64_t>(realPosition) - softStopPosition) <= 8 &&
+            abs(estVelocity) <= MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 100;
+        if (action == STOP) CancelInternal(ProtectionProtocol::CANCELLED_STOP);
         softStopToken = token;
         softStopTokenValid = true;
+        softStopTokenAction = action;
         softStopLocked = true;
+        // Bind a fresh master confirmation to an existing, fixed hold. This
+        // never recaptures position, clears holding torque, or skips first stop.
+        if (keepHold) return;
         softStopPhase = DECELERATING;
         softStopRequest = STOP;
     }
@@ -500,6 +517,7 @@ void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
         if (!IsFeedbackValid() || configurationFault)
         {
             softStopToken = token; softStopTokenValid = true;
+            softStopTokenAction = action;
             softStopLocked = true; softStopPhase = FAULT;
             goalDisable = softDisable = true; requestMode = modeRunning = MODE_STOP;
             return;
@@ -508,6 +526,7 @@ void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
         softStopKeepHold = softStopPhase == HOLDING;
         softStopToken = token;
         softStopTokenValid = true;
+        softStopTokenAction = action;
         softStopLocked = true;
         softStopPhase = DECELERATING;
         softStopRequest = ENABLE_HOLD;
@@ -688,6 +707,10 @@ void Motor::Controller::AddTrajectorySetPoint(int32_t _pos, int32_t _vel)
 }
 
 
+// CAN setpoint entry; preserve the 20kHz control/arrival optimization.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void Motor::Controller::SetPositionSetPoint(int32_t _pos)
 {
     if (IsSoftStopLocked()) return;
@@ -700,7 +723,9 @@ void Motor::Controller::SetPositionSetPoint(int32_t _pos)
         ResetPositionCompletion(true);
         state = STATE_RUNNING; // The immediate 0x07 ACK must not carry old FINISH.
     }
-    if (abs(goalPosition - realPosition) > positionTolerance)
+    const int64_t error = static_cast<int64_t>(goalPosition) - realPosition;
+    const int32_t tolerance = MotionCompletionProtocol::PositionToleranceSteps(boardConfig.canNodeId);
+    if (error < -tolerance || error > tolerance)
     {
         if (!motionIntent) ResetDetection(true);
         motionIntent = true;
@@ -721,8 +746,6 @@ void Motor::Controller::ResetPositionCompletion(bool newGoal)
 bool Motor::Controller::TickPositionCompletion()
 {
     using namespace MotionCompletionProtocol;
-    const int64_t error = static_cast<int64_t>(realPosition) - goalPosition;
-    const int32_t tolerance = PositionToleranceSteps(static_cast<uint8_t>(boardConfig.canNodeId));
     if (positionCompletionTarget != goalPosition || modeRunning != MODE_COMMAND_POSITION ||
         requestMode != MODE_COMMAND_POSITION || IsSoftStopLocked() || !IsFeedbackValid() ||
         goalDisable || softDisable || goalBrake || softBrake || isStalled || overloadFlag)
@@ -730,7 +753,7 @@ bool Motor::Controller::TickPositionCompletion()
         ResetPositionCompletion(true);
         return false;
     }
-    if (softPosition != goalPosition || softVelocity != 0 || error < -tolerance || error > tolerance)
+    if (!IsOrdinaryPositionArrival())
     {
         ResetPositionCompletion();
         return boardConfig.canNodeId != 8 && positionCompleted;
@@ -755,6 +778,13 @@ bool Motor::Controller::TickPositionCompletion()
         }
         positionSettled = true;
         positionCompleted = true;
+        if (motionIntent)
+        {
+            ResetDetection();
+            detectionReset = ProtectionProtocol::DR_COMPLETED;
+            detectionResetDetail = 0;
+            detectionGate = ProtectionProtocol::DG_NO_MOTION;
+        }
         positionStableTicks = 0;
         positionStableMin = positionStableMax = realPosition;
         positionVelocitySum = 0;
@@ -762,6 +792,23 @@ bool Motor::Controller::TickPositionCompletion()
     return boardConfig.canNodeId == 8 ? positionSettled : positionCompleted;
 }
 
+bool Motor::Controller::IsOrdinaryPositionArrival(bool referenceFinished) const
+{
+    const int64_t error = static_cast<int64_t>(goalPosition) - realPosition;
+    const int32_t tolerance = MotionCompletionProtocol::PositionToleranceSteps(boardConfig.canNodeId);
+    if (modeRunning != MODE_COMMAND_POSITION || requestMode != MODE_COMMAND_POSITION ||
+        error < -tolerance || error > tolerance) return false;
+    if (referenceFinished) return softPosition == goalPosition && softVelocity == 0;
+    // Detection can suppress tolerated endpoint correction slightly before
+    // the last reference tick; completion still requires the full reference.
+    const int64_t referenceError = static_cast<int64_t>(goalPosition) - softPosition;
+    return referenceError >= -tolerance && referenceError <= tolerance;
+}
+
+// Low-frequency CAN query only; keep the 20kHz controller optimization unchanged.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 uint8_t Motor::Controller::GetPositionCompletionStatus(float expectedMotorR) const
 {
     using namespace MotionCompletionProtocol;
@@ -772,17 +819,20 @@ uint8_t Motor::Controller::GetPositionCompletionStatus(float expectedMotorR) con
     if (expectedSteps < -2147483648.0f || expectedSteps >= 2147483648.0f) return flags;
     const int64_t expected = static_cast<int32_t>(expectedSteps) +
                              static_cast<int64_t>(context->config.motionParams.encoderHomeOffset);
-    if (IsFeedbackValid()) flags |= ENCODER_READY;
+    const bool feedbackValid = IsFeedbackValid();
+    if (feedbackValid) flags |= ENCODER_READY;
     if (softPosition == goalPosition && softVelocity == 0) flags |= PLANNER_READY;
     const int64_t error = static_cast<int64_t>(realPosition) - goalPosition;
     const int32_t tolerance = PositionToleranceSteps(static_cast<uint8_t>(boardConfig.canNodeId));
     if (error >= -tolerance && error <= tolerance) flags |= POSITION_READY;
-    if (expected != goalPosition || modeRunning != MODE_COMMAND_POSITION ||
-        requestMode != MODE_COMMAND_POSITION || IsSoftStopLocked() || !IsFeedbackValid() ||
-        goalDisable || softDisable || goalBrake || softBrake || isStalled || overloadFlag)
-        return flags;
-    flags |= TARGET_READY;
-    if (positionSettled && positionCompletionTarget == goalPosition && state == STATE_FINISH &&
+    if (overloadFlag) flags |= CURRENT_CMD_LIMITED;
+    if (modeRunning != MODE_COMMAND_POSITION || requestMode != MODE_COMMAND_POSITION ||
+        IsSoftStopLocked() || !feedbackValid || goalDisable || softDisable ||
+        goalBrake || softBrake || isStalled) flags |= DRIVE_BLOCKED;
+    if (expected != goalPosition || requestMode != MODE_COMMAND_POSITION) return flags;
+    flags |= TARGET_READY; // This goal was adopted, even if control is now blocked.
+    if (!(flags & (DRIVE_BLOCKED | CURRENT_CMD_LIMITED)) &&
+        positionSettled && positionCompletionTarget == goalPosition && state == STATE_FINISH &&
         softPosition == goalPosition && softVelocity == 0 && error >= -tolerance && error <= tolerance)
         flags |= SETTLED;
     return flags;

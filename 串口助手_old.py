@@ -26,10 +26,10 @@ RAIL_DEFAULT = 0
 # 界面初值仅用于编辑；最终限额及整组合法性由实际节点检查。
 STALL_PARAMETERS = (
     ("ENABLE", "普通堵转检测开关", "0=关闭 / 1=开启", 1, 0, 1),
-    ("CURRENT_A", "电流命令阈值", "A", 2.25, 0.1, None),
+    ("CURRENT_A", "电流命令阈值", "A", 1.0, 0.1, None),
     ("SPEED_RPS", "实际低速阈值", "电机 r/s", 0.02, 0.001, 0.2),
     ("ERROR_R", "跟随误差阈值", "电机圈", 0.5 / 360 * 50, 0.0002, 1),
-    ("TRIGGER_MS", "连续触发时间", "ms", 300, 20, 2000),
+    ("TRIGGER_MS", "连续触发时间", "ms", 100, 20, 2000),
     ("STARTUP_MS", "启动豁免时间", "ms", 200, 0, 500),
     ("CURRENT_FILTER_MS", "电流命令滤波", "ms", 10, 1, 100),
     ("SPEED_FILTER_MS", "速度滤波", "ms", 20, 1, 100),
@@ -1071,9 +1071,10 @@ class RobotSerialAssistantOld:
                 with self._serial_write_lock:
                     if generation != self._tx_generation:
                         continue
-                    if self._stop_locked and cmd not in ("!STOP", "!START", "!DISABLE"):
+                    diagnostic = self._is_stall_status_query(cmd)
+                    if self._stop_locked and not diagnostic and cmd not in ("!STOP", "!START", "!DISABLE"):
                         continue
-                    if self._calibration_busy and cmd not in ("!CALIBRATION", "!STOP", "!DISABLE"):
+                    if self._calibration_busy and not diagnostic and cmd not in ("!CALIBRATION", "!STOP", "!DISABLE"):
                         continue
                     port_obj = self.serial_port
                     if port_obj is None or not port_obj.is_open:
@@ -1206,6 +1207,11 @@ class RobotSerialAssistantOld:
                          ).pack(side=tk.LEFT, padx=6)
             ttk.Button(top, text="读取全部参数", command=lambda k=kind: self._query_protection(k)
                        ).pack(side=tk.LEFT, padx=6)
+            if kind == "STALL":
+                ttk.Button(top, text="读取运行快照", command=self._query_stall_status
+                           ).pack(side=tk.LEFT, padx=6)
+                ttk.Button(top, text="读取触发快照", command=lambda: self._query_stall_status(last=True)
+                           ).pack(side=tk.LEFT, padx=6)
             save = ttk.Button(top, text="保存节点 EEPROM", command=lambda k=kind: self._save_protection(k))
             save.pack(side=tk.LEFT, padx=6)
             self._protection_save_buttons[kind] = save
@@ -1268,6 +1274,17 @@ class RobotSerialAssistantOld:
 
     def _query_protection(self, kind):
         self.send_cmd(f"#{kind}_GET {self._protection_nodes[kind].get()}")
+
+    @staticmethod
+    def _is_stall_status_query(cmd):
+        return re.fullmatch(r"#STALL_STATUS\s+[1-7](?:\s+LAST)?", cmd) is not None
+
+    def _query_stall_status(self, last=False):
+        node = self._protection_nodes["STALL"].get()
+        if node not in range(1, 8):
+            self.log("堵转快照仅支持单个节点 J1–J7，请切换节点", "WARN")
+            return
+        self.send_cmd(f"#STALL_STATUS {node}" + (" LAST" if last else ""))
 
     def _set_protection(self, kind, key):
         node = self._protection_nodes[kind].get()
@@ -1569,10 +1586,11 @@ class RobotSerialAssistantOld:
         if self._seq_active and not sequence and (cmd.startswith(('>', '&', '@', '#CMDMODE')) or cmd in ('!HOME', '!RESET')):
             self.log("顺序发送中，请等待完成或先 STOP；当前运动回执由顺序任务占用", "WARN")
             return False
-        if self._calibration_busy and cmd not in ("!STOP", "!DISABLE"):
+        diagnostic = self._is_stall_status_query(cmd)
+        if self._calibration_busy and not diagnostic and cmd not in ("!STOP", "!DISABLE"):
             self.log("校准及保存中，START 返回 busy，不挂起；可发送 STOP 或 DISABLE", "WARN")
             return False
-        if self._stop_locked and cmd not in ("!STOP", "!START", "!DISABLE"):
+        if self._stop_locked and not diagnostic and cmd not in ("!STOP", "!START", "!DISABLE"):
             self.log("保护锁定中，仅接受 START、DISABLE；STOP 可中断保护动作", "WARN")
             return False
         if cmd.startswith("#ENC_CAL"):

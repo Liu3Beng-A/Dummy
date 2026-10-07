@@ -30,6 +30,7 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
             case ProtectionProtocol::PARAM_REPLY:
             case ProtectionProtocol::CONTEXT_REPLY:
             case ProtectionProtocol::PROBE_REPLY:
+            case ProtectionProtocol::DIAG_REPLY:
                 if (rxHeader->DLC == 8) dummy.ProtectionCallback(id, cmd, data);
                 return;
             case SoftStopProtocol::COMMAND:

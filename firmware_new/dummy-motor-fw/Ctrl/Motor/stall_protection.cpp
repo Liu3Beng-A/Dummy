@@ -6,6 +6,13 @@
 #include <initializer_list>
 
 using namespace ProtectionProtocol;
+// Keep diagnostics within the existing 95KiB application area. Only CAN/main
+// query / one-shot capture work uses size optimization; the 20kHz detector retains its options.
+#if defined(__GNUC__)
+#define PROTECTION_CAN_SIZE __attribute__((optimize("Os")))
+#else
+#define PROTECTION_CAN_SIZE
+#endif
 namespace {
 constexpr int32_t STEPS = Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 constexpr uint32_t HZ = 20000;
@@ -94,7 +101,7 @@ void Motor::Controller::UpdateProtectionLimits() {
     retreatDistance = newDistance; retreatVelocity = newVelocity; retreatAcceleration = newAcceleration;
     retreatCurrent = newRetreatCurrent; holdingCurrent = newHoldCurrent; positionTolerance = newTolerance;
     retreatTimeoutTicks = newTimeout; profileLow = newLow; profileHigh = newHigh; profileDirections = newDirections;
-    candidateTicks = 0; filteredCurrentQ = filteredVelocityQ = 0;
+    ClearDetectionTimer(DR_PARAMETERS); filteredCurrentQ = filteredVelocityQ = 0;
 }
 void Motor::Controller::OnMotionLimitChange() {
     const float maxCurrent = boardConfig.currentLimit / 1000.0f;
@@ -121,17 +128,84 @@ void Motor::Controller::OnMasterCommunication() {
     masterSeen = true; masterSilenceTicks = 0;
 }
 void Motor::Controller::ResetDetection(bool newMotion) {
+    if (newMotion) {
+        if (++detectionSession == 0) ++detectionSession;
+        detectionPeak = detectionLastTimer = detectionBadTotal = detectionBadPeak = 0;
+        detectionReset = DR_NONE; detectionResetDetail = 0;
+    } else if (detectionGate != DG_PROTECTED) ClearDetectionTimer(DR_CONTROL_RESET);
     candidateTicks = 0; directionTicks = 0; motionDirection = 0;
     filteredCurrentQ = filteredVelocityQ = 0;
     startupTicks = newMotion ? detectorStartupTicks : 0;
     if (!newMotion) motionIntent = false;
+}
+void Motor::Controller::ClearDetectionTimer(uint8_t reason, uint8_t detail) {
+    if (candidateTicks) {
+        detectionLastTimer = candidateTicks;
+        detectionReset = reason; detectionResetDetail = detail;
+    }
+    candidateTicks = 0;
+}
+PROTECTION_CAN_SIZE void Motor::Controller::FillStallDiagnostic(uint32_t* s, uint8_t source, uint8_t reason) const {
+    s[D_META] = uint32_t(modeRunning) | (uint32_t(requestMode) << 8) |
+        (uint32_t(protectionPhase) << 16) | (uint32_t(detectionGate) << 24);
+    s[D_FLAGS] = (motionIntent ? 1U : 0) | (IsFeedbackValid() ? 2U : 0) |
+        (!goalDisable && !softDisable ? 4U : 0) |
+        (context->config.ctrlParams.stallProtectSwitch ? 8U : 0) |
+        (IsSoftStopLocked() ? 16U : 0) | (uint32_t(detectionUnmet) << 8);
+    s[D_CURRENT] = uint16_t(focCurrent) | (uint32_t(filteredCurrentQ / 1024) << 16);
+    s[D_RAW_SPEED] = uint32_t(estVelocity); s[D_FILTER_SPEED] = filteredVelocityQ / 1024;
+    const int64_t error = int64_t(softPosition) - realPosition;
+    memcpy(s + D_ERROR_LOW, &error, sizeof(error));
+    s[D_TIMER] = source == DS_TRIGGER || detectionGate == DG_ELIGIBLE ? candidateTicks : 0;
+    s[D_PEAK_TIMER] = detectionPeak;
+    s[D_RESET] = detectionReset | (uint32_t(detectionResetDetail) << 8) | (uint32_t(detectionSession) << 16);
+    s[D_BAD_TOTAL] = detectionBadTotal; s[D_BAD_PEAK] = detectionBadPeak;
+    s[D_STARTUP] = startupTicks;
+    s[D_CURRENT_LIMIT] = detectorCurrent; s[D_SPEED_LIMIT] = detectorSpeed;
+    s[D_ERROR_LIMIT] = detectorError; s[D_TRIGGER] = detectorTriggerTicks;
+    s[D_LAST_TIMER] = detectionLastTimer; s[D_CAPTURE_MS] = HAL_GetTick();
+    s[D_EVENT] = protectionEvent;
+    const int64_t goalError = int64_t(goalPosition) - realPosition;
+    memcpy(s + D_GOAL_ERROR_LOW, &goalError, sizeof(goalError));
+    s[D_REFERENCE_SPEED] = uint32_t(softVelocity);
+    s[D_DIRECTION] = uint8_t(motionDirection) | (uint32_t(uint8_t(stallDirection)) << 8) |
+        (uint32_t(reason) << 16) | (uint32_t(source) << 24);
+}
+PROTECTION_CAN_SIZE void Motor::Controller::CaptureStallDiagnostic(uint16_t request, uint8_t selector) {
+    IrqGuard guard;
+    if (request == diagnosticRequest && selector != diagnosticSelector) return;
+    if (request != diagnosticRequest) {
+        if (selector == DS_LIVE) FillStallDiagnostic(diagnosticSnapshot, DS_LIVE);
+        else if (triggerSnapshotValid) memcpy(diagnosticSnapshot, triggerSnapshot, sizeof(triggerSnapshot));
+        else {
+            memset(diagnosticSnapshot, 0, sizeof(diagnosticSnapshot));
+            diagnosticSnapshot[D_DIRECTION] = uint32_t(DS_NO_TRIGGER) << 24;
+        }
+        diagnosticRequest = request;
+        diagnosticSelector = selector;
+    }
+    diagnosticCursor = 0;
+}
+PROTECTION_CAN_SIZE void Motor::Controller::PollStallDiagnostic() {
+    uint8_t data[8]{};
+    const uint32_t now = HAL_GetTick();
+    {
+        IrqGuard guard;
+        if (diagnosticCursor >= DIAG_FIELD_COUNT || now - diagnosticSendMs < 1) return;
+        data[0] = diagnosticCursor++; data[1] = DIAG_VERSION;
+        data[2] = uint8_t(diagnosticRequest); data[3] = uint8_t(diagnosticRequest >> 8);
+        memcpy(data + 4, diagnosticSnapshot + data[0], 4);
+        diagnosticSendMs = now;
+    }
+    // Ordinary queue: protection replies retain priority over diagnostics.
+    Send(DIAG_REPLY, data);
 }
 void Motor::Controller::SetProtectionPhase(uint8_t phase, uint8_t reason) {
     if (protectionPhase == phase && protectionReason == reason) return;
     protectionPhase = phase; protectionReason = reason; phaseTicks = 0;
     eventAcknowledged = false;
 }
-void Motor::Controller::BuildProtectionEvent(uint8_t* data) const {
+PROTECTION_CAN_SIZE void Motor::Controller::BuildProtectionEvent(uint8_t* data) const {
     const uint32_t event = protectionEvent;
     memcpy(data, &event, 4);
     data[4] = protectionPhase; data[5] = protectionReason; data[6] = coordinateVersion;
@@ -140,7 +214,7 @@ void Motor::Controller::BuildProtectionEvent(uint8_t* data) const {
               (distanceClipped ? DISTANCE_CLIPPED : 0) | (localStall ? LOCAL_STALL : 0) |
               (boardConfig.canNodeId == 8 ? EXCLUDED : 0) | (IsActuallyDisabled() ? DISABLED_FLAG : 0);
 }
-void Motor::Controller::BuildProtectionContext(uint8_t* data, uint16_t query, bool probe) const {
+PROTECTION_CAN_SIZE void Motor::Controller::BuildProtectionContext(uint8_t* data, uint16_t query, bool probe) const {
     uint8_t event[8]{}; BuildProtectionEvent(event);
     data[0] = protectionPhase | (probe ? QUERY_REPLY_FLAG : 0);
     data[1] = probe ? event[7] : protectionReason;
@@ -158,7 +232,13 @@ void Motor::Controller::ReplyConfiguration(uint8_t op, uint8_t status, uint16_t 
     Send(PARAM_REPLY, data);
 }
 
-bool Motor::Controller::ProcessProtectionCan(uint8_t command, const uint8_t* data, uint32_t length) {
+PROTECTION_CAN_SIZE bool Motor::Controller::ProcessProtectionCan(uint8_t command, const uint8_t* data, uint32_t length) {
+    if (command == DIAG_QUERY) {
+        if (length == 8 && boardConfig.canNodeId >= 1 && boardConfig.canNodeId <= 7 &&
+            data[0] <= DS_TRIGGER && data[1] == DIAG_VERSION && U16(data + 2))
+            CaptureStallDiagnostic(U16(data + 2), data[0]);
+        return true;
+    }
     if (command != EVENT_ACK && command != PARAM_SET && command != PARAM_GET && command != CONFIG && command != CONTEXT) return false;
     if (length != 8) return true;
     OnMasterCommunication();
@@ -256,7 +336,7 @@ bool Motor::Controller::ProcessProtectionCan(uint8_t command, const uint8_t* dat
         IrqGuard contextGuard;
         uint8_t failure = NONE;
         if (op == CANCEL) {
-            if (task == protectionTask && task != 0) {
+            if (task == protectionTask && task != 0 && task != lastCancelledTask) {
                 lastCancelledTask = task; CancelInternal(CANCELLED_STOP);
                 softStopRequest = SoftStopProtocol::STOP; softStopLocked = true;
                 softStopPhase = IsActuallyDisabled() ? SoftStopProtocol::DISABLED : SoftStopProtocol::DECELERATING;
@@ -336,7 +416,14 @@ bool Motor::Controller::ProcessProtectionCan(uint8_t command, const uint8_t* dat
         if (op == CAL_END && !failure) {
             reply[2] = static_cast<uint8_t>(task); reply[3] = static_cast<uint8_t>(task >> 8);
         }
-        if (failure) { reply[1] = failure; reply[2] = static_cast<uint8_t>(task); reply[3] = static_cast<uint8_t>(task >> 8); }
+        if (failure) {
+            // A same-task GO/PREPARE arriving after failure reports the real
+            // terminal cause, not a BAD_TASK pseudo-failure over that snapshot.
+            const bool terminal = task && task == protectionTask &&
+                (protectionPhase == HOLD_FAILED || protectionPhase == CAL_FAILED) && protectionReason != NONE;
+            reply[1] = terminal ? protectionReason : failure;
+            reply[2] = static_cast<uint8_t>(task); reply[3] = static_cast<uint8_t>(task >> 8);
+        }
         Send(CONTEXT_REPLY, reply); BuildProtectionEvent(reply); Send(EVENT, reply);
     }
     __set_PRIMASK(irq); return true;
@@ -376,6 +463,15 @@ void Motor::Controller::BeginLocalProtection(uint8_t reason, bool isLocal) {
     const int64_t followingError = static_cast<int64_t>(softPosition) - realPosition;
     if (followingError * stallDirection <= 0) stallDirection = 0;
     if (abs(estVelocity) > detectorSpeed && Sign(estVelocity) != stallDirection) stallDirection = 0;
+    if (isLocal && reason == STALL) {
+        IrqGuard guard;
+        // Freeze before STOP changes the reference/current or resets detection.
+        FillStallDiagnostic(triggerSnapshot, DS_TRIGGER, reason);
+        triggerSnapshot[D_RESET] = DR_TRIGGERED | (uint32_t(detectionSession) << 16);
+        triggerSnapshot[D_LAST_TIMER] = candidateTicks;
+        ClearDetectionTimer(DR_TRIGGERED);
+        triggerSnapshotValid = true;
+    }
     SetProtectionPhase(isLocal ? LOCAL_STOPPING : PEER_STOPPING, reason);
     RequestSoftStop(STOP_PROTECTION, static_cast<uint16_t>(softStopToken + 1));
     ResetDetection(); leaseTicks = 0; masterSilenceTicks = 0;
@@ -393,8 +489,10 @@ void Motor::Controller::FailProtection(uint8_t reason) {
     }
     ResetDetection();
 }
-void Motor::Controller::CancelInternal(uint8_t reason) {
+PROTECTION_CAN_SIZE void Motor::Controller::CancelInternal(uint8_t reason) {
     if (protectionPhase == IDLE) return;
+    if ((protectionPhase == HOLD_FAILED || protectionPhase == CAL_FAILED) && protectionReason != NONE)
+        reason = protectionReason; // Keep the first fault when STOP/CANCEL follows it.
     contextRequest = 0; internalStopping = false; saveRequested = false;
     coordinateCapturePending = false;
     if (protectionTask) lastCancelledTask = protectionTask;
@@ -411,6 +509,12 @@ void Motor::Controller::OnPeerProtection(uint8_t node, uint32_t event, uint8_t p
 }
 
 void Motor::Controller::TickProtection() {
+    detectionUnmet = 0;
+    detectionGate = protectionPhase == IDLE ? DG_ELIGIBLE : DG_PROTECTED;
+    if (!IsFeedbackValid()) {
+        if (detectionBadTotal != UINT32_MAX) ++detectionBadTotal;
+        if (invalidFeedbackTicks > detectionBadPeak) detectionBadPeak = invalidFeedbackTicks;
+    }
     if (masterSeen && masterSilenceTicks < HZ * 60) ++masterSilenceTicks;
     if (protectionPhase != IDLE) ++phaseTicks;
     if (protectionTakenOver && leaseTicks < HZ * 60) ++leaseTicks;
@@ -437,30 +541,52 @@ void Motor::Controller::TickProtection() {
     // The internal controller owns its continuous contact/reblock timer.
     // Ordinary detection must not clear that timer every protected tick.
     if (protectionPhase != IDLE) return;
-    if (boardConfig.canNodeId == 8 || !context->config.ctrlParams.stallProtectSwitch ||
-        IsSoftStopLocked() || goalDisable || softDisable || !IsFeedbackValid()) {
-        candidateTicks = 0; return;
-    }
+    if (boardConfig.canNodeId == 8) detectionGate = DG_EXCLUDED;
+    else if (!context->config.ctrlParams.stallProtectSwitch) detectionGate = DG_SWITCH_OFF;
+    else if (IsSoftStopLocked()) detectionGate = DG_STOP_LOCKED;
+    else if (goalDisable || softDisable) detectionGate = DG_DISABLED;
+    else if (!IsFeedbackValid()) detectionGate = DG_BAD_FEEDBACK;
+    if (detectionGate != DG_ELIGIBLE) { ClearDetectionTimer(DR_GATE, detectionGate); return; }
     const bool positionMode = modeRunning == MODE_COMMAND_POSITION || modeRunning == MODE_COMMAND_Trajectory ||
                               modeRunning == MODE_PWM_POSITION || modeRunning == MODE_STEP_DIR;
-    if (!positionMode || !motionIntent) { candidateTicks = 0; return; }
+    if (!positionMode || !motionIntent) {
+        detectionGate = positionMode ? DG_NO_MOTION : DG_MODE;
+        ClearDetectionTimer(DR_GATE, detectionGate); return;
+    }
+    if (IsOrdinaryPositionArrival(false)) {
+        // Acceptable endpoint correction is not a blocked move. Keep intent
+        // until the existing encoder stability window confirms completion.
+        detectionGate = DG_ARRIVAL; ClearDetectionTimer(DR_GATE, detectionGate); return;
+    }
     const int32_t directionReference = softVelocity;
     if (abs(directionReference) >= STEPS / 1000) {
         const int8_t direction = Sign(directionReference);
-        if (motionDirection != direction) { motionDirection = direction; directionTicks = 0; candidateTicks = 0; }
+        if (motionDirection != direction) { motionDirection = direction; directionTicks = 0; ClearDetectionTimer(DR_DIRECTION); }
         if (directionTicks < HZ) ++directionTicks;
     }
-    if (startupTicks) { --startupTicks; candidateTicks = 0; return; }
-    if (currentFilterTicks == 0 || velocityFilterTicks == 0) { candidateTicks = 0; return; }
+    if (startupTicks) { --startupTicks; detectionGate = DG_STARTUP; ClearDetectionTimer(DR_STARTUP); return; }
+    if (currentFilterTicks == 0 || velocityFilterTicks == 0) {
+        detectionGate = DG_FILTER; ClearDetectionTimer(DR_GATE, detectionGate); return;
+    }
     const int32_t boundedSpeed = Min(abs(estVelocity), INT32_MAX / 1024);
     filteredCurrentQ = Filter(filteredCurrentQ, abs(focCurrent), currentFilterTicks);
     filteredVelocityQ = Filter(filteredVelocityQ, boundedSpeed, velocityFilterTicks);
     const int64_t error = static_cast<int64_t>(softPosition) - realPosition;
-    const bool all = filteredCurrentQ / 1024 >= detectorCurrent && filteredVelocityQ / 1024 <= detectorSpeed &&
-                     (error >= detectorError || error <= -detectorError);
-    if (!all) candidateTicks = 0;
-    else if (++candidateTicks >= detectorTriggerTicks) BeginLocalProtection(STALL, true);
-    if (softVelocity == 0 && abs(goalPosition - realPosition) <= positionTolerance) motionIntent = false;
+    detectionUnmet = (filteredCurrentQ / 1024 < detectorCurrent ? 1 : 0) |
+        (filteredVelocityQ / 1024 > detectorSpeed ? 2 : 0) |
+        (error < detectorError && error > -detectorError ? 4 : 0);
+    if (detectionUnmet) ClearDetectionTimer(DR_CONDITIONS, detectionUnmet);
+    else {
+        ++candidateTicks;
+        if (candidateTicks > detectionPeak) detectionPeak = candidateTicks;
+        if (candidateTicks >= detectorTriggerTicks) {
+            BeginLocalProtection(STALL, true);
+        }
+    }
+    // Command-position intent is retired by actual completion, not by the
+    // protection retreat tolerance. Preserve non-command-position behavior.
+    if (modeRunning != MODE_COMMAND_POSITION && softVelocity == 0 &&
+        abs(goalPosition - realPosition) <= positionTolerance) motionIntent = false;
 }
 
 void Motor::Controller::SetCaptureCoordinate(float motorR) {
@@ -726,4 +852,5 @@ void Motor::Controller::PollProtectionMain() {
         __set_PRIMASK(irq);
         Send(EVENT, event); Send(CONTEXT_REPLY, contextData); eventSendMillis = now;
     }
+    PollStallDiagnostic();
 }

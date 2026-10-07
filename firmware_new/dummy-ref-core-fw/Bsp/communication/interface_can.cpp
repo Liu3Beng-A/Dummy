@@ -268,7 +268,7 @@ bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef
     const uint8_t command = txHeader->StdId & 0x7F;
     const bool protectionTraffic = command == SoftStopProtocol::COMMAND ||
         command == ProtectionProtocol::EVENT_ACK ||
-        (command >= ProtectionProtocol::PARAM_SET && command <= ProtectionProtocol::PROBE_REPLY);
+        (command >= ProtectionProtocol::PARAM_SET && command <= ProtectionProtocol::DIAG_REPLY);
     if (!protectionTraffic && dummy.IsStopLocked()) return false;
     const uint32_t epoch = dummy.GetMotionEpoch();
     osSemaphoreId_t semaphore;

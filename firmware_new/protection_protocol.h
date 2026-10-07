@@ -14,6 +14,40 @@ constexpr uint8_t CONFIG = 0x33, CONTEXT = 0x34, CONTEXT_REPLY = 0x35;
 // Coherent QUERY snapshot: coordinateVersion[0], flags[1], probe u16[2..3],
 // real motor-r float32[4..7]. Storage VERSION stays 1: no EEPROM migration.
 constexpr uint8_t PROBE_REPLY = 0x36;
+// Read-only stall diagnostics. QUERY: selector[0] (0 live, 1 last trigger), version[1], nonzero
+// request u16[2..3], zero[4..7]. REPLY: field[0], version[1], same request,
+// integer value u32[4..7]. Retries retain the first coherent capture.
+constexpr uint8_t DIAG_QUERY = 0x37, DIAG_REPLY = 0x38, DIAG_VERSION = 2;
+enum DiagnosticSource : uint8_t { DS_LIVE = 0, DS_TRIGGER = 1, DS_NO_TRIGGER = 2 };
+enum DiagnosticField : uint8_t {
+    D_META, D_FLAGS, D_CURRENT, D_RAW_SPEED, D_FILTER_SPEED,
+    D_ERROR_LOW, D_ERROR_HIGH, D_TIMER, D_PEAK_TIMER, D_RESET,
+    D_BAD_TOTAL, D_STARTUP, D_CURRENT_LIMIT, D_SPEED_LIMIT, D_ERROR_LIMIT,
+    D_TRIGGER, D_LAST_TIMER, D_BAD_PEAK, D_CAPTURE_MS,
+    D_EVENT, D_GOAL_ERROR_LOW, D_GOAL_ERROR_HIGH, D_REFERENCE_SPEED, D_DIRECTION,
+    DIAG_FIELD_COUNT
+};
+static_assert(DIAG_FIELD_COUNT < 32, "Diagnostic fields must fit the received-field mask");
+// META bytes: running mode, requested mode, protection phase, detection gate.
+// FLAGS low byte: intent=1, valid feedback=2, enabled=4, detection switch=8,
+// STOP lock=16. Next byte: unmet CURRENT=1, SPEED=2, ERROR=4 (eligible only).
+// CURRENT halves: signed raw command mA, unsigned filtered magnitude mA.
+// Speeds/errors are motor subdivision steps (/51200 = motor r or r/s).
+// Timers are 20kHz ticks (/20 = ms). RESET bytes: reason, detail, session u16.
+// DIRECTION bytes: signed motion direction, signed validated stall direction,
+// trigger reason (0 for live), DiagnosticSource. GOAL_ERROR is goal-real.
+// Ordinary local STALL capture is RAM-only and survives START/DISABLE/new
+// commands until the next local STALL or reboot. Peer STOP, retreat failure
+// and calibration contact do not overwrite the original detection evidence.
+enum DiagnosticGate : uint8_t {
+    DG_ELIGIBLE, DG_PROTECTED, DG_EXCLUDED, DG_SWITCH_OFF, DG_STOP_LOCKED,
+    DG_DISABLED, DG_BAD_FEEDBACK, DG_MODE, DG_NO_MOTION, DG_STARTUP, DG_FILTER,
+    DG_ARRIVAL
+};
+enum DiagnosticReset : uint8_t {
+    DR_NONE, DR_CONDITIONS, DR_GATE, DR_DIRECTION, DR_STARTUP,
+    DR_CONTROL_RESET, DR_PARAMETERS, DR_TRIGGERED, DR_COMPLETED
+};
 // Extended 0x0A action: ramps the seven axes without cancelling their current
 // protection episode. Plain STOP(1) always cancels internal retreat/calibration.
 constexpr uint8_t STOP_PROTECTION = 5;

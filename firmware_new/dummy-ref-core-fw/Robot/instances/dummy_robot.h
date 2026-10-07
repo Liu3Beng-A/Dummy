@@ -449,8 +449,11 @@ private:
         uint32_t id = 0;
         const char* reason = nullptr;
         uint16_t wait = 0, txok = 0, ready = 0;
+        uint8_t flags[8] = {};
     } motionFailureNotice;
     volatile bool motionFailurePrintPending = false;
+    volatile uint16_t motionCurrentLimitedPrintMask = 0;
+    uint32_t motionCurrentLimitedPrintId = 0;
     void FailMotionDispatch(uint32_t epoch, uint32_t generation, const char* reason, uint16_t wait);
     volatile uint16_t motionProgressMask = 0;
     uint32_t motionSendAt[8] = {}, motionQueryAttemptAt[8] = {};

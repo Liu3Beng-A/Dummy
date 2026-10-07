@@ -15,12 +15,14 @@ public:
     bool Busy() const { return job != NONE; }
     bool ParameterBusy() const { return job == SETTINGS_GET || job == SETTINGS_SET || job == SETTINGS_SAVE; }
     bool BlockAutoStart() const { return job != NONE || locked; }
-    // main calls STOP BEFORE Poll increments this counter: old odd -> new even.
-    bool StopSendSlot() const { return (pollRound & 1) != 0; }
+    // STOP runs before Poll increments: reserve new rounds 3/7 for PREPARE/leases.
+    bool StopSendSlot() const { return job == PROTECT_STOP ? (pollRound & 3) != 2 : (pollRound & 1) != 0; }
+    bool FastStopConfirm() const { return job == PROTECT_STOP; }
     void StopAttempted() { stopUsed = true; }
     void ObserveCommunication(uint8_t node);
     bool InterceptStart();
     void Cancel(bool disable);
+    void MotionDispatchFailed();
     void Started();
     void Disabled();
     bool Command(const char* command, unsigned length, StreamSink& response);
@@ -41,6 +43,7 @@ private:
         bool probePending = false;
         uint16_t task = 0, probe = 0, issuedProbe = 0;
         uint8_t phase = 0, reason = 0, version = 0, flags = 0, eventPhase = 0, probeFlags = 0;
+        uint8_t eventReason = 0; // CONTEXT request rejection cannot overwrite EVENT cause.
         float position = 0;
         bool dirty = false, ack = false;
     };
@@ -64,6 +67,7 @@ private:
     uint8_t lastParam = 0, requestNode = 0, healthNode = 1, renewNode = 1;
     uint8_t pollRound = 0, cancelCursor = 1, ackCursor = 1;
     bool txUsed = false, allowTransmit = false, stopUsed = false;
+    bool goPriorityPending = false; // One first-GO opportunity, never unlimited priority.
     float value = 0;
     bool calParameters = false, startAfterProfile = false;
     volatile bool replyReady = false;
@@ -71,6 +75,15 @@ private:
     uint16_t replyTransaction = 0;
     float replyValue = 0;
     StreamSink* sink = nullptr;
+    // Independent read-only transaction; never contributes to Locked()/Busy().
+    enum DiagnosticState : uint8_t { DIAG_IDLE, DIAG_COLLECT, DIAG_READY, DIAG_TIMEOUT };
+    volatile DiagnosticState diagnosticState = DIAG_IDLE;
+    StreamSink* diagnosticSink = nullptr;
+    uint32_t diagnosticValues[ProtectionProtocol::DIAG_FIELD_COUNT]{};
+    uint32_t diagnosticMask = 0, diagnosticAt = 0, diagnosticLastSend = 0;
+    uint16_t diagnosticSerial = 0, diagnosticRequest = 0;
+    uint8_t diagnosticNode = 0, diagnosticLine = 0;
+    uint8_t diagnosticSelector = ProtectionProtocol::DS_LIVE;
     struct Notice { StreamSink* sink; char text[64]; };
     Notice notices[24]{};
     uint8_t writeNotice = 0, readNotice = 0;
@@ -89,6 +102,8 @@ private:
     void PollGroup(uint8_t operation, uint8_t phase, uint16_t mask);
     void PollProfile();
     void PollParameters();
+    void PollDiagnostic();
+    void PrintDiagnostic();
     void CancelContexts();
     void Lease();
     void Health();
