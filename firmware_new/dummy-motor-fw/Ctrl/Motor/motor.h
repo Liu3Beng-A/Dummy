@@ -224,6 +224,11 @@ public:
         uint32_t diagnosticSnapshot[ProtectionProtocol::DIAG_FIELD_COUNT]{};
         uint32_t triggerSnapshot[ProtectionProtocol::DIAG_FIELD_COUNT]{};
         bool triggerSnapshotValid = false;
+        uint32_t calFailureSnapshot[ProtectionProtocol::DIAG_FIELD_COUNT]{};
+        bool calFailureSnapshotValid = false;
+        uint32_t calDetectionPeak = 0, calDetectionLastTimer = 0;
+        uint8_t calDetectionReset = ProtectionProtocol::DR_NONE, calDetectionResetDetail = 0;
+        uint8_t calDetectionUnmet = 0, calDetectionGate = ProtectionProtocol::DG_DISABLED;
         uint16_t diagnosticRequest = 0;
         uint8_t diagnosticSelector = ProtectionProtocol::DS_LIVE;
         uint8_t diagnosticCursor = ProtectionProtocol::DIAG_FIELD_COUNT;
@@ -264,6 +269,9 @@ public:
         void ResetDetection(bool newMotion = false);
         void ClearDetectionTimer(uint8_t reason, uint8_t detail = 0);
         void FillStallDiagnostic(uint32_t* snapshot, uint8_t source, uint8_t reason = ProtectionProtocol::NONE) const;
+        void FillCalDiagnostic(uint32_t* snapshot, uint8_t source, uint8_t reason = ProtectionProtocol::NONE) const;
+        void FreezeCalFailure(uint8_t reason);
+        void ClearCalDetectionTimer(uint8_t reason, uint8_t detail = 0);
         void CaptureStallDiagnostic(uint16_t request, uint8_t selector);
         void PollStallDiagnostic();
         void UpdateProtectionLimits();

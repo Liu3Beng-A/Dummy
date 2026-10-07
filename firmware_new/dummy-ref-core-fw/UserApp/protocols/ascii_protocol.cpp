@@ -29,8 +29,8 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
         Respond(response, "Stopping ok");
         return true;
     }
-    // Only this read-only diagnostic may pass the protection command lock.
-    if (command.rfind("#STALL_STATUS", 0) == 0)
+    // Only these read-only diagnostics may pass the protection command lock.
+    if (command.rfind("#STALL_STATUS", 0) == 0 || command.rfind("#CAL_STATUS", 0) == 0)
         return dummy.HandleProtectionCommand(command.c_str(), command.size(), response);
     if (dummy.IsStopLocked())
     {

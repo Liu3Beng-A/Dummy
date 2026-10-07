@@ -49,16 +49,20 @@ void ProtectionSettings::Defaults(uint8_t node, int32_t currentMa) {
     value[BACK_POS_TOL_R] = .001f; value[BACK_TIMEOUT_MS] = 5000;
     value[REBLOCK_MS] = 100; value[GRANT_WAIT_MS] = 500;
     value[MIN_POSITION_R] = -100; value[MAX_POSITION_R] = 100; value[DIRECTION_MASK] = 3;
-    value[CAL_SEEK_RPS] = value[CAL_RETURN_RPS] = .5f; value[CAL_RETOUCH_RPS] = .25f;
-    value[CAL_ACCEL] = 5; value[CAL_CURRENT_A] = node == 8 ? fminf(1, current) : current;
-    value[CAL_CONTACT_RATIO] = .8f; value[CAL_SPEED_RPS] = value[CAL_ERROR_R] = .02f;
-    value[CAL_TRIGGER_MS] = 150; value[CAL_STARTUP_MS] = 100;
-    value[CAL_MAX_TRAVEL_R] = node == 7 ? 101.0f : 105.0f * 16.0f / 360.0f;
-    value[CAL_SEEK_TIMEOUT_MS] = node == 7 ? 220000 : 15000;
+    // J7/J8 calibration defaults confirmed by the 2026-10-07 hardware test.
+    value[CAL_SEEK_RPS] = value[CAL_RETURN_RPS] = node == 7 ? 5.0f : node == 8 ? 2.0f : .5f;
+    value[CAL_RETOUCH_RPS] = node == 7 || node == 8 ? .5f : .25f;
+    value[CAL_ACCEL] = node == 7 ? 3 : 5;
+    value[CAL_CURRENT_A] = node == 7 ? fminf(2.5f, current) : node == 8 ? fminf(1, current) : current;
+    value[CAL_CONTACT_RATIO] = node == 8 ? .2f : .3f; value[CAL_SPEED_RPS] = value[CAL_ERROR_R] = .02f;
+    value[CAL_TRIGGER_MS] = node == 7 || node == 8 ? 100 : 150; value[CAL_STARTUP_MS] = 100;
+    value[CAL_MAX_TRAVEL_R] = node == 7 ? 101.0f : node == 8 ? 6.0f : 105.0f * 16.0f / 360.0f;
+    value[CAL_SEEK_TIMEOUT_MS] = node == 7 ? 220000 : node == 8 ? 30000 : 15000;
     value[CAL_RETURN_TIMEOUT_MS] = node == 7 ? 120000 : 15000;
     value[CAL_RETOUCH_TIMEOUT_MS] = 5000;
-    value[CAL_BACKOFF_R] = node == 7 ? .2f : 2.0f * 16.0f / 360.0f;
-    value[CAL_REPEAT_TOL_R] = .01f; value[CAL_POSITION_TOL_R] = .001f;
+    value[CAL_BACKOFF_R] = node == 7 ? 1.0f : node == 8 ? .5f : 2.0f * 16.0f / 360.0f;
+    value[CAL_REPEAT_TOL_R] = node == 7 ? .05f : node == 8 ? .1f : .01f;
+    value[CAL_POSITION_TOL_R] = node == 7 ? .005f : node == 8 ? .01f : .001f;
     value[CAL_CONTACT_WINDOW_R] = node == 7 ? 1.0f : 5.0f * 16.0f / 360.0f;
 }
 bool ProtectionSettings::Set(uint8_t id, float v, uint8_t node, int32_t currentMa,

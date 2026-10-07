@@ -31,7 +31,7 @@ public:
     void Print();
 private:
     enum Job : uint8_t { NONE, START_QUERY, START_VERIFY, CAL_QUERY, PROFILE, PROTECT_STOP, PROTECT_RUN,
-        CAL_START, CAL_ZERO, CAL_HAND, CAL_RAIL, CAL_DISABLE, CAL_SAVE, CAL_FINISH,
+        CAL_START, CAL_ZERO, CAL_WAIT, CAL_MOVE, CAL_DISABLE, CAL_SAVE, CAL_FINISH,
         SETTINGS_GET, SETTINGS_SET, SETTINGS_SAVE };
     struct Node {
         uint32_t event = 0, eventMs = 0, contextMs = 0, healthMs = 0;
@@ -56,6 +56,7 @@ private:
     Node nodes[9]{};
     uint32_t seenEvents[9]{};
     uint32_t phaseAt = 0, lastSend = 0, lastRenew = 0, lastHealth = 0;
+    uint32_t calRunAt[2]{}; // Independent CAL_RUN retries for J7 and J8.
     uint32_t pollEpoch = 0;
     uint32_t leaseSerial = 0;
     uint16_t serial = 0, task = 0, queryProbe = 0, expected = 0, received = 0;

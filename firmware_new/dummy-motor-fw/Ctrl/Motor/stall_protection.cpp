@@ -6,8 +6,9 @@
 #include <initializer_list>
 
 using namespace ProtectionProtocol;
-// Keep diagnostics within the existing 95KiB application area. Only CAN/main
-// query / one-shot capture work uses size optimization; the 20kHz detector retains its options.
+// Keep diagnostics within the existing 95KiB application area. Startup,
+// CAN/main queries and one-shot phase/capture work use size optimization;
+// periodic 20kHz control/detection functions retain their original options.
 #if defined(__GNUC__)
 #define PROTECTION_CAN_SIZE __attribute__((optimize("Os")))
 #else
@@ -49,7 +50,7 @@ void Send(uint8_t command, const uint8_t* data) {
 }
 }
 
-void Motor::Controller::InitProtection() {
+PROTECTION_CAN_SIZE void Motor::Controller::InitProtection() {
     protectionSettings.Defaults(boardConfig.canNodeId, context->config.motionParams.ratedCurrent);
     const float maxVelocity = context->config.motionParams.ratedVelocity / static_cast<float>(STEPS);
     const float maxAcceleration = context->config.motionParams.ratedVelocityAcc / static_cast<float>(STEPS);
@@ -77,7 +78,7 @@ void Motor::Controller::InitProtection() {
     UpdateProtectionLimits(); ResetDetection();
 }
 
-void Motor::Controller::UpdateProtectionLimits() {
+PROTECTION_CAN_SIZE void Motor::Controller::UpdateProtectionLimits() {
     // Software-float conversions run with the 20kHz timer allowed to preempt;
     // only the prepared integer snapshot publication is an IRQ critical section.
     const int32_t newCurrent = static_cast<int32_t>(protectionSettings.Get(CURRENT_A) * 1000);
@@ -103,7 +104,7 @@ void Motor::Controller::UpdateProtectionLimits() {
     retreatTimeoutTicks = newTimeout; profileLow = newLow; profileHigh = newHigh; profileDirections = newDirections;
     ClearDetectionTimer(DR_PARAMETERS); filteredCurrentQ = filteredVelocityQ = 0;
 }
-void Motor::Controller::OnMotionLimitChange() {
+PROTECTION_CAN_SIZE void Motor::Controller::OnMotionLimitChange() {
     const float maxCurrent = boardConfig.currentLimit / 1000.0f;
     const float maxSpeed = boardConfig.velocityLimit / static_cast<float>(STEPS);
     const float maxAcceleration = boardConfig.velocityAcc / static_cast<float>(STEPS);
@@ -171,15 +172,49 @@ PROTECTION_CAN_SIZE void Motor::Controller::FillStallDiagnostic(uint32_t* s, uin
     s[D_DIRECTION] = uint8_t(motionDirection) | (uint32_t(uint8_t(stallDirection)) << 8) |
         (uint32_t(reason) << 16) | (uint32_t(source) << 24);
 }
+PROTECTION_CAN_SIZE void Motor::Controller::FillCalDiagnostic(uint32_t* s, uint8_t source, uint8_t reason) const {
+    FillStallDiagnostic(s, source, reason);
+    s[D_META] = (s[D_META] & 0x00FFFFFFU) | (uint32_t(calDetectionGate) << 24);
+    const bool search = protectionPhase == CAL_SEEK || protectionPhase == CAL_RETOUCH;
+    s[D_FLAGS] = (s[D_FLAGS] & ~0xFF09U) |
+        (calibrationTask && MovingPhase(protectionPhase) && !internalStopping ? 1U : 0) |
+        (calibrationTask && search && !internalStopping ? 8U : 0) | (uint32_t(calDetectionUnmet) << 8);
+    s[D_TIMER] = candidateTicks; s[D_PEAK_TIMER] = calDetectionPeak;
+    s[D_LAST_TIMER] = calDetectionLastTimer;
+    s[D_RESET] = calDetectionReset | (uint32_t(calDetectionResetDetail) << 8) | (uint32_t(protectionTask) << 16);
+    s[D_CURRENT_LIMIT] = contactCurrent; s[D_SPEED_LIMIT] = contactSpeed;
+    s[D_ERROR_LIMIT] = contactError;
+    s[D_TRIGGER] = search ? contactTriggerTicks : MovingPhase(protectionPhase) ? reblockTicks : 0;
+    s[D_BAD_TOTAL] = Min(calibrationCurrent, EffectiveCurrentLimit());
+    s[D_BAD_PEAK] = searchMaxTravel; s[D_EVENT] = protectionTask;
+    s[D_GOAL_ERROR_LOW] = uint32_t(int64_t(realPosition) - searchStart);
+    s[D_GOAL_ERROR_HIGH] = uint32_t(int64_t(softPosition) - searchStart);
+    s[D_DIRECTION] = uint8_t(searchDirection) | (uint32_t(reason) << 16) | (uint32_t(source) << 24);
+}
+PROTECTION_CAN_SIZE void Motor::Controller::FreezeCalFailure(uint8_t reason) {
+    if (!calibrationTask || boardConfig.canNodeId < 7 || calFailureSnapshotValid) return;
+    FillCalDiagnostic(calFailureSnapshot, DS_CAL_FAILURE, reason);
+    calFailureSnapshotValid = true;
+}
+void Motor::Controller::ClearCalDetectionTimer(uint8_t reason, uint8_t detail) {
+    if (candidateTicks) {
+        calDetectionLastTimer = candidateTicks;
+        calDetectionReset = reason; calDetectionResetDetail = detail;
+    }
+    candidateTicks = 0;
+}
 PROTECTION_CAN_SIZE void Motor::Controller::CaptureStallDiagnostic(uint16_t request, uint8_t selector) {
     IrqGuard guard;
     if (request == diagnosticRequest && selector != diagnosticSelector) return;
     if (request != diagnosticRequest) {
         if (selector == DS_LIVE) FillStallDiagnostic(diagnosticSnapshot, DS_LIVE);
-        else if (triggerSnapshotValid) memcpy(diagnosticSnapshot, triggerSnapshot, sizeof(triggerSnapshot));
+        else if (selector == DS_CAL_LIVE) FillCalDiagnostic(diagnosticSnapshot, DS_CAL_LIVE);
+        else if (selector == DS_CAL_FAILURE && calFailureSnapshotValid)
+            memcpy(diagnosticSnapshot, calFailureSnapshot, sizeof(calFailureSnapshot));
+        else if (selector == DS_TRIGGER && triggerSnapshotValid) memcpy(diagnosticSnapshot, triggerSnapshot, sizeof(triggerSnapshot));
         else {
             memset(diagnosticSnapshot, 0, sizeof(diagnosticSnapshot));
-            diagnosticSnapshot[D_DIRECTION] = uint32_t(DS_NO_TRIGGER) << 24;
+            diagnosticSnapshot[D_DIRECTION] = uint32_t(selector == DS_CAL_FAILURE ? DS_NO_CAL_FAILURE : DS_NO_TRIGGER) << 24;
         }
         diagnosticRequest = request;
         diagnosticSelector = selector;
@@ -234,8 +269,11 @@ void Motor::Controller::ReplyConfiguration(uint8_t op, uint8_t status, uint16_t 
 
 PROTECTION_CAN_SIZE bool Motor::Controller::ProcessProtectionCan(uint8_t command, const uint8_t* data, uint32_t length) {
     if (command == DIAG_QUERY) {
-        if (length == 8 && boardConfig.canNodeId >= 1 && boardConfig.canNodeId <= 7 &&
-            data[0] <= DS_TRIGGER && data[1] == DIAG_VERSION && U16(data + 2))
+        if (length != 8) return true;
+        const bool stall = boardConfig.canNodeId >= 1 && boardConfig.canNodeId <= 7 && data[0] <= DS_TRIGGER;
+        const bool cal = (boardConfig.canNodeId == 7 || boardConfig.canNodeId == 8) &&
+            (data[0] == DS_CAL_LIVE || data[0] == DS_CAL_FAILURE);
+        if ((stall || cal) && data[1] == DIAG_VERSION && U16(data + 2))
             CaptureStallDiagnostic(U16(data + 2), data[0]);
         return true;
     }
@@ -351,6 +389,12 @@ PROTECTION_CAN_SIZE bool Motor::Controller::ProcessProtectionCan(uint8_t command
             else if (protectionPhase != IDLE && protectionPhase != CAL_FAILED) failure = BUSY;
             else {
                 calibrationTask = true; calibrationCoordinateSet = false; protectionTask = task;
+                calFailureSnapshotValid = false;
+                calDetectionPeak = calDetectionLastTimer = 0;
+                calDetectionReset = DR_NONE; calDetectionResetDetail = calDetectionUnmet = 0;
+                calDetectionGate = DG_DISABLED;
+                searchStart = realPosition; searchMaxTravel = calibrationCurrent = 0;
+                contactCurrent = contactSpeed = contactError = 0; contactTriggerTicks = 0;
                 localStall = false; softStopLocked = true; softStopPhase = SoftStopProtocol::DISABLED;
                 contextRequest = 0; leaseTicks = 0; protectionTakenOver = true;
                 SetProtectionPhase(CAL_READY); ResetDetection();
@@ -450,7 +494,8 @@ int32_t Motor::Controller::EffectiveCurrentLimit() const {
         limit = Min(limit, holdingCurrent);
     return Max(0, limit);
 }
-void Motor::Controller::BeginLocalProtection(uint8_t reason, bool isLocal) {
+PROTECTION_CAN_SIZE void Motor::Controller::BeginLocalProtection(uint8_t reason, bool isLocal) {
+    FreezeCalFailure(reason);
     contextRequest = 0; internalStopping = false;
     calibrationTask = false; calibrationCoordinateSet = false;
     localStall = isLocal; protectionTakenOver = false; protectionTask = 0;
@@ -476,7 +521,8 @@ void Motor::Controller::BeginLocalProtection(uint8_t reason, bool isLocal) {
     RequestSoftStop(STOP_PROTECTION, static_cast<uint16_t>(softStopToken + 1));
     ResetDetection(); leaseTicks = 0; masterSilenceTicks = 0;
 }
-void Motor::Controller::FailProtection(uint8_t reason) {
+PROTECTION_CAN_SIZE void Motor::Controller::FailProtection(uint8_t reason) {
+    FreezeCalFailure(reason);
     contextRequest = 0; internalStopping = false;
     coordinateCapturePending = false;
     SetProtectionPhase(calibrationTask ? CAL_FAILED : HOLD_FAILED, reason);
@@ -493,6 +539,7 @@ PROTECTION_CAN_SIZE void Motor::Controller::CancelInternal(uint8_t reason) {
     if (protectionPhase == IDLE) return;
     if ((protectionPhase == HOLD_FAILED || protectionPhase == CAL_FAILED) && protectionReason != NONE)
         reason = protectionReason; // Keep the first fault when STOP/CANCEL follows it.
+    FreezeCalFailure(reason);
     contextRequest = 0; internalStopping = false; saveRequested = false;
     coordinateCapturePending = false;
     if (protectionTask) lastCancelledTask = protectionTask;
@@ -589,7 +636,7 @@ void Motor::Controller::TickProtection() {
         abs(goalPosition - realPosition) <= positionTolerance) motionIntent = false;
 }
 
-void Motor::Controller::SetCaptureCoordinate(float motorR) {
+PROTECTION_CAN_SIZE void Motor::Controller::SetCaptureCoordinate(float motorR) {
     const int64_t offset = static_cast<int64_t>(realPosition) - Steps(motorR);
     if (offset < INT32_MIN || offset > INT32_MAX) { FailProtection(BAD_VALUE); return; }
     context->config.motionParams.encoderHomeOffset = static_cast<int32_t>(offset);
@@ -605,7 +652,7 @@ void Motor::Controller::SetCaptureCoordinate(float motorR) {
     } else CaptureStopPosition();
     ResetDetection(); ResetStableWindow();
 }
-void Motor::Controller::BeginInternalMove(int32_t target, int32_t velocity, int32_t acceleration,
+PROTECTION_CAN_SIZE void Motor::Controller::BeginInternalMove(int32_t target, int32_t velocity, int32_t acceleration,
                                          int32_t current, uint8_t phase) {
     internalConfig = context->config.motionParams;
     internalConfig.ratedVelocity = Min(velocity, boardConfig.velocityLimit);
@@ -623,9 +670,14 @@ void Motor::Controller::BeginInternalMove(int32_t target, int32_t velocity, int3
     softPosition = realPosition; softVelocity = estVelocity; goalPosition = target;
     internalStopping = false; candidateTicks = 0; startupTicks = detectorStartupTicks;
     referenceFinishedTicks = 0;
+    if (calibrationTask) {
+        calDetectionPeak = calDetectionLastTimer = 0;
+        calDetectionReset = DR_NONE; calDetectionResetDetail = calDetectionUnmet = 0;
+        calDetectionGate = DG_STARTUP;
+    }
     ResetStableWindow(); SetProtectionPhase(phase);
 }
-void Motor::Controller::BeginSearch(bool retouch) {
+PROTECTION_CAN_SIZE void Motor::Controller::BeginSearch(bool retouch) {
     contactCurrent = static_cast<int32_t>(calibrationCurrent * protectionSettings.Get(CAL_CONTACT_RATIO));
     contactSpeed = Steps(protectionSettings.Get(CAL_SPEED_RPS)); contactError = Steps(protectionSettings.Get(CAL_ERROR_R));
     contactTriggerTicks = Ticks(protectionSettings.Get(CAL_TRIGGER_MS));
@@ -718,10 +770,16 @@ bool Motor::Controller::TickInternalProtection() {
         return false;
     }
     if (!IsFeedbackValid()) {
-        ResetStableWindow(); candidateTicks = 0;
+        ResetStableWindow();
+        if (calibrationTask) { calDetectionGate = DG_BAD_FEEDBACK; ClearCalDetectionTimer(DR_GATE, DG_BAD_FEEDBACK); }
+        else candidateTicks = 0;
         return true; // grace period handled by TickProtection; no stale completion
     }
     if (softStopRequest == SoftStopProtocol::DISABLE || softStopRequest == SoftStopProtocol::STOP) return false;
+    const int64_t actualTravel = int64_t(realPosition) - searchStart;
+    if (search && (actualTravel > searchMaxTravel || actualTravel < -int64_t(searchMaxTravel))) {
+        FailProtection(SEARCH_TRAVEL); return false;
+    }
     if (internalStopping) {
         internalPlanner.velocityTracker.CalcSoftGoal(0); softVelocity = internalPlanner.velocityTracker.goVelocity;
         if (!TickStableWindow(softVelocity == 0)) return true;
@@ -750,10 +808,19 @@ bool Motor::Controller::TickInternalProtection() {
     }
     internalPlanner.positionTracker.CalcSoftGoal(internalTarget);
     softPosition = internalPlanner.positionTracker.go_location; softVelocity = internalPlanner.positionTracker.go_velocity;
-    if (search && (abs(realPosition - searchStart) > searchMaxTravel || abs(softPosition - searchStart) > searchMaxTravel)) {
-        FailProtection(SEARCH_TRAVEL); return false;
+    if (search && (int64_t(softPosition) - internalTarget) * searchDirection >= 0) {
+        // Only CAL's bounded reference is clamped. Reset its integrators as
+        // well as position/velocity so a discrete overshoot cannot escape the
+        // contact-proof window. Actual travel and contact remain independent.
+        if (softPosition != internalTarget || softVelocity != 0)
+            internalPlanner.positionTracker.NewTask(internalTarget, 0);
+        softPosition = internalTarget; softVelocity = 0;
     }
-    if (startupTicks) { --startupTicks; candidateTicks = 0; }
+    if (startupTicks) {
+        --startupTicks;
+        if (calibrationTask) { calDetectionGate = DG_STARTUP; calDetectionUnmet = 0; ClearCalDetectionTimer(DR_STARTUP); }
+        else candidateTicks = 0;
+    }
     else {
         filteredCurrentQ = Filter(filteredCurrentQ, abs(focCurrent), currentFilterTicks);
         const int32_t speed = Min(abs(estVelocity), INT32_MAX / 1024);
@@ -764,8 +831,20 @@ bool Motor::Controller::TickInternalProtection() {
         const int32_t errorLimit = calibrationTask ? contactError : detectorError;
         const bool blocked = filteredCurrentQ / 1024 >= currentLimit && filteredVelocityQ / 1024 <= speedLimit &&
                              (error >= errorLimit || error <= -errorLimit);
-        if (!blocked) candidateTicks = 0;
-        else if (++candidateTicks >= (search ? contactTriggerTicks : reblockTicks)) {
+        if (calibrationTask) {
+            calDetectionGate = DG_ELIGIBLE;
+            calDetectionUnmet = (filteredCurrentQ / 1024 < currentLimit ? 1 : 0) |
+                (filteredVelocityQ / 1024 > speedLimit ? 2 : 0) |
+                (error < errorLimit && error > -errorLimit ? 4 : 0);
+        }
+        if (!blocked) {
+            if (calibrationTask) ClearCalDetectionTimer(DR_CONDITIONS, calDetectionUnmet);
+            else candidateTicks = 0;
+        } else {
+            ++candidateTicks;
+            if (calibrationTask && candidateTicks > calDetectionPeak) calDetectionPeak = candidateTicks;
+        }
+        if (blocked && candidateTicks >= (search ? contactTriggerTicks : reblockTicks)) {
             if (search) {
                 // An assumed single-turn boot coordinate cannot prove end
                 // location. Only a measured coordinate uses the prior window.
@@ -784,7 +863,7 @@ bool Motor::Controller::TickInternalProtection() {
                 modeRunning = requestMode = MODE_COMMAND_VELOCITY;
                 ClearIntegral(); config->pid.vError = config->pid.vErrorLast = 0;
                 config->pid.outputKi = focCurrent * 1024;
-                internalStopping = true; ResetStableWindow(); candidateTicks = 0;
+                internalStopping = true; ResetStableWindow(); ClearCalDetectionTimer(DR_TRIGGERED);
             } else if (calibrationTask && boardConfig.canNodeId == 7) {
                 motionDirection = Sign(softVelocity);
                 if (!motionDirection) motionDirection = Sign(internalTarget - internalStart);
@@ -796,13 +875,13 @@ bool Motor::Controller::TickInternalProtection() {
     if (search) {
         if (softVelocity == 0 && softPosition == internalTarget) {
             // Especially during slow retouch, the reference reaches its
-            // bounded overtravel target before filtering + continuous contact
-            // proof can finish. Hold that fixed target for a bounded proof
-            // window; never increase travel or confuse planner completion with
-            // encoder-confirmed contact.
-            const uint32_t proofWindow = contactStartupTicks + contactTriggerTicks +
-                                         5 * (currentFilterTicks + velocityFilterTicks) + 1000;
-            if (++referenceFinishedTicks > proofWindow) { FailProtection(SEARCH_TRAVEL); return false; }
+            // bounded overtravel target before actual settling + continuous
+            // contact proof can finish. Give settling its own one-second
+            // allowance, then the configured continuous proof time. Keep the
+            // target fixed and the phase timeout active; interrupted candidates
+            // never renew this deadline or count as encoder-confirmed contact.
+            const uint32_t proofWindow = HZ + contactTriggerTicks;
+            if (++referenceFinishedTicks > proofWindow) { FailProtection(CONTACT_NOT_CONFIRMED); return false; }
         } else referenceFinishedTicks = 0;
         return true;
     }
@@ -816,7 +895,7 @@ bool Motor::Controller::TickInternalProtection() {
     return true;
 }
 
-void Motor::Controller::PollProtectionMain() {
+PROTECTION_CAN_SIZE void Motor::Controller::PollProtectionMain() {
     if (saveRequested || parameterSaveRequested) {
         const uint32_t irq = __get_PRIMASK(); __disable_irq();
         const bool coordinateSave = saveRequested;
@@ -834,7 +913,7 @@ void Motor::Controller::PollProtectionMain() {
         if (coordinateSave && task == protectionTask && calibrationTask) {
             coordinateSavingInProgress = false;
             if (saved) { lastSavedTask = task; coordinateDirty = false; SetProtectionPhase(SAVED); }
-            else SetProtectionPhase(CAL_FAILED, SAVE_FAILED);
+            else { FreezeCalFailure(SAVE_FAILED); SetProtectionPhase(CAL_FAILED, SAVE_FAILED); }
         } else if (!coordinateSave) {
             parameterSavingInProgress = false;
             lastParameterSavedTransaction = transaction;

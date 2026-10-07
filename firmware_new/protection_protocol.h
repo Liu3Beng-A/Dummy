@@ -14,11 +14,15 @@ constexpr uint8_t CONFIG = 0x33, CONTEXT = 0x34, CONTEXT_REPLY = 0x35;
 // Coherent QUERY snapshot: coordinateVersion[0], flags[1], probe u16[2..3],
 // real motor-r float32[4..7]. Storage VERSION stays 1: no EEPROM migration.
 constexpr uint8_t PROBE_REPLY = 0x36;
-// Read-only stall diagnostics. QUERY: selector[0] (0 live, 1 last trigger), version[1], nonzero
+// Read-only diagnostics. QUERY: selector[0] (0/1 STALL live/last trigger,
+// 3/4 CAL live/first failure), version[1], nonzero
 // request u16[2..3], zero[4..7]. REPLY: field[0], version[1], same request,
 // integer value u32[4..7]. Retries retain the first coherent capture.
 constexpr uint8_t DIAG_QUERY = 0x37, DIAG_REPLY = 0x38, DIAG_VERSION = 2;
-enum DiagnosticSource : uint8_t { DS_LIVE = 0, DS_TRIGGER = 1, DS_NO_TRIGGER = 2 };
+enum DiagnosticSource : uint8_t {
+    DS_LIVE = 0, DS_TRIGGER = 1, DS_NO_TRIGGER = 2,
+    DS_CAL_LIVE = 3, DS_CAL_FAILURE = 4, DS_NO_CAL_FAILURE = 5
+};
 enum DiagnosticField : uint8_t {
     D_META, D_FLAGS, D_CURRENT, D_RAW_SPEED, D_FILTER_SPEED,
     D_ERROR_LOW, D_ERROR_HIGH, D_TIMER, D_PEAK_TIMER, D_RESET,
@@ -39,6 +43,14 @@ static_assert(DIAG_FIELD_COUNT < 32, "Diagnostic fields must fit the received-fi
 // Ordinary local STALL capture is RAM-only and survives START/DISABLE/new
 // commands until the next local STALL or reboot. Peer STOP, retreat failure
 // and calibration contact do not overwrite the original detection evidence.
+// CAL selectors are J7/J8 only, using the same 24-field transport. Thresholds,
+// timers and flags describe CAL contact, independently of ordinary STALL.
+// CAL-only meanings: BAD_TOTAL=current cap mA, BAD_PEAK=max search travel steps,
+// EVENT=task, GOAL_ERROR_LOW=signed actual search travel steps,
+// GOAL_ERROR_HIGH=signed reference search travel steps. DIRECTION low byte is
+// search direction; reason identifies the first failure before STOP resets it.
+// CAL failure is RAM-only, survives STOP/START/DISABLE, and is cleared only by
+// a newly accepted CAL_BEGIN or reboot. A duplicate BEGIN/query never clears it.
 enum DiagnosticGate : uint8_t {
     DG_ELIGIBLE, DG_PROTECTED, DG_EXCLUDED, DG_SWITCH_OFF, DG_STOP_LOCKED,
     DG_DISABLED, DG_BAD_FEEDBACK, DG_MODE, DG_NO_MOTION, DG_STARTUP, DG_FILTER,
@@ -74,7 +86,8 @@ enum Reason : uint8_t {
     SEARCH_TRAVEL = 13, CONTACT_UNSTABLE = 14, EARLY_CONTACT = 15,
     RETURN_TIMEOUT = 16, SAVE_FAILED = 17, NOT_DISABLED = 18,
     BAD_TASK = 19, BAD_VALUE = 20, BUSY = 21, UNSUPPORTED = 22,
-    COORDINATE_INVALID = 23, COMMUNICATION_TIMEOUT = 24, CAPTURE_UNSTABLE = 25
+    COORDINATE_INVALID = 23, COMMUNICATION_TIMEOUT = 24, CAPTURE_UNSTABLE = 25,
+    CONTACT_NOT_CONFIRMED = 26 // bounded reference finished without contact proof
 };
 enum Flag : uint8_t {
     FEEDBACK_VALID = 1, PROFILE_VALID = 2, ASSUMED_BOOT = 4,

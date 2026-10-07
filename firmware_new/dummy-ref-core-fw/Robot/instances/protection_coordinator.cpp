@@ -17,8 +17,8 @@ static const char* ReasonName(uint8_t reason) {
         "INVALID_PROFILE", "GRANT_TIMEOUT", "LEASE_TIMEOUT", "RETREAT_TIMEOUT", "REBLOCKED",
         "CANCELLED_STOP", "CANCELLED_DISABLE", "SEARCH_TIMEOUT", "SEARCH_TRAVEL", "CONTACT_UNSTABLE",
         "EARLY_CONTACT", "RETURN_TIMEOUT", "SAVE_FAILED", "NOT_DISABLED", "BAD_TASK", "BAD_VALUE",
-        "BUSY", "UNSUPPORTED", "COORDINATE_INVALID", "COMMUNICATION_TIMEOUT", "CAPTURE_UNSTABLE"};
-    return reason <= CAPTURE_UNSTABLE ? names[reason] : "UNKNOWN";
+        "BUSY", "UNSUPPORTED", "COORDINATE_INVALID", "COMMUNICATION_TIMEOUT", "CAPTURE_UNSTABLE", "CONTACT_NOT_CONFIRMED"};
+    return reason <= CONTACT_NOT_CONFIRMED ? names[reason] : "UNKNOWN";
 }
 uint16_t ProtectionCoordinator::NextId() {
     if (!serial) serial = uint16_t(HAL_GetTick() ^ 0xB571U);
@@ -83,11 +83,13 @@ void ProtectionCoordinator::PrintDiagnostic() {
         std::memcpy(s, diagnosticValues, sizeof(s)); mask = diagnosticMask;
         node = diagnosticNode; request = diagnosticRequest; output = diagnosticSink;
         line = diagnosticLine++;
-        const bool noTrigger = (s[D_DIRECTION] >> 24) == DS_NO_TRIGGER;
+        const bool cal = diagnosticSelector == DS_CAL_LIVE || diagnosticSelector == DS_CAL_FAILURE;
+        const char* prefix = cal ? "CAL_STATUS" : "STALL_STATUS";
+        const bool noTrigger = (s[D_DIRECTION] >> 24) == (cal ? DS_NO_CAL_FAILURE : DS_NO_TRIGGER);
         if (timeout || line == 20 || (noTrigger && line == 1)) diagnosticState = DIAG_IDLE;
         taskEXIT_CRITICAL();
         if (timeout) {
-            Respond(*output, "error STALL_STATUS J%u req=%u missing=%05lX", node, request,
+            Respond(*output, "error %s J%u req=%u missing=%05lX", prefix, node, request,
                 (unsigned long)(((1U << DIAG_FIELD_COUNT) - 1) & ~mask));
             break;
         }
@@ -97,12 +99,13 @@ void ProtectionCoordinator::PrintDiagnostic() {
         int64_t goalError; std::memcpy(&goalError, s + D_GOAL_ERROR_LOW, sizeof(goalError));
         char text[44]{}; // Prefix + body + CRLF must fit Respond's 64-byte line.
         if (noTrigger) {
-            Respond(*output, line == 0 ? "STALL_STATUS [%u] no_trigger_record req=%u" :
-                "STALL_STATUS [%u] end req=%u", node, request);
+            if (line == 0) Respond(*output, "%s [%u] %s req=%u", prefix, node,
+                cal ? "no_failure_record" : "no_trigger_record", request);
+            else Respond(*output, "%s [%u] end req=%u", prefix, node, request);
             continue;
         }
         switch (line) {
-        case 0: snprintf(text, sizeof(text), "req=%u session=%u at_ms=%lu", request,
+        case 0: snprintf(text, sizeof(text), cal ? "req=%u task=%u at_ms=%lu" : "req=%u session=%u at_ms=%lu", request,
             unsigned(reset >> 16), (unsigned long)s[D_CAPTURE_MS]); break;
         case 1: snprintf(text, sizeof(text), "mode=%u reqmode=%u phase=%u gate=%s",
             unsigned(s[D_META] & 255), unsigned((s[D_META] >> 8) & 255), unsigned((s[D_META] >> 16) & 255),
@@ -122,18 +125,25 @@ void ProtectionCoordinator::PrintDiagnostic() {
         case 9: snprintf(text, sizeof(text), "peak_ms=%.6g", double(s[D_PEAK_TIMER]) / 20); break;
         case 10: snprintf(text, sizeof(text), "clear=%s detail=%u", cause <= DR_COMPLETED ? resets[cause] : "UNKNOWN", unsigned((reset >> 8) & 255)); break;
         case 11: snprintf(text, sizeof(text), "last_ms=%.6g", double(s[D_LAST_TIMER]) / 20); break;
-        case 12: snprintf(text, sizeof(text), "bad_total=%lu", (unsigned long)s[D_BAD_TOTAL]); break;
-        case 13: snprintf(text, sizeof(text), "bad_run_peak_ms=%.6g", double(s[D_BAD_PEAK]) / 20); break;
+        case 12:
+            if (cal) snprintf(text, sizeof(text), "I_cap=%.6g A", double(s[D_BAD_TOTAL]) / 1000);
+            else snprintf(text, sizeof(text), "bad_total=%lu", (unsigned long)s[D_BAD_TOTAL]); break;
+        case 13: snprintf(text, sizeof(text), cal ? "max_travel=%.6g r" : "bad_run_peak_ms=%.6g",
+            double(s[D_BAD_PEAK]) / (cal ? 51200 : 20)); break;
         case 14: snprintf(text, sizeof(text), "startup_left_ms=%.6g", double(s[D_STARTUP]) / 20); break;
-        case 15: snprintf(text, sizeof(text), "record=%s event=%08lX",
-            (s[D_DIRECTION] >> 24) == DS_TRIGGER ? "LAST" : "LIVE", (unsigned long)s[D_EVENT]); break;
+        case 15: snprintf(text, sizeof(text), cal ? "record=%s task=%lu" : "record=%s event=%08lX",
+            ((s[D_DIRECTION] >> 24) == DS_TRIGGER || (s[D_DIRECTION] >> 24) == DS_CAL_FAILURE) ? "LAST" : "LIVE",
+            (unsigned long)s[D_EVENT]); break;
         case 16: snprintf(text, sizeof(text), "v_ref=%.6g r/s", double(int32_t(s[D_REFERENCE_SPEED])) / 51200); break;
-        case 17: snprintf(text, sizeof(text), "goal_err=%.6g r", double(goalError) / 51200); break;
-        case 18: snprintf(text, sizeof(text), "dir=%d stall_dir=%d", int(int8_t(s[D_DIRECTION] & 255)), int(int8_t((s[D_DIRECTION] >> 8) & 255))); break;
-        case 19: snprintf(text, sizeof(text), "trigger_reason=%s", ReasonName(uint8_t(s[D_DIRECTION] >> 16))); break;
+        case 17: snprintf(text, sizeof(text), cal ? "actual_travel=%.6g r" : "goal_err=%.6g r",
+            double(cal ? int64_t(int32_t(s[D_GOAL_ERROR_LOW])) : goalError) / 51200); break;
+        case 18:
+            if (cal) snprintf(text, sizeof(text), "ref_travel=%.6g r", double(int32_t(s[D_GOAL_ERROR_HIGH])) / 51200);
+            else snprintf(text, sizeof(text), "dir=%d stall_dir=%d", int(int8_t(s[D_DIRECTION] & 255)), int(int8_t((s[D_DIRECTION] >> 8) & 255))); break;
+        case 19: snprintf(text, sizeof(text), cal ? "failure_reason=%s" : "trigger_reason=%s", ReasonName(uint8_t(s[D_DIRECTION] >> 16))); break;
         case 20: snprintf(text, sizeof(text), "end req=%u", request); break;
         }
-        Respond(*output, "STALL_STATUS [%u] %s", node, text);
+        Respond(*output, "%s [%u] %s", prefix, node, text);
     }
 }
 bool ProtectionCoordinator::Send(uint8_t node, uint8_t command, const uint8_t* data) {
@@ -437,7 +447,8 @@ void ProtectionCoordinator::Lease() {
         if (renewNode > 8) renewNode = 1;
         uint8_t n = renewNode++;
         Node& a = nodes[n];
-        const bool movingCal = calibration && n == active && (job == CAL_HAND || job == CAL_RAIL);
+        const bool movingCal = calibration && job == CAL_MOVE && (n == 7 || n == 8) &&
+            !(received & (1U << n));
         if (a.task != task || !(movingCal || ((stalled & (1U << n)) && !(finished & (1U << n))))) continue;
         if (a.leaseTask != task) { a.leaseTask = task; a.leaseNonce = 0; a.leaseAckMs = now - 80; }
         if (a.leaseNonce ? now - a.leaseSentMs < 20 : now - a.leaseAckMs < 80) continue;
@@ -643,25 +654,51 @@ void ProtectionCoordinator::Poll() {
         PollGroup(SET_CAPTURE_COORD, CAL_DONE, 0x7E);
         if (job == CAL_ZERO && received == 0x7E) {
             robot.initPose = robot.currentJoints = robot.targetJoints = robot.REST_POSE;
-            active = 8; Enter(CAL_HAND); Log("CAL J8 SEEK");
+            Enter(CAL_WAIT); Log("CAL WAIT 1000ms");
         }
         break;
-    case CAL_HAND: case CAL_RAIL:
-        if (nodes[active].task == task && nodes[active].contextMs >= phaseAt &&
-            nodes[active].phase == CAL_DONE && nodes[active].reason == NONE && Finite(nodes[active].position)) {
-            SyncPosition(active);
-            if (job == CAL_HAND) { active = 7; Enter(CAL_RAIL); Log("CAL J7 SEEK"); }
-            else {
-                Enter(CAL_DISABLE); Log("CAL DISABLING");
-                internal = true; robot.RequestDisable(); internal = false;
+    case CAL_WAIT:
+        // The one-second delay starts only after all six coordinate ACKs.
+        // STOP/DISABLE cancel this job; START remains busy throughout.
+        if (now - phaseAt >= 1000) {
+            Enter(CAL_MOVE, 0x180); cursor = 7;
+            calRunAt[0] = calRunAt[1] = now - 100;
+            Log("CAL J7 SEEK"); Log("CAL J8 SEEK");
+        }
+        break;
+    case CAL_MOVE:
+        for (uint8_t n = 7; n <= 8; ++n) {
+            Node snapshot;
+            taskENTER_CRITICAL(); snapshot = nodes[n]; taskEXIT_CRITICAL();
+            const bool thisTask = snapshot.task == task && snapshot.contextMs >= phaseAt;
+            if ((thisTask && (snapshot.phase == CAL_FAILED || snapshot.reason != NONE)) ||
+                now - phaseAt > 1270000U || (now - phaseAt > 1500 &&
+                (!thisTask || now - snapshot.contextMs > 1500))) {
+                Error(thisTask && snapshot.reason ? ReasonName(snapshot.reason) : "HOMING_TIMEOUT_OR_OFFLINE", n);
+                return;
             }
+            const uint16_t bit = uint16_t(1U << n);
+            if (thisTask && now - snapshot.contextMs <= 300 && snapshot.phase == CAL_DONE &&
+                snapshot.reason == NONE && Finite(snapshot.position)) {
+                if (!(received & bit)) SyncPosition(n);
+                received |= bit;
+            } else received &= ~bit;
+        }
+        if ((received & expected) == expected) {
+            Enter(CAL_DISABLE); Log("CAL DISABLING");
+            internal = true; robot.RequestDisable(); internal = false;
             break;
         }
-        if ((nodes[active].task == task && nodes[active].phase == CAL_FAILED) ||
-            now - phaseAt > 1270000U || (now - phaseAt > 1500 && now - nodes[active].contextMs > 1500)) {
-            Error(nodes[active].reason ? ReasonName(nodes[active].reason) : "HOMING_TIMEOUT_OR_OFFLINE", active); break;
+        // Same-task CAL_RUN is idempotent after completion: it refreshes the
+        // done snapshot while the other axis works, without seeking again.
+        // Rotate even on TX busy so either axis can start/retry independently.
+        for (uint8_t count = 0; count < 2; ++count) {
+            if (cursor < 7 || cursor > 8) cursor = 7;
+            const uint8_t n = cursor++;
+            if (now - calRunAt[n - 7] < 100) continue;
+            if (Context(n, CAL_RUN, task, n == 8 ? robot.hand->current : 0)) calRunAt[n - 7] = now;
+            break;
         }
-        if (now - lastSend >= 100 && Context(active, CAL_RUN, task, active == 8 ? robot.hand->current : 0)) lastSend = now;
         break;
     case CAL_DISABLE:
         if (robot.stopState == DummyRobot::DISABLED) {
@@ -721,29 +758,32 @@ bool ProtectionCoordinator::Command(const char* cmd, unsigned len, StreamSink& r
     size_t first = text.find_first_not_of(" \t\r\n"), last = text.find_last_not_of(" \t\r\n");
     if (first == std::string::npos) return false;
     text = text.substr(first, last-first+1);
-    if (text.rfind("#STALL_STATUS", 0) == 0) {
-        const size_t at = text.find_first_not_of(" \t", 13);
-        const bool separated = text.size() > 13 && (text[13] == ' ' || text[13] == '\t');
-        const bool validNode = at != std::string::npos && text[at] >= '1' && text[at] <= '7';
+    if (text.rfind("#STALL_STATUS", 0) == 0 || text.rfind("#CAL_STATUS", 0) == 0) {
+        const bool cal = text.rfind("#CAL_STATUS", 0) == 0;
+        const char* prefix = cal ? "CAL_STATUS" : "STALL_STATUS";
+        const size_t length = cal ? 11 : 13;
+        const size_t at = text.find_first_not_of(" \t", length);
+        const bool separated = text.size() > length && (text[length] == ' ' || text[length] == '\t');
+        const bool validNode = at != std::string::npos && text[at] >= (cal ? '7' : '1') && text[at] <= (cal ? '8' : '7');
         const size_t after = validNode ? text.find_first_not_of(" \t", at + 1) : std::string::npos;
         const bool lastTrigger = validNode && after != std::string::npos && after > at + 1 && text.substr(after) == "LAST";
         if (!separated || !validNode || (after != std::string::npos && !lastTrigger)) {
-            Respond(response, "error STALL_STATUS syntax J1..J7 [LAST]"); return true;
+            Respond(response, "error %s syntax %s [LAST]", prefix, cal ? "J7..J8" : "J1..J7"); return true;
         }
         const uint8_t node = uint8_t(text[at] - '0');
         taskENTER_CRITICAL();
         if (diagnosticState != DIAG_IDLE) {
-            taskEXIT_CRITICAL(); Respond(response, "error STALL_STATUS busy"); return true;
+            taskEXIT_CRITICAL(); Respond(response, "error %s busy", prefix); return true;
         }
         if (!diagnosticSerial) diagnosticSerial = uint16_t(HAL_GetTick() ^ 0xD135U);
         if (!++diagnosticSerial) ++diagnosticSerial;
         diagnosticRequest = diagnosticSerial; diagnosticNode = uint8_t(node);
-        diagnosticSelector = lastTrigger ? DS_TRIGGER : DS_LIVE;
+        diagnosticSelector = cal ? (lastTrigger ? DS_CAL_FAILURE : DS_CAL_LIVE) : (lastTrigger ? DS_TRIGGER : DS_LIVE);
         diagnosticSink = &response; diagnosticMask = 0; diagnosticLine = 0;
         diagnosticAt = HAL_GetTick(); diagnosticLastSend = diagnosticAt - 100;
         diagnosticState = DIAG_COLLECT;
         taskEXIT_CRITICAL();
-        Respond(response, "ok STALL_STATUS [%u] pending", unsigned(node)); return true;
+        Respond(response, "ok %s [%u] pending", prefix, unsigned(node)); return true;
     }
     if (text == "!CALIBRATION") {
         if (Locked() || robot.stopState != DummyRobot::DISABLED) {

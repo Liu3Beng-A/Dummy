@@ -46,24 +46,25 @@ STALL_PARAMETERS = (
 )
 
 # 校准参数使用独立 #CAL_* 命令，J8 的接触判定不加入普通堵转保护。
+# 未回读的编辑初值对应2026-10-07实测默认；下表为J7，J8在节点切换时覆盖。
 CAL_PARAMETERS = (
-    ("SEEK_RPS", "寻限位速度上限", "电机 r/s", 0.5, 0, None),
-    ("RETURN_RPS", "返回速度上限", "电机 r/s", 0.5, 0, None),
-    ("RETOUCH_RPS", "复触速度上限", "电机 r/s", 0.25, 0, None),
-    ("ACCEL", "校准加速度", "电机 r/s²", 5, 0.1, 100),
+    ("SEEK_RPS", "寻限位速度上限", "电机 r/s", 5, 0, None),
+    ("RETURN_RPS", "返回速度上限", "电机 r/s", 5, 0, None),
+    ("RETOUCH_RPS", "复触速度上限", "电机 r/s", 0.5, 0, None),
+    ("ACCEL", "校准加速度", "电机 r/s²", 3, 0.1, 100),
     ("CURRENT_A", "校准电流命令上限", "A", 2.5, 0, None),
-    ("CONTACT_RATIO", "接触电流命令比率", "本次限流比例", 0.8, 0, 1),
+    ("CONTACT_RATIO", "接触电流命令比率", "本次限流比例", 0.3, 0, 1),
     ("SPEED_RPS", "接触低速阈值", "电机 r/s", 0.02, 0.001, 0.2),
     ("ERROR_R", "参考/实际误差阈值", "电机圈", 0.02, 0.0002, 1),
-    ("TRIGGER_MS", "接触持续时间", "ms", 150, 20, 2000),
+    ("TRIGGER_MS", "接触持续时间", "ms", 100, 20, 2000),
     ("STARTUP_MS", "启动豁免时间", "ms", 100, 0, 500),
     ("MAX_TRAVEL_R", "最大搜索行程", "电机圈", 101, 0, None),
     ("SEEK_TIMEOUT_MS", "首次搜索超时", "ms", 220000, 1, None),
     ("RETURN_TIMEOUT_MS", "返回超时", "ms", 120000, 1, None),
     ("RETOUCH_TIMEOUT_MS", "复触超时", "ms", 5000, 1, None),
-    ("BACKOFF_R", "复触前退让距离", "电机圈", 0.2, 0, None),
-    ("REPEAT_TOL_R", "两次接触容差", "电机圈", 0.01, 0, None),
-    ("POSITION_TOL_R", "实际返回到位容差", "电机圈", 0.001, 0.0002, 0.01),
+    ("BACKOFF_R", "复触前退让距离", "电机圈", 1, 0, None),
+    ("REPEAT_TOL_R", "两次接触容差", "电机圈", 0.05, 0, None),
+    ("POSITION_TOL_R", "实际返回到位容差", "电机圈", 0.005, 0.0002, 0.01),
     ("CONTACT_WINDOW_R", "已知端点接触窗口", "电机圈", 1, 0, None),
 )
 
@@ -1071,7 +1072,7 @@ class RobotSerialAssistantOld:
                 with self._serial_write_lock:
                     if generation != self._tx_generation:
                         continue
-                    diagnostic = self._is_stall_status_query(cmd)
+                    diagnostic = self._is_protection_status_query(cmd)
                     if self._stop_locked and not diagnostic and cmd not in ("!STOP", "!START", "!DISABLE"):
                         continue
                     if self._calibration_busy and not diagnostic and cmd not in ("!CALIBRATION", "!STOP", "!DISABLE"):
@@ -1212,6 +1213,11 @@ class RobotSerialAssistantOld:
                            ).pack(side=tk.LEFT, padx=6)
                 ttk.Button(top, text="读取触发快照", command=lambda: self._query_stall_status(last=True)
                            ).pack(side=tk.LEFT, padx=6)
+            else:
+                ttk.Button(top, text="读取校准快照", command=self._query_cal_status
+                           ).pack(side=tk.LEFT, padx=6)
+                ttk.Button(top, text="读取失败快照", command=lambda: self._query_cal_status(last=True)
+                           ).pack(side=tk.LEFT, padx=6)
             save = ttk.Button(top, text="保存节点 EEPROM", command=lambda k=kind: self._save_protection(k))
             save.pack(side=tk.LEFT, padx=6)
             self._protection_save_buttons[kind] = save
@@ -1263,9 +1269,10 @@ class RobotSerialAssistantOld:
             elif kind == "STALL" and key == "ERROR_R":
                 default = 0.1 if node == 7 else 0.5 / 360 * (30 if node == 6 else 50)
             elif kind == "CAL" and node == 8:
-                default = {"CURRENT_A": 1, "MAX_TRAVEL_R": 105 / 100 * 100 / 360 * 16,
-                           "SEEK_TIMEOUT_MS": 15000, "RETURN_TIMEOUT_MS": 15000,
-                           "BACKOFF_R": 2 / 100 * 100 / 360 * 16,
+                default = {"SEEK_RPS": 2, "RETURN_RPS": 2, "ACCEL": 5,
+                           "CURRENT_A": 1, "CONTACT_RATIO": 0.2, "MAX_TRAVEL_R": 6,
+                           "SEEK_TIMEOUT_MS": 30000, "RETURN_TIMEOUT_MS": 15000,
+                           "BACKOFF_R": 0.5, "REPEAT_TOL_R": 0.1, "POSITION_TOL_R": 0.01,
                            "CONTACT_WINDOW_R": 5 / 100 * 100 / 360 * 16}.get(key, default)
             value = cached.get(key, f"{default:g}")
             entry.delete(0, tk.END)
@@ -1278,6 +1285,20 @@ class RobotSerialAssistantOld:
     @staticmethod
     def _is_stall_status_query(cmd):
         return re.fullmatch(r"#STALL_STATUS\s+[1-7](?:\s+LAST)?", cmd) is not None
+
+    @staticmethod
+    def _is_cal_status_query(cmd):
+        return re.fullmatch(r"#CAL_STATUS\s+[78](?:\s+LAST)?", cmd) is not None
+
+    def _is_protection_status_query(self, cmd):
+        return self._is_stall_status_query(cmd) or self._is_cal_status_query(cmd)
+
+    def _query_cal_status(self, last=False):
+        node = self._protection_nodes["CAL"].get()
+        if node not in (7, 8):
+            self.log("校准快照仅支持单个节点 J7、J8，请切换节点", "WARN")
+            return
+        self.send_cmd(f"#CAL_STATUS {node}" + (" LAST" if last else ""))
 
     def _query_stall_status(self, last=False):
         node = self._protection_nodes["STALL"].get()
@@ -1586,7 +1607,7 @@ class RobotSerialAssistantOld:
         if self._seq_active and not sequence and (cmd.startswith(('>', '&', '@', '#CMDMODE')) or cmd in ('!HOME', '!RESET')):
             self.log("顺序发送中，请等待完成或先 STOP；当前运动回执由顺序任务占用", "WARN")
             return False
-        diagnostic = self._is_stall_status_query(cmd)
+        diagnostic = self._is_protection_status_query(cmd)
         if self._calibration_busy and not diagnostic and cmd not in ("!STOP", "!DISABLE"):
             self.log("校准及保存中，START 返回 busy，不挂起；可发送 STOP 或 DISABLE", "WARN")
             return False
@@ -1714,7 +1735,8 @@ class RobotSerialAssistantOld:
         if not messagebox.askyesno(
             "确认置零",
             "J1～J6 保持失能，仅将当前位置定义为 REST_POSE。\n"
-            "J8 会寻闭合限位并返回开度100；J7 会寻正限位并返回0。\n"
+            "六轴坐标修正完成后等待1秒，J7、J8 并行自动校准。\n"
+            "J8 寻闭合限位并返回开度100；J7 寻正限位并返回0。\n"
             "全部完成后自动八轴失能并保存 EEPROM，不重启。\n\n"
             "请支撑好当前六轴姿态，并留出地轨、夹爪运动空间。\n确定继续吗？",
             parent=self.root,

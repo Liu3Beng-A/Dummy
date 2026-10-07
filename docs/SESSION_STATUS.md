@@ -1,5 +1,255 @@
 # SESSION STATUS（2026-10-07）
 
+## 当前归档：校准修复及已验收默认参数提交（2026-10-07）
+
+- **用户授权/范围**：用户明确要求“提交”，并询问firmware_new根目录新增文件用途及是否保留。本次归档目前11个待提交文件：电机校准搜索参考边界、接触确认期限、首次失败冻结快照；主控六轴坐标确认后1000ms等待及J7/J8并行；CAL_STATUS只读诊断；最终J7/J8默认、old助手和3份文档。未增加新的固件行为、未删除文件、未烧录或操作设备、未推送远端。
+- **提交前状态**：五目标构建/产物以及默认配置、EEPROM与old助手核对已在上一节完成，当前提交只补本文归档说明，不重复运行固件测试或修改参数。仓库本地身份为Liu3Beng-A / liu3beng@icloud.com；不使用agent身份。提交标题围绕校准实际行为和最终验收参数，具体提交哈希以本轮git log/回复为准，避免在提交自身的文档中写不可预知的哈希。
+- **根目录文件用途（均须保留）**：`firmware_new/stop_protocol.h`定义0x0A软停/解锁/保持使能/失能动作、phase和token回执；`firmware_new/motion_completion_protocol.h`定义0x23目标确认、实际到位/判稳标志、nonce及节点容差；`firmware_new/protection_protocol.h`定义堵转/回退/校准的CAN事件、参数、事务、阶段、原因和诊断快照。它们都是已经Git跟踪的共享生产头文件，放在两个固件项目的共同父目录，避免主控/电机复制协议产生不一致，不是构建临时文件，也无需单独烧录。
+- **引用已验证**：电机`dummy-motor-fw/Ctrl/Motor/motor.h:7–8`及主控`dummy-ref-core-fw/Robot/actuators/ctrl_step/ctrl_step.hpp:6–7`直接包含stop和motion_completion；电机`dummy-motor-fw/UserApp/protection_config.h:3`及主控`dummy-ref-core-fw/Robot/instances/protection_coordinator.h:4`包含protection。删除任一共享头会导致相关源码编译缺依赖；复制或迁移firmware_new时应保留父目录与两个项目的相对结构。
+- **后续边界**：本轮只按用户授权归档已完成校准工作和说明共享头文件用途。已记录的退让/复触超时耦合、错误名混用、LIVE标签残留及最少Flash余236B仍按前节保留，不因为提交而宣称已修复。未来新增功能由用户另行决定。
+
+## 当前完成：J7/J8校准默认更新为用户最终实测值（2026-10-07，已编译，未提交）
+
+- **授权/证据**：用户20:03:20反馈CALIBRATION ok、Disabled ok及自动保存完成，随后START、HOME约4395ms、RESET约4402ms正常；20:04:22～25回读完整CAL_GET7/8，明确要求“把固件中默认参数改成最后查询的值，测试已经没有问题了”。此组还调整速度/加速度/退让/复触容差，不作为上一轮单参数试验结果；整组通过是用户实测反馈，不宣称此前位置收敛偶发超时唯一根因已经找到。
+- **最终默认（电机轴单位）**：J7 SEEK/RETURN=5/5r/s、RETOUCH=.5r/s、ACCEL=3r/s²、CURRENT=2.5A、CONTACT_RATIO=.3、SPEED/ERROR=.02/.02、TRIGGER/STARTUP=100/100ms、MAX_TRAVEL=101r、SEEK/RETURN/RETOUCH_TIMEOUT=220000/120000/5000ms、BACKOFF=1r、REPEAT/POSITION_TOL=.05/.005r、CONTACT_WINDOW=1r。J8对应2/2、.5、5、1A、.2、.02/.02、100/100、6r、30000/15000/5000ms、.5r、.1/.01r、5×16/360r（回读.222222）。完整单位/范围表已同步方案第13.3节。
+- **生产改动与作用**：`firmware_new/dummy-motor-fw/UserApp/protection_config.cpp:52–66`只改J7/J8校准Defaults，保留J1～J6既有初值、普通堵转、Set/Validate/Load/Save及存储布局。`串口助手_old.py:49–69/1271–1278`CAL编辑初值对应J7表和J8覆盖表；既有节点回读缓存优先，发送/保护锁/线程和界面布局不变。更新`docs/堵转保护与自动回退及校准方案.md`当前首节及参数表、`docs/堵转误报修复与实机测试流程.md`当前首节和本文；没有改主控、STOP状态机、普通完成/同步、PID、总电流上限、参考目录、esp32或串口助手.py。
+- **约束与常规细化**：J7校准默认电流取min(2.5A,节点总限流)，J8取min(1A,节点总限流)，避免旧总限流较低时默认整组校验不合法，未提升总限流。J8 CONTACT_WINDOW保留原精确5×16/360换算，不将串口显示的六位小数当作重新量化标准。接触三条件AND/连续100ms、参考结束后1000+100=1100ms有限窗口、真实到位与50ms稳定、六轴后1000ms再并行、START busy不挂起、STOP/DISABLE可取消、全成功后失能保存均未改。
+- **配置优先级/保存**：合法EEPROM仍优先于新默认，不迁移覆盖旧值、不自动连接设备或写参数。`Ctrl/Motor/stall_protection.cpp:898–911`成功校准保存当前整组参数和坐标，未单独CAL_SAVE仍可能保存试验值；新固件不会强制恢复本轮默认。用户实机当前已完成保存，正常情况下不需为默认值更新反复校准或整片擦除。J7 RETOUCH_TIMEOUT也作用首次退让、错误名RETURN_TIMEOUT混用，及此前LIVE标签残留问题继续记录，未顺手修复。
+- **软件验证**：复用实际生产配置/EEPROM测试，更新已变更默认期望，209项断言通过，覆盖18项J7/18项J8配置、1～8节点合法性、低总限流电流封顶、NaN/Inf/范围/整数拒绝、保存真实Flash回读及旧合法EEPROM值仍优先。实际old助手刷新函数40项通过，18键分别与回读值一致、缓存回读优先及全文件语法通过；普通STALL编辑初值未变。未把本轮软件核查称为新的物理限位测试。
+- **编译与产物**：四电机Ninja重新编译链接成功；主控Ninja无待构建工作，主控BIN哈希保持此前值。五组BIN/HEX校验和与逐字节一致、95KiB电机应用区、原串口助手哈希、限定修改范围、配置校验/EEPROM加载保存源未改、git diff --check通过。四电机RAM10704B；FLASH97044/97044/97036/96996B，最少余236B。已有RWX链接告警保留，资源仍在限制内；未为余量改无关优化或分区。检查记录在Git忽略的`firmware_new/dummy-ref-core-fw/build/analysis/protection_regression/cal_defaults_20261007_artifacts.json`及配置测试结果。
+- **当前状态/下一步**：用户已认可最终参数组实测，默认落地与构建核对完成；按需烧录J7 motor-57及J8 motor-gripper，主控无需因本轮默认修改更新，保留EEPROM和编码器表。未烧录/连接设备、未提交commit，等待用户后续指令；旧参数建议与待测试文字按历史阅读，以本节为当前状态。
+
+| 对象 | BIN（同目录有HEX） | 字节数 | SHA256 |
+|---|---|---:|---|
+| 主控（未变） | `firmware_new/dummy-ref-core-fw/build/Core-STM32F4-fw.bin` | 434760 | `2a1fa48ea689cfc26dd4f7274196312f082a6c60b975c7485c92943c94588eee` |
+| motor-35 | `firmware_new/dummy-motor-fw/build/motor-35.bin` | 97044 | `e75e36ef9decab103e9045bbf70f86ecdcb481bf0040451221d2ccfa3e7521a7` |
+| motor-42 | `firmware_new/dummy-motor-fw/build/motor-42.bin` | 97044 | `e75e36ef9decab103e9045bbf70f86ecdcb481bf0040451221d2ccfa3e7521a7` |
+| motor-57 | `firmware_new/dummy-motor-fw/build/motor-57.bin` | 97036 | `41dc86381bf340cf49eeb1e7239f53f2f3329eface874e2bb7b9cf8ef2689ecc` |
+| motor-gripper | `firmware_new/dummy-motor-fw/build/motor-gripper.bin` | 96996 | `f2c69eb4bb1c030aa0fca426a06da3d0072ffd6560efbf9993f9e37aae3cf08e` |
+
+## 当前建议：用户要求参数验证，单独试J7位置容差（2026-10-07，尚未实测）
+
+- **范围**：用户询问应调整什么参数继续测试；本轮只读校准完成/参数验证/保存路径，按AGENTS 5.2更新本文。未改固件或配置文件、未写实机参数/运行设备、未编译/提交。下列为用户手动验证建议，不能记作已经执行或通过。
+- **单变量**：保持既定校准姿态，确认八轴失能后，仅`#CAL_SET 7 POSITION_TOL_R 0.005`，等确认再`#CAL_GET 7`核对。J7从.001r=.005mm放宽为.005r=.025mm，可容纳前次约.0179mm参考跟随残差；此项同时影响CAL_BACKOFF和CAL_RETURN实际到位，不能称为仅退让容差。接触电流比例/速度/误差/持续时间、真实50ms稳定窗口、重复接触点容差、速度/电流/加速度和超时全部保留；不保证一定通过。
+- **目的/流程**：只进行一次受控CALIBRATION，记录J7 phase10首次退让到phase11复触的时间、完整阶段输出及最终成功/失败，检验容差放宽下的表现。先前.001已出现成功，一次新成功不能证明根因或长期重复性；不自动要求多次硬限位重试。失败/异常先DISABLE等确认，然后读取CAL_STATUS 7 LAST；若第一失败来自J8再读8 LAST，各等完整end。本轮失败后不继续盲目加大容差/延长限位停留。
+- **保存语义已核实**：`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:898–911`校准坐标保存复制整个当前protectionSettings，`UserApp/protection_config.cpp:137–154`与坐标一起写Flash；主控`Robot/instances/protection_coordinator.cpp:703–720`在全部实际完成/失能后自动请求。因此不发CAL_SAVE不等于试验仅RAM：成功会自动保存.005，失败未保存时本轮RAM值仍存在。需要恢复时，在失能状态SET7 POSITION_TOL_R .001并CAL_SAVE7，等保存确认再GET7核对，不必为恢复参数重新跑校准。
+- **后续边界**：当前试验是用户主动选择参数验证后的推荐，不撤销上一节“现有证据不能认定.001必须改变”的归因边界。若.005仍首次退让超时，应增加目标误差/稳定窗口进度等取证，另提文件用途和授权；不在本轮擅自修改STOP、CAL完成或超时逻辑。
+
+## 当前分析：19:50同参数校准成功，J7退让确认存在重复性差异（2026-10-07，仅分析）
+
+- **范围/授权**：用户补充19:48:46～19:50:41完整成功日志及CAL_GET7/8，询问未改参数为何成功。本轮只读当前源码和前次失败附件，按AGENTS 5.2更新本文；未修改固件、配置、其他文档或助手，未提交/编译/操作设备。保留已有未提交改动。
+- **实机回读回答前次待确认**：J7 POSITION_TOL_R仍.001、BACKOFF_R=1、RETURN_RPS=1、ACCEL=10、RETOUCH_TIMEOUT_MS=5000、RETURN_TIMEOUT_MS=120000；J8 POSITION_TOL_R=.006，保持上一轮用户已设置并CAL_SAVE的值。用户本轮没有调整参数，不能把这次成功归因于此前建议的J7 .005；该建议未被执行。J7 CAL阶段只更新坐标、保护位置范围和方向，源码未自动改CAL_POSITION_TOL_R，见`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:639–653/783–805`。
+- **两次J7首次退让不同**：前次phase10 19:47:16.661→phase14 21.666，约5.005秒失败；本次phase10 19:49:02.663→phase11 04.788，约2.125秒通过。前次LAST phase10、v_ref0、跟随差-.00357422r≈-.0178711mm，绝对值超.001r=.005mm位置容差；本次phase11只能证明真实完成门槛曾通过，没有成功时的目标误差/稳定窗口数值，不能编造误差0或确认整个两次过程的波形。前次快照也不能证明其此前从未短暂进入过容差。
+- **完成机制未改变**：`stall_protection.cpp:888–894`要求参考速度0、参考位置准确到内部目标、真实编码器误差不超过CAL_POSITION_TOL_R，并通过`:479–488`连续50ms稳定（实际位置峰峰≤8内部单位、平均有符号估计速度≤.01电机r/s、反馈有效）。J7峰峰8单位约.00078125mm；任一资格失效或窗口位移超限会重新计稳定窗口。`:762–769`退让仍使用复触5秒期限，并错误共用RETURN_TIMEOUT名称；本次2.125秒内通过即可进入复触，前次到期没有通过则失败。不是电流/接触TRIGGER参数自动变化，也不是规划器走完被直接算完成。
+- **同设置不等于同反馈过程**：`:783–791`每次第一接触减速判稳后，从当次实际编码器位置捕获firstContact并生成退让目标；`:664–670`规划器以当次realPosition/estVelocity起步；`Ctrl/Motor/motor.cpp:558–569`捕获时清积分后用当时focCurrent初始化保持积分。这些运行状态未由相同参数强制固定。负载、摩擦、回差、接触预紧、控制状态或编码器微动均可能令末端收敛/稳定资格不同，但现有两份阶段日志和一个失败快照不能确定唯一原因，不断言机械问题或PID/积分实现存在已证实bug。
+- **整轮确实完成**：本次J8 phase12 19:48:56.018→phase13 19:49:05.121约9.103秒；J7 phase12 19:49:07.128→phase13 59.764约52.636秒。随后八轴失能、八节点phase16保存确认、phase0结束，19:50:01.013返回CALIBRATION ok。全部pending到最终ok约74.234秒。成功是既有严格门槛实际通过并完成保存，不是超时放行；J8已在首次退让/复触/返回后等待J7，没有新J8失败。
+- **修正归因/当前建议**：前轮失败证据支持“失败时尚未满足完成门槛”，不足以证明J7 .001必然不可达或必须改成.005。本次证明.001可通过，但单次成功不能证明重复性问题已解决。先保留当前参数，不因一个失败/成功继续调电流、PID、位置容差或要求反复顶限位。若后续决定定位，应先明确增加退让目标误差、参考结束时刻、稳定进度/峰峰/清零原因的受限取证，另列文件用途获授权；独立退让超时及准确错误名仍是已记录、未实施的软件方向。
+
+以下章节为之前轮次当时的分析；前次J7参数待回读及.005临时试验建议，以本节新增证据和当前建议为准。
+
+## 当前分析：19:47 J8到位通过，J7首次退让phase10超时（2026-10-07，仅分析）
+
+- **证据/范围**：用户提供`C:/Users/Liu3Beng/.codex/attachments/136c81bb-d139-4004-85cd-a305dae237cf/已粘贴的文本.txt`，描述J7回退完成时出现问题。本轮读取完整日志及实际源，仅按AGENTS 5.2更新本文，不修改固件/参数/其他文档/助手、不提交/编译/操作设备。用户的肉眼完成描述和软件资格需分别核对，不能凭参考速度0判定校准成功。
+- **J8阶段已通过**：用户19:46:41.860将J8 POSITION_TOL_R设.006并在43.766 CAL_SAVE成功保存参数（此前建议只临时试，实际用户选择了保存，须如实记录）。本轮J8 phase9→10→11→12于19:46:59.925→phase13于19:47:09.002，返回约9.077秒，已完成并保持等待J7。此次改善与单容差调整一致，不能证明所有条件下都已验收，也不能把它当PID优化试验。CAL_SAVE参数保存与整轮校准坐标结果保存不同：随后整轮失败saved/pending000，未进入CAL_SAVING。
+- **J7实际失败阶段**：19:47:16.661从CAL_SEEK9进入CAL_BACKOFF10，21.666约5.005秒后CAL_FAILED14/RETURN_TIMEOUT；没有phase11/12，不是最终从+250返回0的失败，也不是普通STALL自动回退。J7 LAST task57935/phase10、fb/enabled/intent均1、v_ref0，说明首次接触后退离限位的内部动作未通过实际到位稳定确认。
+- **本次已确认快照**：J7 LAST err=-.00357422r≈-183内部单位；actual_travel=-22.952r、ref_travel=-22.9556r，实际位置比参考点沿正电机退让方向更远约.00357422r×5=.0178711mm。J7寻端电机方向负、退让方向正，见`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:689/787–791`；本次应解释为退让略超参考点，不能说尚欠退约.018mm。跟随误差是相对参考的反馈差，不是原始总退让距离；相对行程仍以首次searchStart计，不把22.952r当作退让了114.76mm。
+- **到位/判稳门槛**：`:888–894`CAL_BACKOFF和CAL_RETURN共用实际CAL_POSITION_TOL_R以及`:479–488`50ms稳定。J7本轮尚无CAL_GET7，默认/此前设置.001r约51单位=.005mm，若仍是该值，失败点残差约容差3.57倍，actualArrival无法满足（参考若没准确到internalTarget也不满足）。稳定另要求实际峰峰≤8单位，J7对应约.00078125mm=.78125µm、平均有符号实际速度≤.01r/s；本快照没有稳定窗口峰峰/进度，不能证明只要放宽位置容差就必然通过，也不能拿单个v_raw0证明已连续50ms稳定。
+- **超时耦合及错误命名已确认**：`:762–769`CAL_BACKOFF使用CAL_RETOUCH_TIMEOUT_MS，而CAL_RETURN才用CAL_RETURN_TIMEOUT_MS；非搜索的CAL阶段超时统一返回RETURN_TIMEOUT。日志phase10后5.005秒与此前J7复触5秒期限一致，具体值仍需回读。改RETURN_TIMEOUT_MS不会延长此次退让期限；延长RETOUCH_TIMEOUT会同时影响退让和复触，不能把它说成独立退让参数。这两个设计问题已有历史记录，本轮未擅自实现独立字段/原因号。
+- **不是再次受阻或命令限流饱和**：LAST I_cmd=.242/I_filt=.25<I_thr=.75A，err绝对值.00357422<.02r，unmet5，timer0、peak/last23.2ms<再次受阻100ms，原因RETURN_TIMEOUT不是REBLOCKED。命令上限2.5A、当时输出约.242A，快照无输出饱和证据，不据此提高电流/改接触TRIGGER。detect0表示非寻端接触阶段，并不排除退让内部再次受阻保护；need100是REBLOCK_MS，非到位时长。
+- **LAST与LIVE不能混用**：随后LIVE phase14/err0、参考与实际行程相同，是失败STOP将当前编码器位置捕获为新的保持目标，见`Ctrl/Motor/motor.cpp:557–571`及软停处理；不说明原退让目标已按要求完成，更不意味着校准失败解除。LIVE failure_reason=NONE为运行诊断的reason入参，不覆盖LAST冻结RETURN_TIMEOUT；根因以首次失败LAST为准。
+- **待回读及建议**：已异步请求失能状态只读CAL_GET7，不重新校准，确认POSITION_TOL、BACKOFF、RETURN_RPS和RETOUCH_TIMEOUT。若实际J7容差仍.001且用户确认退让已完成，建议由用户只临时`#CAL_SET 7 POSITION_TOL_R 0.005`并回读，先不CAL_SAVE、不同时改PID/电流/速度/超时；.005r约.025mm，可容纳本次约.018mm残差，但也作用最终返回且50ms稳定仍保留，效果待实测。若本就已≥该容差，则不能沿用位置容差不足解释，应看参考到目标/实际稳定及反馈过程；不盲目加宽或反复顶限位。
+- **后续软件方向（未获本项改动授权）**：退让应有清楚的独立超时语义及阶段错误名，CAL到位容差/稳定门槛需按地轨与夹爪实际单位评估；如需增加target误差/稳定进度的取证，另列文件用途并获授权。当前只记录问题，不更改既有STOP判稳或普通运动完成流程。
+
+## 当前分析：19:43回读确认J8严格到位容差与低增益PID，建议单参数验证（2026-10-07，仅分析）
+
+- **范围/新增证据**：用户补充19:43 CAL_GET 8和GET_PID 8；本轮只读实际设置/输出路径，按AGENTS 5.2更新本文，不改固件/配置/其他文档/助手，不提交、编译或写设备参数。用户尚未说明19:24返回时是否基本全开或中途停止，也尚未反馈POSITION_TOL_R=.006的试验结果，不把建议当成已执行。
+- **实际参数已确认**：J8 SEEK1、RETURN.5、RETOUCH.5电机r/s，ACCEL5r/s²、CURRENT1A、CONTACT_RATIO.2、SPEED/ERROR .02/.02、TRIGGER100、STARTUP100、MAX_TRAVEL6、SEEK_TIMEOUT30000、RETURN_TIMEOUT15000、RETOUCH_TIMEOUT5000ms、BACKOFF.3、REPEAT_TOL.01、POSITION_TOL.001、CONTACT_WINDOW.222222r。返回速度/15秒总期限及.001容差现在有实机回读，不再仅引用默认或历史设置。
+- **19:24失败与容差核对**：LAST跟随残差绝对值.005r=256内部单位；实际容差.001经Steps整数截断为51单位，约5倍差距。源码`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:888–894`完成要求参考到内部目标且真实误差进入容差，再通过50ms稳定；本失败周期不具备完成资格，但没有历史完整波形证明此前从未进入容差或说明稳定窗口哪项反复失效。按静止起点、全开100映射4.44444圈、RETURN.5/ACCEL5估计参考单程约8.99秒，15秒总期限名义上留约6秒收敛/判稳余量；这是理想规划估算，不是测得参考实际停止时刻，也不证明延长超时一定无效。
+- **PID路径与差异**：实机GET_PID 8为kp50/kv50/ki3/kd2；当前gripper源码默认`firmware_new/dummy-motor-fw/UserApp/main.cpp:66–71`为200/80/300/250，`:106–109`启动复制至DCE实际参数。`UserApp/protocols/interface_can.cpp:217–238/334–371`设置同时更新运行DCE与boardConfig，回读取boardConfig；校准返回MODE_COMMAND_POSITION走`Ctrl/Motor/motor.cpp:141–179/419–447`DCE位置闭环，没有独立CAL PID覆盖。当前Kp为默认四分之一、Ki为默认百分之一，可作为小误差收敛能力较弱的候选方向；不把增益比例称为实机速度比例，不据此判定PID是唯一原因。默认值不等于已针对这套实物调好的值，EEPROM有效时优先于默认。
+- **建议的单参数试验（由用户操作，未实施）**：若本次返回已基本全开，保持实际PID、RETURN.5、限流1A、TRIGGER100及15秒超时不变，只临时`#CAL_SET 8 POSITION_TOL_R 0.006`并回读，不先CAL_SAVE。容差约307内部单位/.135模型开度，可容纳本次.005r残差；该参数同时用于CAL_BACKOFF与CAL_RETURN实际到位，50ms稳定、参考到目标、寻端/复触接触判据和重复性门槛不改。不能保证通过；若中途明显未返回，先不要靠放宽容差掩盖，应另核对实际运动与闭环。若仍失败，失能后取CAL_STATUS 8 LAST及完整阶段日志，不自动继续加电流/速度或反复放宽条件。
+- **PID写入语义需保持准确**：当前主控`UserApp/protocols/ascii_protocol.cpp:399–417`的SET_PID调用四个SetDce接口，而`Robot/actuators/ctrl_step/ctrl_step.cpp:422–477`四帧data[4]=1要求保存；并非提供无保存的PID试调入口。本轮不建议直接发送整组默认PID，也未调用任何PID写工具。后续如决定PID试验必须明确这个已有持久化行为，避免把它描述为仅RAM试调。
+- **待确认**：用户实际开度观察和单容差验证结果；先将本次参数与证据留档，不修改完成流程/STOP状态机。若未来需要分别配置退让与返回容差或扩充稳定窗口快照，先另提文件用途并获授权，不因本轮分析自行扩展实现。
+
+## 当前分析：19:24 J8复触已通过，返回阶段15秒到期失败（2026-10-07，仅分析）
+
+- **证据/范围**：用户贴出19:23～19:24完整CAL日志及J7/J8 LAST。本轮按实际源码核对返回完成条件与故障分类，仅按AGENTS 5.2更新本文，不改生产代码/参数/其他文档/助手，不提交、编译或操作硬件。上轮确认窗口修复已编译交付，此次日志是后续实机反馈，不能继续把新RETURN_TIMEOUT当成复触CONTACT_NOT_CONFIRMED。
+- **阶段已推进**：J8 phase9 19:24:02.003→phase10 07.197→phase11 08.523→phase12 09.900，说明本轮首次接触、退让、第二次接触、接触后实际稳定及重复点检查均已通过，闭合坐标已在RAM生效并启动返回100；见`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:783–805`。随后phase14/RETURN_TIMEOUT 24.880，返回阶段约14.980秒，与此前CAL_RETURN_TIMEOUT_MS=15000相符；不是复触时间不足。仅证明此次复触已通过，不推定所有其他参数下均已验收。
+- **返回真实完成条件**：`:888–894`要求参考速度0、参考位置等于internalTarget、实际编码器到目标误差≤CAL_POSITION_TOL_R，再通过`:479–488`实际50ms稳定（位置峰峰≤8内部单位、平均有符号速度≤.01电机r/s且反馈有效），才捕获固定保持点并到CAL_DONE。`:762–769`返回总期限包含规划、实际跟随收敛及稳定判定，超时先失败；没有把参考停止直接认定为到位。
+- **本轮LAST关键事实**：J8 task51084/phase12/intent/fb/enabled均1、v_ref0，err=-.005电机圈；actual_travel=-4.13992r、ref_travel=-4.14492r相差.005r。跟随残差对应1.8°电机轴、.1125模型开度单位（减速16），不能表述为.1125mm或物理测得开度。此前回读/默认CAL_POSITION_TOL_R=.001r对应.0225模型开度；若实机本项未改，本周期不能满足actualArrival：参考若已到目标则实际残差为容差5倍，参考若未到目标则参考条件本身不成立。快照没有internalTarget/实际目标误差或稳定窗口峰峰值，不把v_ref0单独视为参考已准确到目标，也不证明15秒期间完全没有进入过位置容差。
+- **不是再次受阻计时触发**：LAST I_cmd=-.063A/I_filt=.061<I_thr=.2，err绝对值.005<接触/再次受阻ERROR.02，v_filt=.00283203≤.02，unmet5；timer0、peak/last15.5ms<need100，故障原因明确RETURN_TIMEOUT而非REBLOCKED。`:175–193`detect0只表示当前非SEEK/RETOUCH接触检测阶段，RETURN仍执行再次受阻保护；need_ms100在此为REBLOCK_MS，不是返回完成时长，更不能通过继续改CAL_TRIGGER来修复返回到位。返回判稳使用独立50ms窗口，单个v_raw=-.00703125或v_filt低不能证明该窗口已通过。
+- **电流/PID归因边界**：实际返回继续由`Ctrl/Motor/motor.cpp:141–179/419–447`正常位置闭环DCE输出，限流不会强制输出指定电流。失败瞬间电流命令幅值.063A远低于1A命令上限，不能据此认定限流不足或要求提高电流；这也不是电源/绕组实测值。PID收敛、摩擦/回差/微动和完成容差是否适配均待核对，不能从一个快照断言唯一硬件原因或编造PID参数。RETURN_RPS/当前POSITION_TOL/实际PID本轮未回读，不能假设还在用默认速度或据规划模型保证多少秒能实际到位。
+- **J7与保存**：J7 LAST仍phase9/v_ref=-1、failure_reason=CANCELLED_STOP，因J8失败取消整轮，不是J7自身限位故障。主控`firmware_new/dummy-ref-core-fw/Robot/instances/protection_coordinator.cpp:669–705`先要求两轴CAL_DONE才进入DISABLING/SAVING；本轮saved/pending均000、没有CAL_SAVING，未启动不完整校准保存，DISABLE37.099正常完成。两节点at_ms为独立上电计时，不跨节点相减分析异常。
+- **待补充/下一步**：已通过异步问题请求用户保持失能，只回读CAL_GET 8及GET_PID 8，并说明本次返回时是否基本全开或中途停住；无需重新跑CAL。待确认实际RETURN_RPS、POSITION_TOL_R、RETURN_TIMEOUT_MS与PID后，再评估返回时间预算、末端实际收敛和夹爪容差/稳定要求是否适配。当前不盲目延长超时或放宽容差，不擅自修改完成判定；若要修复，先列文件与作用并获授权。原退让共用复触超时/错误命名另项继续保留。
+
+## 当前完成：校准接触确认期限修复，编译及离线回归通过（2026-10-07，待烧录）
+
+- **授权/范围**：用户在18:58失败重新分析后明确“执行修复”，授权上轮1000ms独立收敛余量 + 连续触发时间方案。生产源码本轮只修改`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp`；同步`docs/堵转保护与自动回退及校准方案.md`、`docs/堵转误报修复与实机测试流程.md`、本文。其余已有未提交改动保留，按本轮前置hash核对未变；不改主控、默认配置、协议、EEPROM格式、助手、参考firmware或esp32，不提交、不连接/烧录/写硬件参数。
+- **已确认事实/改动**：电机`:875–884`仅在CAL_SEEK/CAL_RETOUCH的参考停止固定后，把确认期限由startup+trigger+5×filters+50ms改为HZ+contactTriggerTicks，即1000ms+CAL_TRIGGER_MS（20kHz）。TRIGGER100对应1100ms，默认150对应1150ms；持续判定`:825–847`、失效清零、接触后的减速/实际稳定/复触点比较、实际返回、总阶段超时`:762–769`、行程/反馈/租约保护及STOP/DISABLE均保持。候选重启不会刷新参考结束期限；条件满触发时长即接受，不强制等待期限。
+- **实施决策/与前案一致性**：1000ms用于单独的收敛余量，再加当前触发时长；不是把全部等待固定成1000ms，不新增可调参数/CAN/EEPROM字段。这是上轮“预留约1000ms、再加连续触发时间”的具体落地。修复只提供有限等待机会，若速度一直不合格仍失败；不继续缩短TRIGGER、不放宽速度/误差/电流、不额外推进参考或扩大搜索行程。退让与复触期限共用/RETURN_TIMEOUT语义歧义仍是另项记录，未扩大范围。
+- **旧版本复现与新版本对照**：使用真实motor.cpp/stall_protection.cpp/motion_planner.cpp、受控编码器/电流命令输入及配置，构造参考结束后330.85ms开始最后一段连续有效候选。旧代码在400.05ms时冻结69.2ms/100ms并CONTACT_NOT_CONFIRMED，22项断言通过，贴合实机失败点69.15ms的时序关系；新代码同输入在430.85ms连续满100ms立即接受，不等1100ms。此为依据日志设计的输入，不是声称复现未采样的真实机械/速度波形。
+- **验证**：专用CAL确认期限3192594项断言通过，覆盖J7/J8、SEEK/RETOUCH、TRIGGER20/100/150/2000ms、提前有效立即接受、连续重计、反复5ms短候选有限失败、完全无接触失败、固定参考/无额外实际行程、实际越界、总阶段超时先到、反馈门禁及STOP/DISABLE在延长窗口内取消。原CAL边界与首次快照798869、电机保护/完整理想校准7040、主控STOP/坐标/并行/取消/诊断24732项通过；大量数字来自周期断言，不能作为实机验收。测试生成器、案例、源hash、构建日志和产物校验在忽略目录`firmware_new/dummy-ref-core-fw/build/analysis/protection_regression/cal_confirmation_wait_*`以及两build的cal_confirmation_wait_build.log；没有新增生产测试依赖。
+- **构建与产物**：主控Ninja无待构建工作、BIN与前轮完全一致；四电机Ninja均重编译链接成功，RAM10704B、原95KiB区最少剩452B，原RWX警告未顺手改。五组BIN/HEX校验逐字节相同，原`串口助手.py`SHA256仍D07D3E90968F42706C107EC038AFD5109E6A67FC0A12F3C2BC3D98D13FF0D7E4；测试源hash与最终源一致，git diff --check及生产修改范围通过。
+  - 主控`firmware_new/dummy-ref-core-fw/build/Core-STM32F4-fw.bin` 434760B / SHA256 `2a1fa48ea689cfc26dd4f7274196312f082a6c60b975c7485c92943c94588eee`。
+  - 35/42 `firmware_new/dummy-motor-fw/build/motor-35.bin`、`motor-42.bin`各96828B / SHA256 `6c66e13dd5f258a0d8297af198804162c15516f87023e794a096e84b0fbed14d`。
+  - 57 `firmware_new/dummy-motor-fw/build/motor-57.bin` 96820B / SHA256 `22ec81465ac3b0cdb718ad6258442f4d014ff0e761367a160a41bda8d1dfe9ad`。
+  - gripper `firmware_new/dummy-motor-fw/build/motor-gripper.bin` 96780B / SHA256 `874fa3f47ae2db2a382a4d3c6bae706da5105d33bab88fdd96b51a3a7fe05867`。
+- **待用户实测**：本轮只需烧J7 motor-57及J8 motor-gripper，保留EEPROM/磁编码器表，已有配套主控不必重烧；先失能回读CAL_GET 7/8、保持此次100ms和其余参数，执行一次受控CAL。重点J8复触phase11能否到phase12/13，以及两轴均返回后全八失能保存/CALok。校准中START busy不挂起；若失败先DISABLE，再各读CAL_STATUS 8 LAST/7 LAST完整冻结记录，取证前不重启/重跑。生产测试尚未烧录，不能宣称实际接触已验收。
+
+## 当前分析：18:58 TRIGGER=100ms已生效，复触连续候选仍被有限确认期限截断（2026-10-07，仅分析）
+
+- **范围/证据**：用户提供`C:/Users/Liu3Beng/.codex/attachments/8598fa36-f169-4109-99fa-49d517efacc0/已粘贴的文本.txt`，要求重新分析降低TRIGGER后仍失败。本轮只读完整日志与实际电机源，按AGENTS 5.2仅更新本文；不改固件、参数、助手或其他文档，不提交/编译/连接设备，不要求再次撞限位。上一节提出的确认窗口修复尚未实施，用户此次仅修改实机参数。
+- **100ms明确已生效**：J8在18:57:38.812 SET成功、40.338 SAVE成功；J7也SET/SAVE成功。失败冻结快照J8和取消快照J7均显示need_ms=100，排除未保存/仍使用150ms的解释。J8 phase9于18:58:18.217开始，23.419到phase10、24.657到phase11、25.844报CONTACT_NOT_CONFIRMED，复触约1.187秒；首次接触和退让已通过，本轮没有进入phase12。STOP locked26.086，DISABLE31.985正常完成，saved/pending仍000。
+- **连续计时证据**：J8 LAST task49227/phase11/gateELIGIBLE，intent/fb/enabled/detect均1，unmet0；I_filt=.894≥I_thr=.2A，v_filt=.0179883≤.02r/s，err=.0423828≥.02r，在失败周期三个条件均满足。当前连续timer69.15ms<100ms，阶段最长peak75.6ms<100ms；clearCONDITIONS/detail2说明此前非零候选因速度条件失败清零。peak大于当前timer证明此前有更长候选已中断；last_ms=.65仅是最近一次被清零的非零候选长度，不是最长候选，也不能据此声称只发生一次清零。最后仍差30.85ms，但仅在后续条件持续成立时才可能补足，不能保证再等31ms就成功。
+- **源代码与本轮结果一致**：`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:199–205/825–847`严格三条件AND、失败立即清零且不累加间歇候选，当前快照没有证明计时器不运行。`:875–884`在固定参考softPosition==internalTarget、softVelocity==0后，独立计数确认期限，即使当前候选仍有效也会因到期报CONTACT_NOT_CONFIRMED。本轮ref_travel=.34r、actual_travel=.297617r、v_ref0，说明参考已结束、实际仍有.0423828r跟随残差。没有完整速度波形，不能在真实微动、估计速度波动、机械弹性之间认定唯一原因；只确认速度条件曾失效。
+- **为什么缩短TRIGGER没解决**：源码期限换算为CAL_STARTUP_MS+CAL_TRIGGER_MS+5×(CURRENT_FILTER_MS+SPEED_FILTER_MS)+50ms（20kHz，末项1000周期）。按原有STARTUP100及默认共享滤波10/20ms，TRIGGER150时期限450ms，改100后期限400ms，要求和等待截止同时缩50ms，两者相差的收敛余量仍300ms。滤波值本轮未回读，400/450ms是按上述配置计算；“缩短TRIGGER使期限等量缩短”不依赖滤波具体值。本轮69.15ms与上一轮107.25ms来自两次不同反馈轨迹，不能按相减50ms预测。按继承RETOUCH=.5、ACCEL5、参考.34r估计参考运动约.78秒，再加.4秒约1.18秒，与1.187秒日志接近，属模型对照，不是物理触碰的精确计时。
+- **结论与推荐修正**：本次继续支持“参考结束后的确认期限对实际收敛/速度条件反复失效不够适配”，而不是100ms没落地或当前电流/误差条件不足。存在两个关联因素：速度失效令连续候选重新开始、有限期限又在最后有效候选满100ms之前终止。上一节至少1秒确认窗口建议仍未实施；进一步推荐把实际收敛余量单独定义，初步取1000ms，再留足配置的连续触发时间，阶段总超时继续作为硬上限，避免只改TRIGGER去补收敛时间。参考保持固定、不额外推进搜索，不改变电流/速度/误差判据、不累计间歇候选、不允许候选反复续期；连续满TRIGGER后立即进入接触减速/实际稳定/重复点检查，不固定等待整段期限。延长窗口仅提供机会，不保证速度必能持续满足，也不代表整轮已验证成功。当前不优先放宽SPEED或继续缩短TRIGGER；后续若仍受速度判据影响，再依据快照/必要波形评估迟滞，不擅自改普通堵转检测。
+- **J7联动与未完成**：J7 LAST phase9、v_ref=-1r/s，failure_reason=CANCELLED_STOP，因J8失败被整轮取消，不是J7自身限位检测失败。两个at_ms属于独立节点时钟，不能跨节点相减归因。后续拟改电机`stall_protection.cpp`的校准确认期限并同步既有方案/测试/状态文档，需先列文件用途并获用户确认；无需新增CAN、EEPROM或串口参数。退让与复触期限复用/RETURN_TIMEOUT歧义仍另行记录，不扩大本项范围。离线验证应覆盖有效候选完成、速度失效清零、完全无接触/反复短候选有限到期、阶段总超时及STOP/DISABLE打断；本轮未执行源代码修改或构建。
+
+## 当前分析：18:50复触已有有效候选107.25ms，有限证明窗口先到期（2026-10-07，仅分析）
+
+- **范围/证据**：用户贴出18:49～18:50完整串口日志及J7/J8 LAST；本轮读实际电机源、当前默认/参数换算、已有状态文档，按AGENTS 5.2仅更新本文，不改固件、配置、助手或其他文档，不提交、编译、烧录、连接设备或要求再次撞限位。此次证据足够定位确认窗口与连续计时的关系，不再用上轮缺快照的结论代替当前快照。
+- **本轮参数与阶段**：J7成功SET/SAVE SEEK/RETURN1、RETOUCH.5；J8成功SET/SAVE SEEK1、BACKOFF.3。其他值依据前轮保存历史，而非本轮GET确认；LAST直接证明J8接触门槛.2A/.02r/s/.02r、连续150ms、限流1A、实际行程上限6r、复触参考总长.34r。18:50:33.836 phase9→39.076 phase10→40.396 phase11→41.612 phase14 CONTACT_NOT_CONFIRMED（复触约1.216s）；退让本轮已完成，未进入phase12，随后STOP locked/全轮无保存，DISABLE47.537成功。
+- **首次决定性复触证据**：J8 LAST task49343/phase11/gateELIGIBLE/intent/fb/enabled/detect均1、unmet0。I_cmd.938/I_filt.928≥I_thr.2A；v_filt.0175391≤v_thr.02r/s；err.0412109≥.02r；三个滤波条件在失败点都通过，但timer/peak107.25ms<need150ms，当前连续候选还需至少42.75ms且必须继续满足条件。v_raw.0216406略高于.02不等于此周期判据未通过，生产代码使用滤波绝对速度。clearCONDITIONS/detail2、last.45ms明确记录此前一个非零候选因速度条件失败清零；不是把间歇候选累加，更不能声称此次缺电流或缺误差。没有完整波形，不推定只有一次速度清零或以后一定能连续通过150ms。
+- **已确认参考/窗口时序**：`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:680–696`复触目标长BACKOFF+.02×2=.34r（初次6圈不会改变该参考），LAST ref_travel.34、actual_travel.298789、v_ref0证明有界参考已结束但实际编码器受阻/跟随落后。`:825–847`连续计时尚未完成；`:875–884`referenceFinishedTicks从参考停止开始独立计数，超过contactStartup+contactTrigger+5×(currentFilter+velocityFilter)+50ms后无条件Fail CONTACT_NOT_CONFIRMED，不检查已有候选还差多少。默认过滤10/20ms下为450ms；按继承RETOUCH.5、ACCEL5估算参考.34/.5+.5/5=.78s，再加.45s约1.23s，与1.216s日志接近（接收调度及起始实际速度有差异），不能当物理接触时间。失败快照证明截止在当前有效连续确认完成之前触发；属于接触证明窗口设计对实际收敛/微动不够适配，而非计时器算错或检测没有执行。
+- **参数调法不能混淆**：缩短TRIGGER150→100同时把证明窗口450→400ms，要求和截止一起缩50ms；在相同候选形成时刻下，不会补回当前约42.75ms缺口，不能保证通过。加大TRIGGER同样延长两者；只调RETOUCH_TIMEOUT只改变阶段总截止，本次却触发独立CONTACT_NOT_CONFIRMED。提高电流或放宽ERROR不针对失败时已经通过的条件；提高SPEED可能减少此前清零但未经波形证明，不优先用它放宽物理接触判据。物理微动/速度估计抖动究竟哪种令速度短时不满足仍未测，不宣称唯一机械原因。
+- **推荐的针对性固件方案（尚未实施）**：只在校准SEEK/RETOUCH参考固定后给实际收敛及连续候选足够但有限的接触证明期限；建议把该等待上限设为至少1000ms（或独立定义确认窗口），保持与触发持续时间的合理裕量、阶段总超时照常生效，不累计间歇候选，不让重复候选无限续期，不增加参考/实际搜索行程、不改变电流/速度/误差/150ms判据，STOP/DISABLE随时打断。条件连续满150ms立即进入接触停稳/复触点比较，不固定等满1秒；本例若现有条件保持，当前候选仅需补足约43ms，但后续仍须实际停稳/接触重复性，不保证整轮一改即过。此项可先在既有电机stall_protection.cpp内修复，不必新增CAN/EEPROM/串口参数；同步保护方案/测试流程/状态文档，改前列文件用途并获用户确认。退让/复触超时共用及RETURN_TIMEOUT歧义作为另一个已记录问题，不擅自扩大当前修复范围。
+- **J7与保护联动**：J7 LAST reason=CANCELLED_STOP、phase9，v_ref-1、v_raw约-.93，因J8失败被取消，不是J7自身堵转。两个at_ms是独立节点时钟，不用其差值推断跨节点因果。没有部分校准保存或旧目标自动恢复证据。
+- **未完成**：尚未获本项源代码改动授权，未执行修复或测试；推荐离线先复现“截止时候选107.25ms仍通过、应允许在有限窗口内连续到150ms”及速度清零重计、无候选/反复候选截止、整体阶段超时、STOP/DISABLE，再编译交用户实测。当前不需再要求硬限位测试来确认软件时序路径。
+
+## 当前分析：18:41夹爪退开实际到位未完成，2秒共享期限触发RETURN_TIMEOUT（2026-10-07，仅分析）
+
+- **证据/范围**：用户提供`C:/Users/Liu3Beng/.codex/attachments/9015c98f-049f-4ef7-b1d4-70b37245b68f/已粘贴的文本.txt`，追加18:41失败及J7/J8 LAST。本轮只核对日志/代码，按AGENTS 5.2更新本文；无固件、配置、助手或其他文档修改，无提交/编译/设备操作。接续上一轮分析，不把两次不同阶段故障混为一项。
+- **实际参数变化**：18:40:55将J8 RETOUCH_TIMEOUT_MS由5000改2000（是缩短到2秒，并非延长），BACKOFF_R由1改.5并保存；J8 SEEK/RETURN仍2、RETOUCH仍.5、ACCEL5、CURRENT1、CONTACT_RATIO.2、ERROR.02、MAX_TRAVEL6、POSITION_TOL.001等未改。J7本轮GET确认SEEK/RETURN2、RETOUCH.5、ACCEL10、CURRENT2.5、CONTACT_RATIO.3、BACKOFF1、ERROR/SPEED.02、默认各阶段超时等，随后SEEK/RETURN升5并保存；J7并行速度变化不作为J8自身超时的直接证据。
+- **实际阶段定位**：18:41:54.573 J8 CAL_SEEK9→57.500 CAL_BACKOFF10（已确认首次接触并停稳捕获）→59.494 CAL_FAILED14/RETURN_TIMEOUT（距phase10约1.994s），无CAL_RETOUCH11、无CAL_RETURN12。用户说复触张开，实际对应复触前退让张开；本轮没有进入第二次闭合或最终开到100。随后全轮error/saved000/pending000/STOP locked，两个只读LAST分包均完整。
+- **已确认固件耦合及错误命名**：`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:762–769`在CAL_BACKOFF使用CAL_RETOUCH_TIMEOUT_MS，CAL_RETURN才用CAL_RETURN_TIMEOUT_MS；BACKOFF阶段超时也笼统返回RETURN_TIMEOUT，容易误以为最后返回100。用户缩短复触期限同时缩短了退让完成期限，时间包含整个规划运动、实际误差收敛及实际50ms稳定。此复用/命名不清是已确认设计问题，未擅改；后续应独立定义退让期限并区分BACKOFF/RETURN错误，但新增字段/协议/EEPROM兼容及具体修改先提案获授权。
+- **本次LAST直接证据**：J8 task61052/phase10、mode1、fb/enabled/intent1，v_ref0、v_raw.000722656r/s，实际目标误差.00546875r=280内部单位≈1.96875°电机轴≈.123047模型开度；完成门槛CAL_POSITION_TOL_R仍.001r≈.0225模型开度，失败时误差约门槛5.47倍。`:888–894`规划停止且参考到内部目标之外，还要求实际误差≤该门槛并通过`:479–488`50ms真实稳定窗口，才能启动BeginSearch(true)进入phase11。本次参考已停但实际到位资格不满足，2秒到期先终止；不能仅凭肉眼张开/实际速度低认定到位或自动放宽容差。实际收敛迟缓的唯一PID/摩擦等原因未测，不凭I_cmd.022A推定总限流不足。
+- **不是再次受阻触发**：J8 LAST I_cmd.022/I_filt.021<I_thr.2A、滤波速度.00236328≤.02、误差.00546875<接触ERROR.02，unmet5、timer0、peak/last11.5ms、clearCONDITIONS/detail2；退让内部再次受阻门槛100ms，未达到，实际故障是RETURN_TIMEOUT而非REBLOCKED。诊断detect0仅表示搜索接触检测标志在BACKOFF为假，退让仍有再次受阻保护，见`:175–193/825–871`；need_ms100不是本阶段超时。实际/参考行程4.20434/4.2098r仍相对于首次SEEK的searchStart，不是声称退开4.2圈；目标误差两者相差.00546875有效。
+- **规划与实际的时间区别**：J8退开.5r在速度上限2r/s、加速度5r/s²下，静止起点理想参考为三角速度（峰值约1.581r/s），耗时约2×sqrt(.5/5)=.63246s；不能因此认为2秒必然足够，真实闭环收敛和50ms稳定也占总期限。上轮成功J8返回100规划约8.99s、日志实际阶段约11.986s，也显示完成不只取决于参考时间；仅作模型/日志对照，不测得机械收敛波形。
+- **J7联动证据**：J7 LAST reason=CANCELLED_STOP、phase9、v_ref-5/v_raw约-5.03，未触发自身接触；被J8失败整轮取消。两个节点at_ms是各自电机上电时钟，不跨节点比较为事件顺序。没有本轮J7独立堵转故障证据。
+- **建议/界限**：在失能后将J8 RETOUCH_TIMEOUT_MS恢复5000可以解除本次人为缩短的退让期限，但不能宣称必通过，也不能修复18:39 phase11 CONTACT_NOT_CONFIRMED。优先恢复完整实测成功J8基线：SEEK/RETURN=.5、RETOUCH=.25、BACKOFF=.0888889、RETOUCH_TIMEOUT5000，MAX_TRAVEL6/CONTACT_RATIO.2/CURRENT1/ERROR.02/TRIGGER150等保留；先不同时提高速度、改退让/缩时，不靠放宽POSITION_TOL或加电流掩盖本次未到位。未通过工具设置任何参数或擅自保存；完整成功配置已在上一节记录。
+- **未完成**：18:39复触闭合的首次失败快照已被新CAL_BEGIN覆盖，本次phase10 LAST不能反推上一轮未通过哪一接触条件。后续优化需独立处理复触接触证明和退让/返回实际收敛及超时语义；用户尚未授权源代码修改，本轮仅解释并记录。
+
+## 当前分析：18:39复触参考结束但接触未确认，不是复触阶段超时（2026-10-07，仅分析）
+
+- **证据/范围**：用户提供`C:/Users/Liu3Beng/.codex/attachments/d0d1389f-d07e-4de7-9052-07edcee01dfe/已粘贴的文本.txt`，包含18:34成功与18:39调整后失败，询问为何在夹爪复触闭合失败。本轮读实际源及完整日志，按AGENTS 5.2仅更新本文；未修改生产代码/配置/其他文档/助手、未提交、未连接设备、未执行运动。
+- **本次实际变化**：上轮成功J8 SEEK/RETURN=.5、RETOUCH=.25、BACKOFF=.0888889r；本轮改J8 SEEK/RETURN=2、RETOUCH=.5、BACKOFF=1r并保存，其余已知CURRENT1/CONTACT_RATIO.2/ERROR.02/MAX_TRAVEL6/TRIGGER150/STARTUP100及RET超时5s未改。J7也同时改BACKOFF1、SEEK/RETURN2、RETOUCH.5、ACCEL10、CURRENT2.5、CONTACT_RATIO.3、SPEED/ERROR.02并保存；J8本轮ACCEL仍5，不把J7的10套到J8。一次修改多个参数，不能独立归因某一个变化。
+- **阶段定位**：18:39:21.929 J8 phase9→24.705 phase10（已接受第一次接触并减速捕获）→25.943 phase11（退让实际到位后复触）→28.571 phase14 CONTACT_NOT_CONFIRMED；复触仅2.628s，无phase12，未接受第二次接触、更未进入两次接触点比较后返回。saved/pending000、STOP locked28.853；DISABLE38.096正常。J7停止仍为整轮失败取消，无独立J7异常证据。
+- **单位及代码已确认**：`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:787–791`CAL_BACKOFF_R是电机圈，且退让速度使用CAL_RETURN_RPS。J8从.0888889→1r，相当于模型退开2→22.5开度（11.25倍），不是1mm/1开度；J7同样1r则是5mm。`:680–696`复触从实际退让后位置生成参考长度CAL_BACKOFF_R+2×CAL_ERROR_R，本轮1+.04=1.04r；首次寻端的MAX_TRAVEL6仍作实际行程保护，但不会把复触参考目标也变6r。理想退让准确时只比第一次捕获接触点向闭合方向额外约.04r=.9模型开度，这项余量没有随着退让距离增大而增加。
+- **失败分支已确认**：`:875–884`只有复触参考已经固定到内部目标且速度0、有限接触证明窗口耗尽，才返回CONTACT_NOT_CONFIRMED；阶段超时`:762–769`在CAL_RETOUCH会返回SEARCH_TIMEOUT，本日志不是该错误。按照静止起点、1.04r参考、.5r/s、5r/s²和默认滤波10/20ms，参考耗时约1.04/.5+.5/5=2.18s，加100+150+5×(10+20)+50=450ms窗口约2.63s，与2.628s相符；是参考模型解释，不能用接收时间代替物理触碰时刻。只调CAL_RETOUCH_TIMEOUT_MS不会延长这个证明窗口，增大MAX_TRAVEL也不改变复触参考长度。
+- **未证明的触发条件**：`:825–847`复触仍需电流命令≥.2A、滤波估计实际速度≤.02r/s、绝对参考/实际误差≥.02r连续150ms，任一不满足清零。附件没有本次phase11的LAST，不能用旧phase9快照判定这次缺电流、缺误差、速度抖动或连续计时不足，也不能说本次必为间歇累计bug。高速初次接触/较长高速退让/复触速度变化可能改变接触载荷、背隙、弹性或电流命令，但仅是待快照验证方向，不宣称唯一机械故障。CONTACT_UNSTABLE比较在`:792–794`第二次接受并实际停稳后才执行，本次未到那里，放宽REPEAT_TOL不针对本错。
+- **建议/用户新输入**：已请求仅在失能、未新CAL/重启时读取`#CAL_STATUS 8 LAST`完整输出，不重新触碰。用户回复“重新测试，可能是复触超时，调整时间后测试”；已立即说明2.628s/CONTACT_NOT_CONFIRMED不同于5s/SEARCH_TIMEOUT，延长阶段超时不能解决本分支，不要求再次撞限位验证。建议先保留失败证据，再恢复J8上一轮成功的四项速度/退让值作为基线，CURRENT1/CONTACT_RATIO.2/ERROR.02/MAX_TRAVEL6等不变；不据此擅改节点参数或保存。若优化需独立设置有界复触余量、确认时间与合理速度的组合，并保留真实反馈、连续检测、复触一致性、行程/时间约束；具体数值/文件须后续证据和授权。
+- **未完成**：本次复触LAST未提供，尚不能确定哪项连续判据导致不接受接触；用户新测试结果待反馈。软件单项范围校验通过不等于整组物理接触参数已经实测适配。最新日志证明首次搜索6圈方案在本组高速下能确认接触，不证明复触也受其6圈余量保障。之前成功配置与所有未提交改动保留。
+
+## 最新实测：18:34整轮校准成功，J8搜索预算改为6圈（2026-10-07）
+
+- **用户反馈/范围**：用户贴出18:34～18:37完整日志并确认“这次成功了”。按AGENTS 5.2仅记录本文，不擅自改默认参数、代码、配置、其他文档或助手、不提交、不连接设备或执行测试。固件默认MAX_TRAVEL_R仍4.66667；用户本次实际EEPROM参数已保存为6，二者须区分。
+- **本次J8已知有效设置**：SEEK_RPS=.5、RETURN_RPS=.5、RETOUCH_RPS=.25、ACCEL5、CURRENT_A1、CONTACT_RATIO=.2、SPEED_RPS=.02、ERROR_R=.02、TRIGGER150、STARTUP100、MAX_TRAVEL_R6、SEEK_TIMEOUT30000、RETURN_TIMEOUT15000、RETOUCH_TIMEOUT5000、BACKOFF_R=.0888889、REPEAT_TOL_R=.01、POSITION_TOL_R=.001、CONTACT_WINDOW_R=.222222。用户先恢复速度.5并把最大搜索行程改6，随后重新设置寻端超时30000并保存；无ERROR_R变更。J7实际参数本轮未回读，不推定全部等于默认。
+- **完整成功证据**：18:34:45.935六轴CAL_DONE齐全并WAIT1000ms；46.941 J7/J8 SEEK并行。J8 phase9 46.972→phase10 57.061（10.089s）→phase11 58.334→phase12 59.458→phase13 18:35:11.444。J7 phase9 18:34:46.952→phase10 18:35:44.775→phase11 46.009→phase12 47.110→phase13 18:37:27.896。随后CAL DISABLING、Disabled ok、CAL SAVING，J1～J8分别phase16/NONE、八节点phase0/NONE结束，18:37:29.169 !CALIBRATION ok并Disabled ok。软件确认寻端、退让、复触一致性、RAM标坐标、实际返回、全部失能、八节点保存及结束回执齐全；没有失败或部分保存日志。
+- **最新分析/纠正方向**：这次在ERROR_R仍.02的情况下能通过首次和二次接触，证明既有三条件检测及后续流程能运行；不需要为了通过而将误差降到末端保持残差以下。结合前次编码器几乎跟完4.66667圈却缺误差，本次最大搜索预算增至6后在约10.089s已进入退让（理论6圈/.5rps加减速及证明窗口约12.55s才到参考结束失败），强支持原搜索参考在有效接触证明形成前已经结束、余量不足这一方向，不再把降低CONTACT_RATIO或延长总超时当作唯一解法。此次也恢复了速度，未做完全同条件单变量对照，不能宣称已独立证明全部机械/反馈根因或真实全开闭合圈数。
+- **参数语义**：`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:680–695`的6圈是从实际起点向闭合方向的有界搜索预算，不是实测机械行程，也不改变开度0～100映射。`:787–805`接触成立后提前停止搜索并退让/复触，返回100仍按100×16/360=4.44444电机圈计算；不把6圈换算135模型开度后误当成实际爪指走过135。本轮成功日志证明当前参数一次成功，不证明任意初始开度、负载、重复性均通过。
+- **未完成/后续**：先保留这一实测成功配置，固件默认值是否改6/.2、返回100是否对应机械正常全开及重复性由用户后续决定/反馈，不擅自设置。上一轮失能后LIVE位置变化约4.69圈及无活动CAL时gate/unmet残留问题尚无补充观察；成功本轮不证明已解释或修复这两项，不要求为此再次顶限位。
+
+## 当前分析：18:21校准仍未确认接触，仅误差条件不足（2026-10-07，仅分析）
+
+- **范围/证据**：用户提供附件`C:/Users/Liu3Beng/.codex/attachments/09115373-8613-420a-a51c-e4a12e6cf5ad/已粘贴的文本.txt`，询问为何反复无法校准、应调参数还是固件问题。本轮读实际固件和本轮完整日志，按AGENTS 5.2仅更新本文；不改固件/配置/其他文档/助手、不提交、不连接设备或请求重复顶限位。
+- **本轮实际参数**：CAL_GET 8原CONTACT_RATIO=.3、SEEK/RETURN=.5、SEEK_TIMEOUT15000、ERROR_R=.02、TRIGGER150、STARTUP100、MAX_TRAVEL4.66667、ACCEL5；随后成功SET CONTACT_RATIO=.2、SEEK_TIMEOUT30000、SEEK/RETURN=1并CAL_SAVE成功。没有ERROR_R或最大搜索行程变更，不能再说本轮电流门槛仍30%或速度仍.5。
+- **当前失败，不是本次已证明死机**：18:21:17.347 J8 phase9，22.664 phase14/CONTACT_NOT_CONFIRMED，约5.317秒，随后saved/pending000、STOP locked22.904。18:21:29 DISABLE在约84ms回复Disabled ok；LIVE及LAST分包完整end。证明本次失败后的USB/CAN查询仍可工作，不把历史USB卡住归因于本次这条失败。J7因整轮校准取消停止，没有独立J7失败证据。
+- **冻结证据**：LAST task50573/phase9、gateELIGIBLE、intent/fb/enabled/detect均1；I_cmd=.212、I_filt=.210≥I_thr=.2A；v_raw0、v_filt=.00275391≤v_thr=.02r/s；err=.00425781<.02r，unmet4仅误差不满足，timer/peak/last均0、clearNONE。当前缺的是误差条件，不能沿用上一轮“电流和误差均不足”；峰值0只证明该搜索阶段没有一个可计数周期三条件同时成立，不证明误差独立全程均小。失败点误差约218内部单位/1.5328°电机轴/0.0958模型开度，门槛1024单位/7.2°/0.45模型开度。
+- **时间与搜索预算对应**：`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:680–696`从实际起点生成固定相对位置参考；`:809–817`每周期独立推进内部规划器，仅参考到界时固定；`:875–884`固定参考到达后有限接触证明窗口失败，与CAL_SEEK_TIMEOUT独立。规定静止起点、1r/s及5r/s²的梯形参考估算4.66666/1+1/5+.450=5.31666s，与本次5.317s相符；上一轮.5r/s时估算9.88332s，也与日志相符。属参考模型吻合，不是测得物理触碰时间；延长SEEK_TIMEOUT30s不延长这450ms证明窗，加快SEEK只更早走到同一个参考终点，不增加搜索距离。
+- **核心线索/归因边界**：LAST ref_travel4.66666r、actual_travel4.6624r，编码器几乎跟完105模型开度搜索（实走按模型约104.904单位），故仅留下很小残差；`:825–847`的三条件AND运行与日志一致，未发现门禁关闭、间歇累计或用规划位置冒充编码器位置的新证据。`motor.cpp:83–116`从有效角度包独立解包累加实际位置；`:136–195`CAL控制权期间普通规划器不覆盖其参考。仍不能证明机械实物确走104.904开度、真实0～100行程必为4.44444圈或是哪一项硬件故障；固定行程/搜索余量与真实传动匹配未确认，编码器至爪指运动关系也待核对。
+- **参数与方案建议**：不通过再次加电流/速度/超时试探，也不把ERROR_R=.003当修复（失败点该值在数值上可通过，但端点保持电流/静止/小残差也可能符合而伪造限位；单个快照不证明能连续150ms）。仅降低CONTACT_RATIO已经不再针对本次未满足项，缩短TRIGGER也无法让峰值0的候选开始计数。先核对实际开闭电机圈数及反馈/传动，若真实全行程与4.44444r模型不符须校正夹爪开度映射/搜索预算；若编码器几乎抵达目标才形成受阻，应在机械范围内重新设计受控搜索余量/接触证明，保留实际编码器、连续判据、行程/时间界限、复触、STOP/DISABLE及失败不保存。此前修复的是参考微越界与取证，不宣称已解决实际接触识别；当前不能二选一断言只需降阈值或唯一硬件原因。
+- **附加LIVE变化待解释**：失能后LIVE task0/enabled0/detect0，err4.69229r、actual_travel=-.0295117r；与LAST actual4.6624相差约4.69191电机圈。同任务取消/DisableForStop不重置realPosition或searchStart，`:175–193`LIVE为查询时实际位置/保留参考及CAL标签，不能拿失能后的大误差证明触发前达标；可能是失能后实际打开或反馈异常等，先询问用户这次失能后是否自行/手动打开、闭合后是否直接观察电机轴继续转，只回忆已有测试，不要求重跑。gate/unmet残留显示问题仍仅记录，未改。
+- **尚未完成**：等上述已有观察区分位置变化，唯一机械/反馈原因及最终校准参数尚未确认；后续若需要代码改动先列文件用途、获得授权。其余未提交工作保留，本轮无构建或实机操作。
+
+## 当前分析：解释J7/J8完整校准流程及用户最新观察（2026-10-07，仅分析）
+
+- **最新用户观察**：本次开始时夹爪处于打开状态，闭合后夹爪保持闭合、地轨也完全停住。用户未确认“打开”是否为物理全开100，也未单独说明电机轴/联轴器是否仍转；不把这个描述扩大为传动没有滑动等结论。本轮先解释现有流程，不新增机械测试要求，不改生产文件、实机参数或提交。
+- **主控准备**：`firmware_new/dummy-ref-core-fw/Robot/instances/protection_coordinator.cpp:788–797/574–588`要求主控处于DISABLED且无保护忙状态，清旧运动/队列，锁定并查询全部八节点有效、新鲜反馈及实际失能状态；全部CAL_BEGIN/CAL_READY后，`:649–668`仅给J1～J6修正当前位置标签为REST_POSE，不使能运动，六轴CAL_DONE确认齐全后等待1000ms，再给J7/J8分别发送同任务CAL_RUN。两轴并行独立推进，不要求同时结束；J8默认HAND电流1A也作为其校准电流上限约束。
+- **各轴完整顺序**：`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:680–696/783–805/888–894`为CAL_SEEK(9)第一次寻端→接触成立后减速、实际50ms稳定并捕获→CAL_BACKOFF(10)退开→实际到位稳定后CAL_RETOUCH(11)低速复触→第二次接触点与第一次比较→RAM标限位坐标→CAL_RETURN(12)返回→实际到位稳定后CAL_DONE(13)固定保持。J7寻用户+250mm端（电机方向-），将该端标+250后返回0；J8寻闭合端（电机方向+），将该端标开度0后返回100。上电只是把夹爪当前位置假定为100，不主动打开或寻端，见`Ctrl/Motor/motor.cpp:68–72`。
+- **搜索与接触判据**：搜索从当前实际编码器位置生成相对、有界位置目标，不是直接下发用户+250/0绝对目标。第一次默认搜索J7最多101电机圈=505mm、J8最多4.66667圈=105模型开度；参考到边界固定，不视作触碰。`:819–866`在CAL启动豁免后要求滤波绝对电流命令≥calibrationCurrent×CONTACT_RATIO、滤波绝对实际估计速度≤CAL_SPEED、参考/实际误差绝对值≥CAL_ERROR连续CAL_TRIGGER；任一条件失效清零。calibrationCurrent来自CAL_CURRENT并对J8取HAND上限较小值；实际输出还受电机总限流/板型限制，focCurrent不是实测电流。已有实测坐标时首次接触还必须落在CONTACT_WINDOW内；假定上电坐标不凭该窗口证明端点。固定参考结束后仍无接触证明，在有限窗口结束报CONTACT_NOT_CONFIRMED。
+- **默认值及耗时边界**：`UserApp/protection_config.cpp:52–62`默认SEEK/RETURN=.5电机r/s、RETOUCH=.25、ACCEL5r/s²、CONTACT_RATIO=.3、SPEED/ERROR=.02r/s/.02r、TRIGGER150ms、STARTUP100ms。J7退让.2圈=1mm、J8退让.0888889圈=2模型开度，与普通堵转BACK_MM=5/20无关；二次接触差≤.01电机圈，返回实际误差≤.001圈并连续50ms稳定。J7默认寻端/返回速度2.5mm/s；若真实从0到+250，首次寻端约100s、返回另约100s，不含加减速/确认。J8按模型全行程100对应4.44444圈、.5r/s单程约8.9s。代码默认不覆盖有效EEPROM；J8本次回读值已知，J7现值未回读，不宣称默认就是实机参数。
+- **阶段超时**：J7默认SEEK220s、RETURN120s，J8两项15s，BACKOFF及RETOUCH均使用5s。实际最大搜索行程、无效反馈、续租/通信失效、再次受阻及重复接触点不一致都能终止流程；返回和退让均要求实际编码器到位，不能只按规划器结束。
+- **共同成功收尾**：主控`:669–730`要求两轴本任务CAL_DONE/NONE及新鲜有限实际位置，先完成者固定保持、另一轴继续；两轴完成后全八轴DISABLE，确认失能再逐节点SAVE_COORD，八个SAVED确认及CAL_END完成后才返回!CALIBRATION ok和Disabled ok，保持失能。保存是八节点顺序写入，不是跨节点原子事务；如果保存中途失败，可能已有部分节点写入，saved/pending记录实际进度且不返回成功。寻端/返回之前失败则不启动保存；J1～J6已经生效的RAM标签不自动回滚。
+- **失败和用户命令**：主控`:345–364`在任一轴校准失败后取消全八节点任务，停止包括J8在内的本轮校准，锁定且不继续复触/返回/保存；J7特殊EARLY_CONTACT/返回受阻可转入普通保护回退，取消整轮校准。CAL活动/等待/保存期间START返回busy、不挂起，STOP取消并保持锁定，DISABLE取消并使全八轴失能。当前日志J8由phase9直接到14/CONTACT_NOT_CONFIRMED，尚未进入退让、复触、坐标捕获或返回；J7一起停止与整轮失败联动一致，不证明J7自身限位或故障。
+- **当前结论/未完成**：此次用户观察补足开始为打开、闭合后两机构停止，但不改变LAST三条件未同时成立的已确认事实。尚未确定真实夹爪行程/电机反馈与模型差异的唯一原因；不以规划终点或肉眼闭合作为校准成功。本轮只更新本文记录流程，未编译、烧录、连接设备、修改参数或提交。
+
+## 当前分析：18:04实机CAL失败，电流命令和误差同时不足（2026-10-07，仅分析）
+
+- **范围**：用户贴出新CAL失败及LAST/LIVE，要求详细解释物理限位判定与普通堵转的关系。本轮只读固件、按AGENTS 5.2更新本文；不改固件/配置/助手/其他文档，不提交或要求再次顶限位。
+- **本次事实**：J1～J6 CAL_DONE齐全后WAIT1000ms、J7/J8并行SEEK；J8 phase9到CONTACT_NOT_CONFIRMED约9.883秒，随后整轮error、saved/pending均000、STOP locked。DISABLE及J8诊断全部正常响应。LAST在故障前phase9、mode1、intent/fb/enabled/detect全1、gateELIGIBLE；stop_lock1是内部校准预期锁，并不屏蔽内部接触检测。I_cmd=.174/I_filt=.173/I_thr=.3A，实际命令上限1A；v_raw0/v_filt=.00109375≤.02r/s；err=.0025<.02r。unmet=5=电流1+误差4，速度条件满足；timer/peak/last均0，意味着该SEEK阶段从未出现一个计数周期三条件同时满足，不证明电流或误差各自全程都不满足。clearNONE仅在没有非零候选清零时正常出现。
+- **已确认代码判据**：`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:680–696`准备CAL专用阈值/方向/有界位置参考，启动豁免来自CAL_STARTUP_MS；`:825–847`复用普通CURRENT_FILTER_MS/SPEED_FILTER_MS对abs(focCurrent)/abs(estVelocity)滤波，与abs(softPosition-realPosition)一起AND连续计数，任一失效清零，不累计间歇条件。focCurrent为控制输出命令，不是测得绕组或电源电流。CAL_CURRENT_A及HAND任务限流决定CAL_CONTACT_RATIO门槛，普通STALL_CURRENT_A不参与这条判据。`:848–866`还要求已测得坐标情况下的预计限位位置窗口；接受后减速并实际50ms稳定，再退让/复触，比对两次实际接触点，才标限位原点返回。phase9直接失败意味着尚未接受第一次接触，未进入后续判稳/复触，不能归因于后续STOP停稳太严格。
+- **与普通堵转的区别**：同样三条件AND、滤波及连续计时思路，但CAL内部状态/阈值/动作独立。普通`:590–630`仅J1～J7、运动意图/反馈/模式/到位门禁通过后使用CURRENT_A/SPEED_RPS/ERROR_R/TRIGGER_MS；J8排除普通检测但CAL寻找闭合端允许检测。CAL中预期接触→退让复触→标坐标→实际返回→全部成功后失能保存；普通STALL→全机联动STOP和内部回退→锁定等待START/DISABLE。
+- **搜索失败已与旧bug区别开**：`:811–817/875–884`固定搜索参考及有限证明窗口这次走到了CONTACT_NOT_CONFIRMED分支，未再因参考1单位越界抢先SEARCH_TRAVEL。当前约9.88秒与默认0.5r/s、4.66666r加450ms证明窗口一致，日志接收时间不是精确电机触碰时刻。本轮反馈证明前轮边界修复/冻结查询生效，不能证明物理接触全部已经识别。
+- **关键新线索及单位边界**：ref_travel4.66666r、actual_travel4.66416r，相差.0025r=128内部单位=.9°电机轴。`dummy-ref-core-fw/Robot/instances/dummy_robot.h:47–79`按16减速、100开度映射100°，标准0～100对应4.44444电机圈；本次参考105开度搜索，编码器实走按该模型折算104.9436开度单位，离参考仅.05625，而误差门槛.02r对应.45单位。此为模型换算，不是测得机械真实开度超过100。代码没有直接限位开关输入；肉眼闭合与电机编码器不能明显早于参考停止并非同一证据。若起始确实物理全开、传动及比例成立，通常应在约4.4444圈停止、剩余约.2222圈误差；本次几乎完整跟随105搜索，需优先核实初始实物开度、真实开闭电机圈数、编码器至爪指传动是否继续运动，以及当前搜索余量，不认定是哪种机械缺陷。
+- **不得据此盲调**：只降低电流比例仍有误差门槛未过；只缩短150ms也无用，连续候选峰值原本0。同时降到小保持残差容易把正常规划终点停下误当物理端点，应先核实真实行程/传动，再决定限位检测配置或更适合的局部搜索策略，不扩大不受约束搜索、不把规划到达直接算接触。
+- **J7停止/未保存**：主控`Robot/instances/protection_coordinator.cpp:669–678`发现J8失败，`:345–364`取消整轮八节点任务并启动包括校准J8的STOP。J7停止是失败联动，当前没有J7自身失败证据；无最终CAL ok，Flash保存计数000，已完成的J1～J6RAM标记不能据此说全部回滚。
+- **附带诊断显示问题（记录，未改）**：DISABLE后的LIVE task0/mode0/enabled0/detect0正确；gateELIGIBLE/unmet5是calDetectionGate/Unmet保留了上个活动阶段，`FillCalDiagnostic:175–193`未在无活动任务时重算这些标签，不能把LIVE这些残留解释为失能后仍在检测。LAST为冻结证据，未受这个LIVE显示问题影响。后续获授权可独立修正LIVE标签，不擅自顺手改。
+- **最新补充/待确认边界**：用户已说明开始夹爪打开，闭合后夹爪保持闭合、地轨完全停住；没有进一步确认物理全开100或单独观察电机轴/传动件。先按新首节解释完整流程，不重复请求撞限位测试；尚未确定唯一物理根因。
+
+## 当前完成：校准搜索边界修复及失败冻结快照（2026-10-07，待烧录实测）
+
+- **授权/范围**：用户在确认30%已实际生效及搜索参考微过冲缺陷后要求“修复”。完成校准SEEK/RETOUCH有界参考与CAL失败快照；保留本轮开始时已有30%默认、六轴完成后等待1000ms、J7/J8并行及文档/old助手改动。未提交commit，未连接设备、写实机参数、烧录或执行物理运动。
+- **已确认事实/修复**：电机`Ctrl/Motor/stall_protection.cpp:778–817`先以64位差值检查实际编码器行程，包含接触后的减速阶段；仅SEEK/RETOUCH参考到达或越过既定internalTarget时固定于该目标，并以NewTask(target,0)清该内部规划器的位置/速度及积分。未改共享普通motion_planner.cpp。`:875–884`保留原有限接触证明窗口，默认100+150+5×(10+20)+50=450ms；参考走完不当作物理接触，无接触证明返回新增CONTACT_NOT_CONFIRMED(26)，实际越界/搜索目标整数溢出仍SEARCH_TRAVEL(13)，阶段总超时也仍有效。接触仍需电流命令/实际低速/误差连续150ms，不放宽30%/速度/误差/行程或位置判稳。
+- **新证据通道**：电机`:174–239`使用独立96B RAM首次失败快照，`:497/524/541/916`在校准转普通保护、失败、取消、保存失败前捕获，先记录再清检测。记录模式/phase/任务/门禁/反馈、原始及滤波电流命令/速度、误差、实际门槛和限流、连续计时/本阶段峰值/最近非零候选清零原因、实际/参考搜索行程与失败原因；普通STALL触发快照不覆盖。LAST在STOP/START/DISABLE后保留，直到新任务CAL_BEGIN真正接受或重启；同任务BEGIN/同request重传不重新捕获、不清LAST。阶段峰值在下一内部子阶段启动时重置，条件/无效反馈失效清连续候选，间歇条件不累计。
+- **命令/协议**：`#CAL_STATUS 7`或8读取LIVE，追加`LAST`读取首次失败；无记录no_failure_record，不会拼造停机后的触发值。共享`protection_protocol.h`保留0x37/0x38、DIAG_VERSION=2及24字段/8字节分包，新增selector=3/4、无失败record=5，J7/J8限定；普通selector0/1及J8普通堵转排除不变，EEPROM VERSION=1/格式不改。字段的CAL专用映射见该头部注释和方案。主控`Robot/instances/protection_coordinator.cpp:70–150/761–794`复用只读事务，按节点/request/version收齐、100ms重发、1500ms超时，控制任务打印，CAN ISR仅复制，无打印或任务临界区调用。只读事务不贡献校准/运动busy，不改变保护锁或参数。
+- **必要配套与自主决策**：实施读串口入口发现只允许旧STALL_STATUS经过锁，因此增加已向用户说明的`UserApp/protocols/ascii_protocol.cpp:32–34`，只扩展CAL_STATUS读命令入口；严格语法/节点仍由协调器检查，参数写入/运动门禁不扩展。协调器.h沿用先前并行改动，本次诊断通过既有selector区分，不另增状态成员。新增失败reason26区分分支；默认450ms窗口不新加可调参数，受既有接触/滤波设置和阶段超时限制。压缩原文件内启动/参数缓存更新、CAN/main查询、单次故障/坐标捕获/子阶段启动函数为Os，周期20kHz控制/检测/判稳函数编译选项不改；Flash95KiB、编码器表/EEPROM保留区不改。常规设计均在用户授权快照与边界修复内，未顺手更改PID等其他问题。
+- **old助手**：`串口助手_old.py:1216–1220/1284–1300`CAL页增加“读取校准快照/读取失败快照”；选7/8生成只读命令，发送入口和发送线程仅对严格CAL_STATUS/STALL_STATUS诊断白名单放行。CAL_STATUS回包不会伪装成CAL或STALL事件、不会解锁/自动运动；Tk隐藏检查包含原顺序模式。串口助手.py校验未变，禁止修改的参考目录未改。
+- **验证**：真实生产代码受控探针770841项（含每周期边界断言）通过：低电流/高速条件不足时参考固定238933单位、实际227555未越界，在9429.4ms达到参考上界，450ms后9879.4ms CONTACT_NOT_CONFIRMED；之前同输入9430.55ms参考238934误报SEARCH_TRAVEL。有效接触仍9153.1ms接受；参考结束后再让条件成立可在9583.4ms接受。两搜索方向、短复触、积分清零、实际行程越界、连续150ms重计、反馈失效、首次快照保留/新task清除及普通J8排除均检查。此为规定输入，不能证明用户实机哪项门槛未满足。
+- **回归/编译**：生产主控/STOP/理想CAN同行24732项（含真实ASCII锁入口、CAL诊断完整/缺包/错节点/无记录及打印）通过；真实电机/保护/规划器与六种理想CAL起点7040项、配置/EEPROM170项、隐藏真实Tk诊断106项及原顺序/分包/模式410项通过。五目标Ninja及BIN/HEX逐字节一致、应用区大小、旧助手哈希、git diff --check通过。主控FLASH434760B/RAM56384B，四电机FLASH96844/96844/96836/96796B、RAM10704B，最少剩436B；既有RWX及编码器虚函数无返回值告警记录而未扩大修改范围。测试数含循环，不是对应数量物理试验。
+- **未完成/实机边界**：软件缺陷已修复；实机闭合能否连续符合CURRENT/SPEED/ERROR仍待本轮快照确认，不宣称所有夹爪接触问题已消失。先配套烧录主控、J7/57、J8/gripper，保留EEPROM/编码器表；J1～J6逻辑未为此新增校准运动，如希望全节点同一构建可用已编译35/42更新。失能后LIVE/LAST先查询无动作，再支撑好六轴进行一次受控校准；闭合后仍无退让或啸叫立即DISABLE，不连续重试硬限位。失败后分别CAL_STATUS 8 LAST、7 LAST，每项等end，取到日志后再开始新CAL/重启（会清记录）。详细顺序见测试流程新首节。
+
+| 对象 | BIN（同目录有HEX） | 字节数 | SHA256 |
+|---|---|---:|---|
+| 主控 | `firmware_new/dummy-ref-core-fw/build/Core-STM32F4-fw.bin` | 434760 | `2a1fa48ea689cfc26dd4f7274196312f082a6c60b975c7485c92943c94588eee` |
+| motor-35 | `firmware_new/dummy-motor-fw/build/motor-35.bin` | 96844 | `4be94d2f0c244ba4334f820975ea18b2654adc89980879694bae74a490cac030` |
+| motor-42 | `firmware_new/dummy-motor-fw/build/motor-42.bin` | 96844 | `4be94d2f0c244ba4334f820975ea18b2654adc89980879694bae74a490cac030` |
+| motor-57 | `firmware_new/dummy-motor-fw/build/motor-57.bin` | 96836 | `c7c5350da7f8d3495793ae06c07fdac11b687291f7e0523def75196d73cbc542` |
+| motor-gripper | `firmware_new/dummy-motor-fw/build/motor-gripper.bin` | 96796 | `b1fd09dd1960b386c26f11d61caffa927f4e31ff2c2f67faa8362863f1952c4f` |
+
+以下“待确认/未修复”描述是各历史轮次当时状态，本节为当前状态。
+
+## 当前分析：30%已生效，J8搜索失败取消并行地轨（2026-10-07，17:26实机日志）
+
+- **本轮范围**：用户报告并行校准仍失败；只读生产代码，在ignored分析目录构建真实生产代码的受控输入探针，按AGENTS 5.2更新本文。未改生产固件/配置/助手、未写实际节点参数、未重新发布固件或提交。本次拟修复内容须确认后实施，此前并行及30%改动保留。
+- **实机已确认**：17:26:33.163六轴CAL_DONE、33.164 CAL WAIT 1000ms；34.161两轴SEEK，34.182 J7/34.203 J8 phase9；43.640 J8 phase14 SEARCH_TRAVEL，J8阶段9到失败9.437秒；随后error J8、saved=000 pending=000、STOP locked。17:26:57 DISABLE成功。并行及一秒延时已工作；J8没有接受接触并进入phase10退让/phase11复触/phase12返回，不能把本次当已成功找限位。无Flash保存不等于六轴RAM坐标未变。
+- **参数补充与排除方向**：17:29 CAL_GET 8回读CONTACT_RATIO=.3、CURRENT_A=1、速度.5/.5/.25、ACCEL5、SPEED/ERROR=.02/.02、TRIGGER150、STARTUP100、MAX_TRAVEL4.66667、SEEK/RETURN/RETOUCH超时15/15/5秒、BACKOFF.0888889、REPEAT/POSITION容差.01/.001、窗口.222222。明确排除80%未应用；不能仅凭CAL_CURRENT_A=1确定实际总/HAND限流，但实际生效上限不超过该值。
+- **地轨停止是已确认的失败联动**：主控`Robot/instances/protection_coordinator.cpp:659–668`逐轴检查本任务失败，J8 CAL_FAILED调用Error；`:335–354`取消八节点任务，包含校准中的J8，BeginStop停止/保持整轮。不证明J7自己SEARCH_TRAVEL或堵转。任一校准失败禁止完成/保存仍按既定方案，不应删掉联动来掩盖夹爪失败。
+- **两层问题**：电机`Ctrl/Motor/stall_protection.cpp:751–754`先检查实际或参考行程严格越界，再`:758–787`检查接触；`:797–805`规划精确终点后有有限接触证明窗口。直接参考检查会在规划器微过冲时先结束，不能获得证明窗口。接触必须滤波abs(focCurrent)达到实际校准限流×.3、滤波abs(estVelocity)≤.02电机r/s、abs参考/实际误差≥.02电机圈连续150ms；肉眼已闭合不等于三条件连续成立。无失败前快照，不能断言哪项条件唯一未满足，更不能认定电流条件已通过。
+- **真实生产源离线复现**：ignored `generate_cal_contact_failure_probe.py/run_cal_contact_failure_probe.cmd`直接包含生产motor.cpp、stall_protection.cpp、motion_planner.cpp和当前protection_config.cpp，硬件/CAN边界使用已有替身，手动受控输入不代表实机电流或速度。在J8全开到闭合的理想实际位置边界下，默认30%/1A校准上限；模拟接触电流命令.2A（电流不满足）或命令.5A但实际估计速度.03r/s（速度不满足），均在9430.550ms CAL_FAILED/SEARCH_TRAVEL，参考行程238934单位超过238933一单位，实际行程227555未越界，候选峰值0。模拟.5A及实际0速度时在9153.100ms接受连续接触、未触发该失败。与实机9.437秒接近支持参考分支，但探针不能证明实机是哪项接触条件未满足或唯一根因。1单位约.000439开度；不是实际超行程的证据。
+- **诊断缺口**：`FailProtection:479–490`在失败后ResetDetection，丢连续候选证据；现有STALL_STATUS只覆盖普通J1～J7，J8不支持，字段也是普通门槛而非CAL接触门槛。需要失败前冻结校准电流/速度/误差、实际有效门槛、连续峰值/清零原因、实际/参考行程及具体失败分支，失能后经主控USB读取，不要求ST-Link或再次长时间顶限位。
+- **推荐修复、等待确认**：仅校准内部SEEK/RETOUCH把参考约束于既定有界目标，并同步重置该内部规划器位置/速度/积分；保留实际编码器最大行程、接触三条件及有限证明窗口，无接触仍明确失败。新增CAL_STATUS 7/8失败冻结快照并区分实际行程越界与到参考终点仍未确认接触，复用CAN诊断分包通道；普通堵转/J8排除不变。拟改motor.h、stall_protection.cpp、共享protection_protocol.h、主控protection_coordinator.cpp/.h、串口助手_old.py及三份保护文档；不改共享普通规划器、PID、机械范围、Flash分区或持续时间。构建需核对原95KiB电机应用区，诊断/校准启动等非周期函数可在同一已列文件内按体积优化，不改变20kHz周期函数编译选项；不能扩大编码器/EEPROM保留区。本轮不再要求撞限位实测。
+
+## 当前改动：六轴坐标确认后等待1秒，J7/J8并行校准（2026-10-07）
+
+- **用户授权与计时起点**：用户要求“把j7和j8改成同步校准”，补充“j1-6校准后一秒再启动j7和j8”。按同轮并行理解，不要求两个CAN单播同一毫秒启动或同时完成；1秒从本任务J1～J6的SET_CAPTURE_COORD/CAL_DONE确认全部收齐开始，不从收到CALIBRATION命令计时。
+- **最新改动**：主控`Robot/instances/protection_coordinator.cpp/.h`用CAL_WAIT、CAL_MOVE替换CAL_HAND/CAL_RAIL串行阶段；等待1000ms后J7/J8独立幂等CAL_RUN、分别100ms重试、轮转避免TX忙饿死同伴，分别续约。两轴本任务CAL_DONE/NONE/有限实际位置及300ms内新鲜回执都有效才进入八轴失能/顺序EEPROM保存；先完成轴保持，不再次寻端。`串口助手_old.py`校准确认弹窗同步等待与并行说明；本文、方案、测试流程更新。上轮CONTACT_RATIO默认30%保留，不改电机内部校准动作或协议。
+- **已确认事实**：电机`Ctrl/Motor/stall_protection.cpp:398–404`同任务CAL_RUN在运动及CAL_DONE阶段幂等，只回当前快照，不再次搜索；`:358–369`独立task/version/nonce续约，500ms租约未变。主控原Cancel/Error覆盖全部八节点并停止校准中的J8；异常J7普通堵转事件仍取消校准、接管普通保护回退。CAL等待/运动/失能/保存期间START busy不挂起，STOP/DISABLE取消后不能晚到启动或保存成功。
+- **常规决策及排除方向**：两轴实际动作顺序、搜索方向、退让/复触、返回0/100和接触比例不改；取消不保存不完整流程。新增逐轴完成掩码和独立重试，不用ALL广播CAL_RUN（J8载荷有HAND电流限制），不改普通堵转串行回退。先完成轴继续用同任务CAL_RUN刷新完成证明，另一轴完成时不能用几分钟前的旧完成快照收尾；异常、拒绝、1.5秒无本任务回执任一轴均终止整轮。
+- **未完成/限制**：之前确认的搜索参考越边界缺陷仍待单独修复，不能认为并行或30%已解决所有SEARCH_TRAVEL。合法EEPROM优先加载，实际已保存80%仍需失能SET/GET/SAVE变30%。本轮不连接设备、写实际参数、烧录或commit。
+- **验证完成**：主控Ninja成功，FLASH434360B（比上一轮+344B）、RAM56384B，原有RWX链接告警保留；四电机Ninja无需重编译。真实主控协调器/STOP离线24572断言通过，包含999/1000ms边界、两个完成顺序、新鲜/错误任务/NaN回执、只完成一轴不保存、CAN单次TX忙及两轴续约丢ACK、两轴续约间隔与单帧预算、任一轴失败/完成后掉线、等待/运行中的STOP/DISABLE和START busy；隐藏真实Tk72项通过，确认弹窗写明等待1秒和并行、WAIT及两轴SEEK保持busy。断言数含周期循环，端点耗时由理想CAN同行模拟，不是实际接触/动态测试。五BIN/HEX、原应用区大小、参考助手校验及git diff --check通过。
+- **最新产物**：`firmware_new/dummy-ref-core-fw/build/Core-STM32F4-fw.bin`（同目录HEX），434360B / SHA256 e3480d0085c7badff5701566e9aa54340ed96ab4090c55f66da504aed28b14ad。电机BIN及SHA仍为下一节30%版本，协议及电机端无需为并行重新改动/烧录；实际CONTACT_RATIO以节点EEPROM回读为准。ignored测试文件及产物不入库，本轮未commit或烧录。
+
+## 当前改动：校准接触电流比例80%→30%（2026-10-07，用户明确授权）
+
+- **当前问题与决策**：用户反馈夹爪闭合时80%电流门槛过高，明确要求改为30%。仅调整J7/J8共享CAL_CONTACT_RATIO默认值；普通堵转CURRENT_A仍为初始化限流40%，其余校准参数和流程保持原实现。此前80%回读及讨论保留为历史证据，以下各节中的“本轮未改CAL/只读分析”属于对应历史轮次。
+- **最新改动**：电机端`firmware_new/dummy-motor-fw/UserApp/protection_config.cpp:54`默认.8→.3；`串口助手_old.py:55`校准编辑初值同步.3；本文、方案及测试流程记录生效方式与未修复事项。不改主控、参考固件、EEPROM格式或普通堵转控制逻辑。
+- **已确认事实**：`Ctrl/Motor/stall_protection.cpp:628`使用实际校准电流命令上限乘CONTACT_RATIO判接触；例如实际校准上限1A时新门槛.3A，仍需实际低速/跟随误差连续150ms及有效编码器反馈。不是整机电源实测电流比例。合法EEPROM记录仍优先覆盖新默认，不能仅靠重新烧录让已有.8生效为.3。
+- **参数应用**：失能并等Disabled ok后，逐条发送`#CAL_SET 8 CONTACT_RATIO 0.3`、等最终成功、`#CAL_GET 8`回读确认，再`#CAL_SAVE 8`等saved；J7需要更新已有保存值时同样用节点7。old助手回读值优先于编辑初值，不自动覆盖实际节点参数。
+- **未完成与已排除方向**：上一节已确认的搜索参考越边界问题另行待修，本轮不扩大MAX_TRAVEL、不改触发时间/速度/误差、不以规划结束代替接触。降低比例不保证该边界缺陷消失，也没有证据证明电流是唯一阻塞条件。不要求继续长时间顶限位测试；未连接串口、写真实参数、烧录或新增commit。
+- **验证完成**：35/42/57/gripper四种Ninja构建通过，主控Ninja确认无需重编译；配置/EEPROM170项（含J7/J8新默认30%、已保存80%优先加载）、隐藏真实Tk66项（两节点初值30%、已回读80%仍显示80%）、真实电机/保护/规划器及理想编码器校准模拟7040项通过，git diff --check通过。循环断言及理想模拟不能代替实机接触/空驶误触发验收。既有RWX告警保留，BIN大小与此前相同，参考串口助手.py校验未变。
+- **最新产物**：四电机位于`firmware_new/dummy-motor-fw/build/`，35/42各97260B / SHA256 66cc5e2886981b36ce67def470445e97806bc7f6cd83afe60296236ac8f62276；57为97252B / 9f71b6b41ffd799dbda3cc302196b41f0348359a3bc592f30cbc468b85dc31ae；gripper为97212B / 7993e5d39d577c84c5a0e1f6b23a8f4858b4e23a13325251dba4bc4b59c0e67f，均有对应HEX。主控434016B / cd1ca6e158b9a557cb05f59d51e5ac6e8b7fb2aaa8e53e7df840605439f9819d未变。ignored测试及产物不加入版本库，本轮未commit。
+
+## 当前分析：CALIBRATION夹爪闭合后SEARCH_TRAVEL，地轨尚未启动（2026-10-07，16:38日志）
+
+- **本轮范围**：用户要求分析，J1～J6留待之后讨论。只读生产代码，在原ignored build分析目录运行真实规划器探针，按AGENTS 5.2记录本文；未改固件、配置、old助手、实际EEPROM参数或发布构建，未烧录、未新增commit。保护基线仍424c9ed，唯一tracked未提交文件为本文。
+- **日志事实**：16:38:15.388 CAL pending；八轴phase8/CAL_READY；J1～J6 phase13/CAL_DONE；15.886 CAL J8 SEEK、15.958 phase9/CAL_SEEK；25.400 phase14/CAL_FAILED reason=SEARCH_TRAVEL，距报告SEEK约9.442秒。没有J8 phase10退让/11复触/12返回，也没有CAL J7 SEEK。saved=000 pending=000证明未发送或确认本次Flash保存，随后STOP locked；38:45 DISABLE成功。J1～J6捕获坐标已在RAM生效，不能把无Flash保存解释为没有发生任何RAM坐标变化。
+- **J7不动原因已确认**：`dummy-ref-core-fw/Robot/instances/protection_coordinator.cpp:649–656`串行先J8，只有本任务新鲜CAL_DONE/NONE/有效位置才切J7。J8失败分支终止整轮、包括夹爪的停止/保持，J7本次未获CAL_RUN；不能据此判地轨控制故障或堵转。
+- **SEARCH_TRAVEL路径**：`dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:628–644`构造有界相对搜索目标；`:753–754`实际或规划参考相对搜索起点超过searchMaxTravel直接失败（在接触判定之前）；`:797–805`参考已精确到终点/速度0后，等待startup+trigger+5*(电流/速度滤波)+50ms仍无有效接触，也报同原因。目标整数溢出还可在开始时报同码，但本次先正常运动约9秒，不能用立即构造失败解释。没有接受接触时才继续这些分支；接受后internalStopping在`:725`独占，稳定后进退让。
+- **接触条件及未证实项**：`:758–768`有效反馈时，滤波abs(focCurrent)≥实际校准限流×CONTACT_RATIO、滤波abs(estVelocity)≤CAL_SPEED_RPS、abs(softPosition-realPosition)≥CAL_ERROR_R连续CAL_TRIGGER_MS；任一失效立即清零。默认ratio=.8、低速.02电机r/s、误差.02电机圈（夹爪约.45开度）、连续150ms、启动100ms，滤波共享10/20ms。实际限流为min(CAL_CURRENT_A,正值HAND运行限流,总限流)；默认CAL/HAND各1A时门槛.8A，不能由整机电源电流推断是否通过。EEPROM可覆盖各值。本次没有接触快照，不能确认80%门槛、电机微振的速度或计时哪一项阻塞，也不能据肉眼闭合证明全部三条件达标。
+- **已确认边界缺陷与真实源复现**：`Ctrl/Motor/motion_planner.cpp:190–329`离散积分在近终点允许小参考过冲；搜索目标恰好按最大距离设置，却在上述严格参考检查中不给规划器收敛机会。忽略目录`cal_search_planner_probe.cpp`直接包含该生产cpp，默认J8 MAX_TRAVEL=105*16/360圈量化238933单位、速度.5电机r/s、加速度5、初速0，正负方向均在9430.550ms出现参考238934/-238934（越过1单位、速度±730单位/s），至9439.450ms才精确终点及速度0。当前搜索守卫会在首次超出时先退出，不能进入之后的默认450ms证明窗口。1单位约.000439开度；此为参考数值边界问题，不证明物理实际越行程。9.43055秒与日志9.442秒接近，支持该路径，但尚未回读实际参数/冻结分支，不认定唯一实机根因。
+- **推荐修复、未授权**：在校准寻端/复触内部链路把参考约束在既定有界目标，并一致停止内部规划参考，保留实际编码器的最大行程检查及有限接触证明窗口；不扩大机械搜索行程，也不能把规划结束自动当作接触成功。失败应区分实际行程越界/参考到终点未接触，同时保留接触时电流/速度/误差/最长连续计时及失效条件，避免再靠长时间顶限位定位。CAL接触参数单独评估，不擅自将普通40%/100复制过去；不扩改J1～J6或地轨并行顺序。
+- **用户已补充**：确认空夹至自身闭合限位；16:44 `#CAL_GET 8`回读SEEK/RETURN/RETOUCH=.5/.5/.25、ACCEL5、CURRENT1、CONTACT_RATIO.8、SPEED/ERROR=.02/.02、TRIGGER150、STARTUP100、MAX_TRAVEL4.66667、SEEK/RETURN/RETOUCH超时15000/15000/5000、BACKOFF.0888889、REPEAT/POSITION容差.01/.001、CONTACT_WINDOW.222222，均与上述默认探针输入相符。排除本次夹物及CAL保存了另一组阈值的方向；尚未给具体闭合时刻、HAND运行限流或触发瞬间电流/速度/计时证据，仍不能断言某一条件唯一失效。不要求再次运行校准或持续顶限位。
+
 ## 当前节点：普通末端修复已获实机反馈，日常默认值已确认（2026-10-07）
 
 - **用户反馈/授权**：用户“我测试没有什么问题”，随后确认日常默认方案并要求“改完后提交，提交完后我们开始讨论!CALIBRATION”。本轮明确获准将此前已验收保护改动及本次默认值一起提交，使用仓库本地身份Liu3Beng-A / liu3beng@icloud.com；不连接串口、写实际节点参数或烧录。
@@ -8,8 +258,16 @@
 - **事实及排除**：`Ctrl/Motor/stall_protection.cpp:53–65`先生成默认再优先加载合法EEPROM，`UserApp/protection_config.cpp:121`验证记录。重新烧录不覆盖保存的敏感试验参数；`OnMotionLimitChange`提高总限流不自动按40%提高已有门槛。本轮不迁移EEPROM、不擅自提高J7总限流。100ms仅缩短连续候选200ms，不能承诺碰限位总延迟100ms；新默认尚无各轴带载实测。
 - **验证完成**：四电机Ninja重新链接成功，主控Ninja确认最新产物无需重编译；配置/EEPROM165项（含1/2.5/3A的40%、低电流下限、J8排除、CAL保持150ms及保存的50ms优先于新100ms默认）、末端/快照主控123/电机182717、隐藏真实Tk默认/诊断63及顺序/分包/模式410均通过；git diff --check通过。断言数含周期循环，不能当实机用例。保留既有RWX告警；五BIN/HEX都在原应用区，35/42最小Flash余量20B。
 - **最新产物**：主控434016B / SHA256 cd1ca6e158b9a557cb05f59d51e5ac6e8b7fb2aaa8e53e7df840605439f9819d；35/42均97260B / f9ccfd8fb44c177420a25919fb72410f1dffb1f4cdcc06fe1909d504ffb4a6f0；57为97252B / 79331da4908c9a1718267b888f95a5a577eeaa9cd82ee2292a26bab061e0e4ab；gripper为97212B / f87a1fdd9fe8e6266569725a35d77860ba004990f6a0984ae9893234b8fb3284。路径仍各原build目录，ignored清单endpoint_fix_artifacts.json已更新，原串口助手.py校验未改。
-- **提交范围**：准备按本轮授权提交19个已核对的生产/文档文件，包含此前已验收的目标确认与保护接管、回退入口及STOP幂等、末端误报与LIVE/LAST、40%阈值和本次100ms默认。使用本地身份，实际提交结果以git日志为准；ignored测试脚本/构建产物不加入版本库。新默认实机验收与此前修复反馈仍分开记录。
+- **提交完成**：`424c9ed fix(protection): 修复堵转接管与末端误报并确定日常默认值`，19个生产/文档文件，作者及提交者均仓库本地Liu3Beng-A / liu3beng@icloud.com。包含此前已验收的目标确认与保护接管、回退入口及STOP幂等、末端误报与LIVE/LAST、40%阈值和本次100ms默认；提交后已核对工作区干净。ignored测试脚本/构建产物未加入版本库。新默认实机验收与此前修复反馈仍分开记录。此提交之后仅本文记录校准讨论，暂不再提交或修改校准代码。
 - **下一步**：提交完成后只讨论CALIBRATION，先读实际实现；用户已确认失能发起、J1～J6重新标REST_POSE、J7正向限位250→0、J8负向限位0→100、全部成功后自动失能保存、START busy不挂起、失败取消不保存不完整校准。校准代码修改仍须另列文件/用途获确认。
+
+## CALIBRATION重新讨论：提交后只读初核（2026-10-07）
+
+- **已实现流程**：`dummy-ref-core-fw/Robot/instances/protection_coordinator.cpp:748/561`入口检查主控失能，带本次probe逐轴核验有效反馈及实际DISABLED，再逐节点CAL_BEGIN再次核验。`:638–692`六关节静止捕获坐标（主控把零电机位映射REST_POSE），J8闭合寻端/返回100，再J7逻辑正端寻端/返回0，随后八轴失能确认、顺序逐节点Flash保存及CAL_END，全部成功才`!CALIBRATION ok`。
+- **实际端点采集**：`dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:628/729–747`初次寻端、停稳、退让、慢速复触，复触位置与首次比较后才标J7电机-50圈（主控反向映射+250mm）或J8电机0，回到实际反馈目标。J7退让1mm、J8退让2开度。不是只看规划器完成；返回需`:809`实际位置容差及50ms稳定窗。
+- **操作兼容**：`ascii_protocol.cpp:14`校准期间START直接busy不挂起；`protection_coordinator.cpp:308/335`STOP/DISABLE取消并禁止后续未开始保存/成功回执。Flash已开始写入不能撤销，已有设计明确用saved/pending掩码报告部分保存，不能承诺八节点原子回滚。old助手`:1703`已有失能提示、确认弹窗与阶段显示，不自动入口DISABLE。
+- **接触参数仍需单独讨论**：`UserApp/protection_config.cpp:52–64`CAL_CONTACT_RATIO=.8、CAL_TRIGGER_MS=150、CAL_STARTUP_MS=100、实际低速.02电机r/s、误差.02电机圈；寻端/返回/复触速度.5/.5/.25r/s、加速度5。J7校准限流默认初始化总限流，J8默认min(1A,总限流)并受主控HAND电流再次限制。普通CURRENT_A=40%和TRIGGER100没有改动这些CAL值；滤波仍共享现有普通10/20ms设置。
+- **推荐推进、未决策**：先在失能时分别读取`#CAL_GET 7`和`#CAL_GET 8`，每条等完整输出再发下一条，以实际EEPROM为准；不先要求机械寻端。之后独立确定校准低能量限流、接触比例与持续时间，保留复触/实际返回及失败边界，不能根据整机电源电流直接推断focCurrent门槛。不得自动把普通参数复制到CAL。本轮仅初核，不声称现有校准已实机验收。
 
 ## 当前交付：普通运动末端误触发与首次堵转快照已修复（2026-10-07，待用户烧录）
 
