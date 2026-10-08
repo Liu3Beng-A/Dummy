@@ -361,7 +361,7 @@ void ProtectionCoordinator::Error(const char* reason, uint8_t n) {
         }
     job = NONE; calibration = false; robot.startPending = false;
     locked = !readOnly; protectionSeen = locked; trigger = false;
-    if (locked) BeginStop(false, wasCal);
+    if (locked) { alarm = true; BeginStop(false, wasCal); } // RGB indication only; stop behavior is unchanged.
 }
 void ProtectionCoordinator::SyncPosition(uint8_t n) {
     if (!Finite(nodes[n].position)) return;
@@ -786,15 +786,21 @@ bool ProtectionCoordinator::Command(const char* cmd, unsigned len, StreamSink& r
         Respond(response, "ok %s [%u] pending", prefix, unsigned(node)); return true;
     }
     if (text == "!CALIBRATION") {
+        taskENTER_CRITICAL();
+        if (robot.IsRGBSaveBusy()) {
+            taskEXIT_CRITICAL(); Respond(response, "error CALIBRATION busy"); return true;
+        }
         if (Locked() || robot.stopState != DummyRobot::DISABLED) {
-            Respond(response, "error CALIBRATION require DISABLE"); return true;
+            taskEXIT_CRITICAL(); Respond(response, "error CALIBRATION require DISABLE"); return true;
         }
         sink = &response; calibration = locked = true; saved = saveInFlight = 0; task = NextId();
         suppressEpisodes = false;
         robot.startPending = false; ++robot.motionEpoch; robot.motionActive = false;
         robot.commandHandler.ClearFifo(); robot.tuningHelper.SetTuningFlag(0);
         queryProbe = task;
-        Enter(CAL_QUERY, 0x1FE); Respond(response, "!CALIBRATION pending"); return true;
+        Enter(CAL_QUERY, 0x1FE);
+        taskEXIT_CRITICAL();
+        Respond(response, "!CALIBRATION pending"); return true;
     }
     if (text.rfind("#STALL_", 0) != 0 && text.rfind("#CAL_", 0) != 0) return false;
     char verb[20]{}, key[32]{}, extra[2]{}; int node = -1; float v = 0;

@@ -5,6 +5,7 @@
 #include "actuators/ctrl_step/ctrl_step.hpp"
 #include "string"
 #include <cstring>
+#include "rgb.hpp"
 #define ALL 0
 class ProtectionCoordinator;
 
@@ -143,6 +144,7 @@ public:
         void SetTuningFlag(uint8_t _flag);
         void Tick(uint32_t _timeMillis);
         void SetFreqAndAmp(float _freq, float _amp);
+        bool IsActive() const { return tuningFlag != 0; }
 
 
         // Communication protocol definitions
@@ -190,7 +192,7 @@ public:
     void PollProtectionPrint();
     uint32_t GetMotionEpoch() const { return motionEpoch; }
     void RequestSoftStop();
-    void RequestStart();
+    bool RequestStart();
     void RequestDisable();
     void PollSoftStop();
     void PollStopPrint();
@@ -271,6 +273,9 @@ public:
     bool GetRGBEnabled();
     void SetRGBMode(uint32_t mode);
     uint32_t GetRGBMode();
+    RGB::State GetRGBState() const;
+    int SaveRGBConfig(); // 0=busy/state rejected,1=saved,2=flash failure
+    bool IsRGBSaveBusy() const { return rgbSaveBusy; }
     void CalibrateHomeOffset();
     void Homing();
     void Resting();
@@ -498,8 +503,7 @@ private:
     bool RestingForGeneration(uint32_t epoch, uint32_t id = 0);
     void CalibrateForGeneration(uint32_t epoch);
     void RebootForGeneration(uint32_t epoch);
-    bool isRGBEnabled = true;
-    uint32_t rgbMode = 0;
+    volatile bool rgbSaveBusy = false;
 };
 
 

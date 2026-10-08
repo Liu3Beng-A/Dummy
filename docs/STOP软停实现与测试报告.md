@@ -71,7 +71,7 @@
 | 停稳后收到 `!START` | 保持已捕获的原停点，确认七轴状态后解锁；主控目标回填到停点，旧队列、旧目标和 TUN 激励不恢复。 |
 | 收到 `!DISABLE` | 取消待执行 START，广播失能并逐轴重试；确认 J1～J8 全部失能后解除 STOP 锁定，保留失能状态。 |
 | 失能后收到 `!START` | J1～J8 在各自当前实际位置使能保持，完成八轴确认后允许接收新动作。 |
-| STOP 期间收到其他指令 | 丢弃，包括运动、HOME、RESET、CALIBRATION、参数查询/设置、RGB 和新夹爪指令；ASCII 返回 `error STOP_LOCKED`。 |
+| STOP 期间收到其他指令 | 丢弃运动、HOME、RESET、CALIBRATION、普通参数查询/设置、RGB设置/保存和新夹爪指令；ASCII 返回 `error STOP_LOCKED`。已有保护/校准只读诊断按白名单处理；RGB允许精确匹配的 `#RGB_STATUS`、`#RGB_GET`、无参数 `!RGB_BRIGHT`，仅读取主控，不解除STOP锁定。 |
 | J8 夹爪 | 不接收 STOP；STOP 和紧接着的 START 均不改变其原有动作。DISABLE 包括夹爪。 |
 
 START/DISABLE 为完整指令匹配，可带首尾空白；`!START extra`、`!XDISABLE` 等不能解除锁态。STOP 期间的重复 STOP 也不会重启减速。

@@ -54,7 +54,7 @@ void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 84-1;
+  htim2.Init.Period = 105-1; /* APB1 timer clock 84MHz / 105 = WS2812 800kHz */
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -382,9 +382,8 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
       Error_Handler();
     }
 
-    /* Several peripheral DMA handle pointers point to the same DMA handle.
-     Be aware that there is only one stream to perform all the requested DMAs. */
-    __HAL_LINKDMA(tim_baseHandle,hdma[TIM_DMA_ID_CC2],hdma_tim2_ch2_ch4);
+    /* This stream serves RGB on CH4 only. HAL dispatches DMA callbacks by
+       handle identity, so aliasing CC2 here misidentifies completion as CH2. */
     __HAL_LINKDMA(tim_baseHandle,hdma[TIM_DMA_ID_CC4],hdma_tim2_ch2_ch4);
 
     /* TIM2 interrupt Init */
@@ -612,7 +611,6 @@ void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* tim_baseHandle)
     __HAL_RCC_TIM2_CLK_DISABLE();
 
     /* TIM2 DMA DeInit */
-    HAL_DMA_DeInit(tim_baseHandle->hdma[TIM_DMA_ID_CC2]);
     HAL_DMA_DeInit(tim_baseHandle->hdma[TIM_DMA_ID_CC4]);
 
     /* TIM2 interrupt Deinit */

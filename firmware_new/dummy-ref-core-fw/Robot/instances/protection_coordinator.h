@@ -14,6 +14,9 @@ public:
     bool CalibrationBusy() const { return calibration; }
     bool Busy() const { return job != NONE; }
     bool ParameterBusy() const { return job == SETTINGS_GET || job == SETTINGS_SET || job == SETTINGS_SAVE; }
+    bool RgbAlarm() const { return alarm; }
+    bool RgbLocked() const { return locked; }
+    bool RgbStarting() const { return job == START_QUERY || job == START_VERIFY || (job == PROFILE && startAfterProfile); }
     bool BlockAutoStart() const { return job != NONE || locked; }
     // STOP runs before Poll increments: reserve new rounds 3/7 for PREPARE/leases.
     bool StopSendSlot() const { return job == PROTECT_STOP ? (pollRound & 3) != 2 : (pollRound & 1) != 0; }

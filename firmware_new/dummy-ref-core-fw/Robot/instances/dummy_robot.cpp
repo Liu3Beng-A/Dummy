@@ -5,6 +5,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+extern RGB rgb;
+
 // Release 使用 -Ofast，按 IEEE-754 位模式检查，避免 isfinite 被优化掉。
 static bool IsFiniteCommandValue(float value)
 {
@@ -849,10 +851,11 @@ void DummyRobot::RequestSoftStop()
     taskEXIT_CRITICAL();
 }
 
-void DummyRobot::RequestStart()
+bool DummyRobot::RequestStart()
 {
-    if (protection && protection->InterceptStart()) return;
     taskENTER_CRITICAL();
+    if (rgbSaveBusy) { taskEXIT_CRITICAL(); return false; }
+    if (protection && protection->InterceptStart()) { taskEXIT_CRITICAL(); return true; }
     if (stopState == STOPPING || stopState == DISABLING)
     {
         startPending = true;
@@ -871,6 +874,7 @@ void DummyRobot::RequestStart()
     }
     else if (stopState == STARTING) stopDiagPending = true;
     taskEXIT_CRITICAL();
+    return true;
 }
 
 void DummyRobot::RequestDisable()
@@ -1190,22 +1194,59 @@ void DummyRobot::PollStopPrint()
 
 void DummyRobot::SetRGBEnable(bool _enable)
 {
-    isRGBEnabled = _enable;
+    taskENTER_CRITICAL();
+    if (!rgbSaveBusy) rgb.SetEnabled(_enable);
+    taskEXIT_CRITICAL();
 }
 
 bool DummyRobot::GetRGBEnabled()
 {
-    return isRGBEnabled;
+    return rgb.GetConfig().enabled;
 }
 
 void DummyRobot::SetRGBMode(uint32_t mode)
 {
-    rgbMode = mode;
+    taskENTER_CRITICAL();
+    if (!rgbSaveBusy) rgb.SetManualMode(mode);
+    taskEXIT_CRITICAL();
 }
 
 uint32_t DummyRobot::GetRGBMode()
 {
-    return rgbMode;
+    return rgb.GetStatus().mode;
+}
+
+RGB::State DummyRobot::GetRGBState() const
+{
+    taskENTER_CRITICAL();
+    RGB::State state;
+    if (stopFaultMask || (protection && protection->RgbAlarm())) state = RGB::FAULT;
+    else if (IsCalibrationBusy()) state = RGB::CALIBRATION;
+    else if (stopState == STOPPING || stopState == STOPPED || stopState == DISABLING ||
+             (protection && protection->RgbLocked())) state = RGB::STOP;
+    else if (stopState == STARTING || (protection && protection->RgbStarting())) state = RGB::STARTING;
+    else if (stopState == DISABLED || !isEnabled) state = RGB::DISABLED;
+    else {
+        const unsigned mode = unsigned(commandMode);
+        const bool moving = mode == COMMAND_MOTOR_TUNING ? tuningHelper.IsActive() : motionActive;
+        state = mode >= 1 && mode <= 4 ? RGB::State((moving ? RGB::RUN_SEQ : RGB::READY_SEQ) + mode - 1) : RGB::FAULT;
+    }
+    taskEXIT_CRITICAL();
+    return state;
+}
+
+int DummyRobot::SaveRGBConfig()
+{
+    taskENTER_CRITICAL();
+    const bool allowed = !rgbSaveBusy && stopState == DISABLED && !isEnabled && !startPending &&
+        !stopFaultMask && !motionActive && !commandHandler.IsBusy() &&
+        (!protection || !protection->Locked());
+    if (allowed) rgbSaveBusy = true;
+    taskEXIT_CRITICAL();
+    if (!allowed) return 0;
+    const bool ok = rgb.SaveConfig();
+    taskENTER_CRITICAL(); rgbSaveBusy = false; taskEXIT_CRITICAL();
+    return ok ? 1 : 2;
 }
 
 void DummyRobot::UpdateJointPose6D()

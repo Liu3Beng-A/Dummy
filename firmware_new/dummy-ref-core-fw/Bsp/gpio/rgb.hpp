@@ -1,271 +1,113 @@
 #ifndef REF_STM32F4_RGB_H
 #define REF_STM32F4_RGB_H
-
+#include <cstddef>
 #include <cstdint>
 #include <tim.h>
-#include <math.h>
 
-#define MAX_LED 12
-#define USE_BRIGHTNESS 0
-#define PI               3.14159265358979f
-
-class RGB
-{
-private:
-    uint8_t LED_Data[MAX_LED][4];
-    uint8_t LED_Mod[MAX_LED][4];  // for brightness
-    uint32_t pwmData[(24*MAX_LED)+50];
-    uint16_t  effStep = 0;
+// Only the RGB task owns rendering/PWM storage. Commands exchange small snapshots.
+class RGB {
 public:
-    uint8_t  data_sentflag = 0;
-
-    enum Rgb_style_t
-    {
-        RAINBOW,
-        // TIM
-        FADE,
-        BLINK,
-        ALLRed,
-        ALLGreen,
-        ALLBlue,
-        ALLOff
+    static constexpr unsigned LED_COUNT = 24, MODE_COUNT = 13, EFFECT_COUNT = 10, AUTO_COLOR_COUNT = 3;
+    enum Rgb_style_t : uint8_t {
+        PURE_COLOR_0, PURE_COLOR_1, PURE_COLOR_2, RAINBOW, BLUE_TIDE,
+        WHITE_BREATH, CYBER_BREATH, RED_HEARTBEAT, GREEN_SPIN, BLINK,
+        AUTO_SEQ_COLOR, AUTO_INT_COLOR, AUTO_TRJ_COLOR
     };
-
-
-    RGB(uint8_t mode=0);
-
-    void Run(Rgb_style_t _mode = RAINBOW);
-
-    void Interrupt(uint8_t flag);
-
-    //functions
-    void Set_LED (uint8_t LEDs, uint8_t Red, uint8_t Green, uint8_t Blue)
-    {
-        LED_Data[LEDs][0] = LEDs;
-        LED_Data[LEDs][1] = Green;
-        LED_Data[LEDs][2] = Red;
-        LED_Data[LEDs][3] = Blue;
-    }
-
-    void Set_Brightness (int brightness)  // 0-45
-    {
-#if USE_BRIGHTNESS
-
-        if (brightness > 45) brightness = 45;
-        for (int i=0; i<MAX_LED; i++)
-        {
-            LED_Mod[i][0] = LED_Data[i][0];
-            for (int j=1; j<4; j++)
-            {
-                float angle = 105-brightness;  // in degrees
-                angle = angle*PI / 180;  // in rad
-                LED_Mod[i][j] = (LED_Data[i][j])/(tan(angle));
-            }
-        }
-
-#endif
-
-    }
-
-    void WS2812_Send (void)
-    {
-        uint32_t indx=0;
-        uint32_t color;
-        HAL_StatusTypeDef ret;
-
-        for (int i= 0; i<MAX_LED; i++)
-        {
-#if USE_BRIGHTNESS
-            color = ((LED_Mod[i][1]<<16) | (LED_Mod[i][2]<<8) | (LED_Mod[i][3]));
-#else
-            color = ((LED_Data[i][1]<<16) | (LED_Data[i][2]<<8) | (LED_Data[i][3]));
-#endif
-            for (int i=23; i>=0; i--)
-            {
-                //1 timing
-                if (color&(1<<i))
-                {
-                    pwmData[indx] = 70;  // 2/3 of 105
-                }
-                //0 timing
-                else pwmData[indx] = 30;  // 1/3 of 105
-                indx++;
-            }
-
-        }
-
-        //for reset between two data cycle
-        for (int i=0; i<30; i++)
-        {
-            pwmData[indx] = 0;
-            indx++;
-        }
-
-        ret = HAL_TIM_PWM_Start_DMA(&htim2, TIM_CHANNEL_4, pwmData, indx);
-        if (ret != HAL_OK) {
-            data_sentflag = 0;
-            return;
-        }
-        while (!data_sentflag){};
-        data_sentflag = 0;
-    }
-
-    void RainBow()
-    {
-        float factor1, factor2;
-        uint16_t ind;
-        for(uint16_t j=0;j<MAX_LED;j++) {
-            ind = effStep + j * 1;
-            switch((int)((ind % 12) / 4)) {
-                case 0: factor1 = 1.0 - ((float)(ind % 12 - 0 * 4) / 4);
-                    factor2 = (float)((int)(ind - 0) % 12) / 4;
-                    Set_LED(j, 255 * factor1 + 0 * factor2, 0 * factor1 + 255 * factor2, 0 * factor1 + 0 * factor2);
-                    WS2812_Send();
-                    break;
-                case 1: factor1 = 1.0 - ((float)(ind % 12 - 1 * 4) / 4);
-                    factor2 = (float)((int)(ind - 4) % 12) / 4;
-                    Set_LED(j, 0 * factor1 + 0 * factor2, 255 * factor1 + 0 * factor2, 0 * factor1 + 255 * factor2);
-                    WS2812_Send();
-                    break;
-                case 2: factor1 = 1.0 - ((float)(ind % 12 - 2 * 4) / 4);
-                    factor2 = (float)((int)(ind - 8) % 12) / 4;
-                    Set_LED(j, 0 * factor1 + 255 * factor2, 0 * factor1 + 0 * factor2, 255 * factor1 + 0 * factor2);
-                    WS2812_Send();
-                    break;
-            }
-        }
-        if(effStep >= 12) {effStep = 0; }
-        else effStep++;
-    }
-
-    void Sequence() {
-        //define your color style here
-    }
-
-    void Blink()
-    {
-        uint8_t e,r,g,b;
-        if(effStep < 44) {
-            for(uint16_t j=0;j<MAX_LED;j++)
-            {
-                Set_LED(j, 0, 0, 0);
-                WS2812_Send();
-            }
-        }
-        else if(effStep  < 46) {
-            e = (effStep * 5) - 220;
-            r = 255 * ( e / 10 ) + 0 * ( 1.0 - e / 10 );
-            g = 255 * ( e / 10 ) + 0 * ( 1.0 - e / 10 );
-            b = 255 * ( e / 10 ) + 0 * ( 1.0 - e / 10 );
-            for(uint16_t j=0;j<12;j++)
-                if((j%1)==0)
-                {
-                    Set_LED(j, r, g, b);
-                    WS2812_Send();
-                }
-                else
-                {
-                    Set_LED(j, 0, 0, 0);
-                    WS2812_Send();
-                }
-        }
-        else if(effStep < 53.6) {
-            for(uint16_t j=0;j<MAX_LED;j++)
-                if((j%1)==0)
-                {
-                    Set_LED(j, 255, 255, 255);
-                    WS2812_Send();
-                }
-                else
-                {
-                    Set_LED(j, 0, 0, 0);
-                    WS2812_Send();
-                }
-        }
-        else if(effStep < 55.6) {
-            e = (effStep * 5) - 268;
-            r = 0 * ( e / 10 ) + 255 * ( 1.0 - e / 10 );
-            g = 0 * ( e / 10 ) + 255 * ( 1.0 - e / 10 );
-            b = 0 * ( e / 10 ) + 255 * ( 1.0 - e / 10 );
-            for(uint16_t j=0;j<MAX_LED;j++)
-                if((j%1)==0)
-                {
-                    Set_LED(j, r, g, b);
-                    WS2812_Send();
-                }
-                else
-                {
-                    Set_LED(j, 0, 0, 0);
-                    WS2812_Send();
-                }
-        }
-        else {
-            for(uint16_t j=0;j<MAX_LED;j++)
-            {
-                Set_LED(j, 0, 0, 0);
-                WS2812_Send();
-            }
-        }
-        if(effStep >= 75.6) {effStep = 0; }
-        else effStep++;
-    }
-
-    void Fade() {
-        uint8_t r,g,b;
-        double e;
-        e = (effStep * 20) / (double)703;
-        r = ( e ) * 255 + 0 * ( 1.0 - e );
-        g = ( e ) * 255 + 0 * ( 1.0 - e );
-        b = ( e ) * 255 + 0 * ( 1.0 - e );
-        for(uint16_t j=0;j<MAX_LED;j++) {
-            if((j % 1) == 0)
-            {
-                Set_LED(j, r, g, b);
-                WS2812_Send();
-            }
-            else
-            {
-                Set_LED(j, 0, 0, 0);
-                WS2812_Send();
-            }
-        }
-        if(effStep >= 35.15) {effStep = 0; }
-        else effStep++;
-    }
-
-    void PureColor(Rgb_style_t color) {
-        uint8_t r,g,b;
-        switch (color){
-            case ALLRed:
-                r = 100;
-                g = 0;
-                b = 0;
-                break;
-            case ALLBlue:
-                r = 0;
-                g = 0;
-                b = 100;
-                break;
-            case ALLGreen:
-                r = 0;
-                g = 100;
-                b = 0;
-                break;
-            case ALLOff:
-                r = 0;
-                g = 10;
-                b = 0;
-                break;
-            default:
-                break;
-        }
-        for(uint16_t j=0;j<MAX_LED;j++) {
-            Set_LED(j, r, g, b);
-            WS2812_Send();
-        }
-    }
-
+    enum State : uint8_t {
+        BOOT, DISABLED, READY_SEQ, READY_INT, READY_TRJ, READY_TUN,
+        RUN_SEQ, RUN_INT, RUN_TRJ, RUN_TUN, CALIBRATION, STOP, STARTING, FAULT, STATE_COUNT
+    };
+    struct Color { uint8_t r, g, b; };
+    struct Effect {
+        Color first, second;
+        uint16_t periodMs, onMs, offMs;
+        uint8_t reverse, tail;
+    };
+    // color source: 0=preset/effect, 1=explicit RGB, 2/3/4=auto SEQ/INT/TRJ bank.
+    struct Binding { uint8_t mode, customColor; Color color; };
+    struct Config {
+        uint8_t enabled, automatic, brightness, manualMode;
+        uint16_t fadeOnMs, fadeOffMs, brightnessMs, transitionMs;
+        Color colors[3];
+        Effect effects[EFFECT_COUNT];
+        Binding bindings[STATE_COUNT];
+        Color autoColors[AUTO_COLOR_COUNT];
+    };
+    struct Status {
+        uint8_t mode, state, source; // state index, STATE_COUNT=manual, +1=off
+        uint8_t currentBrightness, dirty, storage; // storage 0=defaults,1=valid,2=invalid
+        bool dmaBusy;
+        uint32_t frames, errors, timeouts;
+    };
+    explicit RGB(uint8_t = 0);
+    static Config Defaults();
+    static bool Valid(const Config& value);
+    static const char* StateName(unsigned state);
+    static int FindState(const char* name);
+    void LoadConfig(); // Before communication/RGB tasks.
+    bool SaveConfig(); // Caller holds the robot's disabled-only save reservation.
+    Config GetConfig(uint32_t* revision = nullptr) const;
+    bool ApplyConfig(const Config& value, uint32_t expectedRevision);
+    void SetEnabled(bool enabled);
+    void SetManualMode(uint32_t mode);
+    // mode/source reflect accepted settings; currentBrightness is the rendered ramp.
+    Status GetStatus(State state = STATE_COUNT) const;
+    void Update(State state, uint32_t nowMs);
+    void Interrupt(uint8_t flag); // 1=complete,2=error; only TIM2/CH4 ISR.
+private:
+    static constexpr unsigned RESET_SLOTS = 256; // 320us low at 800kHz
+    static constexpr uint32_t FLASH_ADDRESS = 0x080FFC00UL;
+    struct FlashRecord {
+        uint32_t magic;
+        uint16_t version, size;
+        Config config;
+        uint32_t crc;
+    };
+    struct LegacyConfig {
+        uint8_t enabled, automatic, brightness, manualMode;
+        uint16_t fadeOnMs, fadeOffMs, brightnessMs, transitionMs;
+        Color colors[3];
+        Effect effects[EFFECT_COUNT];
+        Binding bindings[STATE_COUNT];
+    };
+    struct LegacyFlashRecord {
+        uint32_t magic;
+        uint16_t version, size;
+        LegacyConfig config;
+        uint32_t crc;
+    };
+    struct Scene {
+        uint8_t mode, source;
+        Color solid;
+        Effect effect;
+        float scale;
+    };
+    Config config{}, savedConfig{};
+    uint32_t revision = 0;
+    bool savedValid = false;
+    uint8_t storage = 0;
+    volatile bool dmaBusy = false, wireValid = false;
+    volatile uint32_t errors = 0;
+    uint32_t frames = 0, timeouts = 0, dmaStarted = 0;
+    alignas(4) uint32_t pwmData[LED_COUNT * 24 + RESET_SLOTS]{};
+    uint8_t lastWire[LED_COUNT * 3]{};
+    float frame[LED_COUNT][3]{}, fromFrame[LED_COUNT][3]{};
+    Scene scene{};
+    bool sceneValid = false, runtimeStarted = false, bootPending = true;
+    uint32_t bootAt = 0, sceneAt = 0, blendAt = 0;
+    uint16_t blendMs = 0;
+    float brightness = 0, rampFrom = 0, rampTarget = 0;
+    uint32_t rampAt = 0;
+    uint16_t rampMs = 0;
+    bool lastEnabled = false;
+    Status status{};
+    static uint32_t Crc(const void* data, size_t length);
+    static float Smooth(float t);
+    static float Phase(uint32_t elapsed, uint32_t period);
+    static bool SameScene(const Scene& a, const Scene& b);
+    static Scene SelectScene(const Config& value, State state);
+    void Render(const Scene& value, uint32_t elapsed, float output[LED_COUNT][3]);
+    void SendFrame(uint32_t nowMs);
 };
-
-#endif //REF_STM32F4_RGB_H
+#endif
 

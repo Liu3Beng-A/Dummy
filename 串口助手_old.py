@@ -1,5 +1,5 @@
 ﻿import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, colorchooser
 import serial
 import serial.tools.list_ports
 import threading
@@ -10,6 +10,18 @@ import math
 
 
 BAUDRATE = 115200  # 固件 usart.c 中 huart4 波特率硬编码
+
+RGB_MODES = ("0 单色0", "1 单色1", "2 单色2", "3 彩虹", "4 潮汐",
+             "5 呼吸", "6 赛博", "7 心跳", "8 旋转", "9 闪烁",
+             "10 AUTO SEQ常亮", "11 AUTO INT常亮", "12 AUTO TRJ常亮")
+RGB_AUTO_MODES = ("SEQ 顺序", "INT 打断", "TRJ 轨迹")
+RGB_COLOR_SOURCES = ("预设 / 动画颜色", "该状态单独颜色", "AUTO_SEQ", "AUTO_INT", "AUTO_TRJ")
+RGB_STATES = (
+    ("BOOT", "上电初始化"), ("DISABLED", "已失能"),
+    ("READY_SEQ", "SEQ 待机"), ("READY_INT", "INT 待机"), ("READY_TRJ", "TRJ 待机"), ("READY_TUN", "TUN 待机"),
+    ("RUN_SEQ", "SEQ 执行"), ("RUN_INT", "INT 执行"), ("RUN_TRJ", "TRJ 执行"), ("RUN_TUN", "TUN 执行"),
+    ("CALIBRATION", "校准 / 保存中"), ("STOP", "STOP / 失能确认中"), ("STARTING", "使能确认中"),
+)
 
 # 各关节软限位（v3.1 同步到 firmware_new 构造参数 ±175/±75/(0,180)/±270/±100/±180）
 JOINT_RANGES = [(-175, 175), (-75, 90), (0, 180), (-270, 270), (-100, 100), (-180, 180)]
@@ -270,9 +282,9 @@ class RobotSerialAssistantOld:
         control_area = ttk.Frame(main_paned)
         main_paned.add(control_area, weight=2)
 
-        # 三栏布局：左(窄)= 系统/查询/电机  中= 电机参数  右(宽)= 关节控制+MoveL+夹爪
+        # 三栏布局：左(窄)= 系统/查询/电机  中= RGB/电机参数标签页  右= 关节控制+MoveL+夹爪
         control_area.columnconfigure(0, weight=1)  # 左栏
-        control_area.columnconfigure(1, weight=2)  # 中栏（电机参数）
+        control_area.columnconfigure(1, weight=2)  # 中栏（RGB / 电机参数）
         control_area.columnconfigure(2, weight=3)  # 右栏（关节控制 / MoveL / 夹爪）
         control_area.rowconfigure(0, weight=1)
 
@@ -350,12 +362,17 @@ class RobotSerialAssistantOld:
                   ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
         # ==============================================
-        # 中栏：电机参数（查询 / 设置）
+        # 中栏：Notebook（RGB / 电机参数），与参考助手相同的页面切换方式
         # ==============================================
-        middle_col = ttk.Frame(control_area)
-        middle_col.grid(row=0, column=1, sticky="nsew", padx=(0, 6))
-        middle_col.columnconfigure(0, weight=1)
-        middle_col.rowconfigure(0, weight=1)
+        self.notebook = ttk.Notebook(control_area)
+        self.notebook.grid(row=0, column=1, sticky="nsew", padx=(0, 6))
+
+        rgb_page = ttk.Frame(self.notebook, padding=5)
+        self.notebook.add(rgb_page, text=" RGB ")
+        self._build_rgb_page(rgb_page)
+
+        motor_page = ttk.Frame(self.notebook, padding=5)
+        self.notebook.add(motor_page, text=" 电机参数 ")
 
         # 查询与设置合并为一个面板，共享同一个节点下拉。
         # 写入语义（firmware_new 决策 #1/#2，2026-10-04 拍板）：
@@ -366,7 +383,7 @@ class RobotSerialAssistantOld:
         # PID 永远写 EEPROM，因此只配「保存」一个按钮（与「应用」同义）。
         # 节点 0=ALL 仅用于查询广播；节点=0 时写入按钮禁用，避免误写所有节点。
         # 回包统一追加到底部终端日志，不再单独显示。
-        param_f = ttk.LabelFrame(middle_col, text="电机参数（查询 / 设置）", padding=6)
+        param_f = ttk.LabelFrame(motor_page, text="电机参数（查询 / 设置）", padding=6)
         param_f.pack(fill=tk.BOTH, expand=True)
 
         # 节点下拉框（0=ALL, 1~6=J1~J6, 7=地轨, 8=夹爪）
@@ -516,6 +533,345 @@ class RobotSerialAssistantOld:
     # ==============================================
     # 关节控制页（MoveJ）
     # ==============================================
+    def _build_rgb_page(self, parent):
+        """RGB独立模块；编辑不发送，应用只写RAM，保存需实际失能确认。"""
+        self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+        self._rgb_runtime = {}
+        self._rgb_status_var = tk.StringVar(value="RGB 未回读；连接后可查询配置。")
+        status_label = ttk.Label(parent, textvariable=self._rgb_status_var, wraplength=480,
+                                 foreground="#3b5bdb", justify=tk.LEFT)
+        status_label.pack(fill=tk.X, pady=(0, 4))
+        parent.bind("<Configure>", lambda event: status_label.configure(wraplength=max(180, event.width - 12)))
+        actions = ttk.Frame(parent)
+        actions.pack(fill=tk.X, pady=(0, 4))
+        for label, command in (("渐开", "!RGB_ON"), ("渐关", "!RGB_OFF"),
+                               ("自动联动", "!RGB_AUTO 1")):
+            ttk.Button(actions, text=label, command=lambda c=command: self._rgb_send(c)
+                       ).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill=tk.BOTH, expand=True)
+        basic, automatic, effects, states = (ttk.Frame(notebook, padding=6) for _ in range(4))
+        for page, label in ((basic, "亮度 / 灯效"), (automatic, "自动颜色"), (effects, "动画参数"), (states, "状态绑定")):
+            notebook.add(page, text=label)
+
+        row = ttk.Frame(basic)
+        row.pack(fill=tk.X)
+        ttk.Label(row, text="设定亮度 %").pack(side=tk.LEFT)
+        self._rgb_bright = tk.StringVar(value="100")
+        ttk.Entry(row, textvariable=self._rgb_bright, width=5).pack(side=tk.LEFT, padx=3)
+        self._rgb_scale = tk.Scale(row, from_=0, to=100, orient=tk.HORIZONTAL, showvalue=False,
+                                   highlightthickness=0, command=lambda v: self._rgb_bright.set(str(int(float(v)))))
+        self._rgb_scale.set(100)
+        self._rgb_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(row, text="应用", command=self._rgb_apply_bright).pack(side=tk.LEFT)
+        ttk.Label(basic, text="关灯保留设定亮度；0%保持全黑。拖动滑块不自动发送。",
+                  foreground="#868e96", wraplength=480).pack(anchor="w")
+        modes = ttk.Frame(basic)
+        modes.pack(fill=tk.X, pady=4)
+        for i, label in enumerate(RGB_MODES[:10]):
+            modes.columnconfigure(i % 5, weight=1)
+            ttk.Button(modes, text=label, command=lambda n=i: self._rgb_send(f"!RGB_MODE {n}")
+                       ).grid(row=i // 5, column=i % 5, sticky="ew", padx=1, pady=1)
+
+        color_row = ttk.Frame(basic)
+        color_row.pack(fill=tk.X, pady=3)
+        ttk.Label(color_row, text="单色预设").pack(side=tk.LEFT)
+        self._rgb_color_idx = ttk.Combobox(color_row, values=["0", "1", "2"], width=3, state="readonly")
+        self._rgb_color_idx.current(0)
+        self._rgb_color_idx.pack(side=tk.LEFT, padx=3)
+        self._rgb_color_vars = self._rgb_color_fields(color_row, (0, 0, 255))
+        self._rgb_color_idx.bind("<<ComboboxSelected>>", lambda _: self._rgb_fill_color())
+        ttk.Button(color_row, text="应用颜色", command=self._rgb_apply_color).pack(side=tk.LEFT, padx=3)
+
+        fade_row = ttk.Frame(basic)
+        fade_row.pack(fill=tk.X, pady=3)
+        self._rgb_fades = []
+        for label, value in (("渐开", 1000), ("渐关", 1000), ("调亮度", 300), ("换效果", 300)):
+            ttk.Label(fade_row, text=label).pack(side=tk.LEFT)
+            variable = tk.StringVar(value=str(value))
+            self._rgb_fades.append(variable)
+            ttk.Entry(fade_row, textvariable=variable, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Button(basic, text="应用过渡时间 (ms)", command=self._rgb_apply_fades).pack(fill=tk.X, pady=3)
+        ttk.Label(basic, text="渐开 / 渐关 / 调亮度：0～10000ms；换效果：0～5000ms。",
+                  foreground="#868e96", wraplength=480).pack(anchor="w")
+
+        row = ttk.Frame(automatic)
+        row.pack(fill=tk.X, pady=4)
+        ttk.Label(row, text="自动模式").pack(side=tk.LEFT)
+        self._rgb_auto_idx = ttk.Combobox(row, values=RGB_AUTO_MODES, state="readonly", width=15)
+        self._rgb_auto_idx.current(0)
+        self._rgb_auto_idx.pack(side=tk.LEFT, padx=4)
+        self._rgb_auto_idx.bind("<<ComboboxSelected>>", lambda _: self._rgb_fill_auto_color())
+        row = ttk.Frame(automatic)
+        row.pack(fill=tk.X, pady=4)
+        self._rgb_auto_color_vars = self._rgb_color_fields(row, (0,255,0))
+        ttk.Button(row, text="应用自动颜色", command=self._rgb_apply_auto_color).pack(side=tk.LEFT, padx=4)
+        row = ttk.Frame(automatic)
+        row.pack(fill=tk.X, pady=4)
+        ttk.Button(row, text="单色常亮预览", command=lambda: self._rgb_send(
+            f"!RGB_MODE {10 + self._rgb_auto_idx.current()}")).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(row, text="恢复自动联动", command=lambda: self._rgb_send("!RGB_AUTO 1")
+                   ).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Label(automatic, text="SEQ / INT / TRJ 各有独立颜色，默认待机常亮、运动同色旋转。\n"
+                  "与手动预设0 / 1 / 2及动画8的颜色分别设置。\n"
+                  "常亮预设10 / 11 / 12可在状态绑定中选择；旋转选择对应AUTO颜色来源。\n"
+                  "预览会退出自动联动；应用颜色只改RAM，保存全配置后掉电保留。",
+                  foreground="#868e96", wraplength=480).pack(anchor="w", pady=4)
+
+        top = ttk.Frame(effects)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="动画").pack(side=tk.LEFT)
+        self._rgb_effect_mode = ttk.Combobox(top, values=RGB_MODES[3:10], state="readonly", width=18)
+        self._rgb_effect_mode.current(0)
+        self._rgb_effect_mode.pack(side=tk.LEFT, padx=5)
+        self._rgb_effect_mode.bind("<<ComboboxSelected>>", lambda _: self._rgb_fill_effect())
+        for label, attribute, default in (("主颜色", "_rgb_effect_first", (255,255,255)),
+                                          ("副颜色", "_rgb_effect_second", (0,0,0))):
+            row = ttk.Frame(effects)
+            row.pack(fill=tk.X, pady=4)
+            ttk.Label(row, text=label).pack(side=tk.LEFT, padx=(0, 5))
+            setattr(self, attribute, self._rgb_color_fields(row, default))
+        self._rgb_effect_params = []
+        for index, (label, default) in enumerate((("周期 ms (250～30000)", 4000), ("拖尾灯数 (1～12)", 3),
+                                                  ("闪烁亮 ms (20～30000)", 200), ("闪烁灭 ms (20～30000)", 1000))):
+            if index % 2 == 0:
+                row = ttk.Frame(effects)
+                row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text=label, width=22).pack(side=tk.LEFT)
+            variable = tk.StringVar(value=str(default))
+            self._rgb_effect_params.append(variable)
+            ttk.Entry(row, textvariable=variable, width=8).pack(side=tk.LEFT)
+        self._rgb_reverse = tk.BooleanVar(value=False)
+        ttk.Checkbutton(effects, text="反向旋转", variable=self._rgb_reverse).pack(anchor="w")
+        row = ttk.Frame(effects)
+        row.pack(fill=tk.X)
+        ttk.Button(row, text="应用动画参数", command=self._rgb_apply_effect).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(row, text="手动预览", command=lambda: self._rgb_send(
+            f"!RGB_MODE {self._rgb_effect_mode.current() + 3}")).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Label(effects, text="副颜色用于赛博呼吸；方向 / 拖尾用于旋转；彩虹自行生成颜色。\n"
+                  "闪烁按亮 / 灭时间运行。状态颜色优先；实际保护报警为红色双心跳。",
+                  foreground="#868e96", wraplength=480).pack(anchor="w", pady=3)
+
+        row = ttk.Frame(states)
+        row.pack(fill=tk.X, pady=3)
+        ttk.Label(row, text="设备状态").pack(side=tk.LEFT)
+        self._rgb_state = ttk.Combobox(row, values=[label for _, label in RGB_STATES],
+                                       state="readonly", width=27)
+        self._rgb_state.current(0)
+        self._rgb_state.pack(side=tk.LEFT, padx=4)
+        self._rgb_state.bind("<<ComboboxSelected>>", lambda _: self._rgb_fill_state())
+        row = ttk.Frame(states)
+        row.pack(fill=tk.X, pady=3)
+        ttk.Label(row, text="绑定灯效").pack(side=tk.LEFT)
+        self._rgb_state_mode = ttk.Combobox(row, values=RGB_MODES, state="readonly", width=18)
+        self._rgb_state_mode.current(3)
+        self._rgb_state_mode.pack(side=tk.LEFT, padx=4)
+        row = ttk.Frame(states)
+        row.pack(fill=tk.X, pady=4)
+        ttk.Label(row, text="颜色来源").pack(side=tk.LEFT)
+        self._rgb_state_source = ttk.Combobox(row, values=RGB_COLOR_SOURCES, state="readonly", width=24)
+        self._rgb_state_source.current(0)
+        self._rgb_state_source.pack(side=tk.LEFT, padx=4)
+        row = ttk.Frame(states)
+        row.pack(fill=tk.X, pady=3)
+        self._rgb_state_color = self._rgb_color_fields(row, (0,0,255))
+        ttk.Button(states, text="应用当前状态绑定", command=self._rgb_apply_state).pack(fill=tk.X, pady=6)
+        ttk.Label(states, text="该状态RGB用于“该状态单独颜色”；AUTO来源与自动颜色页同步。\n"
+                  "待机默认25%幅度，失能15%。绑定需自动联动，保护 / STOP等优先。\n"
+                  "报警不可改色；关灯全黑。STOP / 校准期间仅允许查询。",
+                  foreground="#868e96", wraplength=480).pack(anchor="w", pady=4)
+
+        footer = ttk.Frame(parent)
+        footer.pack(fill=tk.X, pady=(4, 0))
+        for label, callback in (("查询全部", lambda: self.send_cmd("#RGB_GET")),
+                                 ("保存全配置", self._rgb_save),
+                                 ("恢复默认（临时）", lambda: self._rgb_send("!RGB_RESET"))):
+            ttk.Button(footer, text=label, command=callback).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
+
+    def _rgb_color_fields(self, row, color):
+        variables = [tk.StringVar(value=str(v)) for v in color]
+        for label, variable in zip(("R", "G", "B"), variables):
+            ttk.Label(row, text=label).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=variable, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row, text="选色", command=lambda: self._rgb_pick_color(variables)).pack(side=tk.LEFT, padx=2)
+        return variables
+
+    def _rgb_pick_color(self, variables):
+        try:
+            values = self._rgb_values(variables, [(0, 255)] * 3)
+        except ValueError as error:
+            self.log(str(error), "WARN")
+            return
+        chosen, _ = colorchooser.askcolor("#%02x%02x%02x" % tuple(values), parent=self.root)
+        if chosen:
+            for variable, value in zip(variables, chosen):
+                variable.set(str(round(value)))
+
+    @staticmethod
+    def _rgb_values(variables, ranges):
+        values = []
+        for variable, (lo, hi) in zip(variables, ranges):
+            text = variable.get().strip()
+            if re.fullmatch(r"[0-9]+", text) is None or not lo <= int(text) <= hi:
+                raise ValueError(f"RGB参数须为{lo}～{hi}的整数")
+            values.append(int(text))
+        return values
+
+    def _rgb_send(self, command):
+        # Setters already return MCU status/configuration; do not append a query.
+        return self.send_cmd(command)
+
+    def _rgb_apply_bright(self):
+        try:
+            value = self._rgb_values([self._rgb_bright], [(0, 100)])[0]
+            self._rgb_send(f"!RGB_BRIGHT {value}")
+        except ValueError as error:
+            self.log(str(error), "WARN")
+
+    def _rgb_apply_color(self):
+        try:
+            values = self._rgb_values(self._rgb_color_vars, [(0,255)] * 3)
+            self._rgb_send(f"!RGB_COLOR {self._rgb_color_idx.current()} " + " ".join(map(str, values)))
+        except ValueError as error:
+            self.log(str(error), "WARN")
+
+    def _rgb_apply_auto_color(self):
+        try:
+            values = self._rgb_values(self._rgb_auto_color_vars, [(0,255)] * 3)
+            self._rgb_send(f"!RGB_AUTO_COLOR {self._rgb_auto_idx.current() + 1} " + " ".join(map(str, values)))
+        except ValueError as error:
+            self.log(str(error), "WARN")
+
+    def _rgb_apply_fades(self):
+        try:
+            values = self._rgb_values(self._rgb_fades, [(0,10000)] * 3 + [(0,5000)])
+            self._rgb_send("!RGB_FADE " + " ".join(map(str, values)))
+        except ValueError as error:
+            self.log(str(error), "WARN")
+
+    def _rgb_apply_effect(self):
+        try:
+            first = self._rgb_values(self._rgb_effect_first, [(0,255)] * 3)
+            second = self._rgb_values(self._rgb_effect_second, [(0,255)] * 3)
+            period, tail, on, off = self._rgb_values(self._rgb_effect_params,
+                                                    [(250,30000), (1,12), (20,30000), (20,30000)])
+            values = [self._rgb_effect_mode.current() + 3] + first + second + [
+                period, int(self._rgb_reverse.get()), tail, on, off]
+            self._rgb_send("!RGB_EFFECT " + " ".join(map(str, values)))
+        except ValueError as error:
+            self.log(str(error), "WARN")
+
+    def _rgb_apply_state(self):
+        try:
+            state = RGB_STATES[self._rgb_state.current()][0]
+            command = f"!RGB_SET_STATE {state} {self._rgb_state_mode.current()}"
+            source = self._rgb_state_source.current()
+            if source == 1:
+                command += " " + " ".join(map(str, self._rgb_values(self._rgb_state_color, [(0,255)] * 3)))
+            elif source >= 2:
+                command += " " + RGB_COLOR_SOURCES[source]
+            self._rgb_send(command)
+        except ValueError as error:
+            self.log(str(error), "WARN")
+
+    def _rgb_save(self):
+        if not self._motor_state_known or self._motor_enabled or self._stop_locked or self._calibration_busy or self._seq_active:
+            self.log("RGB保存需先DISABLE并等待Disabled ok，结束校准 / 保护 / 顺序任务。", "WARN")
+            return
+        self._rgb_send("!RGB_SAVE")
+
+    @staticmethod
+    def _rgb_set_fields(variables, values):
+        for variable, value in zip(variables, values):
+            variable.set(str(value))
+
+    def _rgb_fill_color(self):
+        values = self._rgb_cache["colors"].get(self._rgb_color_idx.current())
+        if values is not None:
+            self._rgb_set_fields(self._rgb_color_vars, values)
+
+    def _rgb_fill_auto_color(self):
+        values = self._rgb_cache["auto_colors"].get(self._rgb_auto_idx.current() + 1)
+        if values is not None:
+            self._rgb_set_fields(self._rgb_auto_color_vars, values)
+
+    def _rgb_fill_effect(self):
+        values = self._rgb_cache["effects"].get(self._rgb_effect_mode.current() + 3)
+        if values is not None:
+            self._rgb_set_fields(self._rgb_effect_first, values[:3])
+            self._rgb_set_fields(self._rgb_effect_second, values[3:6])
+            self._rgb_set_fields(self._rgb_effect_params, [values[6], values[8], values[9], values[10]])
+            self._rgb_reverse.set(bool(values[7]))
+
+    def _rgb_fill_state(self):
+        values = self._rgb_cache["states"].get(RGB_STATES[self._rgb_state.current()][0])
+        if values is not None:
+            self._rgb_state_mode.current(values[0])
+            self._rgb_state_source.current(values[1])
+            self._rgb_set_fields(self._rgb_state_color, values[2:])
+
+    def _handle_rgb_status(self, line):
+        """Called exclusively by _process_rx_line on the Tk main thread."""
+        if line.startswith(("RGB_STATUS ", "RGB_RUNTIME ", "RGB_STORAGE ", "RGB_DMA ", "RGB_TIMEOUT ")):
+            fields = dict(re.findall(r"(\w+)=([\w]+)", line))
+            if line.startswith("RGB_STATUS "):
+                self._rgb_runtime = {}
+            self._rgb_runtime.update(fields)
+            fields = self._rgb_runtime
+            required = {"on", "auto", "bright", "current", "mode", "state", "source", "dirty", "storage", "errors", "timeouts"}
+            if required <= fields.keys():
+                limits = {"on": 1, "auto": 1, "bright": 100, "current": 100, "mode": 12,
+                          "dirty": 1, "storage": 2, "errors": 0xFFFFFFFF, "timeouts": 0xFFFFFFFF}
+                if any(re.fullmatch(r"[0-9]+", fields[key]) is None or int(fields[key]) > maximum
+                       for key, maximum in limits.items()):
+                    return
+                state_names = {state for state, _ in RGB_STATES} | {"FAULT"}
+                if fields["state"] not in state_names or fields["source"] not in state_names | {"MANUAL", "OFF"}:
+                    return
+                storage = {"0": "未保存默认", "1": "有效", "2": "无效 / 需重新保存"}.get(fields["storage"], "未知")
+                self._rgb_status_var.set(
+                    f"灯{'开' if fields['on'] == '1' else '关'} / {'自动' if fields['auto'] == '1' else '手动'}  "
+                    f"设定{fields['bright']}% / 当前过渡{fields['current']}%\n"
+                    f"状态 {fields['state']} / 来源 {fields['source']} / 灯效 {fields['mode']}  "
+                    f"修改{'未保存' if fields['dirty'] == '1' else '已保存'}\n"
+                    f"存储 {storage} / DMA错误 {fields['errors']} / 超时 {fields['timeouts']}")
+                self._rgb_bright.set(fields["bright"])
+                self._rgb_scale.set(int(fields["bright"]))
+        elif line.startswith(("RGB_CONFIG ", "RGB_TIMING ")):
+            fields = dict(re.findall(r"(\w+)=(\d+)", line))
+            for index, key in enumerate(("fade_on", "fade_off", "bright_ms", "transition")):
+                if key in fields and int(fields[key]) <= (5000 if index == 3 else 10000):
+                    self._rgb_fades[index].set(fields[key])
+        else:
+            match = re.fullmatch(r"RGB_COLOR ([0-2]) (\d+) (\d+) (\d+)", line)
+            if match:
+                values = list(map(int, match.groups()))
+                if all(0 <= v <= 255 for v in values[1:]):
+                    self._rgb_cache["colors"][values[0]] = values[1:]
+            match = re.fullmatch(r"RGB_AUTO_COLOR ([1-3]) (\d+) (\d+) (\d+)", line)
+            if match:
+                values = list(map(int, match.groups()))
+                if all(0 <= v <= 255 for v in values[1:]):
+                    self._rgb_cache["auto_colors"][values[0]] = values[1:]
+            match = re.fullmatch(r"RGB_EFFECT ([3-9])((?: \d+){11})", line)
+            if match:
+                values = list(map(int, match[2].split()))
+                if (all(0 <= v <= 255 for v in values[:6]) and 250 <= values[6] <= 30000 and
+                        values[7] in (0, 1) and 1 <= values[8] <= 12 and
+                        all(20 <= v <= 30000 for v in values[9:])):
+                    self._rgb_cache["effects"][int(match[1])] = values
+            match = re.fullmatch(r"RGB_STATE (\w+) (\d+) (\d+) (\d+) (\d+) (\d+)", line)
+            if match and match[1] in {state for state, _ in RGB_STATES}:
+                values = list(map(int, match.groups()[1:]))
+                if 0 <= values[0] < len(RGB_MODES) and 0 <= values[1] < len(RGB_COLOR_SOURCES) and all(0 <= v <= 255 for v in values[2:]):
+                    self._rgb_cache["states"][match[1]] = values
+            if line == "RGB_GET end":
+                self._rgb_fill_color()
+                self._rgb_fill_auto_color()
+                self._rgb_fill_effect()
+                self._rgb_fill_state()
+
     def _build_movej_page(self, parent):
         jgrid = ttk.Frame(parent)
         jgrid.pack(fill=tk.X)
@@ -843,6 +1199,9 @@ class RobotSerialAssistantOld:
                 self.receive_thread = threading.Thread(target=self.serial_receive_loop, daemon=True)
                 self.receive_thread.start()
                 self._start_tx_thread()
+                self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+                self._rgb_status_var.set("RGB 已连接，等待配置回读。")
+                self.send_cmd("#RGB_GET")
             except Exception as e:
                 messagebox.showerror("连接失败", str(e))
                 self.log(f"连接失败: {e}", "ERROR")
@@ -859,6 +1218,8 @@ class RobotSerialAssistantOld:
             self._stop_locked = False
             self._update_motor_state(None)
             # 清掉所有等待中的异步状态，避免重连后被上一轮的残留状态卡住
+            self._rgb_status_var.set("RGB 已断开；显示值仅供编辑，需重新回读。")
+            self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
             self._pending_sync = None
             self._sync_data = None
             self._cancel_motion_for_stop()
@@ -915,6 +1276,8 @@ class RobotSerialAssistantOld:
             return
 
         self.root.after(0, self.log, line, "RX")
+        if line.startswith(("RGB_", "ok RGB ", "error RGB ")):
+            self._handle_rgb_status(line)
         if line in ("ok SYNC_ACC pending", "ok SYNC_ACC finish") or line.startswith("error SYNC_ACC "):
             self.root.after(0, self._handle_acc_sync_status, line)
         if line in ("Stopping ok", "STOP locked", "STOP locked disabled", "Start pending",
@@ -928,7 +1291,7 @@ class RobotSerialAssistantOld:
         elif line.startswith("PROTECT ") and " failed reason=" in line:
             self._handle_communication_protection(line)
         elif line == "error START busy":
-            self.log("参数任务正在进行，START 未受理；完成后请重新发送，不会自动使能", "WARN")
+            self.log("参数 / RGB保存任务正在进行，START 未受理；完成后请重新发送，不会自动使能", "WARN")
         elif re.fullmatch(r"ok ENC_CAL \[[1-8]\] dispatched", line):
             self.log("磁编码器校准 CAN 帧已提交；协议没有完成回执，请观察电机校准及重启结果", "INFO")
         self._handle_protection_parameter_status(line)
@@ -1291,7 +1654,8 @@ class RobotSerialAssistantOld:
         return re.fullmatch(r"#CAL_STATUS\s+[78](?:\s+LAST)?", cmd) is not None
 
     def _is_protection_status_query(self, cmd):
-        return self._is_stall_status_query(cmd) or self._is_cal_status_query(cmd)
+        return (cmd in ("#RGB_STATUS", "#RGB_GET", "!RGB_BRIGHT") or
+                self._is_stall_status_query(cmd) or self._is_cal_status_query(cmd))
 
     def _query_cal_status(self, last=False):
         node = self._protection_nodes["CAL"].get()

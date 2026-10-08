@@ -166,31 +166,31 @@ void OnTimer7Callback()
 
 osThreadId_t rgbTaskHandle;
 void ThreadRGBUpdate(void* argument) {
+    TickType_t wake = xTaskGetTickCount();
     for (;;) {
-        if (dummy.GetRGBEnabled())
-        {
-            rgb.Run((RGB::Rgb_style_t)dummy.GetRGBMode());
-            osDelay(30);
-        }else
-        {
-            rgb.Run(RGB::ALLOff);
-            osDelay(30);
-        }
+        rgb.Update(dummy.GetRGBState(), HAL_GetTick());
+        if (xTaskGetTickCount() - wake >= pdMS_TO_TICKS(40)) wake = xTaskGetTickCount();
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(20));
     }
 }
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
-    if(htim->Instance==TIM2)
+    if(htim->Instance==TIM2 && htim->Channel==HAL_TIM_ACTIVE_CHANNEL_4)
     {
-        HAL_TIM_PWM_Stop_DMA(&htim2, TIM_CHANNEL_4);
         rgb.Interrupt(1);
     }
+}
+
+void HAL_TIM_ErrorCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM2) rgb.Interrupt(2);
 }
 
 /* Default Entry -------------------------------------------------------*/
 void Main(void)
 {
+    rgb.LoadConfig();
     // Init all communication staff, including USB-CDC/VCP/UART/CAN etc.
     InitCommunication();
 

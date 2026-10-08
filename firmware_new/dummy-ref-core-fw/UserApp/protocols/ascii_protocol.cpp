@@ -2,6 +2,171 @@
 
 extern DummyRobot dummy;
 
+extern RGB rgb;
+
+static void PrintRGBStatus(StreamSink& response, bool full)
+{
+    const auto c = rgb.GetConfig();
+    const auto s = rgb.GetStatus(dummy.GetRGBState());
+    // Respond has a 62-byte payload limit; preserve the shared transport contract.
+    Respond(response, "RGB_STATUS on=%u auto=%u bright=%u current=%u mode=%u",
+        unsigned(c.enabled), unsigned(c.automatic), unsigned(c.brightness), unsigned(s.currentBrightness),
+        unsigned(s.mode));
+    Respond(response, "RGB_RUNTIME state=%s source=%s", RGB::StateName(s.state), RGB::StateName(s.source));
+    Respond(response, "RGB_STORAGE dirty=%u storage=%u dma=%u", unsigned(s.dirty), unsigned(s.storage), unsigned(s.dmaBusy));
+    Respond(response, "RGB_DMA frames=%lu errors=%lu", (unsigned long)s.frames, (unsigned long)s.errors);
+    Respond(response, "RGB_TIMEOUT timeouts=%lu", (unsigned long)s.timeouts);
+    if (!full) return;
+    Respond(response, "RGB_CONFIG manual=%u fade_on=%u fade_off=%u",
+        unsigned(c.manualMode), unsigned(c.fadeOnMs), unsigned(c.fadeOffMs));
+    Respond(response, "RGB_TIMING bright_ms=%u transition=%u", unsigned(c.brightnessMs), unsigned(c.transitionMs));
+    for (unsigned i = 0; i < 3; ++i)
+        Respond(response, "RGB_COLOR %u %u %u %u", i, unsigned(c.colors[i].r), unsigned(c.colors[i].g), unsigned(c.colors[i].b));
+    for (unsigned i = 0; i < RGB::AUTO_COLOR_COUNT; ++i)
+        Respond(response, "RGB_AUTO_COLOR %u %u %u %u", i+1, unsigned(c.autoColors[i].r),
+            unsigned(c.autoColors[i].g), unsigned(c.autoColors[i].b));
+    for (unsigned i = 3; i < RGB::EFFECT_COUNT; ++i) {
+        const auto& e = c.effects[i];
+        Respond(response, "RGB_EFFECT %u %u %u %u %u %u %u %u %u %u %u %u", i,
+            unsigned(e.first.r), unsigned(e.first.g), unsigned(e.first.b),
+            unsigned(e.second.r), unsigned(e.second.g), unsigned(e.second.b),
+            unsigned(e.periodMs), unsigned(e.reverse), unsigned(e.tail), unsigned(e.onMs), unsigned(e.offMs));
+    }
+    for (unsigned i = 0; i < RGB::STATE_COUNT; ++i) {
+        const auto& b = c.bindings[i];
+        Respond(response, "RGB_STATE %s %u %u %u %u %u", RGB::StateName(i), unsigned(b.mode),
+            unsigned(b.customColor), unsigned(b.color.r), unsigned(b.color.g), unsigned(b.color.b));
+    }
+    Respond(response, "RGB_GET end");
+}
+static bool RGBUInt(const char* token, uint32_t& value)
+{
+    if (!*token) return false;
+    value = 0;
+    for (; *token; ++token) {
+        if (*token < '0' || *token > '9') return false;
+        const uint32_t digit = uint32_t(*token - '0');
+        if (value > (0xFFFFFFFFUL - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    return true;
+}
+static bool HandleRGBCommand(const char* cmd, size_t length, StreamSink& response)
+{
+    while (length && (*cmd == ' ' || *cmd == '\t' || *cmd == '\r' || *cmd == '\n')) { ++cmd; --length; }
+    const bool recognized = (length >= 5 && !std::strncmp(cmd, "!RGB_", 5)) ||
+        (length >= 5 && !std::strncmp(cmd, "#RGB_", 5));
+    if (!recognized) return false;
+    char buffer[192]{};
+    if (length >= sizeof(buffer) || std::memchr(cmd, 0, length)) { Respond(response, "error RGB syntax"); return true; }
+    std::memcpy(buffer, cmd, length);
+    char* tokens[16]{};
+    unsigned count = 0;
+    char* p = buffer;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+        if (!*p) break;
+        if (count == 16) { Respond(response, "error RGB syntax"); return true; }
+        tokens[count++] = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') ++p;
+        if (*p) *p++ = 0;
+    }
+    if (!count) return true;
+    const char* verb = tokens[0];
+    if (!std::strcmp(verb, "#RGB_STATUS") || !std::strcmp(verb, "#RGB_GET")) {
+        if (count != 1) Respond(response, "error RGB syntax");
+        else PrintRGBStatus(response, !std::strcmp(verb, "#RGB_GET"));
+        return true;
+    }
+    if (!std::strcmp(verb, "!RGB_BRIGHT") && count == 1) {
+        Respond(response, "RGB_BRIGHT %u", unsigned(rgb.GetConfig().brightness)); return true;
+    }
+    if (dummy.IsRGBSaveBusy()) { Respond(response, "error RGB save_busy"); return true; }
+    bool save = count > 1 && !std::strcmp(tokens[count-1], "&");
+    if (save) --count;
+    uint32_t revision = 0, args[12]{};
+    auto c = rgb.GetConfig(&revision);
+    bool ok = true, mutate = true;
+    auto numbers = [&](unsigned start, unsigned number) {
+        if (count != start + number || number > 12) return false;
+        for (unsigned i = 0; i < number; ++i) if (!RGBUInt(tokens[start+i], args[i])) return false;
+        return true;
+    };
+    if (!std::strcmp(verb, "!RGB_ON") || !std::strcmp(verb, "!RGB_OFF")) {
+        ok = count == 1; c.enabled = !std::strcmp(verb, "!RGB_ON");
+    } else if (!std::strcmp(verb, "!RGB_ENABLE") || !std::strcmp(verb, "!RGB_AUTO")) {
+        ok = numbers(1, 1) && args[0] <= 1;
+        if (!std::strcmp(verb, "!RGB_ENABLE")) c.enabled = uint8_t(args[0]); else c.automatic = uint8_t(args[0]);
+    } else if (!std::strcmp(verb, "!RGB_BRIGHT")) {
+        ok = numbers(1, 1) && args[0] <= 100; c.brightness = uint8_t(args[0]);
+    } else if (!std::strcmp(verb, "!RGB_MODE")) {
+        ok = numbers(1, 1) && args[0] < RGB::MODE_COUNT; c.manualMode = uint8_t(args[0]); c.automatic = 0;
+    } else if (!std::strcmp(verb, "!RGB_COLOR")) {
+        ok = numbers(1, 4) && args[0] < 3 && args[1] <= 255 && args[2] <= 255 && args[3] <= 255;
+        if (ok) c.colors[args[0]] = {uint8_t(args[1]), uint8_t(args[2]), uint8_t(args[3])};
+    } else if (!std::strcmp(verb, "!RGB_AUTO_COLOR")) {
+        ok = numbers(1, 4) && args[0] >= 1 && args[0] <= RGB::AUTO_COLOR_COUNT &&
+            args[1] <= 255 && args[2] <= 255 && args[3] <= 255;
+        if (ok) c.autoColors[args[0]-1] = {uint8_t(args[1]), uint8_t(args[2]), uint8_t(args[3])};
+    } else if (!std::strcmp(verb, "!RGB_FADE")) {
+        ok = numbers(1, 4) && args[0] <= 10000 && args[1] <= 10000 && args[2] <= 10000 && args[3] <= 5000;
+        if (ok) { c.fadeOnMs = args[0]; c.fadeOffMs = args[1]; c.brightnessMs = args[2]; c.transitionMs = args[3]; }
+    } else if (!std::strcmp(verb, "!RGB_EFFECT")) {
+        ok = numbers(1, 12) && args[0] >= 3 && args[0] < RGB::EFFECT_COUNT;
+        for (unsigned i=1; ok && i<=6; ++i) ok = args[i] <= 255;
+        ok = ok && args[7] >= 250 && args[7] <= 30000 && args[8] <= 1 && args[9] >= 1 && args[9] <= 12 &&
+            args[10] >= 20 && args[10] <= 30000 && args[11] >= 20 && args[11] <= 30000;
+        if (ok) c.effects[args[0]] = {{uint8_t(args[1]),uint8_t(args[2]),uint8_t(args[3])},
+            {uint8_t(args[4]),uint8_t(args[5]),uint8_t(args[6])}, uint16_t(args[7]), uint16_t(args[10]),
+            uint16_t(args[11]), uint8_t(args[8]), uint8_t(args[9])};
+    } else if (!std::strcmp(verb, "!RGB_SET_STATE")) {
+        int state = count > 1 ? RGB::FindState(tokens[1]) : -1;
+        ok = state >= 0 && state < RGB::FAULT && (count == 3 || count == 4 || count == 6) &&
+            RGBUInt(tokens[2], args[0]) && args[0] < RGB::MODE_COUNT;
+        uint8_t source = count == 6 ? 1 : 0;
+        if (ok && count == 4) {
+            source = !std::strcmp(tokens[3], "AUTO_SEQ") ? 2 : !std::strcmp(tokens[3], "AUTO_INT") ? 3 :
+                !std::strcmp(tokens[3], "AUTO_TRJ") ? 4 : 0;
+            ok = source != 0;
+        }
+        if (ok && count == 6) ok = numbers(2, 4) && args[1] <= 255 && args[2] <= 255 && args[3] <= 255;
+        if (ok) c.bindings[state] = {uint8_t(args[0]), source,
+            {uint8_t(args[1]), uint8_t(args[2]), uint8_t(args[3])}};
+    } else if (!std::strcmp(verb, "!RGB_SET_START") || !std::strcmp(verb, "!RGB_SET_ENABLE") ||
+               !std::strcmp(verb, "!RGB_SET_DISABLE")) {
+        ok = numbers(1, 1) && args[0] < RGB::MODE_COUNT;
+        if (ok) {
+            unsigned lo = !std::strcmp(verb, "!RGB_SET_START") ? RGB::BOOT :
+                !std::strcmp(verb, "!RGB_SET_DISABLE") ? RGB::DISABLED : RGB::READY_SEQ;
+            unsigned hi = lo == RGB::READY_SEQ ? RGB::RUN_TUN : lo;
+            for (unsigned s=lo; s<=hi; ++s) c.bindings[s] = {uint8_t(args[0]), 0, {0,0,0}};
+        }
+    } else if (!std::strcmp(verb, "!RGB_RESET")) {
+        ok = count == 1; c = RGB::Defaults();
+    } else if (!std::strcmp(verb, "!RGB_SAVE")) {
+        ok = count == 1 && !save; mutate = false; save = true;
+    } else ok = false;
+    if (!ok || !RGB::Valid(c)) { Respond(response, "error RGB syntax_or_range"); return true; }
+    if (mutate && !rgb.ApplyConfig(c, revision)) { Respond(response, "error RGB config_busy"); return true; }
+    if (save) {
+        const int result = dummy.SaveRGBConfig();
+        if (result != 1) {
+            Respond(response, result == 0 ? "error RGB save_requires_idle_disabled" : "error RGB save_failed");
+            return true;
+        }
+        Respond(response, "ok RGB saved");
+    } else Respond(response, "ok RGB applied");
+    // Structured edits return the confirmed configuration themselves; the host
+    // need not immediately send a second query (which used to duplicate replies).
+    const bool full = !std::strcmp(verb, "!RGB_COLOR") || !std::strcmp(verb, "!RGB_AUTO_COLOR") ||
+        !std::strcmp(verb, "!RGB_FADE") ||
+        !std::strcmp(verb, "!RGB_EFFECT") || !std::strcmp(verb, "!RGB_SET_STATE") ||
+        !std::strcmp(verb, "!RGB_SET_START") || !std::strcmp(verb, "!RGB_SET_ENABLE") ||
+        !std::strcmp(verb, "!RGB_SET_DISABLE") || !std::strcmp(verb, "!RGB_RESET");
+    PrintRGBStatus(response, full);
+    return true;
+}
+
 static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
 {
     std::string command(cmd, len);
@@ -11,9 +176,10 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
     command = command.substr(first, last - first + 1);
     if (command == "!START")
     {
+        if (dummy.IsRGBSaveBusy()) { Respond(response, "error START busy"); return true; }
         if (dummy.IsCalibrationBusy()) { Respond(response, "error CALIBRATION busy"); return true; }
         if (dummy.IsProtectionParameterBusy()) { Respond(response, "error START busy"); return true; }
-        dummy.RequestStart();
+        if (!dummy.RequestStart()) { Respond(response, "error START busy"); return true; }
         Respond(response, dummy.IsEnabled() && !dummy.IsStopLocked() ? "Started ok" : "Start pending");
         return true;
     }
@@ -30,6 +196,8 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
         return true;
     }
     // Only these read-only diagnostics may pass the protection command lock.
+    if (command == "#RGB_STATUS" || command == "#RGB_GET" || command == "!RGB_BRIGHT")
+        return HandleRGBCommand(command.c_str(), command.size(), response);
     if (command.rfind("#STALL_STATUS", 0) == 0 || command.rfind("#CAL_STATUS", 0) == 0)
         return dummy.HandleProtectionCommand(command.c_str(), command.size(), response);
     if (dummy.IsStopLocked())
@@ -37,6 +205,7 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
         Respond(response, dummy.IsCalibrationBusy() ? "error CALIBRATION busy" : "error STOP_LOCKED");
         return true;
     }
+    if (dummy.IsRGBSaveBusy()) { Respond(response, "error RGB save_busy"); return true; }
     if (dummy.HandleProtectionCommand(command.c_str(), command.size(), response)) return true;
     if (!dummy.IsEnabled() && (command[0] == '>' || command[0] == '@' || command[0] == '&'))
     {
@@ -118,7 +287,7 @@ static bool HandleEncoderCalibrationCommand(const char* cmd, size_t len, StreamS
     if (dummy.IsEnabled())
         Respond(response, "error ENC_CAL require DISABLE");
     else if (dummy.IsStopLocked() || dummy.IsCalibrationBusy() ||
-             dummy.IsProtectionParameterBusy() || dummy.IsMotionBusy() || dummy.commandHandler.IsBusy())
+             dummy.IsProtectionParameterBusy() || dummy.IsRGBSaveBusy() || dummy.IsMotionBusy() || dummy.commandHandler.IsBusy())
         Respond(response, "error ENC_CAL busy");
     else
     {
@@ -137,6 +306,7 @@ static bool HandleEncoderCalibrationCommand(const char* cmd, size_t len, StreamS
 void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
+    if (HandleRGBCommand(_cmd, _len, _responseChannel)) return;
     if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;
     if (HandleAccelerationSyncCommand(_cmd, _len, _responseChannel)) return;
     if (HandleEncoderCalibrationCommand(_cmd, _len, _responseChannel)) return;
@@ -564,6 +734,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
+    if (HandleRGBCommand(_cmd, _len, _responseChannel)) return;
     if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;
     if (HandleEncoderCalibrationCommand(_cmd, _len, _responseChannel)) return;
     /*---------------------------- ↓ Add Your CMDs Here ↓ -----------------------------*/
