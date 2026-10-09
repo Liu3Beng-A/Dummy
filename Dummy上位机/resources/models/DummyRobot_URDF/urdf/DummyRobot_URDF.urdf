@@ -1,0 +1,569 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="DummyRobot_URDF">
+  <link
+    name="base_rail">
+    <inertial>
+      <origin
+        xyz="0.000954394507431187 0.0883259974982675 0.017353072875547"
+        rpy="0 0 0" />
+      <mass
+        value="9.27513247711793" />
+      <inertia
+        ixx="0.532473402098459"
+        ixy="2.65792617577544E-05"
+        ixz="1.73766355284922E-05"
+        iyy="0.222153120187208"
+        iyz="-8.48208120946669E-05"
+        izz="0.753386105704525" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/base_rail.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.309803921568627 0.309803921568627 0.309803921568627 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/base_rail.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.000708235447330798 -2.24602712531424E-05 0.117713749195766"
+        rpy="0 0 0" />
+      <mass
+        value="0.65459824877057" />
+      <inertia
+        ixx="0.000759472268353183"
+        ixy="1.10425148416772E-07"
+        ixz="5.64335341466214E-06"
+        iyy="0.000862319359012217"
+        iyz="-1.58352135519818E-07"
+        izz="0.00124453066123206" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.309803921568627 0.309803921568627 0.309803921568627 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="rail"
+    type="prismatic">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="base_rail" />
+    <child
+      link="base_link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-0.25"
+      upper="0.25"
+      effort="1"
+      velocity="0.15" />
+  </joint>
+  <link
+    name="Link1">
+    <inertial>
+      <origin
+        xyz="-4.52970087441886E-05 -0.00697327217228019 0.206536027444802"
+        rpy="0 0 0" />
+      <mass
+        value="0.0946687102122455" />
+      <inertia
+        ixx="4.70639582676801E-05"
+        ixy="1.49739688110612E-07"
+        ixz="-1.30476173125909E-07"
+        iyy="5.68599465780417E-05"
+        iyz="6.02210124272629E-06"
+        izz="4.47170577317032E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint1"
+    type="revolute">
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Link1" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.054"
+      upper="3.054"
+      effort="1"
+      velocity="3.77" />
+  </joint>
+  <link
+    name="Link2">
+    <inertial>
+      <origin
+        xyz="-0.000132576164157668 0.0849019895639085 -6.00847789632959E-05"
+        rpy="0 0 0" />
+      <mass
+        value="0.506306400909599" />
+      <inertia
+        ixx="0.000922756183403637"
+        ixy="-2.26952791753534E-06"
+        ixz="-5.95657040380579E-07"
+        iyy="0.000194651479219989"
+        iyz="-0.000100550178608044"
+        izz="0.000922735176790623" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.180392156862745 0.180392156862745 0.180392156862745 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint2"
+    type="revolute">
+    <origin
+      xyz="0 0 0.2273"
+      rpy="1.5708 0 0" />
+    <parent
+      link="Link1" />
+    <child
+      link="Link2" />
+    <axis
+      xyz="0.00091448 0 -1" />
+    <limit
+      lower="-1.31"
+      upper="1.57"
+      effort="1"
+      velocity="3.77" />
+  </joint>
+  <link
+    name="Link3">
+    <inertial>
+      <origin
+        xyz="-0.0528751915069359 -0.0198271426281751 -0.00354745159487404"
+        rpy="0 0 0" />
+      <mass
+        value="0.220125000076318" />
+      <inertia
+        ixx="7.55620692499258E-05"
+        ixy="-1.48375748072967E-05"
+        ixz="2.25486962418045E-05"
+        iyy="0.000194018144589819"
+        iyz="3.06026449020234E-06"
+        izz="0.000185511077216167" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint3"
+    type="revolute">
+    <origin
+      xyz="0 0.17 0"
+      rpy="0 0.00091448 0" />
+    <parent
+      link="Link2" />
+    <child
+      link="Link3" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="3.1415"
+      effort="1"
+      velocity="3.77" />
+  </joint>
+  <link
+    name="Link4">
+    <inertial>
+      <origin
+        xyz="-0.000702734016891166 -0.000420765509108568 0.0691081220429574"
+        rpy="0 0 0" />
+      <mass
+        value="0.251701641847598" />
+      <inertia
+        ixx="0.000223426617632548"
+        ixy="-3.59664166522469E-07"
+        ixz="-1.08517545540069E-06"
+        iyy="0.000256762346502792"
+        iyz="-5.4617781808846E-06"
+        izz="8.93309911833448E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link4.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.309803921568627 0.309803921568627 0.309803921568627 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint4"
+    type="revolute">
+    <origin
+      xyz="-0.0695 0 -6.3556E-05"
+      rpy="-1.5708 -0.00091448 0" />
+    <parent
+      link="Link3" />
+    <child
+      link="Link4" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="-4.71"
+      upper="4.712"
+      effort="1"
+      velocity="3.77" />
+  </joint>
+  <link
+    name="Link5">
+    <inertial>
+      <origin
+        xyz="-0.000188362677181503 0.0589146133072262 0.000520254140716522"
+        rpy="0 0 0" />
+      <mass
+        value="0.150552055729831" />
+      <inertia
+        ixx="0.000103482989750562"
+        ixy="3.16631764155193E-07"
+        ixz="-3.58006463122162E-07"
+        iyy="6.33963535806473E-05"
+        iyz="1.35463503426992E-05"
+        izz="9.31629160364633E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link5.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint5"
+    type="revolute">
+    <origin
+      xyz="0 0 0.117"
+      rpy="1.5708 0 0.00091448" />
+    <parent
+      link="Link4" />
+    <child
+      link="Link5" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.75"
+      upper="1.75"
+      effort="1"
+      velocity="3.77" />
+  </joint>
+  <link
+    name="Link6">
+    <inertial>
+      <origin
+        xyz="-4.93652578903714E-05 -0.000105888603423667 0.0299031187850284"
+        rpy="0 0 0" />
+      <mass
+        value="0.0568821591491116" />
+      <inertia
+        ixx="1.43073600733196E-05"
+        ixy="1.82984157362015E-08"
+        ixz="-1.67303479696035E-08"
+        iyy="8.9938615507639E-06"
+        iyz="-1.07316010356497E-08"
+        izz="1.67477848282105E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link6.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.803921568627451 0.803921568627451 0.803921568627451 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Link6.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Joint6"
+    type="revolute">
+    <origin
+      xyz="0 0.113 0"
+      rpy="-1.5708 -0.00091448 0" />
+    <parent
+      link="Link5" />
+    <child
+      link="Link6" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.141"
+      upper="3.141"
+      effort="1"
+      velocity="6.28" />
+  </joint>
+  <link
+    name="Hand_R">
+    <inertial>
+      <origin
+        xyz="-0.0020333878466581 -0.00746188142480653 -0.0332521641028611"
+        rpy="0 0 0" />
+      <mass
+        value="0.0133380377299132" />
+      <inertia
+        ixx="2.59403463581116E-06"
+        ixy="9.83324567924701E-08"
+        ixz="3.67521428129718E-07"
+        iyy="2.27258165188795E-06"
+        iyz="2.75209308148097E-08"
+        izz="1.90810063238107E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Hand_R.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Hand_R.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Hand_R"
+    type="prismatic">
+    <origin
+      xyz="0 0 0.058"
+      rpy="-1.5708 0 0.00091448" />
+    <parent
+      link="Link6" />
+    <child
+      link="Hand_R" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="0"
+      upper="0.026"
+      effort="1"
+      velocity="0.088357" />
+  </joint>
+  <link
+    name="Hand_L">
+    <inertial>
+      <origin
+        xyz="0.00201277238435156 -0.00746187356477168 0.0331252389364411"
+        rpy="0 0 0" />
+      <mass
+        value="0.0133380257046588" />
+      <inertia
+        ixx="2.59403441169238E-06"
+        ixy="-9.83318874935182E-08"
+        ixz="3.67522139361931E-07"
+        iyy="2.27258205537984E-06"
+        iyz="-2.75208619742237E-08"
+        izz="1.90810096342182E-06" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Hand_L.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://DummyRobot_URDF/meshes/Hand_L.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="Hand_L"
+    type="prismatic">
+    <origin
+      xyz="0 0 0.058"
+      rpy="-1.5708 0 0.00091448" />
+    <parent
+      link="Link6" />
+    <child
+      link="Hand_L" />
+    <axis
+      xyz="0 0 -1" />
+    <limit
+      lower="0"
+      upper="0.026"
+      effort="1"
+      velocity="0.088357" />
+  </joint>
+</robot>

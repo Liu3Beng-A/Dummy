@@ -1,0 +1,51 @@
+{
+  "three_version": "0.170.0",
+  "urdf_loader_version": "0.12.6",
+  "source_urls": [
+    "https://github.com/mrdoob/three.js/tree/r170",
+    "https://github.com/gkjohnson/urdf-loaders",
+    "https://cdn.jsdelivr.net/npm/urdf-loader@0.12.6/"
+  ],
+  "files": [
+    {
+      "path": "three/LICENSE",
+      "sha256": "4c40a1ef62450b857c3b2aaf294936304cd552d965fbcd9d32d4c5bcf4ba4454"
+    },
+    {
+      "path": "three/loaders/ColladaLoader.js",
+      "sha256": "f306e36d44e80cad00db4e978f9e19dd720c849bd979569dfa95dc1e4348bf1a"
+    },
+    {
+      "path": "three/loaders/STLLoader.js",
+      "sha256": "a0a83c88b269c94e25b690fae770d350c4728c81853195186976be7af0f8a3b3"
+    },
+    {
+      "path": "three/loaders/TGALoader.js",
+      "sha256": "ce938459ed99d5234f9665270cca8552464d0d1703a094e49760631e6b14c7a3"
+    },
+    {
+      "path": "three/OrbitControls.js",
+      "sha256": "80efaadea4f8a636a65fb0bd08bfef62f3d93a0bb94e2e7500f23176c5c07f4e"
+    },
+    {
+      "path": "three/three.module.js",
+      "sha256": "ce1fa418de16a19495a9f72495580e3015d7745c296d3ce0485897f902ddedfb"
+    },
+    {
+      "path": "urdf-loader/LICENSE",
+      "sha256": "12ab00e5637ce70e16be1f6693dfa5f9b7a4fe0f5f976a0329477d0c32d53e86"
+    },
+    {
+      "path": "urdf-loader/package.json",
+      "sha256": "adbbf336d95ba03295ab92e6c271db65d84b18d911aa7d90812d373881e8fcbe"
+    },
+    {
+      "path": "urdf-loader/URDFClasses.js",
+      "sha256": "d5112785611d360b501e824a4811252a57a0a44b761138daa6a35041b06bd569"
+    },
+    {
+      "path": "urdf-loader/URDFLoader.js",
+      "sha256": "08d63008ab689ba1f0dbc7a1936b4cc7e7a45e15036f6927028226f2bf95c0e6"
+    }
+  ]
+}

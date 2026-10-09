@@ -1,0 +1,6 @@
+# Preserve vendor bytes: the offline manifest verifies their original hashes.
+resources/viewer/vendor/** -text -whitespace
+# Keep imported CAD exports intact, including their original whitespace.
+resources/models/** -whitespace
+*.STL binary
+*.ico binary

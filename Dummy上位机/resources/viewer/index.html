@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dummy · 本地 URDF 视图</title>
+  <link rel="stylesheet" href="viewer.css">
+  <script type="importmap">
+  {"imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/examples/jsm/loaders/STLLoader.js": "./vendor/three/loaders/STLLoader.js",
+    "three/examples/jsm/loaders/ColladaLoader.js": "./vendor/three/loaders/ColladaLoader.js"
+  }}
+  </script>
+</head>
+<body>
+  <div id="canvas"></div>
+  <div class="topline">
+    <div class="badge" id="mode">目标预览</div>
+    <div class="badge muted" id="telemetry">尚无位置回读</div>
+  </div>
+  <div id="error" class="error">正在加载模型与本地网格…</div>
+  <div class="toolbar" aria-label="三维视角">
+    <button data-view="isometric" title="重置为透视视角">透视</button>
+    <button data-view="front">正视</button>
+    <button data-view="side">侧视</button>
+    <button data-view="top">俯视</button>
+    <span></span>
+    <button id="grid" class="active">网格</button>
+    <button id="axes" class="active">坐标轴</button>
+  </div>
+  <div class="legend">
+    <span><i class="blue"></i><span id="solid-label">目标预览</span></span>
+    <span id="ghost-label" hidden><i class="slate"></i>最近回读</span>
+    <span id="marker-label" hidden><i class="orange"></i>MoveL 目标标记</span>
+  </div>
+  <div class="footer">
+    <span>左键旋转 · 右键平移 · 滚轮缩放</span>
+    <span id="gripper-status">夹爪：目标开度</span>
+  </div>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script>
+    window.robotBridge = null;
+    window.pendingRobotState = null;
+    if (window.qt && window.QWebChannel) {
+      new QWebChannel(qt.webChannelTransport, channel => {
+        window.robotBridge = channel.objects.robotBridge;
+        window.robotBridge.state_changed.connect(json => {
+          const state = JSON.parse(json);
+          window.pendingRobotState = state;
+          if (window.robotViewer) window.robotViewer.setState(state);
+        });
+        if (window.robotViewer?.loaded) window.robotBridge.viewerReady();
+        if (window.robotViewerError) window.robotBridge.viewerError(window.robotViewerError);
+      });
+    }
+    window.reportRobotError = message => {
+      const text = String(message);
+      window.robotViewerError = text;
+      document.getElementById('error').hidden = false;
+      document.getElementById('error').textContent = '三维加载失败：' + text;
+      window.robotBridge?.viewerError(text);
+    };
+    window.addEventListener('error', event => window.reportRobotError(event.message));
+    window.addEventListener('unhandledrejection', event => window.reportRobotError(event.reason));
+  </script>
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>
