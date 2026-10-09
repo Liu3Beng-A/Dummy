@@ -1,5 +1,80 @@
 # SESSION STATUS（2026-10-08）
 
+## 当前完成：在回退基线上单独恢复J7默认PID（2026-10-08，已编译）
+
+- **用户决定/范围**：完成整体回退后，用户要求地轨默认PID采用回退前决策的版本，即KP=350、KV=320、KI=25、KD=50。本轮只修改电机模块`firmware_new/dummy-motor-fw/UserApp/main.cpp`的MOTOR_TYPE=57默认表及说明注释，文档同步本文、地轨电机加入方案和PID说明状态；其他固件/助手代码维持87288fb，PID事务与顶部模式提示仍未恢复。不提交、不烧录、不操作设备。
+- **已确认事实**：57固件固定节点为J7，CMake用MOTOR_TYPE=57构建motor-57目标。默认表仅在BoardConfig.configStatus不为CONFIG_OK时初始化；已有有效EEPROM优先生效，本次没有覆盖或清除实机已保存PID、编码器表及坐标数据，也不等同于实机参数已变成这四项值。
+- **修改/验证**：相对87288fb的生产代码diff只有main.cpp中两行（注释与四项默认值）。四类电机Ninja编译成功；主控和35/42/gripper BIN的SHA256与回退后记录一致；57 BIN/HEX对应字节及HEX校验和检查通过，未越过95KiB应用区。未新增控制逻辑或恢复其他撤销功能，旧构建告警保留。
+- **当前地轨产物**：`firmware_new/dummy-motor-fw/build/motor-57.bin`为97044B，SHA256 `a1e79690164ac62b6a75890f42d32a778ab358c6e00c5c70f9b8d7dde1fd03ca`；同目录motor-57.hex可供烧录，应用区剩余236B。核验记录`firmware_new/dummy-motor-fw/build/analysis/rail_pid_defaults_20261008.json`；先前rollback_artifacts.json保留为纯基线回退时的历史产物记录。
+- **未完成/边界**：仅完成源码默认值和固件产物更新；未刷J7、未更改实际EEPROM、未证明此前摆动或通信故障已解决。本次不延续已结束的通信故障调查。
+
+## 历史回退记录：已放弃本轮改动并回退至87288fb（2026-10-08）
+
+- **用户决定/范围**：用户提供16:54旧主控对照日志，表示问题仍在，明确要求“直接放弃改动退回到87288fb23b20e1f35513e5a044fa25099d4d7122，保留文档记录”。已按此决定结束本轮修复尝试，恢复全部未提交固件代码及串口助手_old.py；HEAD原本就是该提交，未改写提交历史、未提交新commit。
+- **已回退功能**：主控/电机PID事务、失能RAM应用、独立SAVE_PID、保存互斥等本轮修改均撤销；old助手PID界面改动与右上角主控模式提示一并撤销；J7源码默认恢复KP=300、KV=50、KI=30、KD=100。有效EEPROM仍优先生效，代码回退不改变实机EEPROM中的参数。
+- **最新测试事实**：16:54:29.343受理HOME id=1，约1177ms取消；J2 `PROTECTION_STATUS_TIMEOUT`，age rx=989/probe=1004ms，随后STOP locked。运动快照仍是七轴首次目标下发/READY成功（send=7、txok=0FE、ready=0FE、reject=0、各try=1/fail=0），计划4171.7ms，moving=02C。J2 LAST仍no_trigger_record，LIVE为STOP_LOCKED/trigger_reason=NONE。用户报告旧主控对照仍失败，这不能当作整个旧主控+旧电机组合的验收，也未证明唯一根因；本轮不再继续调整或要求补测。RGB仍按用户要求排除。
+- **文档/日志保留**：既有全部文档及本轮新增PID说明保留；PID说明、查询端补齐方案、地轨电机加入方案新增“已撤销/历史记录”标识，避免照已撤销协议操作当前版本。完整原始日志逐字节保存为[16:54旧主控对照日志](测试记录/2026-10-08_165425_旧主控对照_HOME通信超时.txt)，SHA256 `ab294ce1bcaa18ca0f26dee66856e20bd8aae942d6b7dfaecada3b6edc400b42`。以下分析和“完成”记录均为回退前历史，不能视为当前代码功能或尚待继续执行的任务。
+- **编译/核验**：主控及35/42/57/gripper在各自常用build目录重新Ninja编译成功，五份BIN与87288fb独立归档产物SHA256完全一致：主控446776B；35/42各97044B；57为97036B；gripper为96996B。常用BIN/HEX已恢复基线，分析目录中的旧记录保留。核验清单为`firmware_new/dummy-motor-fw/build/analysis/git_audit_87288/rollback_artifacts.json`；生产代码相对目标提交无内容diff，old助手语法核验通过。保留原有构建告警，没有通过修改基线源码消除告警。
+- **未完成/实际设备边界**：此次完成的是工作区与构建产物回退，没有连接或烧录设备；若设备电机端仍为本轮新版，需要用户将对应旧版固件刷回后才是设备全套回退。通信故障根因未解决，不宣称回退后实机已恢复正常，不延续之前的修复或测试计划。
+
+## 回退前分析记录：以87288fb为基线定位普通运动通信回归（2026-10-08）
+
+- **当前问题/范围**：用户确认`87288fb23b20e1f35513e5a044fa25099d4d7122`为上一个HOME正常的版本，要求结合Git改动分析本文中的故障。当前HEAD正是该提交，本轮PID与模式提示为未提交改动。用户明确RGB忽略，不再把RGB列入本次问题、修复建议或测试前置条件；下节RGB分析仅作历史记录。这里只更新本文及Git忽略的独立分析/构建产物，未修改生产源码、现有发布产物或实机，不提交。
+- **最新日志事实**：已读16:22～16:24附件，补齐了此前要求的`#MOTION_STATUS`。16:22的RESET id=4也由J5保护快照超时取消，不能把故障限定为J2或HOME按钮。随后用户执行ENC_CAL 2和完整CALIBRATION成功，RESET id=5成功；16:23:49.029的HOME id=6仍在约1.17秒时由J2 `PROTECTION_STATUS_TIMEOUT`取消，`age rx=974 probe=1003 flags=03`，继而电机报`COMMUNICATION_TIMEOUT`并联停。重新校准没有消除该现象，不建议继续反复校准或先调PID/电流/加速度。
+- **运动下发已确认**：id=6的`send=7 txok=0FE ready=0FE pending=000 reject=0`，七轴均`try=1 fail=0`，READY在10～40ms内接受。计划4181.7ms，1169ms取消，尚未执行到计划终点。实际明显运动轴为J2/J3（moving=00C）；结合查询时的age与日志时间，最后接受的运动回复约在发布后0.19～0.20秒，而其他轴约1.11～1.15秒仍有回复。该时间换算含USB打印延迟，不是精确CAN波形。real仍是查询时的姿态，取消后的confirmed=000不能改读为从未收到READY。
+- **Git已排除的直接改动**：主控HOME规划、普通运动完成握手/回调、健康检查，以及电机`CloseLoopControlTick`、`TickProtection`、`TickInternalProtection`、`TickPositionCompletion`函数体相对基线未变；主控interface_can.cpp/.hpp及dummy_robot.cpp虽显示工作区M，但实际内容diff为空，保留用户已回退状态。新日志在故障前没有SET_PID/SAVE_PID或配置保存命令，因此不能继续按在线PID写Flash导致NO_ENCODER解释此次故障。电机CAN队列/TXOK/有界重试也已在基线存在。
+- **独立编译与汇编对照**：基线从Git归档到`firmware_new/dummy-motor-fw/build/analysis/git_audit_87288/src`，独立Release/Ninja构建，不覆盖当前固件。35电机的旧/新CloseLoopControlTick均1612B/524条静态指令，TickProtection均1500B/516条，TickInternalProtection均3064B/1023条，主要调用结构一致；字段偏移与链接地址有变化，不能称机器码完全一致。普通检测滤波旧/新均为两条32位SDIV，不能声称本轮新增了20kHz PID计算或64位滤波除法。静态对照不替代实机最坏耗时测量。
+- **尚需验证的差异**：电机`UserApp/protocols/interface_can.cpp:22–26`新增整函数Os属性，实际影响CAN RX中断里的普通0x07目标/0x23查询/STOP，不只是配置命令；该函数旧版2636B，当前1956B。`Ctrl/Motor/stall_protection.cpp:963–1016`增加主循环配置提交检查及每轮PID暂存超时IRQ保护；未发现普通无PID情况下不恢复PRIMASK或无条件写Flash的路径。这些是需要对照的运行路径差异，目前均未证明为唯一根因。
+- **Os试验的实际限制**：仅在上述忽略目录复制当前CAN源码、去掉Os并编译替代对象，OnCanCmd变为2956B。只替换该对象独立链接，Flash97776B，超过95KiB应用区496B，链接失败；未生成可烧录试验固件，未改现有对象/BIN/HEX。因此不能直接删除Os当作已验证修复，也不能扩大应用区侵入编码器表。若后续证明该路径有关，需保留普通收发的速度优化，将体积优化限制在配置分支。
+- **时间相关线索的边界**：丢回复约0.2秒与普通检测默认STARTUP_MS=200接近；20kHz TIM4优先级0、CAN优先级3，电机主循环负责真正送出回复，因此中断占用或主循环无法及时服务CAN仍是候选。实机STARTUP_MS本轮未回读，且上述20kHz生成代码结构未显著改变，不能仅凭该时间相关就宣布CPU超时根因。需要固件交叉对照，必要时再增加DWT耗时和电机CAN收发/主循环计数。
+- **可复现的基线产物**：已独立重建旧主控`build/analysis/git_audit_87288/core_out/Core-STM32F4-fw.bin`，446776B，SHA256 `8b65c47995760a30c010eeaba44b49b0b7205471c7c2e5051e38c6c4028cb632`；旧35电机`build/analysis/git_audit_87288/out/motor-35.bin`，97044B，SHA256 `e75e36ef9decab103e9045bbf70f86ecdcb481bf0040451221d2ccfa3e7521a7`。其余42/57/gripper也已独立编译；五组BIN hash均与本文旧版归档完全一致，HEX校验和、HEX/BIN对应字节和Flash区域检查通过，核验记录`build/analysis/git_audit_87288/audit_result.json`（路径均以firmware_new/dummy-motor-fw为根）。当前五份BIN及生产固件源码hash仍与PID构建清单一致，未发生发布产物漂移。
+- **下一次最小对照**：先只刷上述旧主控，保留当前八电机固件、EEPROM及编码器校准数据；使用同一助手及相同初始姿态，等待START完成，依次RESET、HOME并保留完整日志。成功后查询MOTION_STATUS；失败后DISABLE确认再查询，期间不再新发运动。此阶段不使用新PID事务/保存功能，不重新校准或改参数。若旧主控+当前电机正常，重点定位当前主控改动；若仍失败，尚不能直接断言电机根因，需旧主控+旧电机再对照，以确认同一硬件/配置下旧版是否仍正常。再依据结果做小范围修复或诊断，源代码修改另按4.1说明文件/作用并取得确认。
+
+## 上一轮日志分析：HOME的保护快照超时（历史记录，RGB已按用户要求排除）
+
+本节原“最小待补数据”和RGB后续建议已由上节替代：运动快照已经收到，RGB不属于当前调查范围。
+
+- **当前问题/范围**：用户提供16:04及16:08两份日志，要求先分析、核对本文及最近文档，再说明需要补测什么。用户确认主控和全部八个电机都已刷最新固件；期间另试修一个bug，因同样出现故障已回退。按本项目5.2只同步本文，不修改固件、助手或其他报告，不编译烧录固件、不提交、不操作设备。
+- **已确认的直接触发点**：两次HOME均由主控`firmware_new/dummy-ref-core-fw/Robot/instances/protection_coordinator.cpp:482–518`的健康检查触发`PROTECTION_STATUS_TIMEOUT`后取消。16:08:52.167受理HOME id=3，53.224报J2失败，`age rx=854 probe=1004 flags=03`；16:04对应919/1003ms。probe是距上次匹配有效0x36快照的时间，rx是距上次被在线逻辑记录的节点通信的时间；不能描述成普通位置一直正常刷新、仅保护回复缺失。flags03是最后接受快照的反馈/范围有效位，不是故障时新数据。queued/rx/retry及CAN alst均为累计计数，不能用1668-1654直接认定本条HOME丢了14帧；主控terr=0/full=0也不排除电机侧或请求/回复路径问题。
+- **新日志排除的误读**：本次53.563已收到`STOP locked`，距通信故障约340ms；上一轮2秒快照`wait=020`表示J5已回应但仍DECELERATING，不是J5离线，新日志没有复现该长等待。J2/J5运行快照均`phase=0 gate=STOP_LOCKED fb=1 timer_ms=0 trigger_reason=NONE`，LAST均no_trigger_record，因此此次没有这两轴本地机械STALL触发记录，不能再按此前在线改PID导致NO_ENCODER的同一原因解释。使能后的RGB保存WARN来自助手门禁，未发送保存指令，也没有PID写入指令。
+- **快照速度的解释边界**：J2 raw=-0.0156641、filt=2.53068，J5 raw=0、filt=0.129141。`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:655–685`在STOP锁定门禁提前返回，停止更新普通检测滤波器；因此filt可保留停前历史，不是当前仍以该速度运动的证据。快照采于故障后，不还原故障前的完整编码器/通信波形。
+- **代码与历史修复对照**：顶部模式提示只复用START后一次查询，日志均正确回读INT=2；本轮未发现重复模式查询。PID事务分支在此次日志无设置/保存时未被请求，不能据此证明所有PID改动绝对无关，但没有Flash保存触发证据。`docs/堵转误报修复与实机测试流程.md`第9节及当前电机`Core/Src/can.c`已有保护回复TXOK确认、100ms/16次上限及1–4ms错相重试，不能重复套用旧版“HAL入邮箱就出队、完全不重试”的根因。当前主控interface_can.cpp/.hpp及dummy_robot.cpp相对HEAD无内容diff，尊重用户已经回退的状态，不恢复其他试修。
+- **独立确认的RGB软件缺陷**：两份日志frames/errors分别2148/2148及13358/13358、timeouts=0。`firmware_new/dummy-ref-core-fw/Bsp/gpio/rgb.cpp:306–309`在正常完成回调也调用`HAL_TIM_PWM_Stop_DMA`。仓库HAL DMA_IRQHandler先置READY（stm32f4xx_hal_dma.c:912）再调用完成回调；Stop_DMA经HAL_DMA_Abort_IT遇到READY设置NO_XFER=0x80（同文件:581–586）；回到同次DMA_IRQHandler的错误尾段又触发TIM_DMAError及RGB::Interrupt(2)，导致错误计数加1、wireValid=false和后续重复发帧。主控RGB源码相对HEAD没有本轮PID/UI新增修改，这不是本轮顶部模式文字逻辑；其与J2通信故障的因果尚未证实，不能宣称已找到HOME唯一根因。
+- **RGB复现与旧测试遗漏**：从当前源码提取完整HAL_DMA_IRQHandler、HAL_DMA_Abort_IT、HAL_TIM_PWM_Stop_DMA、TIM完成/错误函数、主控回调及RGB::Interrupt，在系统临时目录用MSVC编译执行；寄存器/外设以替身提供，未改生产源码。仅直接执行TIM完成回调时errors=0而DMA ErrorCode已为0x80；完整DMA IRQ链注入200次正常TC、没有TE/FE/DME，结果errors=200、每次NO_XFER且wireValid=false。旧`build/analysis/rgb/run_native.py`只提取TIM回调、Stop_DMA为空替身，未覆盖DMA_IRQHandler收尾；此前文档的200帧errors=0仅对该夹具成立，不能证明完整HAL路径正常。临时复现不是实机DMA/总线测试。
+- **最小待补数据**：新附件实际没有#MOTION_STATUS。如16:09:03 Disabled ok后未再次START/运动，直接失能查询#MOTION_STATUS，提供从MOTION id到J7的完整输出；否则下一次故障后先按需取诊断，再DISABLE确认、在任何新START/运动之前查询。`dummy_robot.cpp:1539–1548`取消保留上一任务txok、ready、分轴时刻/尝试/失败/规划快照，只清部分确认/在途位，不能把取消后的confirmed=000视为从未收到回复；real是查询时当前姿态，age也不是冻结的故障时年龄。静止阶段与首次HOME期间J2是否先卡顿/抖动仍待用户观察回答，保持PID/加速度/电流及保护参数不变，不要求反复校准/撞限位或拔线。
+- **未完成/建议后续**：J2探针缺失究竟在主控请求发送、电机接收/主循环回复、总线发送还是主控接收匹配，现有计数不能区分；先看上一条HOME分轴诊断，必要时再提出小范围CAN链路计数方案。RGB宜先修正常完成清理重复abort并补完整HAL IRQ回归，之后验证errors不再随成功帧增长；尚未获本轮源代码修改授权，未执行修复，不放宽通信看门狗或反馈/堵转阈值。
+
+## 当前完成：old助手顶部主控模式提示（2026-10-08）
+
+- **当前问题/授权**：用户直接要求在串口助手old右上角STOP和电机状态之间加入主控模式，复用使能读取与切换回执同步。只修改串口助手_old.py和本文，保留此前PID改动；不修改固件、不提交、不连接硬件。
+- **已确认事实**：串口助手_old.py的Started ok处理已调用_query_command_mode，查询回执含req并拒绝旧请求号；模式按钮通过_set_cmdmode等待ok CMDMODE mode确认。顶部使用pack(side=RIGHT)，按电机状态、模式提示、STOP的创建顺序得到从左到右STOP→模式→电机状态。
+- **最新改动**：新增lbl_cmdmode和_update_cmdmode_display，显示顺序(SEQ)/打断(INT)/连续(TRJ)/调参(TUN)。初始及断线显示未知，查询/切换中显示等待提示，实际确认后更新；查询或设置超时显示未知，拒绝切换时保留上次已确认模式。手动发送#CMDMODE的成功回执也更新显示，已有等待切换时仍拒绝不匹配的确认。UI更新沿用RX主线程处理，不新增周期查询。
+- **验证/已排除方向**：Python语法通过；实际隐藏Tk检查使能回读、错请求号、切换等待/确认、手动回执、拒绝、查询/设置超时、断线；1680×1000和1560×940实际渲染验证三个控件顺序及连接状态无重叠。既有motion_ui_test.py共410项真实Tk/分片/顺序发送/模式竞争检查通过。修改后重新读取实际文件，git diff --check通过；未把点击模式按钮当主控已确认，也未扩大到固件协议修改。
+- **未完成/待实测**：重启old助手后，在实机Started ok和切换模式时确认顶部文字自动更新。本轮无固件变化，不需因本次提示新增而重新烧录；此前PID固件刷写要求仍按下节执行。
+
+## 当前完成：PID RAM应用/失能保存与J7新默认（2026-10-08，已编译，待实机测试）
+
+- **当前问题/授权**：用户反馈在线SET_PID后J7 NO_ENCODER及七轴联停，明确授权执行此前方案，并指定57/J7默认350/320/25/50。只修改firmware_new、目标串口助手_old.py及相关文档；不提交、不烧录/操作实机，不改串口助手.py、参考目录或esp32。本文原有12行未提交核查记录保留。
+- **已确认事实**：旧主控每个PID字段CAN保存位固定1，电机主循环使能时也写Flash。SPI/采样停顿与位置合理性判据存在触发NO_ENCODER的路径，但本次实机故障唯一根因尚未由波形证明；其他轴phase6为联停而非各自机械堵转。实际DISABLE完成会清电机软停锁，失能后设置流程可用。
+- **最终实现**：复用0x30..0x33带事务参数通道，PID字段64..67及操作PID_BEGIN5/PID_COMMIT6/PID_SAVE7，保护PARAMETER_COUNT/存储版本不改。失能后按声明字段mask暂存、全部ACK再原子应用，COMMIT幂等，主控回读四项后才RAM成功；SAVE以Flash已保存BoardConfig为基础只更新PID，物理核验整个1KiB重写页，保留其他已保存字段及保护扩展。运行PID与BoardConfig已保存PID分离，CAL/STALL保存不持久化试调PID，PID保存也不顺带保存未持久化加速度/电流。START/保存互斥，STOP/DISABLE取消任务并重试CONFIG ABORT（含J8），电机收到取消后清理暂存/尚未开始的PID保存；已开始的Flash写入不能回滚。旧PID直接CAN仅允许失能RAM且拒绝保存位1；旧配置保存、实体按钮、旧使能/校准/恢复/重启入口不能穿过配置保存门禁。
+- **已改文件**：共享protection_protocol.h；电机motor.cpp/.h、stall_protection.cpp、configurations.h、main.cpp、protection_config.cpp、interface_can.cpp；主控ctrl_step.cpp、protection_coordinator.cpp/.h、ascii_protocol.cpp；串口助手_old.py；本文、查询端补齐方案、地轨电机加入方案及新增PID调参与保存协议及测试说明.md。GET/SET/SAVE经协调器事务，USB/UART4共用，旧立即打印PID成功分支已移除；助手增加应用/保存已应用值及等待回执，RX通过root.after，超时报告未知，断线/入队失败清等待。ACC/I_LIMIT的显式&保存使能时明确拒绝，仍使用旧回执。
+- **软件验证/已排除**：原生主控24992项、电机1693项断言通过，含PID专项及旧STOP/保护退让/校准回归；实际Tk离线50项通过，含回包、禁用、坏值、取消、断线、入队失败、线程投递及1680×1000/1560×940布局。旧motor夹具补CONFIG_OK、旧core夹具补现有RGB类型/入口测试替身，与真实启动状态对齐，不为迁就测试修改生产RGB。断言多数来自既有周期/传输回归，不能替代实机。未改NO_ENCODER阈值、位置跳变容差、20kHz控制算法或Flash/编码器表分区。配置Validate及CAN分发/新保存函数用Os解决容量，不改控制tick优化。
+- **最终编译/产物**：Ninja五目标成功；主控FLASH448540B、RAM59528B、CCM65536B；电机35/42/57/gripper FLASH96776/96776/96768/96744B、RAM均10736B，95KiB代码区最少余504B。BIN/HEX逐字节一致、校验和有效，主控最高0x0806D81B低于0x080E0000，电机最高0x08017A07低于0x08017C00，未覆盖编码器表或EEPROM。保留既有RWX及编码器基类缺返回告警。主控BIN SHA256=41ce1ae2daddf703e54e8e3ab8d9021f3b60900d1cac3bb0c2f7b8ac97829c05；J7 BIN SHA256=23c3b80977e98d62bb52331517ef44905a8c92693a8ed808d3d49aa8d6f4e2db。全部hash、最终源hash、脚本及结果在忽略目录firmware_new/dummy-ref-core-fw/build/analysis/protection_regression/pid_artifacts.json等文件。串口助手.py SHA256未变，参考目录/esp32未改，git diff --check通过。
+- **待实测/交付**：配套更新主控及相应电机固件，J7用motor-57；全节点PID能力需要相应节点均更新。有效EEPROM继续优先；实际Disabled ok后SET_PID 7 350 320 25 50，等四项回读及ok PID_APPLY [7] RAM；START后验证到位±0.03mm及往返，再失能等Disabled ok，SAVE_PID 7等saved，重新上电GET_PID 7核对。NO_ENCODER唯一实机原因及新参数能否消除摆动仍待用户验证。本轮未提交、未烧录、未连接设备。
+
+
+## 已关闭核查：J1～J6校准原点捕获与结束保存时机（2026-10-08，未改固件）
+
+- **用户最终确认**：用户明确说明“程序没问题，是我测试的问题，我校准之后没有发送reset，以为没校准成功”。本次校准失败怀疑按测试判断问题关闭，不据此启动固件修复。`!CALIBRATION`只把六轴捕获位置定义为REST_POSE，不主动移动六轴；`!RESET`是独立的回REST运动，见`firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:801–806`，不是校准保存或生效的必要步骤。
+- **当前问题/边界**：用户要求先核查`!CALIBRATION`是否错误地等J7/J8返回后才采集J1～J6的位置；期望六轴在J7/J8开始前固定原点，必要时先存RAM，全部成功后保存EEPROM。本轮基于HEAD `87288fb`只读代码；按项目工作状态同步要求只更新本文，不改代码、配置、上位机或其他文档，不编译、不提交、不连接硬件。
+- **已确认事实：先捕获后运动**：主控`firmware_new/dummy-ref-core-fw/Robot/instances/protection_coordinator.cpp:574–588、649–667`先验证八轴实际失能及反馈，再开始校准上下文；`CAL_ZERO`向J1～J6发送`SET_CAPTURE_COORD`，只有本任务六轴全部`CAL_DONE`确认收齐，才等待1000ms并启动J7/J8并行自动校准。电机`firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp:639–653、744–757`在有效编码器反馈连续稳定50ms后，将当时`realPosition - Steps(motorR)`写入运行时`encoderHomeOffset`（RAM）；六轴标签为本地0，主控`initPose`映射到REST_POSE。此操作保持六轴失能、不中途写Flash、不重置实际编码器连续位置。
+- **已确认事实：结束保存没有重新采样六轴原点**：电机同文件`429–453`中，同任务已完成的捕获重试不再取当前位置；`SAVE_COORD`只进入待保存。`PollProtectionMain:898–915`读取已经存在的RAM `encoderHomeOffset`并传给`SaveProtectionSettings`，没有根据保存时`realPosition`再计算原点。`firmware_new/dummy-motor-fw/UserApp/protection_config.cpp:141–158`将传入原点写扩展记录，并取其单圈余数写旧BoardConfig，随后Flash提交/回读。主控`protection_coordinator.cpp:703–730`等J7/J8全部返回判稳、八轴失能后，依次提交八节点并收齐结束确认，才返回成功。因此“J7/J8返回后重新取六轴实际位置作为原点保存”不符合当前正常校准调用链；已有实现正是开始存RAM、末尾统一提交。
+- **采样时刻的精确边界**：当前捕获不是USB收到字符串的同一瞬间，也不是六轴同时采样：入口验证、逐节点CAN命令及各轴50ms稳定确认会产生短暂差异（主控`PollGroup:415–438`）。它保证全部捕获完成在J7/J8启动之前。若用户另需严格锁存命令到达瞬间，属于新的时序要求，不能把这一差异说成末尾才捕获。
+- **已确认的收尾缓存不一致**：`protection_coordinator.cpp:726`在`CAL_FINISH`把`robot.currentJoints`和`robot.targetJoints`再次硬写为REST_POSE；此时六轴若因失能被移动，这次缓存赋值与实际角度不同。它没有改电机`encoderHomeOffset`、没有发送重新捕获，不能认定为EEPROM保存错时刻。正常反馈回调`firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:629–639`会根据电机角度加原有`initPose`更新实际角度。推荐后续保留开始捕获的原点，校准收尾同步六轴最新实际反馈及保持目标，避免硬写REST；本轮尚未获准实施。
+- **已排除方向/未确认**：正常校准入口由保护协调器处理，不走旧0x15 `ApplyPositionAsHome`末尾置零；自动DISABLE、SAVE_COORD和CAL_END未发现重新计算J1～J6原点。此前曾询问异常发生阶段及校准期间六轴有无移动；用户现已自行确认测试判断问题，不再要求补测。收尾缓存问题没有被证实导致本次现象，不作为本次修复任务；旧单圈启动无法恢复掉电多圈移动的限制仍保留。
+- **独立已确认遗漏（记录、不修改）**：`stall_protection.cpp:53–63`在调用`ProtectionSettings::Defaults`之后、载入EEPROM之前，仍把CAL_ACCEL写为min(5,额定上限)、SEEK/RETURN写为min(0.5,额定上限)、RETOUCH写为min(0.25,额定上限)。这会覆盖前轮在`protection_config.cpp:52–66`更新的J7/J8部分默认值：空白存储启动时不一定得到已验收默认速度/加速度；有效EEPROM仍在其后加载，所以用户已保存配置不受这处覆盖影响。这是前轮默认值集成核查遗漏，与本次原点捕获时机无关；后续若授权，应改为限制Defaults给出的值而非重写常数，并验证真实InitProtection路径。
+- **最新改动/验证**：只更新本文分析及用户最终确认记录。未改生产源码，未重跑之前通过的编译/测试，未提交；调用链与赋值点已逐项读取。本次核查已关闭，收尾缓存及默认值初始化的独立发现仅留档，任何后续修改由用户另行决定。
+
 ## 当前归档：主控RGB功能、独立AUTO颜色及old助手提交（2026-10-08）
 
 - **当前问题/授权**：用户明确要求“可以，先提交吧”，本次获准提交下列RGB工作。此前各节“不提交”是当时边界，已由本次授权更新；未授权推送或烧录。
