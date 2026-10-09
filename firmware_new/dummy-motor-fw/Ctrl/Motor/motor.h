@@ -141,7 +141,7 @@ public:
         void ClearStallFlag();
         void RequestSoftStop(uint8_t action, uint16_t token);
         void DisableForStop();
-        bool IsSoftStopLocked() const { return softStopLocked; }
+        bool IsSoftStopLocked() const { return softStopLocked || defaultsRestoreRequested; }
         uint8_t GetSoftStopPhase() const { return softStopPhase; }
         uint16_t GetSoftStopToken() const { return softStopToken; }
         float GetSoftStopPosition();
@@ -153,6 +153,7 @@ public:
         void OnPeerProtection(uint8_t node, uint32_t event, uint8_t phase, uint8_t flags);
         void PollProtectionMain();
         void InitProtection();
+        void PollDefaultsRestore();
         void OnMotionLimitChange();
         void BuildProtectionEvent(uint8_t* data) const;
         void BuildProtectionContext(uint8_t* data, uint16_t query = 0, bool probe = false) const;
@@ -204,6 +205,7 @@ public:
         bool configurationFault = false;
         bool distanceClipped = false, localStall = false;
         bool calibrationTask = false, calibrationCoordinateSet = false;
+        volatile bool defaultsRestoreRequested = false;
         float captureCoordinateLabel = 0;
         bool coordinateCapturePending = false;
         float pendingCaptureLabel = 0;

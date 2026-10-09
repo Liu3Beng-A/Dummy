@@ -174,6 +174,9 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
     if (first == std::string::npos) return true;
     const size_t last = command.find_last_not_of(" \t\r\n");
     command = command.substr(first, last - first + 1);
+    if (command.rfind("#MOTOR_DEFAULT", 0) == 0 && &response != usbStreamOutputPtr) {
+        Respond(response, "error MOTOR_DEFAULT USB_only"); return true;
+    }
     if (command == "!START")
     {
         if (dummy.IsRGBSaveBusy()) { Respond(response, "error START busy"); return true; }

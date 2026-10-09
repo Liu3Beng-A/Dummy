@@ -209,6 +209,8 @@ class RobotSerialAssistantOld:
         self._motor_state_known = False
         self._stop_locked = False
         self._calibration_busy = False
+        self._defaults_request = None
+        self._defaults_timeout_id = None
         self._protection_window = None
         self._protection_entries = {"STALL": {}, "CAL": {}}
         self._protection_values = {"STALL": {}, "CAL": {}}
@@ -454,9 +456,14 @@ class RobotSerialAssistantOld:
         self.btn_i_save = ttk.Button(i_f, text="保存", command=self._save_i)
         self.btn_i_save.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2)
 
+        self.btn_motor_defaults = ttk.Button(param_f, text="恢复默认参数（选中节点）",
+                                             command=self._cmd_motor_defaults)
+        self.btn_motor_defaults.pack(fill=tk.X, padx=2, pady=(2, 2))
+        ttk.Label(param_f, text="先失能；恢复会重启并清除零点，需重新置零校准。",
+                  font=("Arial", 8), foreground="#b26a00").pack(fill=tk.X, padx=2)
         self.btn_encoder_cal = ttk.Button(param_f, text="磁编码器校准（选中节点）",
                                           command=self._cmd_encoder_calibration)
-        self.btn_encoder_cal.pack(fill=tk.X, padx=2, pady=(6, 2))
+        self.btn_encoder_cal.pack(fill=tk.X, padx=2, pady=(2, 2))
         ttk.Label(param_f, text="先失能；校准会正反转，成功后该电机自动重启。",
                   font=("Arial", 8), foreground="#b26a00").pack(fill=tk.X, padx=2, pady=2)
 
@@ -465,7 +472,7 @@ class RobotSerialAssistantOld:
             self.btn_pid_save,
             self.btn_acc_apply, self.btn_acc_save,
             self.btn_i_apply, self.btn_i_save,
-            self.btn_encoder_cal,
+            self.btn_encoder_cal, self.btn_motor_defaults,
         ]
         self.param_node.trace_add("write", lambda *_: self._update_write_btn_state())
         self._update_write_btn_state()
@@ -1188,6 +1195,7 @@ class RobotSerialAssistantOld:
                 self.current_cmdmode = None
                 self._mode_pending = self._mode_request = None
                 self._calibration_busy = False
+                self._cancel_defaults_restore("重新连接")
                 self._stop_locked = False
                 self._update_motor_state(None)
                 self.btn_connect.config(text="断开", bg="#c92a2a", activebackground="#a02222")
@@ -1215,6 +1223,7 @@ class RobotSerialAssistantOld:
             self._draw_led(False)
             self.lbl_status.config(text="未连接", fg="#ff6b6b")
             self._calibration_busy = False
+            self._cancel_defaults_restore("断开连接")
             self._stop_locked = False
             self._update_motor_state(None)
             # 清掉所有等待中的异步状态，避免重连后被上一轮的残留状态卡住
@@ -1295,6 +1304,7 @@ class RobotSerialAssistantOld:
         elif re.fullmatch(r"ok ENC_CAL \[[1-8]\] dispatched", line):
             self.log("磁编码器校准 CAN 帧已提交；协议没有完成回执，请观察电机校准及重启结果", "INFO")
         self._handle_protection_parameter_status(line)
+        self._handle_defaults_status(line)
 
         # 电机参数查询回包解析：节点匹配且非 0 时，把数值回填到右侧 Entry（仅 UI 辅助，不影响主日志）
         m = re.match(r'ok PID \[(\d+)\] kp=(-?\d+) kv=(-?\d+) ki=(-?\d+) kd=(-?\d+)', line)
@@ -1435,6 +1445,8 @@ class RobotSerialAssistantOld:
                 with self._serial_write_lock:
                     if generation != self._tx_generation:
                         continue
+                    if self._defaults_request is not None and not self._defaults_command_allowed(cmd):
+                        continue
                     diagnostic = self._is_protection_status_query(cmd)
                     if self._stop_locked and not diagnostic and cmd not in ("!STOP", "!START", "!DISABLE"):
                         continue
@@ -1537,7 +1549,7 @@ class RobotSerialAssistantOld:
 
     def _update_write_btn_state(self):
         """节点=0 (ALL) 时禁用写入按钮，避免误写广播"""
-        state = "disabled" if self.param_node.get() == 0 else "normal"
+        state = "disabled" if self.param_node.get() == 0 or self._defaults_request is not None else "normal"
         for btn in self._write_buttons:
             btn.config(state=state)
 
@@ -1723,6 +1735,113 @@ class RobotSerialAssistantOld:
             entry.insert(0, value)
 
     # ==============================================
+    def _cmd_motor_defaults(self):
+        node = self.param_node.get()
+        if node not in range(1, 9):
+            self.log("恢复默认参数仅支持单个节点 1～8，禁止 ALL", "WARN")
+            return
+        if (not self.is_connected or not self.serial_port or self._defaults_request is not None or
+                self._stop_locked or self._calibration_busy or self._seq_active or self._acc_sync_waiting or
+                not self._motor_state_known or self._motor_enabled):
+            self.log("请先结束当前任务并 DISABLE，等待 Disabled ok 后恢复参数", "WARN")
+            return
+        if not messagebox.askyesno(
+                "确认恢复电机默认参数",
+                f"仅恢复节点 J{node} 的 PID、速度、加速度、电流及 STALL/CAL 参数。\n"
+                "该电机会重启，零点也会清除，随后必须重新置零校准。\n"
+                "磁编码器校准表保留。请支撑好机械臂。\n\n确定恢复吗？", parent=self.root):
+            return
+        request = (time.monotonic_ns() & 0xFFFFFFFF) or 1
+        self.send_cmd(f"#MOTOR_DEFAULT {node} {request}")
+
+    def _defaults_command_allowed(self, cmd):
+        state = self._defaults_request
+        return (state is None or cmd in ("!STOP", "!DISABLE") or self._is_protection_status_query(cmd) or
+                cmd == state.get("command") or cmd == state.get("read_command"))
+
+    def _defaults_set_timeout(self, milliseconds):
+        if self._defaults_timeout_id is not None:
+            self.root.after_cancel(self._defaults_timeout_id)
+        request = self._defaults_request
+        self._defaults_timeout_id = self.root.after(milliseconds, lambda:
+            self._finish_defaults_restore(False, "等待回执超时；请 DISABLE 后核查参数")
+            if self._defaults_request is request else None)
+
+    def _cancel_defaults_restore(self, reason):
+        if self._defaults_request is not None:
+            self._finish_defaults_restore(False, f"{reason}；已受理的擦写可能继续完成，请重新失能并回读")
+
+    def _finish_defaults_restore(self, success, detail):
+        state = self._defaults_request
+        if state is None:
+            return
+        if self._defaults_timeout_id is not None:
+            self.root.after_cancel(self._defaults_timeout_id)
+            self._defaults_timeout_id = None
+        self._defaults_request = None
+        self._update_write_btn_state()
+        if not success:
+            self._cancel_motion_for_stop()  # Discard a restore/query that has not reached the serial port.
+        self._update_motor_state(False if state.get("restored") else None)
+        self.log(f"J{state['node']}：{detail}", "INFO" if success else "WARN")
+
+    def _defaults_read_next(self):
+        state = self._defaults_request
+        if state is None or not state.get("restored"):
+            return
+        if not state["reads"]:
+            self._finish_defaults_restore(True, "默认参数恢复及回读完成；请重新置零校准")
+            return
+        kind, command = state["reads"].pop(0)
+        state["read_kind"] = kind
+        state["read_command"] = command
+        self.send_cmd(command)
+
+    def _handle_defaults_status(self, line):
+        state = self._defaults_request
+        if state is None:
+            return
+        match = re.fullmatch(r"(ok |error )?MOTOR_DEFAULT \[([1-8])\] req=(\d+) (\w+)", line)
+        if match:
+            if (int(match.group(2)), int(match.group(3))) != (state["node"], state["request"]):
+                return
+            if match.group(1) == "error ":
+                self._finish_defaults_restore(False, f"恢复未确认：{match.group(4)}；请失能后核查")
+            elif match.group(1) == "ok " and match.group(4) == "restored" and not state.get("restored"):
+                state["restored"] = True
+                node = state["node"]
+                if node == 8:
+                    self.hand_current.set(1.0)
+                for kind in ("STALL", "CAL"):
+                    self._protection_values[kind].pop(node, None)
+                    if (self._protection_window is not None and self._protection_window.winfo_exists() and
+                            self._protection_nodes[kind].get() == node):
+                        for entry in self._protection_entries[kind].values():
+                            entry.delete(0, tk.END)
+                self._update_motor_state(False)
+                state["reads"] = [("PID", f"#GET_PID {node}"), ("ACC", f"#GETJACC {node}"), ("I_LIMIT", f"#GETI {node}")]
+                if node <= 7:
+                    state["reads"].append(("STALL", f"#STALL_GET {node}"))
+                if node >= 7:
+                    state["reads"].append(("CAL", f"#CAL_GET {node}"))
+                self.log(f"J{node} 默认参数已恢复并重启，正在回读；零点需重新校准", "INFO")
+                self._defaults_set_timeout(10000)
+                self._defaults_read_next()
+            return
+        kind = state.get("read_kind")
+        node = state["node"]
+        complete = (kind in ("PID", "ACC", "I_LIMIT") and
+                    re.match(rf"ok {kind} \[{node}\](?: |=)", line) is not None)
+        complete |= kind == "STALL" and re.fullmatch(rf"ok STALL \[{node}\] DIRECTION_MASK=\S+", line) is not None
+        complete |= kind == "CAL" and re.fullmatch(rf"ok CAL \[{node}\] CONTACT_WINDOW_R=\S+", line) is not None
+        if complete:
+            state["read_kind"] = None
+            self.root.after(40, lambda: self._defaults_read_next() if self._defaults_request is state else None)
+        elif line.startswith("error ") and state.get("restored"):
+            self._finish_defaults_restore(False, "默认参数已恢复，但回读未完成；请手动读取核查")
+        elif line in ("error STOP_LOCKED", "error MOTOR_DEFAULT syntax", "error MOTOR_DEFAULT USB_only"):
+            self._finish_defaults_restore(False, "主控拒绝恢复；请先确认失能及配套固件版本")
+
     # 电机参数设置与磁编码器校准（#SET_PID / #ACC_J / #I_LIMIT_J / #ENC_CAL）
     # 与查询共用 param_node 下拉；写入语义由 panel 注释写明（决策 #1/#2，2026-10-04）：
     #   - #SET_PID        ：永远写 EEPROM（固件无 RAM/EEPROM 区分）
@@ -1968,6 +2087,21 @@ class RobotSerialAssistantOld:
             self.log("未连接串口", "WARN")
             return False
         cmd = cmd.strip()
+        if self._defaults_request is not None and not self._defaults_command_allowed(cmd):
+            self.log("恢复及回读进行中，请等待完成；可发送 DISABLE 或 STOP", "WARN")
+            return False
+        if cmd.startswith("#MOTOR_DEFAULT"):
+            match = re.fullmatch(r"#MOTOR_DEFAULT ([1-8]) ([0-9]{1,10})", cmd)
+            if (match is None or not 0 < int(match.group(2)) <= 0xFFFFFFFF or
+                    self._defaults_request is not None or self._stop_locked or self._calibration_busy or
+                    self._seq_active or self._acc_sync_waiting or not self._motor_state_known or self._motor_enabled):
+                self.log("恢复参数需要单个节点、有效请求编号及已确认失能状态", "WARN")
+                return False
+            self._cancel_motion_for_stop()
+            self._defaults_request = {"node": int(match.group(1)), "request": int(match.group(2)), "command": cmd}
+            self._update_write_btn_state()
+            self._defaults_set_timeout(10000)
+            self.lbl_motor_state.config(text="● 恢复默认参数中", fg="#ffd43b")
         if self._seq_active and not sequence and (cmd.startswith(('>', '&', '@', '#CMDMODE')) or cmd in ('!HOME', '!RESET')):
             self.log("顺序发送中，请等待完成或先 STOP；当前运动回执由顺序任务占用", "WARN")
             return False
@@ -1994,6 +2128,7 @@ class RobotSerialAssistantOld:
             self._calibration_busy = True
             self.lbl_motor_state.config(text="● 校准入口检查中", bg="#495057", fg="#ffd43b")
         if cmd in ("!STOP", "!DISABLE"):
+            self._cancel_defaults_restore("用户中断")
             self._cancel_motion_for_stop()
             self._stop_locked = True
             self._handle_stop_status("Stopping ok" if cmd == "!STOP" else "Disable pending")
@@ -2042,7 +2177,7 @@ class RobotSerialAssistantOld:
 
     def _handle_stop_status(self, line):
         if line == "Started ok":
-            if self._calibration_busy:
+            if self._calibration_busy or self._defaults_request is not None:
                 self.log("校准忙态收到 Started ok，保持运动门禁并核查主控状态", "WARN")
                 return
             self._stop_locked = False

@@ -1,4 +1,33 @@
-# SESSION STATUS（2026-10-08）
+# SESSION STATUS（2026-10-09）
+
+## 当前完成：选中电机恢复默认参数（2026-10-09，源码与全部固件已验证）
+
+- **用户决定/范围**：用户强调最初测试正常、优先排除参数设置影响，明确恢复此前已同意的默认参数功能。本节取代下方历史分析的“继续暂停”。已修改 `串口助手_old.py`、`firmware_new/protection_protocol.h`，主控 `Robot/instances/protection_coordinator.h/.cpp` 与 `UserApp/protocols/ascii_protocol.cpp`，电机 `Ctrl/Motor/motor.h/.cpp`、`Ctrl/Motor/stall_protection.cpp`、`UserApp/main.cpp`、`UserApp/protection_config.cpp`。用户随后明确授权提交本工作改动；只提交本功能与本工作文档，不烧录、不操作实机，未改另一工作负责的独立 `Dummy上位机/` 工程。
+- **功能与操作**：old 助手电机参数区新增“恢复默认参数（选中节点）”，只支持 1～8，ALL 禁用；先 `!DISABLE` 并等待 `Disabled ok`，再确认恢复。清空所选电机最后 1KiB 用户参数页，恢复当前型号源码默认 PID、速度、加速度、电流、STALL/CAL 和零点偏移，保留独立磁编码器校准表；电机重启保持失能，之后须重新置零校准。J7 PID 默认 350/320/25/50，其余型号 200/80/300/250；基础速度/加速度均为 30r/s、30r/s²，电流上限 2.5A。
+- **完成语义**：USB 新命令 `#MOTOR_DEFAULT <1～8> <非零uint32请求编号>`；主控拒绝非失能/忙态，电机再次核验实际失能及无校准/保存任务。CONFIG op=5 先回 PENDING，主循环擦写并逐字节核验，再软件复位；BKP DR2～5 保存请求编号、事务和结果，重复 CAN 请求不会反复擦写。启动强制重建默认基础参数并核验整个 Flash 参数页后才回 OK；主控再取得新的失能状态证明，才打印 `ok MOTOR_DEFAULT [n] req=x restored`。失败/超时明确报告，STOP/DISABLE 取消等待时提示已受理擦写可能继续。
+- **界面回读与一致性**：成功后清除所选节点旧 STALL/CAL 缓存，依次回读 PID、ACC、I_LIMIT，再按节点回读 STALL/CAL；全部完成才提示“恢复及回读完成”。期间阻止运动、设置和校准，保留 STOP/DISABLE 与只读诊断；断线/超时取消未发队列与延迟回调，节点/请求编号不符的迟到回执不匹配。J8 同时恢复主控 HAND_I 校准电流上限及助手输入框至 1.0A。
+- **默认值遗漏已修正**：`stall_protection.cpp::InitProtection` 原先在 Defaults 后硬编码覆盖 CAL 值，本轮改为各自默认值与基础限幅取较小值。恢复后 J7 SEEK/RETURN/RETOUCH/ACCEL 为 5/5/0.5/3，J8 为 2/2/0.5/5；CAL 电流分别 2.5A/1.0A，CONTACT_RATIO 分别 0.3/0.2。正常启动已有有效 EEPROM 仍优先，升级不会自动重置参数。为适配原有 95KiB 应用区，仅对低频配置 Validate 使用 Os，20kHz 控制/检测函数优化未改，未扩大 Flash 区侵入编码器表。
+- **验证**：实际生产逻辑本机回归通过：主控 24810 项断言，35/42/57 各 3545，gripper 3546，覆盖门禁、重试、写入失败、部分启动写入重试、完成回执及原有保护/校准流程。Tkinter 界面 65 项检查通过，含取消/超时/迟到回执/自动回读和两种窗口尺寸全部参数控件边界；old 助手语法和 Git diff 空白检查通过。`串口助手.py` SHA256 仍为 `D07D3E90968F42706C107EC038AFD5109E6A67FC0A12F3C2BC3D98D13FF0D7E4`，未修改。测试在 Git 忽略的 `firmware_new/dummy-ref-core-fw/build/analysis/protection_regression/`。
+- **构建与产物**：主控及 35/42/57/gripper Ninja 全部成功，两处 `ninja -n` 均无待构建。主控 BIN 448652B；电机 35/42 各 96436B、57 96428B、gripper 96388B，距 `0x08017C00` 编码器表分别余 844/844/852/892B。BIN/HEX 内容、HEX 校验和及应用区边界通过；SHA256 清单为上述分析目录 `defaults_restore_artifacts.json`，日志为两个 build 下的 `defaults_restore_build.log`。原有非 void 空函数/RWX 告警保留。
+- **实机边界/待验证**：须使用配套新版主控和对应型号电机固件，再运行 old 助手验证真实恢复；旧电机不支持新 op，不能显示为成功。尚未验证实机擦写/重启或恢复后校准结果，未证明碰限位 BAD_TASK 已解决，唯一复位原因未确认。恢复的是当前源码默认值，不是历史 EEPROM 快照；断电/备用域丢失时不保证事务结果可追溯，超时后应重新失能并回读。
+
+## 当前分析：校准碰限位后 J8 丢失任务，参数风险与 STOP 等待逻辑（2026-10-09）
+
+- **用户要求/范围**：用户提供 20:43～20:45 新日志，要求主要结合逻辑和参数分析校准为何触发堵转；用户补充确认 20:44:08 异常时夹爪刚碰到物理限位。恢复默认参数功能继续暂停。本轮只读源码并同步本文，未改固件或助手、未下发参数、未编译/烧录/提交。
+- **本次实机链路**：HOME/RESET 成功，DISABLE 确认后开始 CAL；J1～J6 已完成坐标捕获，J7/J8 在 20:44:05.290 开始 SEEK。J8 在 20:44:08.448 从 phase=9 直接报告 phase=0/NONE，20:44:08.463 主控报 BAD_TASK，尚未出现 BACKOFF/RETOUCH/RETURN。20:44:30.273 回读 J8 task=0、at_ms=21888，校准电流/接触阈值/最大搜索行程为零；LAST=no_failure_record。按首条回包时间减 HAL_GetTick 粗算启动点约 20:44:08.385，包含通信延迟。与任务/阶段/失败快照丢失合并判断，强烈指向碰限位时 J8 重启或同等程度的运行状态丢失；不能由当前日志区分供电、外部复位或软件原因。前一日志 J7 BAD_TASK 也有类似时间证据。
+- **普通保护已排除为本次直接原因**：电机 `Ctrl/Motor/stall_protection.cpp:590` 在非 IDLE 阶段直接跳过普通堵转检测，J8 在 IDLE 也被 EXCLUDED。校准寻限位通过 `BeginSearch` 设置专用接触电流/速度/误差/时间，接触成立应在同文件第847～866行减速判稳，再由第787～805行依次 BACKOFF、RETOUCH、RETURN；正常接触不主动重启。超时/异常接触/再次堵转走 FailProtection 或 BeginLocalProtection，都会先 FreezeCalFailure，普通 STOP/DISABLE 不抹掉该失败快照。现有 HardFault 是死循环；看门狗 HAL 模块未启用，正常接触分支未发现主动系统复位调用。不能据此排除所有软件或硬件复位。
+- **实际参数及耦合**：J7 回读 SEEK=5、RETURN=20、RETOUCH=0.5、ACCEL=30、CURRENT=2.5、RATIO=0.3、BACKOFF=0.5；J8 回读 2/5/0.3/5/1/0.2/0.3。专用触碰条件为滤波电流命令达到 current×ratio、滤波速度≤0.02r/s、参考-实际误差绝对值≥0.02r，连续100ms；J7 约0.75A，J8 在主控 HAND_I 保持默认1A时约0.2A。主控 `protection_coordinator.cpp:699` 还会传 HAND_I 作为 J8 校准电流上限，电机第712～713行取较小值，因此 GET_CAL 单独不能证明实际 cap。`focCurrent` 是限幅后的控制电流命令（motor.cpp:373～378），不是实测电流。J8 参数是在疑似重启后回读的，不能证明异常前临时 RAM 配置完全相同。
+- **可诱发正常校准失败的参数风险**：校准 BACKOFF/RETURN 使用 CAL_RETURN_RPS、CAL_ACCEL、calibrationCurrent；这些阶段的再次堵转检测仍用低门槛 CAL 接触阈值，持续时间改用普通参数 REBLOCK_MS，启动屏蔽改用普通 STARTUP_MS（stall_protection.cpp:671、791、805、829～871）。J7 RETURN=20/ACCEL=30 高于 Defaults 表的5/3；短0.5r回退在理想梯形下峰值约3.87r/s，不能直接当成20r/s瞬时回退。J8 短0.3r回退峰值约1.22r/s。J8 SEEK=2r/s 对16:1输出约45°/s，理想持续100ms期间参考可继续推进约4.5°；这只是参考轨迹数量级，不是实测压入行程或力量。上述风险若触发正常分支应产生 EARLY_CONTACT/REBLOCKED 等记录，不能直接解释本次 BAD_TASK。
+- **已确认的后续等待问题**：主控 Error 对 BAD_TASK 调用 BeginStop(false, wasCal)；夹爪 `UserApp/protocols/interface_can.cpp:40～45` 只在仍有校准上下文时接受 STOP。重启后上下文已丢失，J8 拒绝该 STOP 且不回0x0A，符合 STOP wait=0x100/no reply；DISABLE 始终允许，符合用户随后 Disabled ok。此链路是校准任务丢失后的恢复逻辑问题，不是 J8 普通堵转开启。
+- **建议与未完成**：先以未保存的参数对照降低碰限位冲击（J8 SEEK 可单项降至0.5；J7 CAL_ACCEL/RETURN 回到3/5），其他检测阈值保持，以区分运动负载影响；这不是已验证修复。若继续修复，需启动时记录 RCC_CSR 复位原因、启动会话与软件复位入口，并明确报告校准任务丢失；在夹爪上下文丢失后转八轴 DISABLE 并核验确认。重新编译没有重置 EEPROM，已保存参数仍优先；InitProtection 硬编码覆盖 Defaults 的遗漏已在历史第83行附近记录，尚未修改。本次唯一复位原因与降速对照实机结果均未确认。
+
+## 当前完成：firmware_new 全部固件完整重编译（2026-10-09 20:30）
+
+- **用户要求/范围**：用户要求重新编译 `firmware_new` 全部固件。先在主控、电机各自 `build/` 执行 `ninja -t clean`，再按现有 Release 配置执行 `ninja -j 8`；未修改固件源码、配置或串口助手，不提交、不烧录、不操作设备。本节仅同步工作状态。
+- **构建结果**：主控 199/199、电机 213/213 全部成功，两个构建进程退出码均为 0；最终两处 `ninja -n` 均为 `no work to do`。主控 BIN 于 20:30:54 生成，四类电机 BIN 于 20:30:44 生成；对应 ELF/HEX 同时重建。保留既有非 void 空函数缺少返回值和 RWX 链接告警。
+- **产物与核验**：主控 `firmware_new/dummy-ref-core-fw/build/Core-STM32F4-fw.bin` 446776B，SHA256 `8b65c47995760a30c010eeaba44b49b0b7205471c7c2e5051e38c6c4028cb632`；电机产物在 `firmware_new/dummy-motor-fw/build/`：35/42 各 97044B，SHA256 均为 `e75e36ef9decab103e9045bbf70f86ecdcb481bf0040451221d2ccfa3e7521a7`；57 为 97044B，SHA256 `a1e79690164ac62b6a75890f42d32a778ab358c6e00c5c70f9b8d7dde1fd03ca`；gripper 为 96996B，SHA256 `f2c69eb4bb1c030aa0fca426a06da3d0072ffd6560efbf9993f9e37aae3cf08e`。五份 BIN 的 SHA256 均与重编译前一致；HEX 校验和、显式数据与 BIN 对应字节、BIN 间隙的 objcopy 默认零填充及应用区边界核验通过。
+- **内存**：主控 RAM59528B、CCMRAM64KiB、FLASH446776B；四类电机 RAM10704B。35/42/57 距编码器表起始地址 `0x08017C00` 各剩 236B，gripper 剩 284B，均未越界。构建日志分别为两处 `build/rebuild_20261009.log`。
+- **暂停工作**：“恢复默认参数”按钮及配套协议已获用户同意，但尚未改代码，用户后续明确要求暂停，当前继续保持暂停。20:23 日志的 STALL_SET 拒绝问题仅完成初步源码核对：电机 `UserApp/protection_config.cpp:86` 限定 BACK_CURRENT_A 不超过实际 `boardConfig.currentLimit / 1000`；主控 `Robot/instances/protection_coordinator.cpp:858` 把任意非 OK 回包统一打印为 REJECTED，并通过 `Error()` 锁定/STOP。尚缺本次 J1 的 `#GETI 1` 回读和具体拒绝状态/事务阶段，不能断言实机电流上限或唯一拒绝原因。未实施修复，本次重编译不代表上述问题已解决。
 
 ## 当前完成：在回退基线上单独恢复J7默认PID（2026-10-08，已编译）
 

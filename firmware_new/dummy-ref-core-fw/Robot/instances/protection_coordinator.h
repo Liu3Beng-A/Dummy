@@ -13,7 +13,7 @@ public:
     bool Locked() const { return locked || job != NONE; }
     bool CalibrationBusy() const { return calibration; }
     bool Busy() const { return job != NONE; }
-    bool ParameterBusy() const { return job == SETTINGS_GET || job == SETTINGS_SET || job == SETTINGS_SAVE; }
+    bool ParameterBusy() const { return job == SETTINGS_GET || job == SETTINGS_SET || job == SETTINGS_SAVE || job == DEFAULTS_RESET; }
     bool RgbAlarm() const { return alarm; }
     bool RgbLocked() const { return locked; }
     bool RgbStarting() const { return job == START_QUERY || job == START_VERIFY || (job == PROFILE && startAfterProfile); }
@@ -35,7 +35,7 @@ public:
 private:
     enum Job : uint8_t { NONE, START_QUERY, START_VERIFY, CAL_QUERY, PROFILE, PROTECT_STOP, PROTECT_RUN,
         CAL_START, CAL_ZERO, CAL_WAIT, CAL_MOVE, CAL_DISABLE, CAL_SAVE, CAL_FINISH,
-        SETTINGS_GET, SETTINGS_SET, SETTINGS_SAVE };
+        SETTINGS_GET, SETTINGS_SET, SETTINGS_SAVE, DEFAULTS_RESET };
     struct Node {
         uint32_t event = 0, eventMs = 0, contextMs = 0, healthMs = 0;
         uint32_t aliveMs = 0, probeSentMs = 0, probeFirstMs = 0;
@@ -60,6 +60,7 @@ private:
     uint32_t seenEvents[9]{};
     uint32_t phaseAt = 0, lastSend = 0, lastRenew = 0, lastHealth = 0;
     uint32_t calRunAt[2]{}; // Independent CAL_RUN retries for J7 and J8.
+    uint32_t defaultsRequest = 0;
     uint32_t pollEpoch = 0;
     uint32_t leaseSerial = 0;
     uint16_t serial = 0, task = 0, queryProbe = 0, expected = 0, received = 0;
@@ -106,6 +107,7 @@ private:
     void PollGroup(uint8_t operation, uint8_t phase, uint16_t mask);
     void PollProfile();
     void PollParameters();
+    void PollDefaults();
     void PollDiagnostic();
     void PrintDiagnostic();
     void CancelContexts();

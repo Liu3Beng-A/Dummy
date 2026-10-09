@@ -227,7 +227,8 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
         }
     } else if (command == PROBE_REPLY) {
         const uint16_t probe = Read16(data + 2);
-        const bool ownerQuery = job == START_QUERY || job == START_VERIFY || job == CAL_QUERY;
+        const bool ownerQuery = job == START_QUERY || job == START_VERIFY || job == CAL_QUERY ||
+                                (job == DEFAULTS_RESET && stage == 1);
         if (!probe || (probe != a.issuedProbe && !(ownerQuery && probe == queryProbe))) return;
         float position; std::memcpy(&position, data + 4, 4);
         a.probe = probe; a.healthMs = now; a.probeFlags = data[1];
@@ -235,7 +236,8 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
         a.version = a.probeVersion = data[0]; a.probePending = false; ++a.probeRx;
         if (Finite(position)) a.position = position;
         if (ownerQuery && probe == queryProbe) {
-            if (data[0] && (data[1] & FEEDBACK_VALID) && Finite(position)) received |= uint16_t(1U << n);
+            if (data[0] && (job == DEFAULTS_RESET ? bool(data[1] & DISABLED_FLAG) :
+                           bool((data[1] & FEEDBACK_VALID) && Finite(position)))) received |= uint16_t(1U << n);
             else failed |= uint16_t(1U << n);
         }
     } else if (command == CONTEXT_REPLY) {
@@ -319,6 +321,8 @@ void ProtectionCoordinator::CancelContexts() {
 }
 void ProtectionCoordinator::Cancel(bool disable) {
     if (internal) return;
+    if (job == DEFAULTS_RESET)
+        Log("error MOTOR_DEFAULT [%u] req=%lu cancelled", active, (unsigned long)defaultsRequest);
     const bool wasCalibration = calibration;
     suppressEpisodes = true;
     for (uint8_t n = 1; n <= 8; ++n) {
@@ -343,6 +347,10 @@ void ProtectionCoordinator::MotionDispatchFailed() {
     BeginStop(true);
 }
 void ProtectionCoordinator::Error(const char* reason, uint8_t n) {
+    if (job == DEFAULTS_RESET) {
+        Log("error MOTOR_DEFAULT [%u] req=%lu %s", active, (unsigned long)defaultsRequest, reason);
+        job = NONE; robot.startPending = false; return;
+    }
     bool wasCal = calibration;
     if (wasCal) {
         Log("error CALIBRATION J%u %s", n, reason);
@@ -734,6 +742,7 @@ void ProtectionCoordinator::Poll() {
         if (job == SETTINGS_GET) PollParameters();
         break;
     case SETTINGS_SET: case SETTINGS_SAVE: PollParameters(); break;
+    case DEFAULTS_RESET: PollDefaults(); break;
     }
     // Reuse an unused cancellation slot; regular health probes otherwise use
     // both query slots. STOP/leases/cancellation already had first priority.
@@ -758,6 +767,29 @@ bool ProtectionCoordinator::Command(const char* cmd, unsigned len, StreamSink& r
     size_t first = text.find_first_not_of(" \t\r\n"), last = text.find_last_not_of(" \t\r\n");
     if (first == std::string::npos) return false;
     text = text.substr(first, last-first+1);
+    if (text.rfind("#MOTOR_DEFAULT", 0) == 0) {
+        unsigned n = 0; unsigned long request = 0; char extra[2]{};
+        const size_t at = text.find_last_of(" \t");
+        const std::string digits = at == std::string::npos ? "" : text.substr(at + 1);
+        if (sscanf(text.c_str(), "#MOTOR_DEFAULT %u %lu %1s", &n, &request, extra) != 2 ||
+            n < 1 || n > 8 || !request || digits.empty() || digits.size() > 10 ||
+            digits.find_first_not_of("0123456789") != std::string::npos ||
+            (digits.size() == 10 && digits > "4294967295")) {
+            Respond(response, "error MOTOR_DEFAULT syntax"); return true;
+        }
+        taskENTER_CRITICAL();
+        if (Locked() || robot.IsRGBSaveBusy() || robot.stopState != DummyRobot::DISABLED) {
+            taskEXIT_CRITICAL();
+            Respond(response, "error MOTOR_DEFAULT [%u] req=%lu require_DISABLE", n, request); return true;
+        }
+        sink = &response; active = uint8_t(n); defaultsRequest = uint32_t(request);
+        task = NextId(); stage = 0;
+        ++robot.motionEpoch; robot.motionActive = false; robot.startPending = false;
+        robot.commandHandler.ClearFifo();
+        Enter(DEFAULTS_RESET, uint16_t(1U << n));
+        taskEXIT_CRITICAL();
+        Respond(response, "MOTOR_DEFAULT [%u] req=%lu pending", n, request); return true;
+    }
     if (text.rfind("#STALL_STATUS", 0) == 0 || text.rfind("#CAL_STATUS", 0) == 0) {
         const bool cal = text.rfind("#CAL_STATUS", 0) == 0;
         const char* prefix = cal ? "CAL_STATUS" : "STALL_STATUS";
@@ -849,6 +881,33 @@ bool ProtectionCoordinator::Command(const char* cmd, unsigned len, StreamSink& r
     } else if (set) firstParam = 0;
     stage = 0; task = NextId(); Enter(get ? SETTINGS_GET : set ? SETTINGS_SET : SETTINGS_SAVE, mask);
     Respond(response, "ok %s pending", verb); return true;
+}
+void ProtectionCoordinator::PollDefaults() {
+    const uint32_t now = HAL_GetTick();
+    if (stage == 0 && TakeReply(0, RESTORE_DEFAULTS)) {
+        if (replyStatus != OK && replyStatus != PENDING) { Error("REJECTED", active); return; }
+        if (replyStatus == OK) {
+            taskENTER_CRITICAL();
+            nodes[active] = Node{}; seenEvents[active] = 0;
+            queryProbe = NextId(); stage = 1; received = failed = 0;
+            taskEXIT_CRITICAL();
+            lastSend = now - 100;
+        }
+    }
+    if (stage == 1 && (received & expected)) {
+        // Fresh disabled proof after the boot's verified Flash completion.
+        if ((nodes[active].probeFlags & FEEDBACK_VALID) && Finite(nodes[active].position)) SyncPosition(active);
+        robot.motorPidLastUpdateMs[active] = 0;
+        robot.jointAccLastUpdateMs[active] = 0;
+        robot.jointCurrentLimitLastUpdateMs[active] = 0;
+        if (active == 8) robot.hand->current = 1.0f; // Also reset the master's CAL_RUN current cap.
+        Log("ok MOTOR_DEFAULT [%u] req=%lu restored", active, (unsigned long)defaultsRequest);
+        job = NONE; return;
+    }
+    if (now - phaseAt > 6000) { Error("TIMEOUT", active); return; }
+    if (now - lastSend < 100) return;
+    const bool sent = stage == 0 ? Config(active, RESTORE_DEFAULTS, defaultsRequest) : Context(active, QUERY, queryProbe);
+    if (sent) lastSend = now;
 }
 void ProtectionCoordinator::PollParameters() {
     uint8_t op = stage == 0 ? BEGIN : COMMIT;

@@ -6,6 +6,8 @@
 #include <initializer_list>
 
 using namespace ProtectionProtocol;
+// Main owns the electrical encoder calibrator and legacy EEPROM save state.
+extern bool MotorDefaultsRestoreAllowed();
 // Keep diagnostics within the existing 95KiB application area. Startup,
 // CAN/main queries and one-shot phase/capture work use size optimization;
 // periodic 20kHz control/detection functions retain their original options.
@@ -56,9 +58,10 @@ PROTECTION_CAN_SIZE void Motor::Controller::InitProtection() {
     const float maxAcceleration = context->config.motionParams.ratedVelocityAcc / static_cast<float>(STEPS);
     protectionSettings.value[BACK_RPS] = fminf(protectionSettings.Get(BACK_RPS), maxVelocity);
     protectionSettings.value[BACK_ACCEL] = fminf(5, maxAcceleration);
-    protectionSettings.value[CAL_ACCEL] = fminf(5, maxAcceleration);
-    protectionSettings.value[CAL_SEEK_RPS] = protectionSettings.value[CAL_RETURN_RPS] = fminf(.5f, maxVelocity);
-    protectionSettings.value[CAL_RETOUCH_RPS] = fminf(.25f, maxVelocity);
+    protectionSettings.value[CAL_ACCEL] = fminf(protectionSettings.Get(CAL_ACCEL), maxAcceleration);
+    protectionSettings.value[CAL_SEEK_RPS] = fminf(protectionSettings.Get(CAL_SEEK_RPS), maxVelocity);
+    protectionSettings.value[CAL_RETURN_RPS] = fminf(protectionSettings.Get(CAL_RETURN_RPS), maxVelocity);
+    protectionSettings.value[CAL_RETOUCH_RPS] = fminf(protectionSettings.Get(CAL_RETOUCH_RPS), maxVelocity);
     const bool loaded = LoadProtectionSettings(protectionSettings, boardConfig.canNodeId, context->config.motionParams.ratedCurrent,
                                               context->config.motionParams.ratedVelocity, context->config.motionParams.ratedVelocityAcc);
     configurationFault = !loaded && !ProtectionStorageIsErased();
@@ -293,7 +296,8 @@ PROTECTION_CAN_SIZE bool Motor::Controller::ProcessProtectionCan(uint8_t command
     } else if (command == PARAM_SET) {
         const uint8_t id = data[0]; const uint16_t transaction = U16(data + 2); const float value = F32(data + 4);
         uint8_t status = OK;
-        if (!configStaging || configTransaction != transaction) status = TRANSACTION_MISMATCH;
+        if (defaultsRestoreRequested) status = LOCKED;
+        else if (!configStaging || configTransaction != transaction) status = TRANSACTION_MISMATCH;
         else if (IsSoftStopLocked() && id != MIN_POSITION_R && id != MAX_POSITION_R && id != DIRECTION_MASK) status = LOCKED;
         else if (!stagedSettings.Set(id, value, boardConfig.canNodeId, boardConfig.currentLimit,
                                      boardConfig.velocityLimit, boardConfig.velocityAcc)) status = INVALID;
@@ -302,6 +306,25 @@ PROTECTION_CAN_SIZE bool Motor::Controller::ProcessProtectionCan(uint8_t command
     } else if (command == CONFIG) {
         const uint8_t op = data[0]; const uint16_t transaction = U16(data + 2); const uint32_t argument = U32(data + 4);
         uint8_t status = OK;
+        if (op == RESTORE_DEFAULTS) {
+            IrqGuard guard;
+            const uint32_t nonce = uint32_t(BKP->DR2) | (uint32_t(BKP->DR3) << 16);
+            if (!argument || !transaction) status = INVALID;
+            else if (nonce == argument && BKP->DR4 == transaction &&
+                     (BKP->DR5 == RESTORE_READY || BKP->DR5 == RESTORE_FAILED))
+                status = BKP->DR5 == RESTORE_READY ? OK : WRITE_FAILED;
+            else if (defaultsRestoreRequested) status = nonce == argument && BKP->DR4 == transaction ? PENDING : LOCKED;
+            else if (!IsActuallyDisabled() || IsSoftStopLocked() || calibrationTask || configStaging ||
+                     saveRequested || parameterSaveRequested || parameterSavingInProgress || coordinateSavingInProgress ||
+                     !MotorDefaultsRestoreAllowed()) status = LOCKED;
+            else {
+                BKP->DR2 = uint16_t(argument); BKP->DR3 = uint16_t(argument >> 16);
+                BKP->DR4 = transaction; BKP->DR5 = 0;
+                defaultsRestoreRequested = true; softStopLocked = true; status = PENDING;
+            }
+            ReplyConfiguration(op, status, transaction); return true;
+        }
+        if (defaultsRestoreRequested) { ReplyConfiguration(op, LOCKED, transaction); return true; }
         if (op == BEGIN) {
             IrqGuard guard;
             if (parameterSaveRequested || parameterSavingInProgress) {
@@ -360,6 +383,11 @@ PROTECTION_CAN_SIZE bool Motor::Controller::ProcessProtectionCan(uint8_t command
     } else {
         const uint8_t op = data[0], version = data[1]; const uint16_t task = U16(data + 2);
         const uint32_t value = U32(data + 4);
+        if (defaultsRestoreRequested && op != QUERY && op != CANCEL) {
+            uint8_t reply[8]{}; BuildProtectionContext(reply); reply[1] = BUSY;
+            reply[2] = uint8_t(task); reply[3] = uint8_t(task >> 8);
+            Send(CONTEXT_REPLY, reply); return true;
+        }
         if (op == QUERY) {
             uint8_t reply[8]{}, event[8]{};
             bool needsEvent;
@@ -895,6 +923,21 @@ bool Motor::Controller::TickInternalProtection() {
     return true;
 }
 
+PROTECTION_CAN_SIZE void Motor::Controller::PollDefaultsRestore() {
+    if (!defaultsRestoreRequested) return;
+    // Only the final 1KiB user page is rewritten; the encoder table is separate.
+    bool erased = IsActuallyDisabled() && MotorDefaultsRestoreAllowed();
+    if (erased) {
+        for (uint32_t i = 0; i <= E2END; ++i) eeprom_buffered_write_byte(i, 0xFF);
+        eeprom_buffer_flush();
+        for (uint32_t i = 0; i <= E2END; ++i)
+            if (eeprom_flash_read_byte(i) != 0xFF) { erased = false; break; }
+    }
+    BKP->DR5 = erased ? RESTORE_ERASED : RESTORE_FAILED;
+    if (erased) HAL_NVIC_SystemReset();
+    defaultsRestoreRequested = false;
+    ReplyConfiguration(RESTORE_DEFAULTS, WRITE_FAILED, uint16_t(BKP->DR4));
+}
 PROTECTION_CAN_SIZE void Motor::Controller::PollProtectionMain() {
     if (saveRequested || parameterSaveRequested) {
         const uint32_t irq = __get_PRIMASK(); __disable_irq();

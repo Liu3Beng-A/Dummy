@@ -463,7 +463,7 @@ void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
 {
     using namespace SoftStopProtocol;
     if ((action == ENABLE_HOLD || action == RELEASE) &&
-        (saveRequested || parameterSaveRequested || parameterSavingInProgress || coordinateSavingInProgress ||
+        (defaultsRestoreRequested || saveRequested || parameterSaveRequested || parameterSavingInProgress || coordinateSavingInProgress ||
          (calibrationTask && protectionPhase != ProtectionProtocol::CAL_FAILED) ||
          protectionPhase == ProtectionProtocol::LOCAL_STOPPING || protectionPhase == ProtectionProtocol::WAIT_GRANT ||
          protectionPhase == ProtectionProtocol::RETREATING || protectionPhase == ProtectionProtocol::PEER_STOPPING)) return;

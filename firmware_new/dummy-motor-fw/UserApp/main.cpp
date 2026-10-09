@@ -15,6 +15,10 @@ Button button1(1, 1000), button2(2, 3000);
 void OnButton1Event(Button::Event _event);
 void OnButton2Event(Button::Event _event);
 Led statusLed;
+bool MotorDefaultsRestoreAllowed()
+{
+    return boardConfig.configStatus == CONFIG_OK && !encoderCalibrator.isTriggered;
+}
 /* Main Entry ----------------------------------------------------------------*/
 void Main()
 {
@@ -29,10 +33,12 @@ void Main()
     defaultNodeID = nodeID;
 
     /*---------- Apply EEPROM Settings ----------*/
+    __HAL_RCC_PWR_CLK_ENABLE(); __HAL_RCC_BKP_CLK_ENABLE(); HAL_PWR_EnableBkUpAccess();
+    const bool restoreBoot = BKP->DR5 == ProtectionProtocol::RESTORE_ERASED;
     // Setting priority is EEPROM > Motor.h
     EEPROM eeprom;
     eeprom.get(0, boardConfig);
-    if (boardConfig.configStatus != CONFIG_OK) // use default settings
+    if (boardConfig.configStatus != CONFIG_OK || restoreBoot) // use default settings
     {
         boardConfig = BoardConfig_t{
             .configStatus = CONFIG_OK,
@@ -76,6 +82,18 @@ void Main()
             .enableTempWatch=false,
         };
         eeprom.put(0, boardConfig);
+    }
+    // The restore request survives a software reset in backup registers. Only
+    // acknowledge completion after physical Flash contains the new base config
+    // and an erased extension, before applying runtime-only node overrides.
+    if (restoreBoot)
+    {
+        bool verified = true;
+        const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&boardConfig);
+        for (uint32_t i = 0; i <= E2END; ++i)
+            if (eeprom_flash_read_byte(i) != (i < sizeof(boardConfig) ? bytes[i] : 0xFF))
+                verified = false;
+        BKP->DR5 = verified ? ProtectionProtocol::RESTORE_READY : ProtectionProtocol::RESTORE_FAILED;
     }
     boardConfig.enableTempWatch=false;
     //depends on 3 bits switch now
@@ -140,13 +158,14 @@ void Main()
     HAL_TIM_Base_Start_IT(&htim1);  // 100Hz
     HAL_TIM_Base_Start_IT(&htim4);  // 20kHz
 
-    if (button1.IsPressed() && button2.IsPressed())
+    if (!restoreBoot && button1.IsPressed() && button2.IsPressed())
         encoderCalibrator.isTriggered = true;
 //    printf("start motor %d\r\n", defaultNodeID);
 
     for (;;)
     {
         CAN_PollTransmit();
+        motor.controller->PollDefaultsRestore();
         motor.controller->PollProtectionMain();
 //        if ( encoderCalibrator.FlashRun() == 0)
             encoderCalibrator.TickMainLoop();

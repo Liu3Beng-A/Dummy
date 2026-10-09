@@ -113,6 +113,11 @@ bool ProtectionSettings::Set(uint8_t id, float v, uint8_t node, int32_t currentM
     value[id] = v;
     return true;
 }
+// Configuration validation runs on command/load paths, outside the 20kHz loop.
+// Avoid O3 duplicating the full Set switch into this loop in the 95KiB image.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 bool ProtectionSettings::Validate(uint8_t node, int32_t currentMa, int32_t velocity,
                                   int32_t acceleration) const {
     ProtectionSettings checked = *this;

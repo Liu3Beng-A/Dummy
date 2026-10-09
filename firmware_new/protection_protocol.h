@@ -116,7 +116,7 @@ enum Parameter : uint8_t {
     CAL_CONTACT_WINDOW_R = 38, PARAMETER_COUNT = 38
 };
 enum Status : uint8_t { OK = 0, INVALID = 1, LOCKED = 2,
-    TRANSACTION_MISMATCH = 3, WRITE_FAILED = 4, NOT_SUPPORTED = 5 };
+    TRANSACTION_MISMATCH = 3, WRITE_FAILED = 4, NOT_SUPPORTED = 5, PENDING = 6 };
 
 // CONFIG: operation[0], zero[1], transaction u16[2..3], argument u32[4..7].
 // BEGIN copies the live config into a staging group; SET only touches that
@@ -126,7 +126,12 @@ enum Status : uint8_t { OK = 0, INVALID = 1, LOCKED = 2,
 // Reply is PARAM_REPLY parameter=0, status[1], same transaction[2..3],
 // echoed ConfigOperation[4], coordinateVersion[5], zero[6..7]. SAVE is
 // permitted only while disabled. The operation echo rejects late BEGIN ACKs.
-enum ConfigOperation : uint8_t { BEGIN = 1, COMMIT = 2, SAVE = 3, ABORT = 4 };
+enum ConfigOperation : uint8_t { BEGIN = 1, COMMIT = 2, SAVE = 3, ABORT = 4, RESTORE_DEFAULTS = 5 };
+// RESTORE_DEFAULTS requires a nonzero request nonce in argument and a disabled
+// motor. PENDING precedes the reboot; OK means the next boot verified defaults.
+// BKP DR2/DR3 = nonce, DR4 = transaction, DR5 = completion state. Retransmits
+// after software reset replay completion without erasing the parameter page again.
+enum RestoreState : uint16_t { RESTORE_ERASED = 0xD1E1, RESTORE_READY = 0xD1E2, RESTORE_FAILED = 0xD1E3 };
 
 // CONTEXT: operation[0], coordinateVersion[1], task u16[2..3], value[4..7].
 // QUERY returns PROBE_REPLY, plus an unacknowledged active EVENT if needed.
