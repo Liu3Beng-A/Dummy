@@ -1,9 +1,14 @@
 """Reusable Qt controls, kept independent from serial communication."""
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from html import escape
+
+from PySide6.QtCore import QEvent, QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QDoubleSpinBox, QHBoxLayout, QLabel,
-    QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QDoubleSpinBox, QHBoxLayout, QLabel,
+    QPushButton, QSlider, QSpinBox, QStyle, QStyleOptionButton, QSizePolicy,
+    QVBoxLayout, QWidget,
 )
+
+from app.ui.color_dialog import choose_color
 
 
 def hint(text, role="hint"):
@@ -80,8 +85,75 @@ class AxisRow(QWidget):
             self.changed.emit(self.spin.value())
 
 
+class PointShortcutButton(QPushButton):
+    """Two-line, width-independent preview shortcut for a one-based slot."""
+
+    def __init__(self, slot, callback=None, parent=None):
+        super().__init__(parent)
+        self._slot = int(slot)
+        self._caption_lines = ("", "")
+        self.setObjectName("PointShortcutButton")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(50)
+        self.setAccessibleDescription("仅加载目标，使用发送按钮执行")
+        if callback is not None:
+            self.clicked.connect(lambda checked=False: callback())
+        self.set_point(None)
+
+    def set_point(self, record_or_None):
+        if record_or_None is None:
+            self._caption_lines = (f"{self._slot} · 暂无点位", "")
+            self.setAccessibleName(f"点位 {self._slot}，暂无点位")
+            self.setToolTip("暂无点位；在点位示教页保存点位后可加载目标。")
+            self.setEnabled(False)
+        else:
+            name = str(record_or_None.get("name", "未命名点位"))
+            kind = str(record_or_None.get("type", "MoveJ"))
+            speed = f"{float(record_or_None.get('speed', 35)):g}"
+            display_name = " ".join(name.split())
+            self._caption_lines = (f"{self._slot} · {display_name}",
+                                   f"{kind} · 速度 {speed}")
+            self.setAccessibleName(f"点位 {self._slot}，{name}，{kind}，速度 {speed}")
+            safe_name = (escape(name).replace("\r\n", "\n")
+                         .replace("\r", "\n").replace("\n", "<br>"))
+            self.setToolTip(f"<qt>名称：{safe_name}<br>类型：{escape(kind)}"
+                            f"<br>速度：{escape(speed)}<br>仅加载目标，使用发送按钮执行</qt>")
+            self.setEnabled(True)
+        self._refresh_caption()
+
+    def sizeHint(self):
+        # Full point names must never contribute to the layout's minimum width.
+        return QSize(180, 50)
+
+    def minimumSizeHint(self):
+        return QSize(64, 50)
+
+    def _refresh_caption(self):
+        if not hasattr(self, "_caption_lines"):
+            return
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        contents = self.style().subElementRect(QStyle.SubElement.SE_PushButtonContents,
+                                              option, self)
+        width = max(0, contents.width() - 2)
+        lines = [self.fontMetrics().elidedText(line, Qt.TextElideMode.ElideRight, width)
+                 .replace("&", "&&") for line in self._caption_lines]
+        text = "\n".join(lines)
+        if self.text() != text:
+            self.setText(text)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refresh_caption()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._refresh_caption()
+
+
 class ColorEditor(QWidget):
-    """Three numeric RGB channels and a native color picker."""
+    """Three numeric RGB channels and a Chinese, themed Qt color picker."""
     def __init__(self, color=(0, 0, 255), parent=None):
         super().__init__(parent)
         row = QHBoxLayout(self)
@@ -111,7 +183,7 @@ class ColorEditor(QWidget):
     def _pick(self):
         from PySide6.QtGui import QColor
         old = QColor(*(spin.value() for spin in self.channels))
-        chosen = QColorDialog.getColor(old, self, "选择灯效颜色")
+        chosen = choose_color(old, self, "选择灯效颜色")
         if chosen.isValid():
             for spin, value in zip(self.channels, (chosen.red(), chosen.green(), chosen.blue())):
                 spin.setValue(value)

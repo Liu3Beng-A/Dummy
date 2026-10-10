@@ -110,15 +110,36 @@ class UiIntegrationTests(unittest.TestCase):
     def test_launch_is_offline_and_pages_have_all_parameter_fields(self):
         self.assertFalse(self.controller.is_connected)
         self.assertIsNone(self.controller.serial_port)
-        self.assertEqual(self.window.pages.count(), 7)
+        self.assertEqual(self.window.pages.count(), 6)
+        self.assertEqual([self.window.navigation.item(index).text() for index in range(6)],
+                         ["运动控制", "点位示教", "电机设置", "夹爪设置", "RGB 灯效", "软件设置"])
         self.assertEqual(len(self.window.joint_spins), 7)
         self.assertEqual(len(self.window.pose_spins), 6)
         self.assertEqual(len(self.controller._protection_entries["STALL"]), 18)
         self.assertEqual(len(self.controller._protection_entries["CAL"]), 18)
         self.assertEqual(self.commands(), [])
-        for page in range(7):
+        for page in range(6):
             self.window.navigation.setCurrentRow(page)
             self.assertEqual(self.window.pages.currentIndex(), page)
+        self.assertIs(self.window.pages.widget(4), self.window.rgb_page)
+        self.assertTrue(self.window.pages.widget(3).isAncestorOf(self.window.hand_row))
+        self.assertTrue(self.window.pages.widget(5).isAncestorOf(self.window.theme_combo))
+        self.window.navigation.setCurrentRow(2)
+        self.assertEqual(self.window.motor_tabs.count(), 2)
+        self.assertEqual([self.window.motor_tabs.tabText(index) for index in range(2)],
+                         ["电机参数", "电机点位校准"])
+        self.assertTrue(self.window.motor_tabs.widget(0).isAncestorOf(
+            self.controller.ent_set_pid_kp.widget))
+        self.assertTrue(self.window.motor_tabs.widget(1).isAncestorOf(
+            self.window.protection_tabs))
+        self.assertEqual(self.window.protection_tabs.count(), 2)
+        for index, kind in enumerate(("STALL", "CAL")):
+            self.window.motor_tabs.setCurrentIndex(1)
+            self.window.protection_tabs.setCurrentIndex(index)
+            self.assertTrue(self.window.protection_tabs.currentWidget().isAncestorOf(
+                next(iter(self.controller._protection_entries[kind].values())).widget))
+        self.window.motor_tabs.setCurrentIndex(0)
+        self.assertEqual(self.commands(), [])
 
     def test_readback_keeps_target_until_explicit_sync_even_with_drag_enabled(self):
         self.connect_fake()

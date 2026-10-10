@@ -8,7 +8,7 @@ sys.path.insert(0, str(PROJECT))
 
 from PySide6.QtCore import QCoreApplication, QTimer, Qt
 QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
-from PySide6.QtWidgets import QApplication, QScrollArea, QTabWidget
+from PySide6.QtWidgets import QApplication, QScrollArea
 from app.core.controller import RobotController
 from app.storage.store import AppStore
 from app.ui.main_window import MainWindow
@@ -35,18 +35,22 @@ def main():
     width, height = map(int, args.size.lower().split("x"))
     window.resize(width, height)
     steps = [(f"{page}-{name}", lambda value=page: window.navigation.setCurrentRow(value))
-             for page, name in enumerate(("motion", "teaching", "motor", "protection", "gripper", "rgb", "settings"))]
+             for page, name in enumerate(("motion", "teaching", "motor", "gripper", "rgb", "settings"))]
 
-    def tab(page, index):
+    def tab(page, widget, index):
         window.navigation.setCurrentRow(page)
-        widget = window.pages.widget(page).findChild(QTabWidget)
         widget.setCurrentIndex(index)
 
-    steps += [("motion-movel", lambda: tab(0, 1)),
-              ("protection-cal", lambda: tab(3, 1)),
-              ("rgb-auto", lambda: tab(5, 1)),
-              ("rgb-effects", lambda: tab(5, 2)),
-              ("rgb-state", lambda: tab(5, 3))]
+    def protection(index):
+        tab(2, window.motor_tabs, 1)
+        window.protection_tabs.setCurrentIndex(index)
+
+    steps += [("motion-movel", lambda: tab(0, window.motion_tabs, 1)),
+              ("motor-stall", lambda: protection(0)),
+              ("motor-cal", lambda: protection(1)),
+              ("rgb-auto", lambda: tab(4, window.rgb_tabs, 1)),
+              ("rgb-effects", lambda: tab(4, window.rgb_tabs, 2)),
+              ("rgb-state", lambda: tab(4, window.rgb_tabs, 3))]
 
     def teaching(index):
         window.navigation.setCurrentRow(1)
@@ -55,15 +59,29 @@ def main():
     steps += [("teaching-movej", lambda: teaching(0)),
               ("teaching-movel", lambda: teaching(1))]
 
-    def bottom(page):
-        window.navigation.setCurrentRow(page)
-        for area in window.pages.widget(page).findChildren(QScrollArea):
-            area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())
+    def scroll_bottom(widget):
+        for area in widget.findChildren(QScrollArea):
+            if area.isVisible():
+                area.verticalScrollBar().setValue(area.verticalScrollBar().maximum())
 
-    steps += [("motor-bottom", lambda: bottom(2)), ("gripper-bottom", lambda: bottom(4))]
+    def motor_bottom(index, protection_index=0):
+        tab(2, window.motor_tabs, index)
+        if index == 1:
+            window.protection_tabs.setCurrentIndex(protection_index)
+        # Let the selected subpage settle before positioning its scroll bars.
+        QTimer.singleShot(50, lambda: scroll_bottom(window.motor_tabs.currentWidget()))
+
+    def gripper_bottom():
+        window.navigation.setCurrentRow(3)
+        QTimer.singleShot(50, lambda: scroll_bottom(window.pages.currentWidget()))
+
+    steps += [("motor-bottom", lambda: motor_bottom(0)),
+              ("motor-stall-bottom", lambda: motor_bottom(1, 0)),
+              ("motor-cal-bottom", lambda: motor_bottom(1, 1)),
+              ("gripper-bottom", gripper_bottom)]
 
     def preview():
-        tab(0, 0)
+        tab(0, window.motion_tabs, 0)
         for spin, value in zip(window.joint_spins, [25,-40,120,15,20,0,80]):
             spin.setValue(value)
         window.hand_row.spin.setValue(60)

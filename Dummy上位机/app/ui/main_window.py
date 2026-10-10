@@ -7,19 +7,22 @@ from pathlib import Path
 import copy
 import time
 
-from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer
+from PySide6.QtCore import QByteArray, QEvent, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFormLayout,
-    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from app.ui.adapters import FieldAdapter, TableAdapter
-from app.ui.widgets import AxisRow, ColorEditor, button, hint, number
+from app.core.dialogs import install_dialog_appearance
+from app.ui.widgets import AxisRow, ColorEditor, PointShortcutButton, button, hint, number
+from app.ui.rgb_ring import RgbRing
+from app.core.rgb_simulator import RgbSimulator, default_config
 from app.visualization.robot_view import RobotView
 from app.protocol.constants import (
     CAL_PARAMETERS, DEFAULT_SPEED, JOINT_DEFAULTS, JOINT_RANGES,
@@ -31,6 +34,7 @@ from app.protocol.constants import (
 class MainWindow(QMainWindow):
     def __init__(self, controller, store):
         super().__init__()
+        install_dialog_appearance()
         self.controller = controller
         self.store = store
         self.fields = {}
@@ -38,6 +42,15 @@ class MainWindow(QMainWindow):
         self._building = True
         self._logs = deque(maxlen=int(store.settings.get("log_limit", 5000)))
         self._last_drag = {"j": 0., "l": 0., "hand": 0., "teaching": 0.}
+        self._rgb_draft = default_config()
+        self._rgb_dirty_paths = set()
+        self._rgb_loading_editor = False
+        self._rgb_device = None
+        self._rgb_follow_seeded = False
+        self._rgb_simulator = RgbSimulator()
+        self._rgb_render_timer = QTimer(self)
+        self._rgb_render_timer.setInterval(33)
+        self._rgb_render_timer.timeout.connect(self._render_rgb_preview)
         self._drag_timers = {}
         self._drag_pending = {}
         self._drag_epoch = 0
@@ -55,8 +68,7 @@ class MainWindow(QMainWindow):
         self._create_shell()
         self._build_motion_page()
         self._build_teaching_page()
-        self._build_motor_page()
-        self._build_protection_page()
+        self._build_motor_settings_page()
         self._build_gripper_page()
         self._build_rgb_page()
         self._build_settings_page()
@@ -70,20 +82,22 @@ class MainWindow(QMainWindow):
         controller.actual_pose_changed.connect(self._actual_pose)
         controller.fields_changed.connect(self._fields_updated)
         controller.ports_changed.connect(self._ports_updated)
+        controller.rgb_changed.connect(self._rgb_device_changed)
+        controller.preset_pose_completed.connect(self._preset_pose_completed)
         if hasattr(controller, "position_synced"):
             controller.position_synced.connect(self._position_synced)
         self.connection_combo.currentIndexChanged.connect(lambda *_: self._update_state({}))
         self._restore_points()
         self._building = False
         self.apply_theme(store.settings.get("theme", "light"))
+        self._rgb_device_changed(controller.rgb_snapshot())
         geometry = store.settings.get("geometry", "")
         if geometry:
             self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
         window_state = store.settings.get("window_state", "")
         if window_state:
             self.restoreState(QByteArray.fromBase64(window_state.encode("ascii")))
-        # Older saved layouts placed the terminal under the entire workspace.
-        # The inline log is now the default; its expanded window stays separate.
+        # Keep the terminal hidden and separate, including older docked layouts.
         self.log_dock.setFloating(True)
         self.log_dock.hide()
         self.controller.set_polling(store.settings.get("auto_poll", True), store.settings.get("poll_hz", 5))
@@ -175,7 +189,7 @@ class MainWindow(QMainWindow):
         side.addSpacing(24)
         self.navigation = QListWidget()
         self.navigation.setObjectName("Navigation")
-        self.navigation.addItems(("运动控制", "点位示教", "电机参数", "保护与校准", "夹爪设置", "RGB 灯效", "软件设置"))
+        self.navigation.addItems(("运动控制", "点位示教", "电机设置", "夹爪设置", "RGB 灯效", "软件设置"))
         side.addWidget(self.navigation, 1)
         foot = QLabel("6 轴 · 地轨 · 夹爪\nDummy Robot 控制台")
         foot.setObjectName("SidebarFoot")
@@ -190,21 +204,25 @@ class MainWindow(QMainWindow):
         self.navigation.setCurrentRow(0)
         self.statusBar().showMessage("离线预览可用；连接设备后可读取实际位置。")
 
-    def _page(self, title, subtitle, scroll=True, actions=None):
+    def _page(self, title, subtitle, scroll=True, actions=None, tabs=None):
         page = QWidget()
+        if tabs is not None:
+            page.setObjectName("MotorTabPage")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(20, 18, 20, 14)
+        margins = (12, 12, 12, 12) if tabs is not None else (20, 18, 20, 14)
+        layout.setContentsMargins(*margins)
         layout.setSpacing(12)
-        heading = QLabel(title)
-        heading.setObjectName("PageTitle")
-        if actions is None:
-            layout.addWidget(heading)
-        else:
-            header = QHBoxLayout()
-            header.setSpacing(16)
-            header.addWidget(heading)
-            header.addLayout(actions, 1)
-            layout.addLayout(header)
+        if tabs is None:
+            heading = QLabel(title)
+            heading.setObjectName("PageTitle")
+            if actions is None:
+                layout.addWidget(heading)
+            else:
+                header = QHBoxLayout()
+                header.setSpacing(16)
+                header.addWidget(heading)
+                header.addLayout(actions, 1)
+                layout.addLayout(header)
         description = hint(subtitle, "muted")
         description.setObjectName("PageSubtitle")
         layout.addWidget(description)
@@ -217,10 +235,11 @@ class MainWindow(QMainWindow):
             content_layout.setSpacing(12)
             area.setWidget(content)
             layout.addWidget(area, 1)
+        if tabs is None:
             self.pages.addWidget(page)
-            return content_layout
-        self.pages.addWidget(page)
-        return layout
+        else:
+            tabs.addTab(page, title)
+        return content_layout if scroll else layout
 
     @staticmethod
     def _group(title):
@@ -262,6 +281,20 @@ class MainWindow(QMainWindow):
         for title, view in (("等轴", "isometric"), ("正面", "front"), ("俯视", "top")):
             toolbar.addWidget(button(title, lambda value=view: self.viewer.set_camera(value)))
         toolbar.addWidget(button("复位视角", lambda: self.viewer.reset_camera()))
+        self.viewer_grid_button = button("网格")
+        self.viewer_grid_button.setObjectName("ViewerToggle")
+        self.viewer_grid_button.setCheckable(True)
+        self.viewer_grid_button.setChecked(self.store.settings.get("show_grid", True))
+        self.viewer_grid_button.setToolTip("显示或隐藏三维地面网格")
+        self.viewer_grid_button.toggled.connect(self._grid_changed)
+        toolbar.addWidget(self.viewer_grid_button)
+        self.viewer_axes_button = button("坐标轴")
+        self.viewer_axes_button.setObjectName("ViewerToggle")
+        self.viewer_axes_button.setCheckable(True)
+        self.viewer_axes_button.setChecked(self.store.settings.get("show_axes", True))
+        self.viewer_axes_button.setToolTip("显示或隐藏三维坐标轴")
+        self.viewer_axes_button.toggled.connect(self._axes_changed)
+        toolbar.addWidget(self.viewer_axes_button)
         toolbar.addStretch()
         scene_layout.addLayout(toolbar)
         self.viewer = RobotView()
@@ -397,7 +430,8 @@ class MainWindow(QMainWindow):
         self._motion_axis_scrolls = (joint_scroll, pose_scroll)
         controls_layout.addWidget(self.motion_tabs, 1)
         self._build_motion_gripper(controls_layout)
-        self._build_motion_log(controls_layout)
+        self._build_quick_points(controls_layout)
+        controls_layout.addStretch()
         self.motion_controls.installEventFilter(self)
         self.motion_splitter.addWidget(self.motion_controls)
         self.motion_splitter.setStretchFactor(0, 3)
@@ -432,30 +466,6 @@ class MainWindow(QMainWindow):
                           + area.maximumHeight())
         self.motion_tabs.setMaximumHeight(natural_height
                                           + self.motion_tabs.tabBar().sizeHint().height() + 4)
-
-    def _build_motion_log(self, layout):
-        self.motion_log_panel = QFrame()
-        self.motion_log_panel.setObjectName("Card")
-        box = QVBoxLayout(self.motion_log_panel)
-        box.setContentsMargins(8, 6, 8, 8)
-        box.setSpacing(5)
-        header = QHBoxLayout()
-        header.addWidget(QLabel("串口日志"))
-        header.addStretch()
-        self.expand_log_button = button("展开", self._expand_log)
-        self.expand_log_button.setObjectName("ExpandLog")
-        self.expand_log_button.setToolTip("在独立窗口中查看日志和发送自定义指令")
-        header.addWidget(self.expand_log_button)
-        box.addLayout(header)
-        self.compact_log_view = QPlainTextEdit()
-        self.compact_log_view.setObjectName("LogView")
-        self.compact_log_view.setReadOnly(True)
-        self.compact_log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.compact_log_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
-        self.compact_log_view.setMinimumHeight(72)
-        self.compact_log_view.setPlaceholderText("连接设备后显示串口收发日志")
-        box.addWidget(self.compact_log_view, 1)
-        layout.addWidget(self.motion_log_panel)
 
     def _build_motion_gripper(self, layout):
         """Always visible under the movement tabs; mirrors the gripper page."""
@@ -492,6 +502,50 @@ class MainWindow(QMainWindow):
         row.addWidget(button("设置电流", self.controller._cmd_hand_set_i))
         box.addLayout(row)
         layout.addWidget(self.motion_gripper_group)
+
+    def _build_quick_points(self, layout):
+        self.quick_points_panel = QFrame()
+        self.quick_points_panel.setObjectName("Card")
+        box = QVBoxLayout(self.quick_points_panel)
+        box.setContentsMargins(8, 6, 8, 8)
+        box.setSpacing(6)
+        header = QHBoxLayout()
+        title = QLabel("点位快捷加载")
+        title.setToolTip("按示教列表顺序显示前 4 个点位；点击仅加载目标和预览。")
+        header.addWidget(title)
+        header.addStretch()
+        self.quick_point_save = button("保存当前点位", self._save_motion_point)
+        self.quick_point_save.setToolTip("保存运动页当前编辑目标、速度与夹爪开度；不查询或发送设备指令")
+        header.addWidget(self.quick_point_save)
+        self.quick_point_manage = button("管理", lambda: self.navigation.setCurrentRow(1))
+        self.quick_point_manage.setToolTip("打开点位示教，保存、编辑或调整点位顺序")
+        header.addWidget(self.quick_point_manage)
+        box.addLayout(header)
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        self.quick_point_buttons = []
+        for index in range(4):
+            control = PointShortcutButton(index + 1, lambda slot=index: self._load_quick_point(slot))
+            self.quick_point_buttons.append(control)
+            grid.addWidget(control, index // 2, index % 2)
+        box.addLayout(grid)
+        layout.addWidget(self.quick_points_panel)
+
+    def _refresh_quick_points(self):
+        for index, control in enumerate(self.quick_point_buttons):
+            control.set_point(self.points[index] if index < len(self.points) else None)
+
+    def _load_quick_point(self, index):
+        if not 0 <= index < min(4, len(self.points)):
+            return
+        record = self.points[index]
+        # Selection is mirrored even when the same row was already selected.
+        with QSignalBlocker(self.point_table):
+            self.point_table.selectRow(index)
+        self._load_point_target(record)
+        self.statusBar().showMessage(f"已载入：{record['name']} · 点击发送按钮执行")
 
     def _focus_event(self, original, joint):
         def focus(event):
@@ -620,8 +674,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.sequence_status)
         layout.addWidget(hint("MoveJ 为角度与地轨 mm；MoveL 为 XYZ mm、ABC °。发送选中使用点位速度，顺序执行使用统一速度；夹爪开度仅作预览。"))
 
+    def _build_motor_settings_page(self):
+        layout = self._page("电机设置", "电机参数、点位校准与保护设置集中管理。按下方分类选择操作。", False)
+        self.motor_tabs = QTabWidget()
+        self.motor_tabs.setObjectName("MotorTabs")
+        self.motor_tabs.setDocumentMode(True)
+        self.motor_tabs.tabBar().setExpanding(True)
+        layout.addWidget(self.motor_tabs, 1)
+        self._build_motor_page()
+        self._build_protection_page()
+
     def _build_motor_page(self):
-        layout = self._page("电机参数", "本页参数查询、写入与电机维护仅支持 USB。节点 0 为 ALL 查询；运行时应用与 EEPROM 保存明确区分。")
+        layout = self._page("电机参数", "本页参数查询、写入与电机维护仅支持 USB。节点 0 为 ALL 查询；运行时应用与 EEPROM 保存明确区分。", tabs=self.motor_tabs)
         self.motor_page_content = layout.parentWidget()
         node_group, box = self._group("目标节点")
         row = QHBoxLayout()
@@ -693,8 +757,9 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def _build_protection_page(self):
-        layout = self._page("保护与校准", "参数先读取实际节点；应用仅改变 RAM，保存需要失能。运行与上次快照可在保护锁定时查询。", False)
+        layout = self._page("电机点位校准", "参数先读取实际节点；应用仅改变 RAM，保存需要失能。运行与上次快照可在保护锁定时查询。", False, tabs=self.motor_tabs)
         tabs = QTabWidget()
+        self.protection_tabs = tabs
         nodes, entries, rows, saves = {}, {}, {}, {}
         for kind, title, descriptors, choices, default in (
             ("STALL", "普通堵转 · J1–J7", STALL_PARAMETERS, range(9), 1),
@@ -822,9 +887,13 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def _build_rgb_page(self):
-        layout = self._page("RGB 灯效", "24 灯珠圆环 · 预设、动画与设备状态联动。编辑不自动发送；应用改 RAM，保存整组后掉电保持。", False)
+        layout = self._page("RGB 灯效", "白色散光灯环 · 预设、动画与设备状态联动。编辑不自动发送；应用改 RAM，保存整组后掉电保持。", False)
+        self.rgb_page = layout.parentWidget()
         self.rgb_status = hint("尚未回读 RGB 配置。", "muted")
-        self._bind("_rgb_status_var", self.rgb_status)
+        # Keep complete diagnostics in the existing field and the summary tooltip.
+        self.rgb_detail_label = QLabel(self.rgb_page)
+        self.rgb_detail_label.hide()
+        self._bind("_rgb_status_var", self.rgb_detail_label)
         layout.addWidget(self.rgb_status)
         row = QHBoxLayout()
         for text, command in (("渐开", "!RGB_ON"), ("渐关", "!RGB_OFF"),
@@ -834,6 +903,8 @@ class MainWindow(QMainWindow):
         row.addStretch()
         layout.addLayout(row)
         tabs = QTabWidget()
+        self.rgb_tabs = tabs
+        tabs.setMinimumWidth(530)
 
         page, box = self._rgb_tab(tabs, "亮度与预设")
         group, content = self._group("设定亮度")
@@ -853,10 +924,10 @@ class MainWindow(QMainWindow):
         content.addLayout(row)
         content.addWidget(hint("0% 保持全黑；渐关保留设定亮度。滑块只编辑，点击应用才发送。"))
         box.addWidget(group)
-        group, content = self._group("手动灯效预览")
+        group, content = self._group("设备灯效切换")
         grid = QGridLayout()
         for index, title in enumerate(RGB_MODES[:10]):
-            grid.addWidget(button(title, lambda mode=index: self.controller.send_cmd(f"!RGB_MODE {mode}")), index // 5, index % 5)
+            grid.addWidget(button(title, lambda mode=index: self._rgb_apply_mode(mode)), index // 5, index % 5)
         content.addLayout(grid)
         box.addWidget(group)
         group, content = self._group("单色预设")
@@ -866,11 +937,12 @@ class MainWindow(QMainWindow):
         color_index.currentIndexChanged.connect(lambda *_: self.controller._rgb_fill_color() if not self._building else None)
         row.addWidget(QLabel("预设"))
         row.addWidget(color_index)
-        color = ColorEditor((0, 0, 255))
-        self.fields["_rgb_color_vars"] = [FieldAdapter(spin, str) for spin in color.channels]
-        row.addWidget(color, 1)
+        row.addStretch()
         row.addWidget(button("应用颜色", self.controller._rgb_apply_color))
         content.addLayout(row)
+        color = ColorEditor((0, 0, 255))
+        self.fields["_rgb_color_vars"] = [FieldAdapter(spin, str) for spin in color.channels]
+        content.addWidget(color)
         box.addWidget(group)
         group, content = self._group("过渡时间 · ms")
         grid = QGridLayout()
@@ -897,7 +969,7 @@ class MainWindow(QMainWindow):
         content.addWidget(color)
         row = QHBoxLayout()
         row.addWidget(button("应用自动颜色", self.controller._rgb_apply_auto_color, "primary"))
-        row.addWidget(button("单色常亮预览", lambda: self.controller.send_cmd(f"!RGB_MODE {10 + auto_index.currentIndex()}")))
+        row.addWidget(button("应用常亮灯效", lambda: self._rgb_apply_mode(10 + auto_index.currentIndex())))
         row.addWidget(button("恢复自动联动", lambda: self.controller.send_cmd("!RGB_AUTO 1")))
         content.addLayout(row)
         content.addWidget(hint("三种自动颜色分别配置，与手动预设及旋转动画颜色独立。手动预览会退出自动联动。"))
@@ -929,7 +1001,7 @@ class MainWindow(QMainWindow):
         content.addWidget(reverse)
         row = QHBoxLayout()
         row.addWidget(button("应用动画参数", self.controller._rgb_apply_effect, "primary"))
-        row.addWidget(button("手动预览", lambda: self.controller.send_cmd(f"!RGB_MODE {effect_mode.currentIndex()+3}")))
+        row.addWidget(button("应用该灯效", lambda: self._rgb_apply_mode(effect_mode.currentIndex()+3)))
         content.addLayout(row)
         content.addWidget(hint("副颜色用于赛博呼吸，方向和拖尾用于旋转。彩虹自行生成颜色。保护报警颜色由固件固定。"))
         box.addWidget(group)
@@ -958,12 +1030,260 @@ class MainWindow(QMainWindow):
         content.addWidget(hint("独立颜色仅在该颜色来源被选中时使用；AUTO 来源引用自动颜色。报警不可改色，STOP / 校准期间只允许查询。"))
         box.addWidget(group)
         box.addStretch()
-        layout.addWidget(tabs, 1)
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(tabs, 3)
+        self.rgb_preview_panel = QFrame()
+        self.rgb_preview_panel.setObjectName("Card")
+        self.rgb_preview_panel.setMinimumWidth(285)
+        preview = QVBoxLayout(self.rgb_preview_panel)
+        preview.setContentsMargins(10, 10, 10, 10)
+        preview.setSpacing(6)
+        title = QLabel("灯环模拟")
+        title.setObjectName("RgbPreviewTitle")
+        preview.addWidget(title)
+        self.rgb_preview_source = self._combo(("本地编辑预览", "跟随设备配置"))
+        self.rgb_preview_source.setToolTip("本地预览不会发送指令；设备跟随按已回读配置与状态模拟，动画相位独立。")
+        preview.addWidget(self.rgb_preview_source)
+        self.rgb_preview_mode = self._combo(RGB_MODES, 3)
+        self.rgb_preview_mode.setToolTip("选择仅在电脑灯环中模拟的灯效；应用设备灯效使用左侧按钮。")
+        preview.addWidget(self.rgb_preview_mode)
+        simulation = QHBoxLayout()
+        simulation.setSpacing(6)
+        self.rgb_preview_state = QComboBox()
+        self.rgb_preview_state.addItem("手动灯效", "MANUAL")
+        for code, name in (*RGB_STATES, ("FAULT", "故障报警")):
+            self.rgb_preview_state.addItem(name, code)
+        self.rgb_preview_state.setToolTip("仅模拟设备状态及其灯效绑定，不改变机械臂状态。")
+        simulation.addWidget(self.rgb_preview_state, 1)
+        self.rgb_preview_on = QCheckBox("模拟开灯")
+        self.rgb_preview_on.setChecked(True)
+        simulation.addWidget(self.rgb_preview_on)
+        preview.addLayout(simulation)
+        self.rgb_ring = RgbRing()
+        preview.addWidget(self.rgb_ring, 1)
+        self.rgb_preview_status = hint("本地模拟 · 编辑不发送", "muted")
+        preview.addWidget(self.rgb_preview_status)
+        columns.addWidget(self.rgb_preview_panel, 2)
+        layout.addLayout(columns, 1)
+
+        for name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state"):
+            self._rgb_load_local_editor(name)
+        for name in ("_rgb_bright", "_rgb_color_idx", "_rgb_color_vars", "_rgb_auto_idx",
+                     "_rgb_auto_color_vars", "_rgb_fades", "_rgb_effect_mode", "_rgb_effect_first",
+                     "_rgb_effect_second", "_rgb_effect_params", "_rgb_reverse", "_rgb_state",
+                     "_rgb_state_mode", "_rgb_state_source", "_rgb_state_color"):
+            adapters = self.fields[name]
+            for adapter in adapters if isinstance(adapters, list) else [adapters]:
+                widget = adapter.widget
+                signal = (widget.currentIndexChanged if isinstance(widget, QComboBox) else
+                          widget.toggled if isinstance(widget, QCheckBox) else widget.valueChanged)
+                signal.connect(lambda *_, field=name: self._rgb_edit_changed(field))
+        tabs.currentChanged.connect(self._rgb_editor_tab_changed)
+        self.rgb_preview_source.currentIndexChanged.connect(self._rgb_preview_source_changed)
+        self.rgb_preview_mode.currentIndexChanged.connect(self._rgb_preview_selection_changed)
+        self.rgb_preview_state.currentIndexChanged.connect(self._rgb_preview_selection_changed)
+        self.rgb_preview_on.toggled.connect(self._rgb_preview_selection_changed)
         row = QHBoxLayout()
         row.addWidget(hint("未保存的配置掉电丢失；保存需要已确认失能。"), 1)
         row.addWidget(button("恢复默认（临时）", lambda: self.controller.send_cmd("!RGB_RESET")))
         row.addWidget(button("保存全部 RGB 配置", self.controller._rgb_save, "primary"))
         layout.addLayout(row)
+
+    def _rgb_apply_mode(self, mode):
+        if self.rgb_preview_source.currentIndex() == 0:
+            self.rgb_preview_state.setCurrentIndex(0)
+            self.rgb_preview_mode.setCurrentIndex(mode)
+        self.controller.send_cmd(f"!RGB_MODE {mode}")
+
+    def _rgb_field_values(self, name):
+        return tuple(int(adapter.get()) for adapter in self.fields[name])
+
+    def _rgb_load_local_editor(self, name):
+        """Restore the selected draft bank, including edits made while offline."""
+        previous = self._rgb_loading_editor
+        self._rgb_loading_editor = True
+        try:
+            if name == "_rgb_color_idx":
+                values = self._rgb_draft["colors"][self.fields[name].current()]
+                groups = (("_rgb_color_vars", values),)
+            elif name == "_rgb_auto_idx":
+                values = self._rgb_draft["auto_colors"][self.fields[name].current() + 1]
+                groups = (("_rgb_auto_color_vars", values),)
+            elif name == "_rgb_effect_mode":
+                effect = self._rgb_draft["effects"][self.fields[name].current() + 3]
+                groups = (("_rgb_effect_first", effect[:3]), ("_rgb_effect_second", effect[3:6]),
+                          ("_rgb_effect_params", (effect[6], effect[8], effect[9], effect[10])))
+                self.fields["_rgb_reverse"].set(bool(effect[7]))
+            elif name == "_rgb_state":
+                state = RGB_STATES[self.fields[name].current()][0]
+                binding = self._rgb_draft["states"][state]
+                self.fields["_rgb_state_mode"].current(binding[0])
+                self.fields["_rgb_state_source"].current(binding[1])
+                groups = (("_rgb_state_color", binding[2:]),)
+            else:
+                return
+            for field, values in groups:
+                for adapter, value in zip(self.fields[field], values):
+                    adapter.set(value)
+        finally:
+            self._rgb_loading_editor = previous
+
+    def _rgb_store_draft(self, path, value):
+        target = self._rgb_draft
+        for key in path[:-1]:
+            target = target[key]
+        if target[path[-1]] != value:
+            self._rgb_dirty_paths.add(path)
+            target[path[-1]] = value
+
+    def _rgb_edit_changed(self, name):
+        if self._building or self._rgb_loading_editor or getattr(self.controller, "_rgb_applying_readback", False):
+            return
+        if name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state"):
+            self._rgb_load_local_editor(name)
+        self.rgb_preview_source.setCurrentIndex(0)
+        if name.startswith("_rgb_color"):
+            index = self.fields["_rgb_color_idx"].current()
+            self._rgb_store_draft(("colors", index), self._rgb_field_values("_rgb_color_vars"))
+            self.rgb_preview_state.setCurrentIndex(0)
+            self.rgb_preview_mode.setCurrentIndex(index)
+        elif name.startswith("_rgb_auto"):
+            index = self.fields["_rgb_auto_idx"].current() + 1
+            self._rgb_store_draft(("auto_colors", index), self._rgb_field_values("_rgb_auto_color_vars"))
+            self.rgb_preview_state.setCurrentIndex(0)
+            self.rgb_preview_mode.setCurrentIndex(index + 9)
+        elif name.startswith("_rgb_effect") or name == "_rgb_reverse":
+            index = self.fields["_rgb_effect_mode"].current() + 3
+            period, tail, on, off = self._rgb_field_values("_rgb_effect_params")
+            effect = (self._rgb_field_values("_rgb_effect_first") + self._rgb_field_values("_rgb_effect_second")
+                      + (period, int(self.fields["_rgb_reverse"].get()), tail, on, off))
+            self._rgb_store_draft(("effects", index), effect)
+            self.rgb_preview_state.setCurrentIndex(0)
+            self.rgb_preview_mode.setCurrentIndex(index)
+        elif name.startswith("_rgb_state"):
+            state = RGB_STATES[self.fields["_rgb_state"].current()][0]
+            binding = (self.fields["_rgb_state_mode"].current(), self.fields["_rgb_state_source"].current())
+            self._rgb_store_draft(("states", state), binding + self._rgb_field_values("_rgb_state_color"))
+            self.rgb_preview_state.setCurrentIndex(self.rgb_preview_state.findData(state))
+        elif name == "_rgb_bright":
+            self._rgb_store_draft(("brightness",), int(self.fields[name].get()))
+        elif name == "_rgb_fades":
+            for key, value in zip(("fade_on_ms", "fade_off_ms", "brightness_ms", "transition_ms"),
+                                  self._rgb_field_values(name)):
+                self._rgb_store_draft((key,), value)
+        self._render_rgb_preview()
+
+    def _rgb_editor_tab_changed(self, index):
+        if self.rgb_preview_source.currentIndex() == 0:
+            self._rgb_edit_changed(("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state")[index])
+
+    def _rgb_preview_selection_changed(self, *args):
+        local = self.rgb_preview_source.currentIndex() == 0
+        self.rgb_preview_mode.setEnabled(local and self.rgb_preview_state.currentIndex() == 0)
+        self.rgb_preview_state.setEnabled(local)
+        self.rgb_preview_on.setEnabled(local)
+        self._render_rgb_preview()
+
+    def _rgb_preview_source_changed(self, index):
+        self._rgb_simulator.reset()
+        self._rgb_follow_seeded = False
+        self._rgb_preview_selection_changed()
+        self._sync_rgb_preview_activity()
+
+    def _rgb_device_changed(self, snapshot):
+        if self._closed:
+            return
+        previous = self._rgb_device
+        self._rgb_device = snapshot
+        if previous is None or previous["connection_id"] != snapshot["connection_id"]:
+            self._rgb_simulator.reset()
+            self._rgb_follow_seeded = False
+        if snapshot["complete"]:
+            incoming = copy.deepcopy(snapshot["config"])
+            for path in tuple(self._rgb_dirty_paths):
+                old, target = self._rgb_draft, incoming
+                for key in path[:-1]:
+                    old, target = old[key], target[key]
+                if target[path[-1]] == old[path[-1]]:
+                    self._rgb_dirty_paths.discard(path)
+                else:
+                    target[path[-1]] = old[path[-1]]
+            self._rgb_draft = incoming
+            if self.rgb_preview_source.currentIndex() == 0:
+                previous_loading = self._rgb_loading_editor
+                self._rgb_loading_editor = True
+                try:
+                    self.fields["_rgb_bright"].set(incoming["brightness"])
+                    for adapter, key in zip(self.fields["_rgb_fades"],
+                                            ("fade_on_ms", "fade_off_ms", "brightness_ms", "transition_ms")):
+                        adapter.set(incoming[key])
+                    for name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state"):
+                        self._rgb_load_local_editor(name)
+                finally:
+                    self._rgb_loading_editor = previous_loading
+        runtime = snapshot["runtime"]
+        if not snapshot["connected"]:
+            summary = "未连接设备 · 本地灯效预览可用"
+        elif runtime:
+            summary = (f"{'自动' if runtime['auto'] else '手动'} · 设定 {runtime['bright']}% · "
+                       f"当前 {runtime['current']}% · {runtime['state']} · "
+                       f"{'配置未保存' if runtime['dirty'] else '配置已保存'}")
+        else:
+            summary = "已连接 · 等待 RGB 配置与状态回读"
+        self.rgb_status.setText(summary)
+        self.rgb_status.setToolTip(str(self.fields["_rgb_status_var"].get()))
+        self._render_rgb_preview()
+        self._sync_rgb_preview_activity()
+
+    def _sync_rgb_preview_activity(self):
+        if not hasattr(self, "rgb_ring"):
+            return
+        active = (not self._closed and self.isVisible() and not self.isMinimized()
+                  and self.pages.currentWidget() is self.rgb_page)
+        self.rgb_ring.set_active(active)
+        if active:
+            if not self._rgb_render_timer.isActive():
+                self._rgb_render_timer.start()
+        else:
+            self._rgb_render_timer.stop()
+        self.controller.set_rgb_monitoring(active and self.rgb_preview_source.currentIndex() == 1)
+
+    def _render_rgb_preview(self):
+        if self._building or not hasattr(self, "rgb_ring") or self._closed:
+            return
+        now = int(time.monotonic() * 1000)
+        if self.rgb_preview_source.currentIndex() == 0:
+            config = copy.deepcopy(self._rgb_draft)
+            state = self.rgb_preview_state.currentData()
+            config.update(enabled=self.rgb_preview_on.isChecked(), automatic=state != "MANUAL",
+                          manual_mode=self.rgb_preview_mode.currentIndex())
+            source = state
+            state = "DISABLED" if state == "MANUAL" else state
+            status = "本地模拟 · 编辑不发送"
+        else:
+            snapshot = self._rgb_device or self.controller.rgb_snapshot()
+            runtime = snapshot["runtime"]
+            age = time.monotonic() - snapshot["received_at"] if snapshot["received_at"] is not None else None
+            unavailable = (not snapshot["connected"] or not snapshot["complete"] or not runtime)
+            if unavailable or age is None or age > 3:
+                self._rgb_follow_seeded = False
+                title = "未连接" if not snapshot["connected"] else "等待回读" if unavailable else "状态已过期"
+                self.rgb_ring.set_frame([(0, 0, 0)] * 24)
+                self.rgb_ring.set_caption(title, "设备配置跟随")
+                self.rgb_preview_status.setText("连接并查询全部配置后显示" if unavailable else "等待下一次状态回读")
+                return
+            if not self._rgb_follow_seeded:
+                self._rgb_simulator.reset(initial_brightness=runtime["current"])
+                self._rgb_follow_seeded = True
+            config, state, source = snapshot["config"], runtime["state"], runtime["source"]
+            status = f"设备配置跟随 · {age:.1f}s 前回读\n{source} · 动画相位独立"
+        frame = self._rgb_simulator.frame(config, state, now, source=source)
+        self.rgb_ring.set_frame(frame)
+        mode = RGB_MODES[self._rgb_simulator.mode].split(" ", 1)[1]
+        brightness_label = "亮度" if self.rgb_preview_source.currentIndex() == 0 else "模拟"
+        self.rgb_ring.set_caption(mode, f"{brightness_label} {self._rgb_simulator.current_brightness}%")
+        self.rgb_preview_status.setText(status)
 
     def _rgb_tab(self, tabs, title):
         area = QScrollArea()
@@ -1118,8 +1438,6 @@ class MainWindow(QMainWindow):
         self.log_dock.setMinimumSize(720, 340)
         self.log_dock.resize(840, 480)
         self.log_dock.hide()
-        # Share one document so filters, pause, clear and limits stay identical.
-        self.compact_log_view.setDocument(self.log_view.document())
 
     def _log_filter_changed(self, index):
         if 0 <= index < len(self.log_type_buttons):
@@ -1228,6 +1546,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(str(status))
         if stale:
             self.actual_status.setText("实际位置未回读 / 已过期 · 夹爪显示目标开度")
+        self._sync_rgb_preview_activity()
 
     def _actual_pose(self, values):
         self.viewer.set_actual_pose(values, None)
@@ -1376,6 +1695,26 @@ class MainWindow(QMainWindow):
             self.teaching_drag.setChecked(False)
         return self.controller.send_cmd(command)
 
+    def _preset_pose_completed(self, command, values):
+        """Display a completed preset without manufacturing position telemetry."""
+        if self._closed or command not in ("HOME", "RESET") or len(values) != 7:
+            return
+        self._cancel_drag()
+        self._teaching_sync = None
+        previous = self.controller._suppress_drag_send
+        self.controller._suppress_drag_send = True
+        try:
+            self.motion_tabs.setCurrentIndex(0)
+            self.teaching_tabs.setCurrentIndex(0)
+            for rows in (self.joint_rows, self.teaching_joint_rows):
+                for row, value in zip(rows, values):
+                    row.set_value(value)
+        finally:
+            self.controller._suppress_drag_send = previous
+        self.viewer_mode.setCurrentIndex(0)
+        self._preview_changed()
+        self.statusBar().showMessage(f"{command} 已完成 · 模型已同步到{'回零' if command == 'HOME' else '休息'}目标")
+
     def _calibration_command(self):
         self._cancel_drag()
         self._teaching_sync = None
@@ -1386,6 +1725,7 @@ class MainWindow(QMainWindow):
         self._cancel_drag()
         self._teaching_sync = None
         self._preview_changed()
+        self._sync_rgb_preview_activity()
 
     def _motion_tab_changed(self, index):
         self._schedule_motion_fit()
@@ -1504,6 +1844,7 @@ class MainWindow(QMainWindow):
         self._point_editing = False
         if selected is not None and 0 <= selected < len(self.points):
             self.point_table.selectRow(selected)
+        self._refresh_quick_points()
 
     def _persist_points(self, selected=None):
         try:
@@ -1531,6 +1872,39 @@ class MainWindow(QMainWindow):
         self._persist_points(len(self.points) - 1)
         self.controller.log(f"已保存点位：{name}", "INFO")
 
+    def _save_motion_point(self):
+        self._cancel_drag()
+        self._teaching_sync = None
+        joint = self.motion_tabs.currentIndex() == 0
+        record = {"type": "MoveJ" if joint else "MoveL",
+                  "gripper": self.motion_hand_row.spin.value(),
+                  "speed": (self.j_speed if joint else self.l_speed).value()}
+        record["joints" if joint else "pose"] = [
+            spin.value() for spin in (self.joint_spins if joint else self.pose_spins)]
+        name, accepted = QInputDialog.getText(
+            self, "保存当前点位",
+            f"点位名称（保存当前 {record['type']} 编辑目标、速度和夹爪开度）",
+            QLineEdit.EchoMode.Normal, f"点位 {len(self.points) + 1}")
+        if not accepted:
+            return
+        name = name.strip()
+        if not name or len(name) > 120:
+            QMessageBox.warning(self, "点位名称", "请输入 1～120 个字符的点位名称。")
+            return
+        record["name"] = name
+        try:
+            self.store.save_points(self.points + [record])
+        except (OSError, ValueError) as exc:
+            self.controller.log(f"点位保存失败：{exc}", "ERROR")
+            QMessageBox.warning(self, "保存失败", f"点位未保存，请重试。\n{exc}")
+            return
+        self.points = copy.deepcopy(self.store.points)
+        with QSignalBlocker(self.point_table):
+            self._restore_points(len(self.points) - 1)
+        self._load_point_target(self.points[-1], preview=False)
+        self.controller.log(f"已保存点位：{name}", "INFO")
+        self.statusBar().showMessage(f"已保存：{name}" + (" · 快捷区显示列表前 4 个点位" if len(self.points) > 4 else ""))
+
     def _replace_point(self):
         index = self._selected_row()
         if index is None:
@@ -1546,7 +1920,9 @@ class MainWindow(QMainWindow):
         row = self._selected_row()
         if row is None or row >= len(self.points):
             return
-        record = self.points[row]
+        self._load_point_target(self.points[row])
+
+    def _load_point_target(self, record, preview=True):
         self._cancel_drag()
         self._teaching_sync = None
         self.point_name.setText(record["name"])
@@ -1574,7 +1950,8 @@ class MainWindow(QMainWindow):
             (self.j_speed if kind == "MoveJ" else self.l_speed).setValue(speed)
         finally:
             self.controller._suppress_drag_send = old
-        self.viewer_mode.setCurrentIndex(0)
+        if preview:
+            self.viewer_mode.setCurrentIndex(0)
         self._preview_changed()
 
     def _point_name_changed(self, item):
@@ -1646,7 +2023,6 @@ class MainWindow(QMainWindow):
             self.snapshot_label.setText(message)
         if not self.log_pause.isChecked() and self._matches_log(tag, text):
             self.log_view.appendPlainText(text)
-            self.compact_log_view.verticalScrollBar().setValue(self.compact_log_view.verticalScrollBar().maximum())
 
     def _matches_log(self, tag, text):
         selected = self.log_filter.currentText()
@@ -1656,7 +2032,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "log_view") and not self.log_pause.isChecked():
             self.log_view.setPlainText("\n".join(text for tag, text in self._logs if self._matches_log(tag, text)))
             self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
-            self.compact_log_view.verticalScrollBar().setValue(self.compact_log_view.verticalScrollBar().maximum())
 
     def _clear_logs(self):
         self._logs.clear()
@@ -1679,6 +2054,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().setStyleSheet(stylesheet)
         self._schedule_motion_fit()
         self.viewer.set_theme(theme)
+        self.rgb_ring.set_theme(theme)
 
     def _theme_setting(self, index):
         if self._building:
@@ -1695,6 +2071,11 @@ class MainWindow(QMainWindow):
         self.store.update_settings(auto_poll=enabled, poll_hz=hz)
 
     def _grid_changed(self, visible):
+        for name in ("viewer_grid_button", "grid_check"):
+            control = getattr(self, name, None)
+            if control is not None and control.isChecked() != visible:
+                with QSignalBlocker(control):
+                    control.setChecked(visible)
         if hasattr(self.viewer, "set_grid_visible"):
             self.viewer.set_grid_visible(visible)
         elif hasattr(self.viewer, "set_show_grid"):
@@ -1703,6 +2084,11 @@ class MainWindow(QMainWindow):
             self.store.update_settings(show_grid=visible)
 
     def _axes_changed(self, visible):
+        for name in ("viewer_axes_button", "axes_check"):
+            control = getattr(self, name, None)
+            if control is not None and control.isChecked() != visible:
+                with QSignalBlocker(control):
+                    control.setChecked(visible)
         if hasattr(self.viewer, "set_axes_visible"):
             self.viewer.set_axes_visible(visible)
         elif hasattr(self.viewer, "set_show_axes"):
@@ -1724,9 +2110,24 @@ class MainWindow(QMainWindow):
         self.log_dock.hide()
         self.store.update_settings(geometry="", window_state="")
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_rgb_preview_activity()
+
+    def hideEvent(self, event):
+        self._sync_rgb_preview_activity()
+        super().hideEvent(event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._sync_rgb_preview_activity()
+
     def closeEvent(self, event):
         if not self._closed:
             self._closed = True
+            self._rgb_render_timer.stop()
+            self.controller.set_rgb_monitoring(False)
             self.log_dock.hide()
             self._cancel_drag()
             self.controller.close()

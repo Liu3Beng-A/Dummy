@@ -7,6 +7,7 @@ import re
 import math
 import queue
 from dataclasses import dataclass
+from functools import wraps
 from app.protocol.constants import *
 from app.core import dialogs as messagebox
 from app.storage.store import validate_points
@@ -20,6 +21,19 @@ class TeachingPoint:
     target: tuple[float, ...]
     gripper: float
     speed: float
+
+
+def _rgb_readback_guard(method):
+    """Widget signals during device fills must not be interpreted as local edits."""
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        previous = self._rgb_applying_readback
+        self._rgb_applying_readback = True
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._rgb_applying_readback = previous
+    return guarded
 
 
 class RobotBusiness:
@@ -96,21 +110,24 @@ class RobotBusiness:
             return
         self._rgb_send("!RGB_SAVE")
 
-    @staticmethod
-    def _rgb_set_fields(variables, values):
+    @_rgb_readback_guard
+    def _rgb_set_fields(self, variables, values):
         for variable, value in zip(variables, values):
             variable.set(str(value))
 
+    @_rgb_readback_guard
     def _rgb_fill_color(self):
         values = self._rgb_cache["colors"].get(self._rgb_color_idx.current())
         if values is not None:
             self._rgb_set_fields(self._rgb_color_vars, values)
 
+    @_rgb_readback_guard
     def _rgb_fill_auto_color(self):
         values = self._rgb_cache["auto_colors"].get(self._rgb_auto_idx.current() + 1)
         if values is not None:
             self._rgb_set_fields(self._rgb_auto_color_vars, values)
 
+    @_rgb_readback_guard
     def _rgb_fill_effect(self):
         values = self._rgb_cache["effects"].get(self._rgb_effect_mode.current() + 3)
         if values is not None:
@@ -119,6 +136,7 @@ class RobotBusiness:
             self._rgb_set_fields(self._rgb_effect_params, [values[6], values[8], values[9], values[10]])
             self._rgb_reverse.set(bool(values[7]))
 
+    @_rgb_readback_guard
     def _rgb_fill_state(self):
         values = self._rgb_cache["states"].get(RGB_STATES[self._rgb_state.current()][0])
         if values is not None:
@@ -126,66 +144,130 @@ class RobotBusiness:
             self._rgb_state_source.current(values[1])
             self._rgb_set_fields(self._rgb_state_color, values[2:])
 
+    @staticmethod
+    def _rgb_decode_fields(payload, limits):
+        """Reject missing, extra, duplicate or malformed wire fields atomically."""
+        fields = {}
+        for token in payload.split():
+            match = re.fullmatch(r"([a-z_]+)=([A-Z_]+|[0-9]+)", token)
+            if not match or match[1] not in limits or match[1] in fields:
+                return None
+            key, value = match.groups()
+            limit = limits[key]
+            if isinstance(limit, set):
+                if value not in limit:
+                    return None
+            else:
+                if not value.isdigit() or int(value) > limit:
+                    return None
+                value = int(value)
+            fields[key] = value
+        return fields if fields.keys() == limits.keys() else None
+
+    @_rgb_readback_guard
     def _handle_rgb_status(self, line):
-        """Called exclusively by _process_rx_line on the Qt main thread."""
-        if line.startswith(("RGB_STATUS ", "RGB_RUNTIME ", "RGB_STORAGE ", "RGB_DMA ", "RGB_TIMEOUT ")):
-            fields = dict(re.findall(r"(\w+)=([\w]+)", line))
-            if line.startswith("RGB_STATUS "):
-                self._rgb_runtime = {}
-            self._rgb_runtime.update(fields)
-            fields = self._rgb_runtime
-            required = {"on", "auto", "bright", "current", "mode", "state", "source", "dirty", "storage", "errors", "timeouts"}
-            if required <= fields.keys():
-                limits = {"on": 1, "auto": 1, "bright": 100, "current": 100, "mode": 12,
-                          "dirty": 1, "storage": 2, "errors": 0xFFFFFFFF, "timeouts": 0xFFFFFFFF}
-                if any(re.fullmatch(r"[0-9]+", fields[key]) is None or int(fields[key]) > maximum
-                       for key, maximum in limits.items()):
-                    return
-                state_names = {state for state, _ in RGB_STATES} | {"FAULT"}
-                if fields["state"] not in state_names or fields["source"] not in state_names | {"MANUAL", "OFF"}:
-                    return
-                storage = {"0": "未保存默认", "1": "有效", "2": "无效 / 需重新保存"}.get(fields["storage"], "未知")
-                self._rgb_status_var.set(
-                    f"灯{'开' if fields['on'] == '1' else '关'} / {'自动' if fields['auto'] == '1' else '手动'}  "
-                    f"设定{fields['bright']}% / 当前过渡{fields['current']}%\n"
-                    f"状态 {fields['state']} / 来源 {fields['source']} / 灯效 {fields['mode']}  "
-                    f"修改{'未保存' if fields['dirty'] == '1' else '已保存'}\n"
-                    f"存储 {storage} / DMA错误 {fields['errors']} / 超时 {fields['timeouts']}")
-                self._rgb_bright.set(fields["bright"])
-                self._rgb_scale.set(int(fields["bright"]))
-        elif line.startswith(("RGB_CONFIG ", "RGB_TIMING ")):
-            fields = dict(re.findall(r"(\w+)=(\d+)", line))
+        """Validate device readback before touching the snapshot or editor fields."""
+        if not self.is_connected:
+            return
+        if line.startswith("error RGB "):
+            self._rgb_query_failed()
+            return
+        state_names = {state for state, _ in RGB_STATES} | {"FAULT"}
+        runtime_limits = {
+            "RGB_STATUS": {"on": 1, "auto": 1, "bright": 100, "current": 100, "mode": 12},
+            "RGB_RUNTIME": {"state": state_names, "source": state_names | {"MANUAL", "OFF"}},
+            "RGB_STORAGE": {"dirty": 1, "storage": 2, "dma": 1},
+            "RGB_DMA": {"frames": 0xFFFFFFFF, "errors": 0xFFFFFFFF},
+            "RGB_TIMEOUT": {"timeouts": 0xFFFFFFFF},
+        }
+        prefix, _, payload = line.partition(" ")
+        if prefix in runtime_limits:
+            if prefix == "RGB_STATUS":
+                self._rgb_runtime_pending = {}
+                self._rgb_runtime_parts = set()
+                self._rgb_runtime_invalid = False
+                self._rgb_runtime_ready_for_config = False
+            fields = self._rgb_decode_fields(payload, runtime_limits[prefix])
+            if fields is None:
+                self._rgb_runtime_invalid = True
+                self._rgb_invalid_readback()
+                return
+            if self._rgb_runtime_pending is None:
+                return  # Never stitch an orphan tail onto a previous device status.
+            self._rgb_runtime_pending.update(fields)
+            self._rgb_runtime_parts.add(prefix)
+            if self._rgb_runtime_parts != runtime_limits.keys() or self._rgb_runtime_invalid:
+                return
+            fields = self._rgb_runtime_pending
+            self._rgb_runtime_pending = None
+            self._rgb_runtime = dict(fields)
+            storage = {0: "未保存默认", 1: "有效", 2: "无效 / 需重新保存"}[fields["storage"]]
+            self._rgb_status_var.set(
+                f"灯{'开' if fields['on'] else '关'} / {'自动' if fields['auto'] else '手动'}  "
+                f"设定{fields['bright']}% / 当前过渡{fields['current']}%\n"
+                f"状态 {fields['state']} / 来源 {fields['source']} / 灯效 {fields['mode']}  "
+                f"修改{'未保存' if fields['dirty'] else '已保存'}\n"
+                f"存储 {storage} / DMA错误 {fields['errors']} / 超时 {fields['timeouts']}")
+            self._rgb_bright.set(str(fields["bright"]))
+            self._rgb_scale.set(fields["bright"])
+            self._accept_rgb_runtime(fields)
+            return
+        config_limits = {
+            "RGB_CONFIG": {"manual": 12, "fade_on": 10000, "fade_off": 10000},
+            "RGB_TIMING": {"bright_ms": 10000, "transition": 5000},
+        }
+        if prefix in config_limits:
+            fields = self._rgb_decode_fields(payload, config_limits[prefix])
+            if fields is None:
+                self._rgb_invalid_readback()
+                return
+            names = {"manual": "manual_mode", "fade_on": "fade_on_ms", "fade_off": "fade_off_ms",
+                     "bright_ms": "brightness_ms", "transition": "transition_ms"}
+            self._accept_rgb_config_fields({names[key]: value for key, value in fields.items()},
+                                           start=prefix == "RGB_CONFIG")
             for index, key in enumerate(("fade_on", "fade_off", "bright_ms", "transition")):
-                if key in fields and int(fields[key]) <= (5000 if index == 3 else 10000):
-                    self._rgb_fades[index].set(fields[key])
-        else:
-            match = re.fullmatch(r"RGB_COLOR ([0-2]) (\d+) (\d+) (\d+)", line)
-            if match:
-                values = list(map(int, match.groups()))
-                if all(0 <= v <= 255 for v in values[1:]):
-                    self._rgb_cache["colors"][values[0]] = values[1:]
-            match = re.fullmatch(r"RGB_AUTO_COLOR ([1-3]) (\d+) (\d+) (\d+)", line)
-            if match:
-                values = list(map(int, match.groups()))
-                if all(0 <= v <= 255 for v in values[1:]):
-                    self._rgb_cache["auto_colors"][values[0]] = values[1:]
-            match = re.fullmatch(r"RGB_EFFECT ([3-9])((?: \d+){11})", line)
-            if match:
-                values = list(map(int, match[2].split()))
-                if (all(0 <= v <= 255 for v in values[:6]) and 250 <= values[6] <= 30000 and
-                        values[7] in (0, 1) and 1 <= values[8] <= 12 and
-                        all(20 <= v <= 30000 for v in values[9:])):
-                    self._rgb_cache["effects"][int(match[1])] = values
-            match = re.fullmatch(r"RGB_STATE (\w+) (\d+) (\d+) (\d+) (\d+) (\d+)", line)
-            if match and match[1] in {state for state, _ in RGB_STATES}:
-                values = list(map(int, match.groups()[1:]))
-                if 0 <= values[0] < len(RGB_MODES) and 0 <= values[1] < len(RGB_COLOR_SOURCES) and all(0 <= v <= 255 for v in values[2:]):
-                    self._rgb_cache["states"][match[1]] = values
-            if line == "RGB_GET end":
-                self._rgb_fill_color()
-                self._rgb_fill_auto_color()
-                self._rgb_fill_effect()
-                self._rgb_fill_state()
+                if key in fields:
+                    self._rgb_fades[index].set(str(fields[key]))
+            return
+        if prefix in ("RGB_COLOR", "RGB_AUTO_COLOR", "RGB_EFFECT", "RGB_STATE"):
+            match = re.fullmatch(r"RGB_COLOR ([0-2]) ((?:[0-9]+ ){2}[0-9]+)", line)
+            kind = "colors"
+            if prefix == "RGB_AUTO_COLOR":
+                match = re.fullmatch(r"RGB_AUTO_COLOR ([1-3]) ((?:[0-9]+ ){2}[0-9]+)", line)
+                kind = "auto_colors"
+            elif prefix == "RGB_EFFECT":
+                match = re.fullmatch(r"RGB_EFFECT ([3-9]) ((?:[0-9]+ ){10}[0-9]+)", line)
+                kind = "effects"
+            elif prefix == "RGB_STATE":
+                match = re.fullmatch(r"RGB_STATE ([A-Z_]+) ((?:[0-9]+ ){4}[0-9]+)", line)
+                kind = "states"
+            if not match:
+                self._rgb_invalid_readback()
+                return
+            key = match[1] if kind == "states" else int(match[1])
+            values = tuple(map(int, match[2].split()))
+            valid = all(value <= 255 for value in values)
+            if kind == "effects":
+                valid = (all(value <= 255 for value in values[:6]) and 250 <= values[6] <= 30000 and
+                         values[7] in (0, 1) and 1 <= values[8] <= 12 and
+                         all(20 <= value <= 30000 for value in values[9:]))
+            elif kind == "states":
+                valid = (key in state_names and values[0] <= 12 and values[1] <= 4 and
+                         all(value <= 255 for value in values[2:]))
+                if key == "FAULT":
+                    valid = valid and values == (7, 1, 255, 0, 0)
+            if not valid:
+                self._rgb_invalid_readback()
+                return
+            self._rgb_cache[kind][key] = values
+            self._accept_rgb_config_table(kind, key, values)
+            return
+        if line == "RGB_GET end":
+            self._rgb_fill_color()
+            self._rgb_fill_auto_color()
+            self._rgb_fill_effect()
+            self._rgb_fill_state()
+            self._finish_rgb_readback()
 
     @staticmethod
     def _parse_numbers(payload):

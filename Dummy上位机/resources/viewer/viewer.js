@@ -34,6 +34,12 @@ grid.rotation.x = Math.PI / 2;
 grid.position.z = -0.003;
 scene.add(grid);
 const axes = new THREE.AxesHelper(0.15);
+// The world origin lies inside the rail/base meshes. Draw the axes as an
+// overlay, after both solid and ghost robots, without moving the origin.
+axes.material.depthTest = false;
+axes.material.depthWrite = false;
+axes.material.transparent = true;
+axes.renderOrder = 10;
 scene.add(axes);
 const marker = new THREE.Group();
 const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.009, 16, 12),
@@ -177,8 +183,6 @@ function setState(state) {
     previousVisibilitySeq = state.visibilitySeq;
     grid.visible = state.grid !== false;
     axes.visible = state.axes !== false;
-    document.getElementById('grid').classList.toggle('active', grid.visible);
-    document.getElementById('axes').classList.toggle('active', axes.visible);
   }
 }
 
@@ -234,17 +238,6 @@ loader.load(new URL('../models/DummyRobot_URDF/urdf/DummyRobot_URDF.urdf', locat
   robot => { sourceRobot = robot; }, undefined,
   error => window.reportRobotError(error?.message || String(error)));
 
-document.querySelectorAll('[data-view]').forEach(button => {
-  button.addEventListener('click', () => setCamera(button.dataset.view));
-});
-document.getElementById('grid').addEventListener('click', event => {
-  grid.visible = !grid.visible;
-  event.currentTarget.classList.toggle('active', grid.visible);
-});
-document.getElementById('axes').addEventListener('click', event => {
-  axes.visible = !axes.visible;
-  event.currentTarget.classList.toggle('active', axes.visible);
-});
 renderer.domElement.addEventListener('webglcontextlost', event => {
   event.preventDefault();
   window.reportRobotError('显卡上下文丢失，请重新启动三维视图。');

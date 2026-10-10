@@ -3,6 +3,7 @@ import math
 import queue
 import re
 import time
+from copy import deepcopy
 import serial
 import serial.tools.list_ports
 from PySide6.QtCore import QObject, QTimer, Signal, Slot, Qt
@@ -16,11 +17,19 @@ from app.protocol.parser import finite_numbers
 from app.transport.serial_transport import SerialTransport
 
 
+_SYSTEM_JOINT_POSES = {
+    "HOME": (0, 0, 90, 0, 0, 0, 0),
+    "RESET": tuple(JOINT_DEFAULTS) + (RAIL_DEFAULT,),
+}
+
+
 class RobotController(QObject, RobotBusiness):
     log_message = Signal(str, str)  # message, tag
     state_changed = Signal(dict)
     actual_pose_changed = Signal(list)  # J1..J6 in degrees, rail in millimetres
     position_synced = Signal(str, list)  # Explicit successful target sync: MoveJ / MoveL.
+    preset_pose_completed = Signal(str, list)  # Matched HOME / RESET completion; target only.
+    rgb_changed = Signal(dict)
     fields_changed = Signal()
     ports_changed = Signal(list)
 
@@ -63,14 +72,19 @@ class RobotController(QObject, RobotBusiness):
         self._seq_pending = ()
         self._seq_speed = DEFAULT_SPEED
         self.sequence_timeout_ms = 300000
+        self._system_pose_active = None
+        self._system_pose_awaiting = []
+        self._system_pose_ambiguous = set()
+        self._system_pose_last_queued_id = None
         self._mode_request_counter = 0
         self._mode_request = self._mode_pending = self._mode_set_token = None
         self._acc_sync_waiting = False
         self._acc_sync_timeout_id = None
         self._protection_window = None
         self._protection_values = {"STALL": {}, "CAL": {}}
-        self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
-        self._rgb_runtime = {}
+        self._rgb_applying_readback = False
+        self._rgb_monitoring = False
+        self._reset_rgb_state(emit=False)
         self.cmd_history = []
         self.cmd_history_idx = [0]
         self.last_hand_pos_send_time = self.last_movej_send_time = self.last_movel_send_time = 0
@@ -83,6 +97,9 @@ class RobotController(QObject, RobotBusiness):
         self._stale_timer.setInterval(500)
         self._stale_timer.timeout.connect(self._emit_state)
         self._stale_timer.start()
+        self._rgb_monitor_timer = QTimer(self)
+        self._rgb_monitor_timer.setInterval(1000)
+        self._rgb_monitor_timer.timeout.connect(self._poll_rgb)
 
     def _default_fields(self):
         for name, value in {
@@ -167,6 +184,146 @@ class RobotController(QObject, RobotBusiness):
         self.fields_changed.emit()
         self._emit_state()
 
+    def _reset_rgb_state(self, emit=True):
+        """Discard readback and query clocks whenever the device identity changes."""
+        self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+        self._rgb_device_config = {key: value for key, value in self._rgb_cache.items()}
+        self._rgb_runtime = {}
+        self._rgb_runtime_pending = None
+        self._rgb_runtime_parts = set()
+        self._rgb_runtime_invalid = False
+        self._rgb_runtime_ready_for_config = False
+        self._rgb_received_at = None
+        self._rgb_complete = False
+        self._rgb_full_active = self._rgb_config_started = self._rgb_full_invalid = False
+        self._rgb_full_fields = set()
+        self._rgb_get_pending_until = None
+        self._rgb_get_retry_at = 0.0
+        self._rgb_next_status_at = 0.0
+        if emit:
+            self._emit_rgb()
+
+    def rgb_snapshot(self):
+        """Return device readback only; changing editable fields cannot change it."""
+        return deepcopy({"config": self._rgb_device_config, "runtime": self._rgb_runtime,
+                         "complete": self._rgb_complete, "connected": self.is_connected,
+                         "received_at": self._rgb_received_at, "connection_id": self._connection_id})
+
+    def _emit_rgb(self):
+        self.rgb_changed.emit(self.rgb_snapshot())
+
+    def _start_rgb_config_response(self, seed_runtime=False):
+        self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+        self._rgb_device_config = {key: value for key, value in self._rgb_cache.items()}
+        self._rgb_full_active = True
+        self._rgb_config_started = self._rgb_full_invalid = self._rgb_complete = False
+        self._rgb_full_fields = set()
+        if seed_runtime and self._rgb_runtime_ready_for_config:
+            values = self._rgb_runtime
+            self._rgb_device_config.update(enabled=bool(values["on"]), automatic=bool(values["auto"]),
+                                           brightness=values["bright"])
+            self._rgb_full_fields.update(("enabled", "automatic", "brightness"))
+
+    def _begin_rgb_get(self):
+        now = time.monotonic()
+        self._rgb_get_pending_until = now + 2.0
+        self._rgb_get_retry_at = now + 5.0
+        self._rgb_runtime_ready_for_config = False
+        self._start_rgb_config_response()
+        self._emit_rgb()
+
+    def _accept_rgb_runtime(self, values):
+        self._rgb_received_at = time.monotonic()
+        self._rgb_runtime_ready_for_config = True
+        self._rgb_device_config.update(enabled=bool(values["on"]), automatic=bool(values["auto"]),
+                                       brightness=values["bright"])
+        # MANUAL is proof that the rendered mode is the configured manual mode.
+        if values["source"] == "MANUAL":
+            self._rgb_device_config["manual_mode"] = values["mode"]
+        if self._rgb_full_active:
+            self._rgb_full_fields.update(("enabled", "automatic", "brightness"))
+        self._emit_rgb()
+
+    def _accept_rgb_config_fields(self, fields, start=False):
+        if not self._rgb_full_active or (start and self._rgb_config_started):
+            self._start_rgb_config_response(seed_runtime=True)
+        if start:
+            self._rgb_config_started = True
+            if self._rgb_get_pending_until is None:
+                # Structured setters return the same full block as GET. Do not
+                # interleave a monitor query while that block is being received.
+                now = time.monotonic()
+                self._rgb_get_pending_until = now + 2.0
+                self._rgb_get_retry_at = max(self._rgb_get_retry_at, now + 5.0)
+        self._rgb_device_config.update(fields)
+        self._rgb_full_fields.update(fields)
+        self._emit_rgb()
+
+    def _accept_rgb_config_table(self, kind, key, values):
+        if not self._rgb_full_active:
+            self._start_rgb_config_response(seed_runtime=True)
+        self._rgb_cache[kind][key] = tuple(values)
+        self._emit_rgb()
+
+    def _rgb_invalid_readback(self):
+        if self._rgb_full_active:
+            self._rgb_full_invalid = True
+
+    def _rgb_query_failed(self):
+        self._rgb_get_pending_until = None
+        self._rgb_runtime_pending = None
+        self._rgb_runtime_ready_for_config = False
+        if self._rgb_full_active:
+            self._rgb_full_invalid = True
+            self._rgb_complete = False
+        self._emit_rgb()
+
+    def _finish_rgb_readback(self):
+        if not self._rgb_full_active:
+            return  # An orphan terminator cannot invalidate a confirmed configuration.
+        required = {"enabled", "automatic", "brightness", "manual_mode", "fade_on_ms", "fade_off_ms",
+                    "brightness_ms", "transition_ms"}
+        states = {state for state, _ in RGB_STATES} | {"FAULT"}
+        self._rgb_complete = bool(
+            self._rgb_full_active and self._rgb_config_started and not self._rgb_full_invalid and
+            required <= self._rgb_full_fields and self._rgb_cache["colors"].keys() == {0, 1, 2} and
+            self._rgb_cache["auto_colors"].keys() == {1, 2, 3} and
+            self._rgb_cache["effects"].keys() == set(range(3, 10)) and
+            self._rgb_cache["states"].keys() == states)
+        self._rgb_full_active = False
+        self._rgb_get_pending_until = None
+        self._rgb_runtime_ready_for_config = False
+        self._emit_rgb()
+
+    def set_rgb_monitoring(self, enabled):
+        """The visible RGB page explicitly opts into read-only 1 Hz monitoring."""
+        self._rgb_monitoring = bool(enabled)
+        if self._rgb_monitoring and self.is_connected:
+            if not self._rgb_monitor_timer.isActive():
+                self._rgb_monitor_timer.start()
+                self._poll_rgb()
+        else:
+            self._rgb_monitor_timer.stop()
+
+    def _poll_rgb(self):
+        if (not self._rgb_monitoring or not self.is_connected or self.serial_port is None or
+                self._parameter_request is not None or self._acc_sync_waiting):
+            return
+        now = time.monotonic()
+        if self._rgb_get_pending_until is not None:
+            if now < self._rgb_get_pending_until:
+                return
+            self._rgb_get_pending_until = None
+            self._rgb_full_active = False
+            self._rgb_full_invalid = True
+            self._rgb_complete = False
+            self._emit_rgb()
+        if not self._rgb_complete and now >= self._rgb_get_retry_at:
+            self.send_cmd("#RGB_GET")
+            return
+        if now >= self._rgb_next_status_at:
+            self.send_cmd("#RGB_STATUS")
+
     def refresh_ports(self):
         ports = [port.device for port in serial.tools.list_ports.comports()]
         self.ports_changed.emit(ports)
@@ -195,6 +352,7 @@ class RobotController(QObject, RobotBusiness):
             self.log(f"连接失败：{error}", "ERROR")
             return False
         self._connection_id += 1
+        self._reset_system_pose_tracking()
         self.connection_type = connection_type.upper()
         self.serial_port = port_object
         self.port_name = port
@@ -207,7 +365,9 @@ class RobotController(QObject, RobotBusiness):
         self._update_motor_state(None)
         self.actual_pose = None
         self.last_actual_at = None
-        self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+        # The default GET below publishes only after its in-flight ledger is
+        # established; UI monitoring listeners cannot enqueue a second GET.
+        self._reset_rgb_state(emit=False)
         self._transport = SerialTransport(port_object, self._tx_queue, self._can_write,
                                           self._connection_id, self)
         self._transport.line_received.connect(self._on_transport_line, Qt.ConnectionType.QueuedConnection)
@@ -218,6 +378,8 @@ class RobotController(QObject, RobotBusiness):
         self.send_cmd("#RGB_GET")
         self._query_command_mode()
         self.set_polling(self._poll_enabled, self._poll_hz)
+        if self._rgb_monitoring:
+            self.set_rgb_monitoring(True)
         self._publish()
         return True
 
@@ -225,7 +387,9 @@ class RobotController(QObject, RobotBusiness):
         self._connection_id += 1  # Ignore callbacks from a previous connection.
         self.is_connected = False
         self._poll_timer.stop()
+        self._rgb_monitor_timer.stop()
         self._cancel_motion_for_stop()
+        self._reset_system_pose_tracking()
         transport, self._transport = self._transport, None
         if transport:
             transport.close()
@@ -235,14 +399,17 @@ class RobotController(QObject, RobotBusiness):
         self._stop_locked = self._calibration_busy = False
         self._update_motor_state(None)
         self._rgb_status_var.set("RGB 已断开；显示值仅供编辑，需重新回读。")
+        self._reset_rgb_state()
         self.log("已断开串口")
         self._publish()
 
     def close(self):
+        self.set_rgb_monitoring(False)
         if self.is_connected or self._transport is not None:
             self.disconnect_port()
         self._poll_timer.stop()
         self._stale_timer.stop()
+        self._reset_system_pose_tracking()
         if hasattr(self.root, "close"):
             self.root.close()
 
@@ -343,8 +510,134 @@ class RobotController(QObject, RobotBusiness):
                 self._finish_parameter_request(False, "指令入队失败")
             self.log(f"指令入队失败：{error}", "ERROR")
             return False
+        self._track_system_pose_command(command)
+        if command == "#RGB_GET":
+            self._begin_rgb_get()
+        elif command == "#RGB_STATUS":
+            self._rgb_next_status_at = time.monotonic() + 1.0
         self._publish()
         return True
+
+    def _discard_system_pose_request(self, request):
+        timeout = request.pop("timeout", None)
+        if timeout is not None:
+            self.root.after_cancel(timeout)
+        self._system_pose_awaiting = [item for item in self._system_pose_awaiting if item is not request]
+        if self._system_pose_active is request:
+            self._system_pose_active = None
+
+    def _invalidate_system_pose(self):
+        request = self._system_pose_active
+        self._system_pose_active = None
+        if request is not None and request["id"] is not None:
+            self._discard_system_pose_request(request)
+        # Keep unnumbered requests as FIFO tombstones: their delayed queued
+        # receipt must never be assigned to a newer request of the same kind.
+
+    def _reset_system_pose_tracking(self):
+        requests = list(self._system_pose_awaiting)
+        if self._system_pose_active is not None:
+            requests.append(self._system_pose_active)
+        for request in requests:
+            self._discard_system_pose_request(request)
+        self._system_pose_awaiting.clear()
+        self._system_pose_ambiguous.clear()
+        self._system_pose_last_queued_id = None
+
+    def _mark_system_pose_ambiguous(self, kind, reason):
+        requests = [item for item in self._system_pose_awaiting if item["kind"] == kind]
+        if self._system_pose_active is not None and self._system_pose_active["kind"] == kind:
+            requests.append(self._system_pose_active)
+        for request in requests:
+            self._discard_system_pose_request(request)
+        if kind not in self._system_pose_ambiguous:
+            self.log(f"{kind} 回执无法对应（{reason}）；本连接暂不自动同步该预设，重新连接可恢复", "WARN")
+        self._system_pose_ambiguous.add(kind)
+
+    def _track_system_pose_command(self, command):
+        if (command.startswith((">", "&", "@", "#CMDMODE")) or
+                command in ("!HOME", "!RESET", "!STOP", "!DISABLE", "!CALIBRATION")):
+            self._invalidate_system_pose()
+        kind = command[1:] if command in ("!HOME", "!RESET") else None
+        if kind is None or kind in self._system_pose_ambiguous:
+            return
+        if len(self._system_pose_awaiting) >= 32:
+            self._mark_system_pose_ambiguous(kind, "未编号请求过多")
+            return
+        request = {"kind": kind, "id": None, "connection": self._connection_id,
+                   "generation": self._tx_generation}
+        self._system_pose_awaiting.append(request)
+        self._system_pose_active = request
+        request["timeout"] = self.root.after(self.sequence_timeout_ms, self._system_pose_timeout, request)
+
+    def _system_pose_timeout(self, request):
+        if (request["connection"] != self._connection_id or
+                not any(item is request for item in self._system_pose_awaiting) and
+                self._system_pose_active is not request):
+            return
+        if request["id"] is None:
+            # queued has no client request token. Forgetting an unnumbered
+            # request and binding the next queued to a new one is unsafe.
+            self._mark_system_pose_ambiguous(request["kind"], "等待 queued 超时")
+        else:
+            self._discard_system_pose_request(request)
+            self.log(f"{request['kind']} 完成回执超时；保留当前模型目标", "WARN")
+
+    def _handle_system_pose_receipt(self, line):
+        queued = re.fullmatch(r"queued (HOME|RESET|MOVEJ|MOVEL) id=([0-9]+) mode=(SEQ|INT|TRJ|TUN)", line)
+        if queued:
+            kind, motion_id, _mode = queued.groups()
+            motion_id = int(motion_id)
+            if not 1 <= motion_id <= 0xFFFFFFFF:
+                return
+            previous = self._system_pose_last_queued_id
+            if previous is not None and not 0 < (motion_id - previous) & 0xFFFFFFFF < 0x80000000:
+                return
+            self._system_pose_last_queued_id = motion_id
+            request = next((item for item in self._system_pose_awaiting if item["kind"] == kind), None)
+            if request is None:
+                if self._system_pose_active is not None and self._system_pose_active["id"] is not None:
+                    self._invalidate_system_pose()
+                return
+            self._system_pose_awaiting = [item for item in self._system_pose_awaiting if item is not request]
+            request["id"] = motion_id
+            if (self._system_pose_active is not request or request["connection"] != self._connection_id or
+                    request["generation"] != self._tx_generation or self._stop_locked or self._calibration_busy):
+                self._discard_system_pose_request(request)
+            return
+        completed = re.fullmatch(r"ok (HOME|RESET) id=([0-9]+)(?: ms=([0-9]+))?", line)
+        failed = re.fullmatch(r"error (HOME|RESET) id=([0-9]+) reason=[A-Z_0-9]+", line)
+        request = self._system_pose_active
+        if request is None:
+            return
+        if line == "Disabled ok":
+            self._invalidate_system_pose()
+            return
+        if line in ("error DISABLED", "error STOP_LOCKED"):
+            if request["id"] is None:
+                self._mark_system_pose_ambiguous(request["kind"], "未编号请求被拒绝")
+            else:
+                self._discard_system_pose_request(request)
+            return
+        match = completed or failed
+        if not match:
+            return
+        kind, motion_id = match.group(1), int(match.group(2))
+        if not 1 <= motion_id <= 0xFFFFFFFF or kind != request["kind"]:
+            return
+        if completed and completed.group(3) is not None and int(completed.group(3)) > 0xFFFFFFFF:
+            return
+        if failed and request["id"] is None:
+            self._mark_system_pose_ambiguous(kind, "错误回执缺少对应 queued")
+            return
+        if request["id"] != motion_id:
+            return
+        current = (request["connection"] == self._connection_id and
+                   request["generation"] == self._tx_generation and self.is_connected and
+                   not self._stop_locked and not self._calibration_busy)
+        self._discard_system_pose_request(request)
+        if completed and current:
+            self.preset_pose_completed.emit(kind, list(_SYSTEM_JOINT_POSES[kind]))
 
     @staticmethod
     def _validate_command(command):
@@ -404,6 +697,7 @@ class RobotController(QObject, RobotBusiness):
                 raise ValueError("保护参数需要为单个有限数值")
 
     def _cancel_motion_for_stop(self):
+        self._invalidate_system_pose()
         super()._cancel_motion_for_stop()
         self._position_request = None
         self._position_token += 1
@@ -482,6 +776,7 @@ class RobotController(QObject, RobotBusiness):
                     self.log("实际笛卡尔位姿已同步到编辑目标")
         before_id = self._seq_motion_id
         super()._process_rx_line(line)
+        self._handle_system_pose_receipt(line)
         if self._seq_motion_id is not None and self._seq_motion_id != before_id:
             self.root.after(self.sequence_timeout_ms, self._motion_completion_timeout,
                             self._seq_session, self._seq_motion_id)
@@ -709,13 +1004,14 @@ class RobotController(QObject, RobotBusiness):
 
     def _rgb_pick_color(self, variables):
         from PySide6.QtGui import QColor
-        from PySide6.QtWidgets import QColorDialog, QApplication
+        from PySide6.QtWidgets import QApplication
+        from app.ui.color_dialog import choose_color
         try:
             values = self._rgb_values(variables, [(0, 255)] * 3)
         except ValueError as error:
             self.log(str(error), "WARN")
             return
-        color = QColorDialog.getColor(QColor(*values), QApplication.activeWindow(), "选择 RGB 颜色")
+        color = choose_color(QColor(*values), QApplication.activeWindow(), "选择 RGB 颜色")
         if color.isValid():
             self._rgb_set_fields(variables, [color.red(), color.green(), color.blue()])
             self.fields_changed.emit()
