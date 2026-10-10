@@ -50,6 +50,7 @@ public:
     bool ApplyConfig(const Config& value, uint32_t expectedRevision);
     void SetEnabled(bool enabled);
     void SetManualMode(uint32_t mode);
+    void EndBoot(); // Accepted robot operations end the boot scene, even between RGB frames.
     // mode/source reflect accepted settings; currentBrightness is the rendered ramp.
     Status GetStatus(State state = STATE_COUNT) const;
     void Update(State state, uint32_t nowMs);
@@ -93,8 +94,8 @@ private:
     uint8_t lastWire[LED_COUNT * 3]{};
     float frame[LED_COUNT][3]{}, fromFrame[LED_COUNT][3]{};
     Scene scene{};
-    bool sceneValid = false, runtimeStarted = false, bootPending = true;
-    uint32_t bootAt = 0, sceneAt = 0, blendAt = 0;
+    bool sceneValid = false, bootPending = true;
+    uint32_t sceneAt = 0, blendAt = 0;
     uint16_t blendMs = 0;
     float brightness = 0, rampFrom = 0, rampTarget = 0;
     uint32_t rampAt = 0;

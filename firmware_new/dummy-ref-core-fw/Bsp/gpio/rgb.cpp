@@ -163,6 +163,9 @@ void RGB::SetManualMode(uint32_t mode) {
     }
     taskEXIT_CRITICAL();
 }
+void RGB::EndBoot() {
+    taskENTER_CRITICAL(); bootPending = false; taskEXIT_CRITICAL();
+}
 RGB::Status RGB::GetStatus(State state) const {
     taskENTER_CRITICAL(); Status result = status;
     if (state == STATE_COUNT) state = State(status.state);
@@ -244,9 +247,10 @@ void RGB::Render(const Scene& s, uint32_t elapsed, float output[LED_COUNT][3]) {
 void RGB::Update(State state, uint32_t now) {
     Config c=GetConfig();
     if (state>=STATE_COUNT) state=FAULT;
-    if (!runtimeStarted) { runtimeStarted=true; bootAt=now; }
-    if (state!=DISABLED || now-bootAt>=2000) bootPending=false;
-    State visible=bootPending && c.automatic && state==DISABLED ? BOOT : state;
+    taskENTER_CRITICAL();
+    if (state!=DISABLED) bootPending=false;
+    const State visible=bootPending && c.automatic && state==DISABLED ? BOOT : state;
+    taskEXIT_CRITICAL();
     Scene next=SelectScene(c, visible);
     if (!sceneValid || !SameScene(scene, next)) {
         std::memcpy(fromFrame, frame, sizeof(frame)); scene=next; sceneAt=blendAt=now;

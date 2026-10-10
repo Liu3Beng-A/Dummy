@@ -830,6 +830,7 @@ void DummyRobot::RequestSoftStop()
     const bool cancelCalibration = IsCalibrationBusy();
     if (protection) protection->Cancel(false);
     taskENTER_CRITICAL();
+    rgb.EndBoot();
     isEnabled = false;
     CancelMotion();
     ++motionEpoch;
@@ -855,6 +856,7 @@ bool DummyRobot::RequestStart()
 {
     taskENTER_CRITICAL();
     if (rgbSaveBusy) { taskEXIT_CRITICAL(); return false; }
+    rgb.EndBoot();
     if (protection && protection->InterceptStart()) { taskEXIT_CRITICAL(); return true; }
     if (stopState == STOPPING || stopState == DISABLING)
     {
@@ -881,6 +883,7 @@ void DummyRobot::RequestDisable()
 {
     if (protection) protection->Cancel(true);
     taskENTER_CRITICAL();
+    rgb.EndBoot();
     isEnabled = false;
     CancelMotion();
     ++motionEpoch;
