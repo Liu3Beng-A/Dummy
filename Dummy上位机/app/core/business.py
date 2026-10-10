@@ -6,8 +6,20 @@ serial dispatch and position reading; this mixin retains verified protocol seman
 import re
 import math
 import queue
+from dataclasses import dataclass
 from app.protocol.constants import *
 from app.core import dialogs as messagebox
+from app.storage.store import validate_points
+
+
+@dataclass(frozen=True)
+class TeachingPoint:
+    """A sequence snapshot never shares a mutable target with the editor."""
+    name: str
+    kind: str
+    target: tuple[float, ...]
+    gripper: float
+    speed: float
 
 
 class RobotBusiness:
@@ -251,6 +263,7 @@ class RobotBusiness:
     def _stop_sequence(self, reason):
         self._seq_active = self._seq_running = self._seq_wait_mode = False
         self._seq_motion_id = None
+        self._seq_expected_type = None
         self._seq_session += 1
         self.log(f"顺序发送停止：{reason}", "WARN")
 
@@ -314,9 +327,11 @@ class RobotBusiness:
             return
         if not self._seq_active or not self._seq_running:
             return
-        m = re.fullmatch(r'queued MOVEJ id=(\d+) mode=(\w+)', line)
+        m = re.fullmatch(r'queued (MOVEJ|MOVEL) id=(\d+) mode=(\w+)', line)
         if m:
-            motion_id, mode = int(m.group(1)), m.group(2)
+            kind, motion_id, mode = m.group(1), int(m.group(2)), m.group(3)
+            if kind != self._seq_expected_type:
+                return
             delta = (motion_id - self._seq_id_floor) & 0xFFFFFFFF
             if self._seq_motion_id is None and 0 < delta < 0x80000000:
                 if mode != 'SEQ':
@@ -326,10 +341,11 @@ class RobotBusiness:
                     self._seq_motion_id = motion_id
                     self._seq_id_floor = motion_id
             return
-        m = re.fullmatch(r'ok MOVEJ id=(\d+)(?: ms=\d+)?', line)
-        if m and int(m.group(1)) == self._seq_motion_id:
+        m = re.fullmatch(r'ok (MOVEJ|MOVEL) id=(\d+)(?: ms=\d+)?', line)
+        if m and m.group(1) == self._seq_expected_type and int(m.group(2)) == self._seq_motion_id:
             self._seq_running = False
             self._seq_motion_id = None
+            self._seq_expected_type = None
             self._seq_idx += 1
             if self._seq_idx < len(self._seq_pending):
                 session = self._seq_session
@@ -338,9 +354,9 @@ class RobotBusiness:
                 self._seq_active = False
                 self.log(f"顺序发送完成，共 {len(self._seq_pending)} 个点位", "INFO")
             return
-        m = re.fullmatch(r'error MOVEJ id=(\d+) reason=(\w+)', line)
-        if m and int(m.group(1)) == self._seq_motion_id:
-            self._stop_sequence(m.group(2))
+        m = re.fullmatch(r'error (MOVEJ|MOVEL) id=(\d+) reason=(\w+)', line)
+        if m and m.group(1) == self._seq_expected_type and int(m.group(2)) == self._seq_motion_id:
+            self._stop_sequence(m.group(3))
         elif line == 'error motion queue full' and self._seq_motion_id is None:
             self._stop_sequence("主控队列已满")
 
@@ -664,9 +680,10 @@ class RobotBusiness:
         self._tx_generation += 1
         self._seq_running = self._seq_active = self._seq_wait_mode = False
         self._seq_motion_id = None
+        self._seq_expected_type = None
         self._seq_session += 1
         self._mode_pending = self._mode_request = None
-        self._seq_pending = []
+        self._seq_pending = ()
         self._seq_idx = 0
         self._pending_sync = None
         self._sync_data = None
@@ -856,6 +873,8 @@ class RobotBusiness:
 
     @staticmethod
     def _validated_speed(value):
+        if isinstance(value, bool):
+            raise ValueError("速度档位必须为数值，不能为布尔值")
         speed = float(value)
         if not math.isfinite(speed) or not 1 <= speed <= 100:
             raise ValueError("速度档位必须为 1–100 的有限数值（100 = 30 r/s）")
@@ -964,11 +983,46 @@ class RobotBusiness:
         if not idx:
             return
         idx = idx[0]
-        name, pos = self.stored_positions[idx]
-        # [v3.1] pos 现在是 7 个值（6 关节 + Rail）
-        self._fill_joints(pos[:7])
-        full = f"{name} [{','.join(str(v) for v in pos)}]"
+        try:
+            point = self._normalize_teaching_point(self.stored_positions[idx])
+        except (ValueError, TypeError, IndexError) as error:
+            self.log(f"点位无效：{error}", "WARN")
+            return
+        if point.kind == "MOVEJ":
+            self._fill_joints(point.target)
+        else:
+            self._fill_pose(point.target)
+        full = f"{point.name} {point.kind} [{','.join(str(v) for v in point.target)}]"
         self.log(f"已加载: {full}", "INFO")
+
+    @staticmethod
+    def _normalize_teaching_point(record):
+        if isinstance(record, (tuple, list)) and len(record) == 2:
+            # Legacy old-assistant tuples carry only a name and seven joints.
+            record = {"name": record[0], "type": "MoveJ", "joints": record[1],
+                      "gripper": 100, "speed": DEFAULT_SPEED}
+        normalized = validate_points([record])[0]
+        kind = normalized["type"].upper()
+        target = normalized["joints" if kind == "MOVEJ" else "pose"]
+        return TeachingPoint(normalized["name"], kind, tuple(target),
+                             normalized["gripper"], normalized["speed"])
+
+    def _teaching_command(self, point, speed):
+        speed = self._validated_speed(speed)
+        prefix = ">" if point.kind == "MOVEJ" else "@"
+        command = prefix + ",".join(f"{value:g}" for value in point.target) + f",{speed:g}"
+        self._validate_command(command)
+        return command
+
+    def send_typed_position(self, record, speed=None):
+        """Explicitly send one valid MoveJ/MoveL target; gripper is preview only."""
+        try:
+            point = self._normalize_teaching_point(record)
+            command = self._teaching_command(point, point.speed if speed is None else speed)
+        except (ValueError, TypeError, OverflowError) as error:
+            self.log(f"点位无效，未发送：{error}", "WARN")
+            return False
+        return self.send_cmd(command)
 
     def _get_pos_speed(self):
         try:
@@ -978,39 +1032,51 @@ class RobotBusiness:
             return None
 
     def send_selected_position(self):
-        """发送列表中选中的点位"""
+        """Explicitly send selected typed target at the teaching speed setting."""
         idx = self._pos_listbox.curselection()
         if not idx:
             self.log("请先选择一个点位", "WARN")
-            return
+            return False
         idx = idx[0]
-        _name, pos = self.stored_positions[idx]
         speed = self._get_pos_speed()
         if speed is None:
-            return
-        # [v3.1] >j1,j2,j3,j4,j5,j6,j7(rail),speed （8 个值）
-        self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:7]) + f",{speed:g}")
+            return False
+        try:
+            record = self.stored_positions[idx]
+        except IndexError:
+            self.log("点位选择已失效，请重新选择", "WARN")
+            return False
+        return self.send_typed_position(record, speed)
 
     def send_all_positions(self):
         """先确认主控 SEQ 且无任务，再逐条等待匹配编号的完成。"""
         if self._stop_locked or self._calibration_busy:
             self.log("保护锁定或校准忙，不能启动顺序发送", "WARN")
-            return
+            return False
         if not self.stored_positions:
             self.log("没有存储的点位", "WARN")
-            return
+            return False
         if self._seq_active or self._mode_pending is not None or self._mode_request is not None:
             self.log("顺序发送或模式确认正在进行中", "WARN")
-            return
+            return False
         speed = self._get_pos_speed()
         if speed is None:
-            return
-        self._seq_pending = list(self.stored_positions)
+            return False
+        try:
+            snapshot = tuple(self._normalize_teaching_point(record) for record in self.stored_positions)
+            for point in snapshot:
+                self._teaching_command(point, speed)
+        except (ValueError, TypeError, OverflowError) as error:
+            self.log(f"顺序点位无效，未查询模式或发送：{error}", "WARN")
+            return False
+        self._seq_pending = snapshot
         self._seq_idx = 0
         self._seq_speed = speed
+        self._seq_expected_type = None
         self._seq_active = self._seq_wait_mode = True
         self._seq_session += 1
         self._query_command_mode()
+        return self._seq_active
 
     def _send_next_position(self):
         """只发当前会话的一条点位，旧 after 回调不能恢复取消的任务。"""
@@ -1018,10 +1084,11 @@ class RobotBusiness:
             return
         if self._seq_idx >= len(self._seq_pending):
             return
-        _name, pos = self._seq_pending[self._seq_idx]
+        point = self._seq_pending[self._seq_idx]
         self._seq_running = True
         self._seq_motion_id = None
-        if not self.send_cmd(">" + ",".join(f"{v:g}" for v in pos[:7]) + f",{self._seq_speed:g}", sequence=True):
+        self._seq_expected_type = point.kind
+        if not self.send_cmd(self._teaching_command(point, self._seq_speed), sequence=True):
             self._stop_sequence("点位发送失败")
             return
         session, index = self._seq_session, self._seq_idx

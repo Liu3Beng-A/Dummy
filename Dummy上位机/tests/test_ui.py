@@ -8,6 +8,7 @@ from unittest.mock import patch
 from PySide6.QtCore import QCoreApplication, Signal, Qt
 QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
+from PySide6.QtTest import QTest
 
 # unittest imports every test module before executing them. Creating QApplication
 # here also lets controller tests reuse it instead of a non-GUI QCoreApplication.
@@ -33,11 +34,14 @@ class FakeView(QWidget):
     def set_target_pose(self, values, gripper=100):
         self.target = (list(values), gripper)
 
+    def set_target_gripper(self, gripper):
+        self.target = (self.target[0], gripper)
+
     def set_actual_pose(self, values, gripper=None):
         self.actual = (list(values), gripper)
 
     def set_cartesian_target(self, values):
-        self.cartesian = list(values)
+        self.cartesian = list(values) if values is not None else None
 
     def set_follow_actual(self, follow):
         self.mode = "actual" if follow else "preview"
@@ -190,7 +194,7 @@ class UiIntegrationTests(unittest.TestCase):
         self.controller.current_cmdmode = 3
         self.window.point_name.setText("起始")
         self.window._save_point()
-        self.window.joint_spins[0].setValue(20)
+        self.window.teaching_joint_spins[0].setValue(20)
         self.window.point_name.setText("取料")
         self.window._save_point()
         self.controller.movej_drag_enable.set(True)
@@ -240,6 +244,164 @@ class UiIntegrationTests(unittest.TestCase):
         self.assertFalse(self.controller._poll_enabled)
         self.assertFalse(self.window.viewer.grid)
         self.assertFalse(self.window.viewer.axes)
+        self.assertEqual(self.commands(), [])
+
+    def test_fixed_gripper_mirrors_page_and_drag_sends_latest_position_once(self):
+        self.connect_fake()
+        self.controller.current_cmdmode = 3
+        self.window.navigation.setCurrentRow(0)
+        self.window.resize(1366, 768)
+        self.window.show()
+        APPLICATION.processEvents()
+        for index in (0, 1):
+            self.window.motion_tabs.setCurrentIndex(index)
+            APPLICATION.processEvents()
+            self.assertTrue(self.window.motion_hand_row.isVisible())
+            self.assertFalse(self.window.motion_tabs.isAncestorOf(self.window.motion_hand_row))
+            send_button = self.window.movej_send_button if index == 0 else self.window.movel_send_button
+            self.assertFalse(send_button.visibleRegion().isEmpty())
+        self.window.motion_hand_current.setValue(1.25)
+        self.assertEqual(self.window.hand_current_spin.value(), 1.25)
+        self.assertEqual(float(self.controller.hand_current.get()), 1.25)
+        self.window.motion_hand_drag.setChecked(True)
+        self.assertTrue(self.window.hand_drag_checkbox.isChecked())
+        self.window.motion_hand_row.spin.setValue(45)
+        self.window.motion_hand_row.spin.setValue(60)
+        QTest.qWait(180)
+        self.scheduler.run_ready()
+        commands = self.commands()
+        self.assertTrue(commands)
+        self.assertEqual(commands[-1], "!HAND_POS 60")
+        self.assertEqual(commands.count("!HAND_POS 60"), 1)
+        self.assertEqual(self.window.hand_row.spin.value(), 60)
+        self.assertEqual(self.controller.hand_pos.get(), 60)
+        self.assertEqual(self.window.viewer.target[1], 60)
+        self.window.hand_drag_checkbox.setChecked(False)
+        self.window.hand_row.spin.setValue(35)
+        self.assertEqual(self.window.motion_hand_row.spin.value(), 35)
+        QTest.qWait(150)
+        self.scheduler.run_ready()
+        self.assertEqual(self.commands(), [])
+
+    def test_pending_gripper_drag_cannot_resume_after_stop_or_calibration(self):
+        self.connect_fake()
+        self.controller.current_cmdmode = 3
+        for command, value in (("!STOP", 70), ("!CALIBRATION", 80)):
+            with self.subTest(command=command):
+                self.window.motion_hand_drag.setChecked(True)
+                self.window.motion_hand_row.spin.setValue(value)
+                self.controller.send_cmd(command)
+                self.assertEqual(self.commands(), [command])
+                self.assertFalse(self.window.motion_hand_drag.isChecked())
+                QTest.qWait(150)
+                self.scheduler.run_ready()
+                self.assertEqual(self.commands(), [])
+                self.controller._process_rx_line("Disabled ok")
+                if command == "!CALIBRATION":
+                    self.controller._process_rx_line("!CALIBRATION ok")
+
+    def test_hand_open_close_and_explicit_send_replace_pending_drag(self):
+        self.connect_fake()
+        self.controller.current_cmdmode = 3
+        self.window.motion_hand_drag.setChecked(True)
+        for opened, value in ((True, 55), (False, 65)):
+            self.window.motion_hand_row.spin.setValue(value)
+            self.window._send_hand_direction(opened)
+            QTest.qWait(150)
+            self.scheduler.run_ready()
+            self.assertEqual(self.commands(), ["!HAND_O 1.00" if opened else "!HAND_C 1.00"])
+        self.window.motion_hand_row.spin.setValue(75)
+        self.window._send_hand_position()
+        QTest.qWait(150)
+        self.scheduler.run_ready()
+        self.assertEqual(self.commands(), ["!HAND_POS 75"])
+
+    def test_teaching_movel_save_select_and_send_preserves_type(self):
+        self.connect_fake()
+        self.controller.current_cmdmode = 3
+        self.window.navigation.setCurrentRow(1)
+        self.window.point_name.setText("关节示教")
+        self.window.teaching_joint_spins[0].setValue(25)
+        self.window._save_point()
+        self.window.teaching_tabs.setCurrentIndex(1)
+        pose = [500, -400, 700, 200, -190, 250]
+        for spin, value in zip(self.window.teaching_pose_spins, pose):
+            spin.setValue(value)
+        self.window.teaching_gripper_spin.setValue(55)
+        self.window.teaching_speed.setValue(42)
+        self.window.point_name.setText("末端示教")
+        self.window._save_point()
+        self.assertEqual([point["type"] for point in self.store.points], ["MoveJ", "MoveL"])
+        self.assertEqual(self.store.points[1]["pose"], pose)
+        self.assertNotIn("joints", self.store.points[1])
+        self.assertEqual(self.commands(), [])
+        self.controller.movej_drag_enable.set(True)
+        self.controller.movel_drag_enable.set(True)
+        self.controller.hand_pos_drag_enable.set(True)
+        self.window.teaching_drag.setChecked(True)
+        self.window.point_table.selectRow(0)
+        self.assertEqual(self.window.teaching_tabs.currentIndex(), 0)
+        self.assertEqual(self.window.teaching_joint_spins[0].value(), 25)
+        self.window.point_table.selectRow(1)
+        self.assertEqual(self.window.teaching_tabs.currentIndex(), 1)
+        self.assertEqual([spin.value() for spin in self.window.teaching_pose_spins], pose)
+        self.assertEqual(self.window.viewer.cartesian, pose)
+        self.assertEqual(self.window.viewer.target[1], 55)
+        QTest.qWait(150)
+        self.scheduler.run_ready()
+        self.assertEqual(self.commands(), [])
+        self.window._send_selected_point()
+        self.assertEqual(self.commands(), ["@500,-400,700,200,-190,250,42"])
+
+    def test_teaching_drag_uses_active_type_and_disabling_cancels_tail(self):
+        self.connect_fake()
+        self.controller.current_cmdmode = 3
+        self.window.navigation.setCurrentRow(1)
+        self.window.teaching_drag.setChecked(True)
+        self.window.teaching_joint_spins[0].setValue(12)
+        self.window.teaching_joint_spins[0].setValue(24)
+        QTest.qWait(150)
+        self.scheduler.run_ready()
+        commands = self.commands()
+        self.assertTrue(commands)
+        self.assertTrue(commands[-1].startswith(">24,"))
+        self.assertFalse(any(command.startswith("@") for command in commands))
+        self.window.teaching_tabs.setCurrentIndex(1)
+        self.window.teaching_pose_spins[0].setValue(245)
+        QTest.qWait(150)
+        self.scheduler.run_ready()
+        commands = self.commands()
+        self.assertTrue(commands)
+        self.assertTrue(commands[-1].startswith("@245,"))
+        self.assertFalse(any(command.startswith(">") for command in commands))
+        self.window.teaching_pose_spins[0].setValue(260)
+        self.window.teaching_drag.setChecked(False)
+        QTest.qWait(150)
+        self.scheduler.run_ready()
+        self.assertEqual(self.commands(), [])
+
+    def test_point_selection_and_explicit_sync_cancel_pending_drag(self):
+        self.connect_fake()
+        self.controller.current_cmdmode = 3
+        self.window.point_name.setText("安全预览点")
+        self.window._save_point()
+        self.window.point_table.clearSelection()
+        self.controller.hand_pos_drag_enable.set(True)
+        self.window.motion_hand_row.spin.setValue(60)
+        self.window.point_table.selectRow(0)
+        QTest.qWait(150)
+        self.scheduler.run_ready()
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(self.window.motion_hand_row.spin.value(), 100)
+        self.controller.movej_drag_enable.set(True)
+        self.window.joint_spins[0].setValue(20)
+        self.controller.read_and_sync_from_robot()
+        self.assertEqual(self.commands(), ["#GETJPOS"])
+        self.controller._process_rx_line("ok 30 -60 160 5 6 7 20")
+        self.scheduler.run_ready()
+        QTest.qWait(150)
+        self.scheduler.run_ready()
+        self.assertEqual(self.window.joint_spins[0].value(), 30)
         self.assertEqual(self.commands(), [])
 
 

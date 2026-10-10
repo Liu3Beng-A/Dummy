@@ -3,6 +3,8 @@ import queue
 import threading
 import time
 import unittest
+from copy import deepcopy
+from dataclasses import FrozenInstanceError
 from PySide6.QtCore import QCoreApplication
 from app.core.controller import RobotController
 from app.protocol.parser import LineFramer, finite_numbers
@@ -162,6 +164,208 @@ class ControllerTests(unittest.TestCase):
         c._process_rx_line("queued MOVEJ id=5 mode=INT")
         self.assertEqual(self.commands(), ["!STOP"])
         self.assertFalse(c._seq_active)
+
+    def test_explicit_and_selected_typed_points_send_only_motion_at_correct_speed(self):
+        c = self.controller
+        point = {"name": "TCP", "type": "MoveL", "pose": [180, 20, 300, 90, 0, -180],
+                 "gripper": 25, "speed": 55}
+        self.assertTrue(c.send_typed_position(point))
+        self.assertEqual(self.commands(), ["@180,20,300,90,0,-180,55"])
+        c.stored_positions = [point]
+        c._pos_listbox.selected = 0
+        c.ent_pos_speed.set("42")
+        self.assertTrue(c.send_selected_position())
+        self.assertEqual(self.commands(), ["@180,20,300,90,0,-180,42"])
+        self.assertTrue(c.send_typed_position(("旧点", [0, -75, 180, 0, 0, 0, 12]), 24))
+        self.assertEqual(self.commands(), [">0,-75,180,0,0,0,12,24"])
+        c._pos_listbox.selected = 99
+        self.assertFalse(c.send_selected_position())
+        self.assertEqual(self.commands(), [])
+
+    def test_mixed_sequence_requires_each_expected_type_and_exact_id(self):
+        c = self.controller
+        c.stored_positions = [
+            {"name": "J", "joints": [0, -75, 180, 0, 0, 0, 20], "speed": 5},
+            {"name": "L", "type": "MoveL", "pose": [200, 30, 300, 90, 0, 180], "speed": 80},
+            ("旧 J", [10, -70, 170, 0, 0, 0, 30]),
+        ]
+        c.ent_pos_speed.set("40")
+        self.assertTrue(c.send_all_positions())
+        request = c._mode_request
+        self.assertEqual(self.commands(), [f"#GET_CMDMODE {request}"])
+        c._process_rx_line(f"ok CMDMODE mode=1 busy=0 issued=10 req={request}")
+        self.assertEqual(self.commands(), [">0,-75,180,0,0,0,20,40"])
+        self.assertEqual(c.state()["sequence_type"], "MOVEJ")
+        c._process_rx_line("queued MOVEL id=11 mode=INT")
+        self.assertIsNone(c._seq_motion_id)
+        self.assertTrue(c._seq_active)
+        c._process_rx_line("queued MOVEJ id=11 mode=SEQ")
+        for receipt in ("ok MOVEL id=11", "error MOVEL id=11 reason=IK_FAILED", "ok MOVEJ id=12"):
+            c._process_rx_line(receipt)
+            self.assertEqual(c._seq_idx, 0)
+            self.assertEqual(c._seq_motion_id, 11)
+        c._process_rx_line("ok MOVEJ id=11 ms=250")
+        self.scheduler.run_ready()
+        self.assertEqual(self.commands(), ["@200,30,300,90,0,180,40"])
+        self.assertEqual(c.state()["sequence_type"], "MOVEL")
+        c._process_rx_line("queued MOVEJ id=12 mode=SEQ")
+        c._process_rx_line("ok MOVEL id=12")  # Needs a matching queued identity first.
+        self.assertIsNone(c._seq_motion_id)
+        self.assertEqual(c._seq_idx, 1)
+        c._process_rx_line("queued MOVEL id=12 mode=SEQ")
+        c._process_rx_line("ok MOVEJ id=12")
+        c._process_rx_line("error MOVEJ id=12 reason=FAILED")
+        self.assertTrue(c._seq_active)
+        self.assertEqual(c._seq_idx, 1)
+        c._process_rx_line("ok MOVEL id=12 ms=600")
+        self.scheduler.run_ready()
+        self.assertEqual(self.commands(), [">10,-70,170,0,0,0,30,40"])
+        c._process_rx_line("queued MOVEJ id=13 mode=SEQ")
+        c._process_rx_line("ok MOVEJ id=13")
+        self.assertFalse(c._seq_active)
+        self.assertEqual(c._seq_idx, 3)
+        self.assertIsNone(c.state()["sequence_type"])
+
+    def test_matching_movel_failure_ends_sequence_without_next_motion(self):
+        c = self.controller
+        c.stored_positions = [
+            {"name": "L", "type": "MoveL", "pose": [200, 0, 300, 0, 0, 0]},
+            ("J", [0, -75, 180, 0, 0, 0, 0]),
+        ]
+        self.assertTrue(c.send_all_positions())
+        c._process_rx_line(f"ok CMDMODE mode=1 busy=0 issued=20 req={c._mode_request}")
+        self.commands()
+        c._process_rx_line("queued MOVEL id=21 mode=SEQ")
+        c._process_rx_line("error MOVEL id=22 reason=IK_FAILED")
+        self.assertTrue(c._seq_active)
+        c._process_rx_line("error MOVEL id=21 reason=IK_FAILED")
+        self.scheduler.run_ready()
+        self.assertFalse(c._seq_active)
+        self.assertEqual(c._seq_idx, 0)
+        self.assertEqual(self.commands(), [])
+
+    def test_sequence_snapshot_is_immutable_when_editor_changes_points(self):
+        c = self.controller
+        records = [
+            {"name": "J", "type": "MoveJ", "joints": [0, -75, 180, 0, 0, 0, 5],
+             "gripper": 20, "speed": 10},
+            {"name": "L", "type": "MoveL", "pose": [200, 30, 300, 90, 0, 180],
+             "gripper": 80, "speed": 90},
+        ]
+        c.stored_positions = records
+        c.ent_pos_speed.set("60")
+        self.assertTrue(c.send_all_positions())
+        self.assertIsInstance(c._seq_pending, tuple)
+        with self.assertRaises(FrozenInstanceError):
+            c._seq_pending[0].kind = "MOVEL"
+        with self.assertRaises(TypeError):
+            c._seq_pending[0].target[0] = 80
+        records[0]["joints"][0] = 90
+        records[0]["type"] = "MoveL"
+        records[1]["pose"][:] = [1, 2, 3, 4, 5, 6]
+        records.reverse()
+        c.ent_pos_speed.set("99")
+        request = c._mode_request
+        self.commands()
+        c._process_rx_line(f"ok CMDMODE mode=1 busy=0 issued=30 req={request}")
+        self.assertEqual(self.commands(), [">0,-75,180,0,0,0,5,60"])
+        records.clear()
+        c._process_rx_line("queued MOVEJ id=31 mode=SEQ")
+        c._process_rx_line("ok MOVEJ id=31")
+        self.scheduler.run_ready()
+        self.assertEqual(self.commands(), ["@200,30,300,90,0,180,60"])
+
+    def test_stop_calibration_and_disconnect_cancel_scheduled_next_typed_point(self):
+        for action in ("!STOP", "!CALIBRATION", "disconnect"):
+            with self.subTest(action=action):
+                self.controller.close()
+                self.scheduler = ManualScheduler()
+                c = self.controller = RobotController(scheduler=self.scheduler)
+                c.is_connected = True
+                c.serial_port = FakePort()
+                c.stored_positions = [
+                    ("J", [0, -75, 180, 0, 0, 0, 0]),
+                    {"name": "L", "type": "MoveL", "pose": [200, 0, 300, 0, 0, 0]},
+                ]
+                self.assertTrue(c.send_all_positions())
+                c._process_rx_line(f"ok CMDMODE mode=1 busy=0 issued=40 req={c._mode_request}")
+                self.commands()
+                c._process_rx_line("queued MOVEJ id=41 mode=SEQ")
+                c._process_rx_line("ok MOVEJ id=41")  # Next send is scheduled, not run yet.
+                callbacks = list(self.scheduler.calls.values())
+                old_generation = c.state()["generation"]
+                if action == "disconnect":
+                    c.disconnect_port()
+                else:
+                    self.assertTrue(c.send_cmd(action))
+                    self.assertEqual(self.commands(), [action])
+                    if action == "!STOP":
+                        c._process_rx_line("Disabled ok")
+                    else:
+                        c._process_rx_line("!CALIBRATION ok")
+                self.assertGreater(c.state()["generation"], old_generation)
+                self.assertFalse(c._seq_active)
+                self.assertIsNone(c.state()["sequence_type"])
+                c._process_rx_line("queued MOVEL id=42 mode=SEQ")
+                c._process_rx_line("ok MOVEL id=42")
+                # Even watchdogs/callbacks already dispatched before cancellation
+                # must not revive the old sequence after the lock clears.
+                for _delay, callback, args in callbacks:
+                    callback(*args)
+                self.assertEqual(self.commands(), [])
+
+    def test_invalid_typed_point_prevents_all_queries_and_motion(self):
+        c = self.controller
+        valid = {"name": "J", "joints": [0, -75, 180, 0, 0, 0, 0]}
+        invalid = [
+            {"name": "bad", "type": "MoveX", "joints": valid["joints"]},
+            {"name": "bad", "type": "MoveL", "joints": valid["joints"]},
+            {"name": "bad", "joints": [0, -75, 180, 0, 0, 0]},
+            {"name": "bad", "joints": [float("nan"), -75, 180, 0, 0, 0, 0]},
+            {"name": "bad", "joints": [True, -75, 180, 0, 0, 0, 0]},
+            {"name": "bad", "joints": [1000, -75, 180, 0, 0, 0, 0]},
+            {"name": "bad", "type": "MoveL", "pose": [200, 0, float("inf"), 0, 0, 0]},
+            {"name": "bad", "type": "MoveL", "pose": [10001, 0, 300, 0, 0, 0]},
+            dict(valid, gripper=-1), dict(valid, gripper=101),
+            dict(valid, speed=0), dict(valid, speed=float("inf")), dict(valid, speed=True),
+        ]
+        for record in invalid:
+            with self.subTest(record=record):
+                self.assertFalse(c.send_typed_position(record))
+                c.stored_positions = [deepcopy(valid), record]
+                self.assertFalse(c.send_all_positions())
+                c._pos_listbox.selected = 1
+                self.assertFalse(c.send_selected_position())
+                self.assertEqual(self.commands(), [])
+                self.assertFalse(c._seq_active)
+                self.assertIsNone(c._mode_request)
+        for speed in (True, float("nan"), float("inf"), 0, 101):
+            self.assertFalse(c.send_typed_position(valid, speed))
+        self.assertEqual(self.commands(), [])
+
+    def test_explicit_position_sync_signal_ignores_poll_timeout_and_canceled_reply(self):
+        c = self.controller
+        synced = []
+        c.position_synced.connect(lambda kind, values: synced.append((kind, values)))
+        c._poll_position()
+        c._process_rx_line("ok 0 -75 180 0 0 0 10")
+        self.assertEqual(synced, [])
+        self.assertTrue(c.read_and_sync_from_robot())
+        c._process_rx_line("ok 1 -74 179 2 3 4 11")
+        self.assertEqual(synced, [("MoveJ", [1, -74, 179, 2, 3, 4, 11])])
+        self.assertTrue(c.read_pose_from_robot())
+        c._process_rx_line("ok 5 -70 170 6 7 8 12")  # Wrong coordinate kind.
+        self.assertEqual(len(synced), 1)
+        c._process_rx_line("ok 200 30 300 90 0 -180")
+        self.assertEqual(synced[-1], ("MoveL", [200, 30, 300, 90, 0, -180]))
+        self.assertTrue(c.read_pose_from_robot())
+        c._position_timeout(c._position_request["token"])
+        c._process_rx_line("ok 201 31 301 91 1 -179")
+        self.assertEqual(len(synced), 2)
+        self.assertTrue(c.read_and_sync_from_robot())
+        c.send_cmd("!STOP")
+        c._process_rx_line("ok 6 -69 169 7 8 9 13")
+        self.assertEqual(len(synced), 2)
 
     def test_polling_updates_actual_without_overwriting_target(self):
         c = self.controller

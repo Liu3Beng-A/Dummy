@@ -1,5 +1,5 @@
 """Reusable Qt controls, kept independent from serial communication."""
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDoubleSpinBox, QHBoxLayout, QLabel,
     QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
@@ -42,7 +42,7 @@ class AxisRow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(7)
         title = QLabel(name)
-        title.setFixedWidth(34)
+        title.setFixedWidth(38)
         layout.addWidget(title)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(round(limits[0] * 100), round(limits[1] * 100))
@@ -53,12 +53,12 @@ class AxisRow(QWidget):
         self.readback = QLabel("—")
         self.readback.setProperty("role", "muted")
         self.readback.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.readback.setFixedWidth(56)
+        self.readback.setFixedWidth(60)
         self.readback.setToolTip("实际回读；未收到有效数据时显示 —")
         layout.addWidget(self.readback)
         self.spin = number(value, *limits, decimals=2, step=1)
         self.spin.setSuffix(f" {unit}")
-        self.spin.setFixedWidth(110)
+        self.spin.setFixedWidth(128)
         layout.addWidget(self.spin)
         self.spin.valueChanged.connect(self._spin_changed)
         self.slider.valueChanged.connect(lambda value: self.spin.setValue(value / 100))
@@ -68,6 +68,16 @@ class AxisRow(QWidget):
         self.slider.setValue(round(value * 100))
         self.slider.blockSignals(False)
         self.changed.emit(value)
+
+    def set_value(self, value, notify=False):
+        """Copy an edited/readback target without triggering another command."""
+        spin_blocker = QSignalBlocker(self.spin)
+        slider_blocker = QSignalBlocker(self.slider)
+        self.spin.setValue(value)
+        self.slider.setValue(round(self.spin.value() * 100))
+        del spin_blocker, slider_blocker
+        if notify:
+            self.changed.emit(self.spin.value())
 
 
 class ColorEditor(QWidget):

@@ -154,6 +154,16 @@ class RobotView(QWidget):
         self._target_gripper = float(gripper_pct)
         self._sync()
 
+    def set_target_gripper(self, gripper_pct):
+        """Update the display opening while preserving the last joint target.
+
+        MoveL has a Cartesian marker without local IK, so changing its gripper
+        preview must not manufacture a new robot joint pose or send commands.
+        """
+        firmware_to_urdf(self._target_pose, gripper_pct, preview=True)
+        self._target_gripper = float(gripper_pct)
+        self._sync()
+
     def set_actual_pose(self, joints, gripper_pct=None):
         pose = normalize_pose(joints, preview=False)
         if gripper_pct is not None:

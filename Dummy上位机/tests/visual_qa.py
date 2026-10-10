@@ -18,15 +18,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--theme", choices=("light", "dark"), default="light")
     parser.add_argument("--output", default="build/qa/pages")
+    parser.add_argument("--size", default="1366x768")
     args = parser.parse_args()
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     application = QApplication([])
     store = AppStore(output / "data")
     store.update_settings(theme=args.theme, geometry="", window_state="")
+    store.save_points([
+        {"name": "关节取料点", "type": "MoveJ", "joints": [25, -40, 120, 15, 20, 0, 80], "gripper": 60, "speed": 35},
+        {"name": "末端放料点", "type": "MoveL", "pose": [245, -20, 220, 180, 0, 90], "gripper": 35, "speed": 25},
+        {"name": "关节休息点", "type": "MoveJ", "joints": [0, -75, 180, 0, 0, 0, 0], "gripper": 100, "speed": 20},
+    ])
     controller = RobotController()
     window = MainWindow(controller, store)
-    window.resize(1366, 768)
+    width, height = map(int, args.size.lower().split("x"))
+    window.resize(width, height)
     steps = [(f"{page}-{name}", lambda value=page: window.navigation.setCurrentRow(value))
              for page, name in enumerate(("motion", "teaching", "motor", "protection", "gripper", "rgb", "settings"))]
 
@@ -40,6 +47,13 @@ def main():
               ("rgb-auto", lambda: tab(5, 1)),
               ("rgb-effects", lambda: tab(5, 2)),
               ("rgb-state", lambda: tab(5, 3))]
+
+    def teaching(index):
+        window.navigation.setCurrentRow(1)
+        window.point_table.selectRow(index)
+
+    steps += [("teaching-movej", lambda: teaching(0)),
+              ("teaching-movel", lambda: teaching(1))]
 
     def bottom(page):
         window.navigation.setCurrentRow(page)
@@ -62,7 +76,12 @@ def main():
         index = progress["index"]
         name = steps[index][0]
         path = output / f"{name}-{args.theme}.png"
-        if not window.grab().save(str(path), "PNG"):
+        snapshot = window.grab()
+        if index == 0:
+            print(f"QA GEOMETRY: {window.width()}x{window.height()} logical; "
+                  f"DPR {snapshot.devicePixelRatio():.3f}; "
+                  f"PNG {snapshot.width()}x{snapshot.height()}", flush=True)
+        if not snapshot.save(str(path), "PNG"):
             application.exit(2)
             return
         print(f"CAPTURE {path.name}", flush=True)
@@ -72,6 +91,10 @@ def main():
     def advance():
         index = progress["index"]
         if index == len(steps):
+            if controller.is_connected or controller._transport is not None or not controller._tx_queue.empty():
+                print("QA FAIL: offline capture dispatched a robot command", flush=True)
+                application.exit(4)
+                return
             print(f"QA PASS: {index} pages; viewer ready; no serial connection", flush=True)
             application.exit(0)
             return

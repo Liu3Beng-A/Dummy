@@ -19,6 +19,31 @@ DEFAULT_SETTINGS = {
 }
 JOINT_LIMITS = [(-175, 175), (-75, 90), (0, 180), (-270, 270),
                 (-100, 100), (-180, 180), (-250, 250)]
+POSE_LIMITS = [(-10000, 10000)] * 3 + [(-3600, 3600)] * 3
+POINT_SCHEMA_VERSION = 2
+
+
+def _point_number(value, name, field, limits):
+    if isinstance(value, bool):
+        raise ValueError(f"{name}：{field} 必须是数值")
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name}：{field} 必须是数值") from exc
+    if not math.isfinite(value) or not limits[0] <= value <= limits[1]:
+        raise ValueError(f"{name}：{field} 超出范围 {limits[0]}～{limits[1]}")
+    return value
+
+
+def _file_points(data):
+    if isinstance(data, dict):
+        version = data.get("schema_version", 1)
+        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
+            raise ValueError("不支持该点位文件版本")
+        if "points" not in data:
+            raise ValueError("点位文件缺少 points 列表")
+        return data["points"]
+    return data
 
 
 def validate_points(records):
@@ -32,27 +57,25 @@ def validate_points(records):
         name = str(record.get("name", f"点位 {index}")).strip()
         if not name or len(name) > 120:
             raise ValueError(f"第 {index} 个点位名称为空或过长")
-        joints = record.get("joints")
-        if not isinstance(joints, (list, tuple)) or len(joints) != 7:
-            raise ValueError(f"{name}：需要六个关节角及一个地轨位置")
-        values = []
-        for axis, (value, limits) in enumerate(zip(joints, JOINT_LIMITS), 1):
-            if isinstance(value, bool):
-                raise ValueError(f"{name}：J{axis} 必须是数值")
-            try:
-                value = float(value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{name}：J{axis} 必须是数值") from exc
-            if not math.isfinite(value) or not limits[0] <= value <= limits[1]:
-                raise ValueError(f"{name}：J{axis} 超出范围 {limits[0]}～{limits[1]}")
-            values.append(value)
-        gripper = float(record.get("gripper", 100))
-        speed = float(record.get("speed", 35))
-        if not math.isfinite(gripper) or not 0 <= gripper <= 100:
-            raise ValueError(f"{name}：夹爪开度必须在 0～100")
-        if not math.isfinite(speed) or not 1 <= speed <= 100:
-            raise ValueError(f"{name}：速度必须在 1～100")
-        result.append({"name": name, "joints": values,
+        point_type = record.get("type", "MoveJ")
+        if point_type == "MoveJ":
+            key, limits = "joints", JOINT_LIMITS
+            labels = ["J1", "J2", "J3", "J4", "J5", "J6", "地轨"]
+            description = "需要六个关节角及一个地轨位置"
+        elif point_type == "MoveL":
+            key, limits = "pose", POSE_LIMITS
+            labels = ["X", "Y", "Z", "A", "B", "C"]
+            description = "需要末端坐标 X/Y/Z 和姿态角 A/B/C"
+        else:
+            raise ValueError(f"{name}：点位类型必须为 MoveJ 或 MoveL")
+        coordinates = record.get(key)
+        if not isinstance(coordinates, (list, tuple)) or len(coordinates) != len(limits):
+            raise ValueError(f"{name}：{description}")
+        values = [_point_number(value, name, label, bounds)
+                  for value, label, bounds in zip(coordinates, labels, limits)]
+        gripper = _point_number(record.get("gripper", 100), name, "夹爪开度", (0, 100))
+        speed = _point_number(record.get("speed", 35), name, "速度", (1, 100))
+        result.append({"name": name, "type": point_type, key: values,
                        "gripper": gripper, "speed": speed})
     return result
 
@@ -75,7 +98,7 @@ class AppStore:
         self._normalize_settings()
         raw = self._read(self.base_dir / "points.json", {"points": []})
         try:
-            self.points = validate_points(raw.get("points", []) if isinstance(raw, dict) else raw)
+            self.points = validate_points(_file_points(raw))
         except (ValueError, TypeError, OverflowError) as exc:
             self.points = []
             self.load_errors.append(f"点位读取失败：{exc}")
@@ -149,19 +172,17 @@ class AppStore:
     def save_points(self, points):
         validated = validate_points(points)
         with self._lock:
-            self._write(self.base_dir / "points.json", {"schema_version": 1, "points": validated})
+            self._write(self.base_dir / "points.json", {"schema_version": POINT_SCHEMA_VERSION, "points": validated})
             self.points = validated
 
     def import_points(self, path):
         with Path(path).open("r", encoding="utf-8-sig") as stream:
             data = json.load(stream)
-        if isinstance(data, dict) and data.get("schema_version", 1) != 1:
-            raise ValueError("不支持该点位文件版本")
-        return validate_points(data.get("points", []) if isinstance(data, dict) else data)
+        return validate_points(_file_points(data))
 
     def export_points(self, path, points=None):
         validated = validate_points(self.points if points is None else points)
-        self._write(Path(path), {"schema_version": 1, "points": validated})
+        self._write(Path(path), {"schema_version": POINT_SCHEMA_VERSION, "points": validated})
 
     def log(self, tag, message):
         self._logger.info("[%s] %s", str(tag), str(message))

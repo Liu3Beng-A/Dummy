@@ -11,10 +11,10 @@ from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFormLayout,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
+    QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -37,7 +37,16 @@ class MainWindow(QMainWindow):
         self._closed = False
         self._building = True
         self._logs = deque(maxlen=int(store.settings.get("log_limit", 5000)))
-        self._last_drag = {"j": 0., "l": 0., "hand": 0.}
+        self._last_drag = {"j": 0., "l": 0., "hand": 0., "teaching": 0.}
+        self._drag_timers = {}
+        self._drag_pending = {}
+        self._drag_epoch = 0
+        self._teaching_sync = None
+        for kind in self._last_drag:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda target=kind: self._flush_drag(target))
+            self._drag_timers[kind] = timer
         self.points = copy.deepcopy(store.points)
         self._point_editing = False
         self.setWindowTitle("Dummy Robot · 机械臂控制台")
@@ -61,6 +70,8 @@ class MainWindow(QMainWindow):
         controller.actual_pose_changed.connect(self._actual_pose)
         controller.fields_changed.connect(self._fields_updated)
         controller.ports_changed.connect(self._ports_updated)
+        if hasattr(controller, "position_synced"):
+            controller.position_synced.connect(self._position_synced)
         self.connection_combo.currentIndexChanged.connect(lambda *_: self._update_state({}))
         self._restore_points()
         self._building = False
@@ -71,6 +82,10 @@ class MainWindow(QMainWindow):
         window_state = store.settings.get("window_state", "")
         if window_state:
             self.restoreState(QByteArray.fromBase64(window_state.encode("ascii")))
+        # Older saved layouts placed the terminal under the entire workspace.
+        # The inline log is now the default; its expanded window stays separate.
+        self.log_dock.setFloating(True)
+        self.log_dock.hide()
         self.controller.set_polling(store.settings.get("auto_poll", True), store.settings.get("poll_hz", 5))
         self.controller.refresh_ports()
         self._update_state({})
@@ -137,7 +152,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.motor_status)
         self.log_toggle = button("终端", self._toggle_log)
         row.addWidget(self.log_toggle)
-        stop = button("■  软停 STOP", lambda: self.controller.send_cmd("!STOP"), "danger")
+        stop = button("STOP", lambda: self._system_command("!STOP"), "danger")
         stop.setObjectName("StopButton")
         stop.setToolTip("发送 !STOP，取消上位机任务并请求主控软停")
         row.addWidget(stop)
@@ -171,17 +186,25 @@ class MainWindow(QMainWindow):
         body.addWidget(self.pages, 1)
         outer.addLayout(body, 1)
         self.navigation.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.navigation.currentRowChanged.connect(self._navigation_changed)
         self.navigation.setCurrentRow(0)
         self.statusBar().showMessage("离线预览可用；连接设备后可读取实际位置。")
 
-    def _page(self, title, subtitle, scroll=True):
+    def _page(self, title, subtitle, scroll=True, actions=None):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(20, 18, 20, 14)
         layout.setSpacing(12)
         heading = QLabel(title)
         heading.setObjectName("PageTitle")
-        layout.addWidget(heading)
+        if actions is None:
+            layout.addWidget(heading)
+        else:
+            header = QHBoxLayout()
+            header.setSpacing(16)
+            header.addWidget(heading)
+            header.addLayout(actions, 1)
+            layout.addLayout(header)
         description = hint(subtitle, "muted")
         description.setObjectName("PageSubtitle")
         layout.addWidget(description)
@@ -207,23 +230,25 @@ class MainWindow(QMainWindow):
         return group, layout
 
     def _build_motion_page(self):
-        layout = self._page("运动控制", "编辑目标与设备实际位置分别管理；三维预览不会自动发送运动指令。", False)
         row = QHBoxLayout()
+        row.setSpacing(4)
         for text, callback, role in (
-            ("启动 START", self.controller._cmd_start, "success"),
-            ("失能 DISABLE", self.controller._cmd_disable, None),
-            ("回零 HOME", lambda: self.controller.send_cmd("!HOME"), None),
-            ("休息 RESET", lambda: self.controller.send_cmd("!RESET"), None),
-            ("置零 / 校准", self.controller._cmd_calibration, None),
+            ("启动 START", lambda: self._system_command("!START"), "success"),
+            ("失能 DISABLE", lambda: self._system_command("!DISABLE"), "secondary"),
+            ("回零 HOME", lambda: self._system_command("!HOME"), "primary"),
+            ("休息 REST", lambda: self._system_command("!RESET"), "slate"),
+            ("置零 / 校准", self._calibration_command, "calibration"),
         ):
             row.addWidget(button(text, callback, role))
-        row.addStretch()
         self.mode_combo = self._combo(("1 · SEQ 顺序", "2 · INT 打断", "3 · TRJ 连续", "4 · TUN 扫频"), 1)
         self.mode_combo.setToolTip("TUN 使用固件内置扫频激励；切换前确认各轴运动空间")
         row.addWidget(self.mode_combo)
         row.addWidget(button("设置模式", lambda: self.controller._set_cmdmode(self.mode_combo.currentIndex() + 1)))
         row.addWidget(button("查询", self.controller._query_command_mode))
-        layout.addLayout(row)
+        row.addStretch()
+        layout = self._page("运动控制", "编辑目标与设备实际位置分别管理；三维预览不会自动发送运动指令。", False, row)
+        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setSpacing(8)
 
         self.motion_splitter = QSplitter(Qt.Orientation.Horizontal)
         scene = QFrame()
@@ -252,12 +277,24 @@ class MainWindow(QMainWindow):
         scene_layout.addWidget(self.actual_status)
         self.motion_splitter.addWidget(scene)
 
+        self.motion_controls = QWidget()
+        self.motion_controls.setMinimumWidth(395)
+        self.motion_controls.setMaximumWidth(545)
+        controls_layout = QVBoxLayout(self.motion_controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
         self.motion_tabs = QTabWidget()
-        self.motion_tabs.setMinimumWidth(330)
-        self.motion_tabs.setMaximumWidth(520)
+        self.motion_tabs.setObjectName("MotionTabs")
+        self.motion_tabs.setDocumentMode(True)
+        self.motion_tabs.tabBar().setExpanding(True)
+        joint_tab = QWidget()
+        joint_tab.setObjectName("MotionTabPage")
+        joint_tab_layout = QVBoxLayout(joint_tab)
+        joint_tab_layout.setContentsMargins(10, 8, 10, 8)
+        joint_tab_layout.setSpacing(6)
         joint_page = QWidget()
         joint_layout = QVBoxLayout(joint_page)
-        joint_layout.setContentsMargins(12, 11, 12, 10)
+        joint_layout.setContentsMargins(2, 2, 2, 4)
         joint_layout.setSpacing(8)
         joint_layout.addWidget(hint("灰色值为实际回读，输入框为编辑目标。", "muted"))
         self.joint_rows = []
@@ -275,36 +312,43 @@ class MainWindow(QMainWindow):
         self._bind("ent_j7", self.joint_rows[6].spin)
         self._bind("scl_j7", self.joint_rows[6].spin)
         self._bind("lbl_j7", QLabel())
+        joint_scroll = QScrollArea()
+        joint_scroll.setObjectName("MoveJAxisScroll")
+        joint_scroll.setWidgetResizable(True)
+        joint_scroll.setMinimumHeight(50)
+        joint_scroll.setSizeAdjustPolicy(QScrollArea.SizeAdjustPolicy.AdjustToContents)
+        joint_scroll.setWidget(joint_page)
+        joint_tab_layout.addWidget(joint_scroll, 1)
         speed_row = QHBoxLayout()
         speed_row.addWidget(QLabel("速度档位"))
         self.j_speed = number(DEFAULT_SPEED, 1, 100, 0)
         self._bind("ent_j_speed", self.j_speed)
         speed_row.addWidget(self.j_speed)
         self.j_drag = QCheckBox("拖动发送")
-        self.j_drag.toggled.connect(lambda *_: self.controller._warn_drag_mode())
+        self.j_drag.toggled.connect(lambda enabled: self._drag_toggled("j", enabled))
         self._bind("movej_drag_enable", self.j_drag)
         speed_row.addWidget(self.j_drag)
-        joint_layout.addLayout(speed_row)
-        joint_layout.addWidget(button("发送 MoveJ", self.controller.send_movej, "primary"))
-        joint_layout.addWidget(button("读取实际位置 → 同步输入", self.controller.read_and_sync_from_robot))
-        gripper_row = QHBoxLayout()
-        gripper_row.addWidget(QLabel("夹爪目标"))
-        self.quick_hand_spin = number(100, 0, 100, 0)
-        self.quick_hand_spin.setSuffix(" %")
-        self.quick_hand_spin.valueChanged.connect(self._quick_hand_changed)
-        gripper_row.addWidget(self.quick_hand_spin, 1)
-        gripper_row.addWidget(button("发送夹爪", self.controller._cmd_hand_set_pos))
-        joint_layout.addLayout(gripper_row)
-        joint_layout.addWidget(hint("速度 100 = 30 r/s；地轨与六轴同步到达。"))
-        joint_layout.addStretch()
-        joint_scroll = QScrollArea()
-        joint_scroll.setWidgetResizable(True)
-        joint_scroll.setWidget(joint_page)
-        self.motion_tabs.addTab(joint_scroll, "关节 / 地轨")
+        self.j_speed.setToolTip("速度 100 = 30 r/s；地轨与六轴同步到达")
+        joint_tab_layout.addLayout(speed_row)
+        actions = QHBoxLayout()
+        self.movej_send_button = button("发送 MoveJ", lambda: self._send_motion("j"), "primary")
+        self.movej_send_button.setObjectName("SendMoveJ")
+        actions.addWidget(self.movej_send_button, 1)
+        self.movej_read_button = button("读取 → 同步输入", lambda: self._read_motion("j"))
+        self.movej_read_button.setToolTip("读取设备实际关节与地轨位置，然后同步至编辑目标；不会发送运动")
+        actions.addWidget(self.movej_read_button, 1)
+        joint_tab_layout.addLayout(actions)
+        joint_tab_layout.addStretch()
+        self.motion_tabs.addTab(joint_tab, "MoveJ · 关节 / 地轨")
 
+        pose_tab = QWidget()
+        pose_tab.setObjectName("MotionTabPage")
+        pose_tab_layout = QVBoxLayout(pose_tab)
+        pose_tab_layout.setContentsMargins(10, 8, 10, 8)
+        pose_tab_layout.setSpacing(6)
         pose_page = QWidget()
         pose_layout = QVBoxLayout(pose_page)
-        pose_layout.setContentsMargins(12, 11, 12, 10)
+        pose_layout.setContentsMargins(2, 2, 2, 4)
         pose_layout.setSpacing(8)
         self.pose_rows = []
         for index, (name, limits, value) in enumerate(zip(("X", "Y", "Z", "A", "B", "C"), POSE_RANGES, POSE_DEFAULTS)):
@@ -321,29 +365,133 @@ class MainWindow(QMainWindow):
         self.fields["ent_pose"] = [FieldAdapter(axis.spin) for axis in self.pose_rows]
         self.fields["scl_pose"] = [FieldAdapter(axis.spin) for axis in self.pose_rows]
         self.fields["lbl_pose"] = [FieldAdapter(axis.readback) for axis in self.pose_rows]
+        pose_scroll = QScrollArea()
+        pose_scroll.setObjectName("MoveLAxisScroll")
+        pose_scroll.setWidgetResizable(True)
+        pose_scroll.setMinimumHeight(50)
+        pose_scroll.setSizeAdjustPolicy(QScrollArea.SizeAdjustPolicy.AdjustToContents)
+        pose_scroll.setWidget(pose_page)
+        pose_tab_layout.addWidget(pose_scroll, 1)
         line = QHBoxLayout()
         line.addWidget(QLabel("速度档位"))
         self.l_speed = number(DEFAULT_SPEED, 1, 100, 0)
         self._bind("ent_l_speed", self.l_speed)
         line.addWidget(self.l_speed)
-        l_drag = QCheckBox("拖动发送")
-        self._bind("movel_drag_enable", l_drag)
-        l_drag.toggled.connect(lambda *_: self.controller._warn_drag_mode())
-        line.addWidget(l_drag)
-        pose_layout.addLayout(line)
-        pose_layout.addWidget(button("发送 MoveL", self.controller.send_movel, "primary"))
-        pose_layout.addWidget(button("读取实际位姿 → 同步输入", self.controller.read_pose_from_robot))
-        pose_layout.addWidget(hint("三维标记表示笛卡尔目标；完整关节姿态以设备回读为准。"))
-        pose_layout.addStretch()
-        pose_scroll = QScrollArea()
-        pose_scroll.setWidgetResizable(True)
-        pose_scroll.setWidget(pose_page)
-        self.motion_tabs.addTab(pose_scroll, "MoveL")
-        self.motion_splitter.addWidget(self.motion_tabs)
+        self.l_drag = QCheckBox("拖动发送")
+        self._bind("movel_drag_enable", self.l_drag)
+        self.l_drag.toggled.connect(lambda enabled: self._drag_toggled("l", enabled))
+        line.addWidget(self.l_drag)
+        self.l_speed.setToolTip("三维标记表示笛卡尔目标；完整关节姿态以设备回读为准")
+        pose_tab_layout.addLayout(line)
+        actions = QHBoxLayout()
+        self.movel_send_button = button("发送 MoveL", lambda: self._send_motion("l"), "primary")
+        self.movel_send_button.setObjectName("SendMoveL")
+        actions.addWidget(self.movel_send_button, 1)
+        self.movel_read_button = button("读取 → 同步输入", lambda: self._read_motion("l"))
+        self.movel_read_button.setToolTip("读取设备实际 XYZABC 位姿，然后同步至编辑目标；不会发送运动")
+        actions.addWidget(self.movel_read_button, 1)
+        pose_tab_layout.addLayout(actions)
+        pose_tab_layout.addStretch()
+        self.motion_tabs.addTab(pose_tab, "MoveL")
+        self.motion_tabs.currentChanged.connect(self._motion_tab_changed)
+        self._motion_axis_scrolls = (joint_scroll, pose_scroll)
+        controls_layout.addWidget(self.motion_tabs, 1)
+        self._build_motion_gripper(controls_layout)
+        self._build_motion_log(controls_layout)
+        self.motion_controls.installEventFilter(self)
+        self.motion_splitter.addWidget(self.motion_controls)
         self.motion_splitter.setStretchFactor(0, 3)
         self.motion_splitter.setStretchFactor(1, 1)
-        self.motion_splitter.setSizes((800, 370))
+        self.motion_splitter.setSizes((760, 430))
         layout.addWidget(self.motion_splitter, 1)
+
+    def _schedule_motion_fit(self):
+        if self._closed or getattr(self, "_motion_fit_pending", False):
+            return
+        self._motion_fit_pending = True
+        QTimer.singleShot(0, self._fit_motion_controls)
+
+    def _fit_motion_controls(self):
+        """Use content height when room permits; scroll only the axes otherwise."""
+        self._motion_fit_pending = False
+        if self._closed:
+            return
+        for area in self._motion_axis_scrolls:
+            content_layout = area.widget().layout()
+            content_layout.invalidate()
+            width = max(1, area.viewport().width())
+            height = (content_layout.heightForWidth(width) if content_layout.hasHeightForWidth()
+                      else content_layout.sizeHint().height())
+            area.setMaximumHeight(height + 2 * area.frameWidth())
+        page_layout = self.motion_tabs.currentWidget().layout()
+        page_layout.invalidate()
+        # QScrollArea caches its initial size hint before the theme is applied.
+        # Replace that height with the current content height for the active tab.
+        area = self._motion_axis_scrolls[self.motion_tabs.currentIndex()]
+        natural_height = (page_layout.sizeHint().height() - area.sizeHint().height()
+                          + area.maximumHeight())
+        self.motion_tabs.setMaximumHeight(natural_height
+                                          + self.motion_tabs.tabBar().sizeHint().height() + 4)
+
+    def _build_motion_log(self, layout):
+        self.motion_log_panel = QFrame()
+        self.motion_log_panel.setObjectName("Card")
+        box = QVBoxLayout(self.motion_log_panel)
+        box.setContentsMargins(8, 6, 8, 8)
+        box.setSpacing(5)
+        header = QHBoxLayout()
+        header.addWidget(QLabel("串口日志"))
+        header.addStretch()
+        self.expand_log_button = button("展开", self._expand_log)
+        self.expand_log_button.setObjectName("ExpandLog")
+        self.expand_log_button.setToolTip("在独立窗口中查看日志和发送自定义指令")
+        header.addWidget(self.expand_log_button)
+        box.addLayout(header)
+        self.compact_log_view = QPlainTextEdit()
+        self.compact_log_view.setObjectName("LogView")
+        self.compact_log_view.setReadOnly(True)
+        self.compact_log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.compact_log_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.compact_log_view.setMinimumHeight(72)
+        self.compact_log_view.setPlaceholderText("连接设备后显示串口收发日志")
+        box.addWidget(self.compact_log_view, 1)
+        layout.addWidget(self.motion_log_panel)
+
+    def _build_motion_gripper(self, layout):
+        """Always visible under the movement tabs; mirrors the gripper page."""
+        self.motion_gripper_group, box = self._group("夹爪")
+        self.motion_gripper_group.setObjectName("MotionGripper")
+        self.motion_gripper_group.setProperty("compact", True)
+        box.setContentsMargins(8, 6, 8, 6)
+        box.setSpacing(5)
+        self.motion_hand_row = AxisRow("开度", (0, 100), 100, "%")
+        self.motion_hand_row.spin.setDecimals(0)
+        self.motion_hand_row.readback.hide()
+        self.motion_hand_spin = self.motion_hand_row.spin
+        self.quick_hand_spin = self.motion_hand_spin  # Existing external UI handles.
+        self.motion_hand_spin.setObjectName("MotionHandPosition")
+        self.motion_hand_row.changed.connect(lambda value: self._hand_position_changed("motion", value))
+        box.addWidget(self.motion_hand_row)
+        row = QHBoxLayout()
+        self.motion_hand_drag = QCheckBox("拖发")
+        self.motion_hand_drag.setToolTip("与夹爪设置页共享：拖动开度时发送位置指令")
+        self.motion_hand_drag.setObjectName("MotionHandDrag")
+        self.motion_hand_drag.toggled.connect(lambda enabled: self._hand_drag_changed("motion", enabled))
+        row.addWidget(self.motion_hand_drag)
+        row.addWidget(button("发送位置", self._send_hand_position, "primary"), 1)
+        row.addWidget(button("张开", lambda: self._send_hand_direction(True), "success"), 1)
+        row.addWidget(button("闭合", lambda: self._send_hand_direction(False), "secondary"), 1)
+        box.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("电流"))
+        self.motion_hand_current = number(1., .05, 2.5, 2, .05)
+        self.motion_hand_current.setSuffix(" A")
+        self.motion_hand_current.setObjectName("MotionHandCurrent")
+        self.motion_hand_current.valueChanged.connect(lambda value: self._hand_current_changed("motion", value))
+        row.addWidget(self.motion_hand_current, 1)
+        row.addWidget(button("设置电流", self.controller._cmd_hand_set_i))
+        box.addLayout(row)
+        layout.addWidget(self.motion_gripper_group)
 
     def _focus_event(self, original, joint):
         def focus(event):
@@ -352,32 +500,108 @@ class MainWindow(QMainWindow):
         return focus
 
     def _build_teaching_page(self):
-        layout = self._page("点位示教", "保存目标关节与地轨坐标，选择点位预览；顺序执行等待匹配运动编号的完成回执。", False)
+        layout = self._page("点位示教", "独立编辑 MoveJ 或 MoveL 点位；选中、切换和回读只更新目标，顺序执行按运动类型与编号等待完成。", False)
         row = QHBoxLayout()
         self.point_name = QLineEdit()
         self.point_name.setPlaceholderText("点位名称，例如：取料起始")
         self.point_name.setMaxLength(120)
         row.addWidget(self.point_name, 1)
         row.addWidget(button("保存当前目标", self._save_point, "primary"))
-        row.addWidget(button("用当前目标更新选中", self._replace_point))
+        row.addWidget(button("更新选中", self._replace_point))
         row.addWidget(button("导入 JSON", self._import_points))
         row.addWidget(button("导出 JSON", self._export_points))
         layout.addLayout(row)
-        self.point_table = QTableWidget(0, 10)
+        self.teaching_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.point_table = QTableWidget(0, 11)
         self.point_table.setObjectName("PointTable")
-        self.point_table.setHorizontalHeaderLabels(("名称", "J1 °", "J2 °", "J3 °", "J4 °", "J5 °", "J6 °", "地轨 mm", "夹爪 %", "速度"))
+        self.point_table.setHorizontalHeaderLabels(("类型", "名称", "J1/X", "J2/Y", "J3/Z", "J4/A", "J5/B", "J6/C", "地轨", "夹爪%", "速度"))
         self.point_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.point_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.point_table.setAlternatingRowColors(True)
         self.point_table.verticalHeader().setVisible(True)
         header = self.point_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.point_table.setColumnWidth(0, 175)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setMinimumSectionSize(48)
         self.point_table.itemSelectionChanged.connect(self._select_point)
         self.point_table.itemChanged.connect(self._point_name_changed)
         self.fields["_pos_listbox"] = TableAdapter(self.point_table)
-        layout.addWidget(self.point_table, 1)
+        self.teaching_splitter.addWidget(self.point_table)
+        editor = QWidget()
+        editor.setMinimumWidth(395)
+        editor.setMaximumWidth(545)
+        editor_layout = QVBoxLayout(editor)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(8)
+        self.teaching_tabs = QTabWidget()
+        self.teaching_tabs.setObjectName("TeachingEditorTabs")
+        self.teaching_joint_rows, self.teaching_pose_rows = [], []
+        for kind, title, names, limits, defaults, target_rows in (
+            ("MoveJ", "MoveJ · 关节 / 地轨", ("J1", "J2", "J3", "J4", "J5", "J6", "地轨"),
+             list(JOINT_RANGES) + [(-250, 250)], list(JOINT_DEFAULTS) + [0], self.teaching_joint_rows),
+            ("MoveL", "MoveL · 笛卡尔", ("X", "Y", "Z", "A", "B", "C"),
+             list(POSE_RANGES), list(POSE_DEFAULTS), self.teaching_pose_rows),
+        ):
+            page = QWidget()
+            panel = QVBoxLayout(page)
+            panel.setContentsMargins(12, 12, 12, 10)
+            panel.setSpacing(8)
+            for index, (name, bounds, value) in enumerate(zip(names, limits, defaults)):
+                unit = "mm" if (kind == "MoveJ" and index == 6) or (kind == "MoveL" and index < 3) else "°"
+                axis = AxisRow(name, bounds, value, unit)
+                axis.readback.hide()
+                if kind == "MoveL":
+                    axis.spin.setRange(-10000 if index < 3 else -3600, 10000 if index < 3 else 3600)
+                axis.spin.setObjectName(f"Teaching{kind}{name}")
+                axis.changed.connect(lambda _: self._teaching_target_edited())
+                target_rows.append(axis)
+                panel.addWidget(axis)
+            panel.addWidget(hint("地轨只随 MoveJ 点位保存。" if kind == "MoveJ" else "仅更新笛卡尔目标标记；不生成关节逆解。", "muted"))
+            panel.addStretch()
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(page)
+            self.teaching_tabs.addTab(scroll, title)
+        self.teaching_joint_spins = [row.spin for row in self.teaching_joint_rows]
+        self.teaching_pose_spins = [row.spin for row in self.teaching_pose_rows]
+        self.teaching_tabs.currentChanged.connect(self._teaching_tab_changed)
+        editor_layout.addWidget(self.teaching_tabs, 1)
+        editor_group, box = self._group("当前目标")
+        editor_group.setProperty("compact", True)
+        box.setContentsMargins(8, 6, 8, 6)
+        box.setSpacing(5)
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(QLabel("速度"))
+        self.teaching_speed = number(DEFAULT_SPEED, 1, 100, 0)
+        self.teaching_speed.setObjectName("TeachingSpeed")
+        edit_row.addWidget(self.teaching_speed)
+        self.teaching_drag = QCheckBox("拖动发送")
+        self.teaching_drag.setObjectName("TeachingDrag")
+        self.teaching_drag.toggled.connect(lambda enabled: self._drag_toggled("teaching", enabled))
+        edit_row.addWidget(self.teaching_drag)
+        edit_row.addStretch()
+        box.addLayout(edit_row)
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(QLabel("夹爪预览"))
+        self.teaching_gripper_spin = number(100, 0, 100, 0)
+        self.teaching_gripper_spin.setSuffix(" %")
+        self.teaching_gripper_spin.setObjectName("TeachingGripperPreview")
+        self.teaching_gripper_spin.valueChanged.connect(lambda *_: self._preview_changed())
+        edit_row.addWidget(self.teaching_gripper_spin, 1)
+        edit_row.addWidget(button("发送目标", self._send_teaching_target, "primary"))
+        box.addLayout(edit_row)
+        edit_row = QHBoxLayout()
+        read = button("读取 → 同步目标", self._read_teaching)
+        read.setToolTip("读取实际位置或位姿并同步当前类型的教学编辑器；不会发送运动")
+        edit_row.addWidget(read)
+        edit_row.addWidget(button("从运动页载入", self._load_motion_target))
+        box.addLayout(edit_row)
+        editor_layout.addWidget(editor_group)
+        self.teaching_splitter.addWidget(editor)
+        self.teaching_splitter.setStretchFactor(0, 2)
+        self.teaching_splitter.setStretchFactor(1, 1)
+        self.teaching_splitter.setSizes((735, 430))
+        layout.addWidget(self.teaching_splitter, 1)
         bottom = QHBoxLayout()
         bottom.addWidget(button("上移", lambda: self._move_point(-1)))
         bottom.addWidget(button("下移", lambda: self._move_point(1)))
@@ -390,11 +614,11 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.point_speed)
         bottom.addWidget(button("发送选中", self._send_selected_point, "primary"))
         bottom.addWidget(button("顺序执行全部", self.controller.send_all_positions, "success"))
-        bottom.addWidget(button("取消后续点位", lambda: self.controller._stop_sequence("用户取消后续点位；当前运动需软停")))
+        bottom.addWidget(button("取消后续", lambda: self.controller._stop_sequence("用户取消后续点位；当前运动需软停")))
         layout.addLayout(bottom)
         self.sequence_status = QLabel("未运行")
         layout.addWidget(self.sequence_status)
-        layout.addWidget(hint("选中只载入目标输入。发送选中使用该点位速度；顺序执行采用上方统一速度。夹爪开度仅作预览记录，需单独发送夹爪指令。"))
+        layout.addWidget(hint("MoveJ 为角度与地轨 mm；MoveL 为 XYZ mm、ABC °。发送选中使用点位速度，顺序执行使用统一速度；夹爪开度仅作预览。"))
 
     def _build_motor_page(self):
         layout = self._page("电机参数", "本页参数查询、写入与电机维护仅支持 USB。节点 0 为 ALL 查询；运行时应用与 EEPROM 保存明确区分。")
@@ -542,10 +766,11 @@ class MainWindow(QMainWindow):
         self.hand_current_spin = number(1., .05, 2.5, 2, .05)
         self.hand_current_spin.setSuffix(" A")
         self._bind("hand_current", self.hand_current_spin)
+        self.hand_current_spin.valueChanged.connect(lambda value: self._hand_current_changed("dedicated", value))
         row.addWidget(self.hand_current_spin)
         row.addWidget(button("设置电流", self.controller._cmd_hand_set_i))
-        row.addWidget(button("张开 · 电流模式", self.controller._cmd_hand_open, "success"))
-        row.addWidget(button("闭合 · 电流模式", self.controller._cmd_hand_close))
+        row.addWidget(button("张开 · 电流模式", lambda: self._send_hand_direction(True), "success"))
+        row.addWidget(button("闭合 · 电流模式", lambda: self._send_hand_direction(False)))
         row.addStretch()
         box.addLayout(row)
         box.addWidget(hint("电流开合持续到接触或后续指令；仅修改运行时电流，不保存 EEPROM。"))
@@ -553,18 +778,18 @@ class MainWindow(QMainWindow):
         group, box = self._group("目标开度 · 0 闭合 / 100 张开")
         self.hand_row = AxisRow("开度", (0, 100), 100, "%")
         self.hand_row.spin.setDecimals(0)
-        self.hand_row.changed.connect(lambda _: self._target_edited("hand"))
-        self.hand_row.changed.connect(self._quick_hand_refresh)
+        self.hand_row.readback.hide()
+        self.hand_row.changed.connect(lambda value: self._hand_position_changed("dedicated", value))
         self._bind("hand_pos", self.hand_row.spin, lambda value: round(value))
         self._bind("lbl_hand_pos", QLabel("100"))
         box.addWidget(self.hand_row)
         row = QHBoxLayout()
-        hand_drag = QCheckBox("拖动发送")
-        self._bind("hand_pos_drag_enable", hand_drag)
-        hand_drag.toggled.connect(lambda *_: self.controller._warn_drag_mode())
-        row.addWidget(hand_drag)
+        self.hand_drag_checkbox = QCheckBox("拖动发送")
+        self._bind("hand_pos_drag_enable", self.hand_drag_checkbox)
+        self.hand_drag_checkbox.toggled.connect(lambda enabled: self._hand_drag_changed("dedicated", enabled))
+        row.addWidget(self.hand_drag_checkbox)
         row.addStretch()
-        row.addWidget(button("设置夹爪位置", self.controller._cmd_hand_set_pos, "primary"))
+        row.addWidget(button("设置夹爪位置", self._send_hand_position, "primary"))
         box.addLayout(row)
         layout.addWidget(group)
 
@@ -806,23 +1031,59 @@ class MainWindow(QMainWindow):
     def _build_log_dock(self):
         self.log_dock = QDockWidget("串口终端", self)
         self.log_dock.setObjectName("TerminalDock")
-        self.log_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.log_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        self.log_dock.setAllowedAreas(Qt.DockWidgetArea.NoDockWidgetArea)
+        self.log_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable
+                                  | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         content = QWidget()
+        content.setObjectName("TerminalContent")
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(10, 6, 10, 8)
-        layout.setSpacing(5)
-        toolbar = QHBoxLayout()
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        filters = QFrame()
+        filters.setObjectName("TerminalFilterBar")
+        filter_row = QHBoxLayout(filters)
+        filter_row.setContentsMargins(8, 6, 8, 6)
+        filter_row.setSpacing(5)
+        filter_row.addWidget(QLabel("日志类型"))
+        # Keep the existing filter interface for log rendering and integrations.
         self.log_filter = self._combo(("全部", "TX", "RX", "INFO", "WARN", "ERROR"))
-        self.log_filter.setFixedWidth(88)
-        self.log_filter.currentIndexChanged.connect(self._render_logs)
-        toolbar.addWidget(self.log_filter)
+        self.log_filter.setParent(content)
+        self.log_filter.hide()
+        self.log_type_group = QButtonGroup(self)
+        self.log_type_group.setExclusive(True)
+        self.log_type_buttons = []
+        for index, title in enumerate(("全部", "发送 TX", "接收 RX", "信息", "警告", "错误")):
+            control = button(title)
+            control.setObjectName("LogTypeButton")
+            control.setCheckable(True)
+            control.setChecked(index == 0)
+            self.log_type_group.addButton(control, index)
+            self.log_type_buttons.append(control)
+            filter_row.addWidget(control)
+        self.log_type_group.idClicked.connect(self.log_filter.setCurrentIndex)
+        self.log_filter.currentIndexChanged.connect(self._log_filter_changed)
+        filter_row.addStretch()
+        self.log_refresh_status = QLabel("实时显示")
+        self.log_refresh_status.setObjectName("LogRefreshStatus")
+        self.log_refresh_status.setProperty("paused", False)
+        filter_row.addWidget(self.log_refresh_status)
+        layout.addWidget(filters)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
         self.log_search = QLineEdit()
-        self.log_search.setPlaceholderText("搜索日志…")
+        self.log_search.setObjectName("LogSearch")
+        self.log_search.setPlaceholderText("搜索日志内容…")
+        self.log_search.setClearButtonEnabled(True)
+        self.log_search.setMinimumWidth(160)
         self.log_search.textChanged.connect(self._render_logs)
         toolbar.addWidget(self.log_search, 1)
-        self.log_pause = QCheckBox("暂停刷新")
-        self.log_pause.toggled.connect(lambda paused: self._render_logs() if not paused else None)
+        self.log_pause = button("暂停显示")
+        self.log_pause.setObjectName("LogPause")
+        self.log_pause.setCheckable(True)
+        self.log_pause.setToolTip("只暂停日志显示；串口接收和日志记录继续，恢复时显示保留的内容")
+        self.log_pause.toggled.connect(self._log_pause_changed)
         toolbar.addWidget(self.log_pause)
         toolbar.addWidget(button("导出", self._export_logs))
         toolbar.addWidget(button("清空显示", self._clear_logs))
@@ -834,23 +1095,49 @@ class MainWindow(QMainWindow):
         self.log_view.setMinimumHeight(75)
         self.log_view.setMaximumBlockCount(self._logs.maxlen)
         layout.addWidget(self.log_view, 1)
-        row = QHBoxLayout()
+        commands = QFrame()
+        commands.setObjectName("TerminalCommandBar")
+        row = QHBoxLayout(commands)
+        row.setContentsMargins(8, 8, 8, 8)
+        row.setSpacing(8)
+        row.addWidget(QLabel("指令"))
         self.custom_command = QLineEdit()
         self.custom_command.setObjectName("CustomCommand")
-        self.custom_command.setPlaceholderText("自定义指令 · Enter 发送 · ↑ / ↓ 历史记录")
+        self.custom_command.setPlaceholderText("输入串口指令，Enter 发送")
+        self.custom_command.setToolTip("Enter 发送；↑ / ↓ 浏览指令历史")
         self.custom_command.returnPressed.connect(self.controller._send_with_history)
         self.custom_command.installEventFilter(self)
         self._bind("ent_custom_cmd", self.custom_command)
         row.addWidget(self.custom_command, 1)
         row.addWidget(button("发送", self.controller._send_with_history, "primary"))
         row.addWidget(button("运动状态", lambda: self.controller.send_cmd("#MOTION_STATUS")))
-        layout.addLayout(row)
+        layout.addWidget(commands)
         self.log_dock.setWidget(content)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
-        self.resizeDocks([self.log_dock], [190], Qt.Orientation.Vertical)
+        self.log_dock.setFloating(True)
+        self.log_dock.setMinimumSize(720, 340)
+        self.log_dock.resize(840, 480)
         self.log_dock.hide()
+        # Share one document so filters, pause, clear and limits stay identical.
+        self.compact_log_view.setDocument(self.log_view.document())
+
+    def _log_filter_changed(self, index):
+        if 0 <= index < len(self.log_type_buttons):
+            self.log_type_buttons[index].setChecked(True)
+        self._render_logs()
+
+    def _log_pause_changed(self, paused):
+        self.log_pause.setText("继续显示" if paused else "暂停显示")
+        self.log_refresh_status.setText("显示已暂停" if paused else "实时显示")
+        self.log_refresh_status.setProperty("paused", paused)
+        self.log_refresh_status.style().unpolish(self.log_refresh_status)
+        self.log_refresh_status.style().polish(self.log_refresh_status)
+        if not paused:
+            self._render_logs()
 
     def eventFilter(self, watched, event):
+        if watched is getattr(self, "motion_controls", None) and event.type() == QEvent.Type.Resize:
+            self._schedule_motion_fit()
         if watched is getattr(self, "custom_command", None) and event.type() == QEvent.Type.KeyPress:
             if event.key() == Qt.Key.Key_Up:
                 self.controller._history_up(None)
@@ -861,7 +1148,16 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _toggle_log(self):
-        self.log_dock.setVisible(not self.log_dock.isVisible())
+        if self.log_dock.isVisible():
+            self.log_dock.hide()
+        else:
+            self._expand_log()
+
+    def _expand_log(self):
+        self.log_dock.setFloating(True)
+        self.log_dock.show()
+        self.log_dock.raise_()
+        self.log_dock.activateWindow()
 
     def _toggle_connection(self):
         if self.controller.is_connected:
@@ -889,6 +1185,11 @@ class MainWindow(QMainWindow):
 
     def _update_state(self, state):
         connected = state.get("connected", self.controller.is_connected)
+        generation = state.get("generation", getattr(self.controller, "_tx_generation", 0))
+        if generation != getattr(self, "_state_generation", generation):
+            self._cancel_drag()
+            self._teaching_sync = None
+        self._state_generation = generation
         self.connect_button.setText("断开连接" if connected else "连接设备")
         self.connection_status.setText("● 已连接" if connected else "○ 未连接")
         self._pill(self.connection_status, connected)
@@ -900,6 +1201,11 @@ class MainWindow(QMainWindow):
         motor = state.get("motor_enabled", getattr(self.controller, "_motor_enabled", None) if known else None)
         locked = state.get("stop_locked", getattr(self.controller, "_stop_locked", False))
         calibrating = state.get("calibration_busy", getattr(self.controller, "_calibration_busy", False))
+        if locked or calibrating or not connected:
+            self._cancel_drag()
+            self._teaching_sync = None
+            if locked or calibrating:
+                self.teaching_drag.setChecked(False)
         self.motor_status.setText("校准进行中" if calibrating else "保护 / 软停锁定" if locked else "● 已使能" if motor is True else "● 已失能" if motor is False else "电机状态未知")
         self._pill(self.motor_status, motor is True and not locked and not calibrating, locked or calibrating)
         active = state.get("sequence_active", getattr(self.controller, "_seq_active", False))
@@ -944,31 +1250,197 @@ class MainWindow(QMainWindow):
     def _preview_changed(self):
         if not hasattr(self, "hand_row"):
             return
-        self.viewer.set_target_pose([spin.value() for spin in self.joint_spins], self.hand_row.spin.value())
-        self.viewer.set_cartesian_target([spin.value() for spin in self.pose_spins])
+        teaching = hasattr(self, "teaching_tabs") and self.navigation.currentRow() == 1
+        if teaching:
+            if self.teaching_tabs.currentIndex() == 0:
+                self.viewer.set_target_pose([spin.value() for spin in self.teaching_joint_spins], self.teaching_gripper_spin.value())
+                self.viewer.set_cartesian_target(None)
+            else:
+                self.viewer.set_target_gripper(self.teaching_gripper_spin.value())
+                self.viewer.set_cartesian_target([spin.value() for spin in self.teaching_pose_spins])
+        elif self.motion_tabs.currentIndex() == 0:
+            self.viewer.set_target_pose([spin.value() for spin in self.joint_spins], self.hand_row.spin.value())
+            self.viewer.set_cartesian_target(None)
+        else:
+            self.viewer.set_target_gripper(self.hand_row.spin.value())
+            self.viewer.set_cartesian_target([spin.value() for spin in self.pose_spins])
 
     def _target_edited(self, kind):
         self._preview_changed()
         if self._building or getattr(self.controller, "_suppress_drag_send", False):
             return
+        if not self._drag_enabled(kind):
+            return
+        self._queue_drag(kind)
+
+    def _drag_enabled(self, kind):
+        if kind == "teaching":
+            return self.teaching_drag.isChecked()
         flag = {"j": "movej_drag_enable", "l": "movel_drag_enable", "hand": "hand_pos_drag_enable"}[kind]
-        if not self.fields[flag].get():
+        return self.fields[flag].get()
+
+    def _queue_drag(self, kind):
+        if kind == "hand":
+            target = int(self.hand_row.spin.value())
+        elif kind == "teaching":
+            target = self._current_point(self.point_name.text().strip() or "示教目标")
+        else:
+            target = {"name": "运动目标", "type": "MoveJ" if kind == "j" else "MoveL",
+                      "gripper": self.hand_row.spin.value(),
+                      "speed": self.j_speed.value() if kind == "j" else self.l_speed.value()}
+            target["joints" if kind == "j" else "pose"] = [spin.value() for spin in (self.joint_spins if kind == "j" else self.pose_spins)]
+        self._drag_pending[kind] = (self._drag_epoch, getattr(self.controller, "_tx_generation", 0), copy.deepcopy(target))
+        elapsed = time.monotonic() - self._last_drag[kind]
+        self._drag_timers[kind].start(max(1, round((.1 - elapsed) * 1000)))
+
+    def _flush_drag(self, kind):
+        pending = self._drag_pending.pop(kind, None)
+        if pending is None:
             return
-        now = time.monotonic()
-        if now - self._last_drag[kind] < .1:
+        epoch, generation, target = pending
+        if (self._closed or epoch != self._drag_epoch or
+                generation != getattr(self.controller, "_tx_generation", 0) or
+                getattr(self.controller, "_suppress_drag_send", False) or
+                getattr(self.controller, "_stop_locked", False) or
+                getattr(self.controller, "_calibration_busy", False) or not self._drag_enabled(kind)):
             return
-        self._last_drag[kind] = now
-        callback = {"j": self.controller.send_movej, "l": self.controller.send_movel, "hand": self.controller._cmd_hand_set_pos}[kind]
-        self.controller._schedule_motion_callback(callback)
+        self._last_drag[kind] = time.monotonic()
+        if kind == "hand":
+            self.controller.send_cmd(f"!HAND_POS {target}")
+        else:
+            self.controller.send_typed_position(target)
+
+    def _cancel_drag(self, kind=None):
+        if kind is None:
+            self._drag_epoch += 1
+            targets = tuple(self._drag_timers)
+        else:
+            targets = (kind,)
+        for target in targets:
+            self._drag_timers[target].stop()
+            self._drag_pending.pop(target, None)
+
+    def _drag_toggled(self, kind, enabled):
+        if not enabled:
+            self._cancel_drag(kind)
+        if self._building:
+            return
+        if kind == "teaching":
+            if enabled and self.controller.current_cmdmode != 3:
+                self.controller.log("示教拖发建议使用 TRJ 连续模式；开启本身不会发送目标。", "WARN")
+        else:
+            self.controller._warn_drag_mode()
+
+    def _hand_position_changed(self, source, value):
+        other = getattr(self, "hand_row" if source == "motion" else "motion_hand_row", None)
+        if other is not None:
+            other.set_value(value)
+        self._target_edited("hand")
+
+    def _hand_current_changed(self, source, value):
+        other = getattr(self, "hand_current_spin" if source == "motion" else "motion_hand_current", None)
+        if other is not None:
+            other.blockSignals(True)
+            other.setValue(value)
+            other.blockSignals(False)
+
+    def _hand_drag_changed(self, source, enabled):
+        other = getattr(self, "hand_drag_checkbox" if source == "motion" else "motion_hand_drag", None)
+        if other is not None:
+            other.blockSignals(True)
+            other.setChecked(enabled)
+            other.blockSignals(False)
+        self._drag_toggled("hand", enabled)
+
+    def _send_hand_position(self):
+        self._cancel_drag("hand")
+        return self.controller._cmd_hand_set_pos()
+
+    def _send_hand_direction(self, opened):
+        self._cancel_drag("hand")
+        return (self.controller._cmd_hand_open if opened else self.controller._cmd_hand_close)()
+
+    def _send_motion(self, kind):
+        self._cancel_drag(kind)
+        return (self.controller.send_movej if kind == "j" else self.controller.send_movel)()
+
+    def _read_motion(self, kind):
+        self._cancel_drag()
+        self._teaching_sync = None
+        return (self.controller.read_and_sync_from_robot if kind == "j" else self.controller.read_pose_from_robot)()
+
+    def _system_command(self, command):
+        self._cancel_drag()
+        self._teaching_sync = None
+        if command in ("!STOP", "!DISABLE") and hasattr(self, "teaching_drag"):
+            self.teaching_drag.setChecked(False)
+        return self.controller.send_cmd(command)
+
+    def _calibration_command(self):
+        self._cancel_drag()
+        self._teaching_sync = None
+        self.teaching_drag.setChecked(False)
+        return self.controller._cmd_calibration()
+
+    def _navigation_changed(self, index):
+        self._cancel_drag()
+        self._teaching_sync = None
+        self._preview_changed()
+
+    def _motion_tab_changed(self, index):
+        self._schedule_motion_fit()
+        self._cancel_drag("j")
+        self._cancel_drag("l")
+        self._preview_changed()
+
+    def _teaching_tab_changed(self, index):
+        self._cancel_drag("teaching")
+        self._teaching_sync = None
+        self._preview_changed()
+
+    def _teaching_target_edited(self):
+        self._preview_changed()
+        if not self._building and not self.controller._suppress_drag_send and self.teaching_drag.isChecked():
+            self._queue_drag("teaching")
+
+    def _send_teaching_target(self):
+        self._cancel_drag("teaching")
+        return self.controller.send_typed_position(self._current_point(self.point_name.text().strip() or "示教目标"))
+
+    def _load_motion_target(self):
+        self._cancel_drag("teaching")
+        self._teaching_sync = None
+        source = self.joint_spins if self.teaching_tabs.currentIndex() == 0 else self.pose_spins
+        rows = self.teaching_joint_rows if self.teaching_tabs.currentIndex() == 0 else self.teaching_pose_rows
+        for row, spin in zip(rows, source):
+            row.set_value(spin.value())
+        self.teaching_speed.setValue(self.j_speed.value() if self.teaching_tabs.currentIndex() == 0 else self.l_speed.value())
+        self.teaching_gripper_spin.setValue(self.hand_row.spin.value())
+        self._preview_changed()
+
+    def _read_teaching(self):
+        self._cancel_drag()
+        kind = "MoveJ" if self.teaching_tabs.currentIndex() == 0 else "MoveL"
+        self._teaching_sync = (kind, getattr(self.controller, "_tx_generation", 0))
+        method = self.controller.read_and_sync_from_robot if kind == "MoveJ" else self.controller.read_pose_from_robot
+        if not method():
+            self._teaching_sync = None
+
+    def _position_synced(self, kind, values):
+        self._cancel_drag()
+        if self._teaching_sync != (kind, getattr(self.controller, "_tx_generation", 0)):
+            return
+        self._teaching_sync = None
+        rows = self.teaching_joint_rows if kind == "MoveJ" else self.teaching_pose_rows
+        for row, value in zip(rows, values):
+            row.set_value(value)
+        self._preview_changed()
 
     def _quick_hand_changed(self, value):
-        if hasattr(self, "hand_row"):
-            self.hand_row.spin.setValue(value)
+        self._hand_position_changed("motion", value)
 
     def _quick_hand_refresh(self, value):
-        self.quick_hand_spin.blockSignals(True)
-        self.quick_hand_spin.setValue(value)
-        self.quick_hand_spin.blockSignals(False)
+        self.motion_hand_row.set_value(value)
 
     def _view_mode_changed(self, index):
         if not hasattr(self, "viewer"):
@@ -1010,17 +1482,25 @@ class MainWindow(QMainWindow):
         self.controller.send_cmd(command)
 
     def _restore_points(self, selected=None):
+        self._cancel_drag()
         self._point_editing = True
         self.point_table.setRowCount(len(self.points))
         for row, record in enumerate(self.points):
-            values = [record["name"]] + [f"{value:.2f}" for value in record["joints"]] + [f"{record.get('gripper',100):g}", f"{record.get('speed',35):g}"]
+            kind = record.get("type", "MoveJ")
+            coordinates = record["joints"][:6] if kind == "MoveJ" else record["pose"]
+            rail = f"{record['joints'][6]:.2f}" if kind == "MoveJ" else "—"
+            values = [kind, record["name"]] + [f"{value:.2f}" for value in coordinates] + [rail, f"{record.get('gripper',100):g}", f"{record.get('speed',35):g}"]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                if col:
+                if col != 1:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if 2 <= col <= 7:
+                    item.setToolTip("关节角 °" if kind == "MoveJ" else "XYZ mm" if col <= 4 else "ABC °")
+                elif col == 8:
+                    item.setToolTip("地轨 mm，仅 MoveJ 使用")
                 self.point_table.setItem(row, col, item)
-        self.controller.stored_positions = [(record["name"], list(record["joints"])) for record in self.points]
+        self.controller.stored_positions = copy.deepcopy(self.points)
         self._point_editing = False
         if selected is not None and 0 <= selected < len(self.points):
             self.point_table.selectRow(selected)
@@ -1028,6 +1508,7 @@ class MainWindow(QMainWindow):
     def _persist_points(self, selected=None):
         try:
             self.store.save_points(self.points)
+            self.points = copy.deepcopy(self.store.points)
         except (OSError, ValueError) as exc:
             self.controller.log(f"点位保存失败：{exc}", "ERROR")
         self._restore_points(selected)
@@ -1037,8 +1518,12 @@ class MainWindow(QMainWindow):
         return selected[0].row() if selected else None
 
     def _current_point(self, name):
-        return {"name": name, "joints": [spin.value() for spin in self.joint_spins],
-                "gripper": self.hand_row.spin.value(), "speed": self.j_speed.value()}
+        kind = "MoveJ" if self.teaching_tabs.currentIndex() == 0 else "MoveL"
+        record = {"name": name, "type": kind, "gripper": self.teaching_gripper_spin.value(),
+                  "speed": self.teaching_speed.value()}
+        controls = self.teaching_joint_spins if kind == "MoveJ" else self.teaching_pose_spins
+        record["joints" if kind == "MoveJ" else "pose"] = [spin.value() for spin in controls]
+        return record
 
     def _save_point(self):
         name = self.point_name.text().strip() or f"点位 {len(self.points) + 1}"
@@ -1062,21 +1547,38 @@ class MainWindow(QMainWindow):
         if row is None or row >= len(self.points):
             return
         record = self.points[row]
+        self._cancel_drag()
+        self._teaching_sync = None
         self.point_name.setText(record["name"])
-        self.controller._fill_joints(record["joints"])
         # Setting a stored target must never invoke a drag-to-send handler.
         old = self.controller._suppress_drag_send
         self.controller._suppress_drag_send = True
         try:
-            self.hand_row.spin.setValue(record.get("gripper", 100))
-            self.j_speed.setValue(record.get("speed", 35))
+            kind = record.get("type", "MoveJ")
+            index = 0 if kind == "MoveJ" else 1
+            self.teaching_tabs.setCurrentIndex(index)
+            self.motion_tabs.setCurrentIndex(index)
+            values = record["joints" if kind == "MoveJ" else "pose"]
+            teaching_rows = self.teaching_joint_rows if kind == "MoveJ" else self.teaching_pose_rows
+            motion_rows = self.joint_rows if kind == "MoveJ" else self.pose_rows
+            for target, value in zip(teaching_rows, values):
+                target.set_value(value)
+            for target, value in zip(motion_rows, values):
+                target.set_value(value)
+            gripper = record.get("gripper", 100)
+            self.hand_row.set_value(gripper)
+            self.motion_hand_row.set_value(gripper)
+            self.teaching_gripper_spin.setValue(gripper)
+            speed = record.get("speed", DEFAULT_SPEED)
+            self.teaching_speed.setValue(speed)
+            (self.j_speed if kind == "MoveJ" else self.l_speed).setValue(speed)
         finally:
             self.controller._suppress_drag_send = old
         self.viewer_mode.setCurrentIndex(0)
         self._preview_changed()
 
     def _point_name_changed(self, item):
-        if self._point_editing or item.column() != 0:
+        if self._point_editing or item.column() != 1:
             return
         name = item.text().strip()
         if not name or len(name) > 120:
@@ -1109,6 +1611,7 @@ class MainWindow(QMainWindow):
         if index is None:
             self.controller.log("请先选择点位。", "WARN")
             return
+        self._cancel_drag()
         self.point_speed.setValue(self.points[index].get("speed", DEFAULT_SPEED))
         self.controller.send_selected_position()
 
@@ -1143,6 +1646,7 @@ class MainWindow(QMainWindow):
             self.snapshot_label.setText(message)
         if not self.log_pause.isChecked() and self._matches_log(tag, text):
             self.log_view.appendPlainText(text)
+            self.compact_log_view.verticalScrollBar().setValue(self.compact_log_view.verticalScrollBar().maximum())
 
     def _matches_log(self, tag, text):
         selected = self.log_filter.currentText()
@@ -1152,6 +1656,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "log_view") and not self.log_pause.isChecked():
             self.log_view.setPlainText("\n".join(text for tag, text in self._logs if self._matches_log(tag, text)))
             self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+            self.compact_log_view.verticalScrollBar().setValue(self.compact_log_view.verticalScrollBar().maximum())
 
     def _clear_logs(self):
         self._logs.clear()
@@ -1169,7 +1674,10 @@ class MainWindow(QMainWindow):
     def apply_theme(self, theme):
         from app.paths import resource_path
         path = resource_path(f"themes/{theme}.qss")
-        QApplication.instance().setStyleSheet(Path(path).read_text(encoding="utf-8"))
+        stylesheet = Path(path).read_text(encoding="utf-8")
+        stylesheet = stylesheet.replace("{{ICONS}}", resource_path("icons").as_posix())
+        QApplication.instance().setStyleSheet(stylesheet)
+        self._schedule_motion_fit()
         self.viewer.set_theme(theme)
 
     def _theme_setting(self, index):
@@ -1213,13 +1721,14 @@ class MainWindow(QMainWindow):
     def _reset_layout(self):
         self.resize(1440, 900)
         self.motion_splitter.setSizes((800, 370))
-        self.log_dock.show()
-        self.resizeDocks([self.log_dock], [190], Qt.Orientation.Vertical)
+        self.log_dock.hide()
         self.store.update_settings(geometry="", window_state="")
 
     def closeEvent(self, event):
         if not self._closed:
             self._closed = True
+            self.log_dock.hide()
+            self._cancel_drag()
             self.controller.close()
             self.viewer.cleanup()
             try:

@@ -15,11 +15,11 @@
 </head>
 <body>
   <div id="canvas"></div>
-  <div class="topline">
+  <div class="topline" role="status" aria-live="polite">
     <div class="badge" id="mode">目标预览</div>
     <div class="badge muted" id="telemetry">尚无位置回读</div>
   </div>
-  <div id="error" class="error">正在加载模型与本地网格…</div>
+  <div id="error" class="error" role="alert">正在加载模型与本地网格…</div>
   <div class="toolbar" aria-label="三维视角">
     <button data-view="isometric" title="重置为透视视角">透视</button>
     <button data-view="front">正视</button>

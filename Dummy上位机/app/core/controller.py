@@ -20,6 +20,7 @@ class RobotController(QObject, RobotBusiness):
     log_message = Signal(str, str)  # message, tag
     state_changed = Signal(dict)
     actual_pose_changed = Signal(list)  # J1..J6 in degrees, rail in millimetres
+    position_synced = Signal(str, list)  # Explicit successful target sync: MoveJ / MoveL.
     fields_changed = Signal()
     ports_changed = Signal(list)
 
@@ -57,8 +58,9 @@ class RobotController(QObject, RobotBusiness):
         self.stored_positions = []
         self._seq_running = self._seq_active = self._seq_wait_mode = False
         self._seq_motion_id = None
+        self._seq_expected_type = None
         self._seq_id_floor = self._seq_session = self._seq_idx = 0
-        self._seq_pending = []
+        self._seq_pending = ()
         self._seq_speed = DEFAULT_SPEED
         self.sequence_timeout_ms = 300000
         self._mode_request_counter = 0
@@ -147,6 +149,7 @@ class RobotController(QObject, RobotBusiness):
             "stop_locked": self._stop_locked, "calibration_busy": self._calibration_busy,
             "cmdmode": self.current_cmdmode, "sequence_active": self._seq_active,
             "sequence_index": self._seq_idx, "sequence_count": len(self._seq_pending),
+            "sequence_type": self._seq_expected_type, "generation": self._tx_generation,
             "acc_sync_waiting": self._acc_sync_waiting, "status": status,
             "actual_stale": (not self.is_connected or self.last_actual_at is None or
                              now - self.last_actual_at > max(1.5, 3 / self._poll_hz)),
@@ -466,6 +469,7 @@ class RobotController(QObject, RobotBusiness):
                 self._pending_sync = None
                 if request["sync"] and request["generation"] == self._tx_generation:
                     self._fill_joints(nums)
+                    self.position_synced.emit("MoveJ", list(nums))
                     self.log("实际位置已同步到编辑目标")
         elif nums is not None and len(nums) == 6:
             request = self._position_request
@@ -474,6 +478,7 @@ class RobotController(QObject, RobotBusiness):
                 self._pending_sync = None
                 if request["sync"] and request["generation"] == self._tx_generation:
                     self._fill_pose(nums)
+                    self.position_synced.emit("MoveL", list(nums))
                     self.log("实际笛卡尔位姿已同步到编辑目标")
         before_id = self._seq_motion_id
         super()._process_rx_line(line)
