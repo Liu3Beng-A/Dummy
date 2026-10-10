@@ -216,12 +216,21 @@ extern "C" void Tim1Callback100Hz()
 
 extern "C" void Tim4Callback20kHz()
 {
+    static uint32_t previousCycle;
+    const uint32_t began = DWT->CYCCNT;
+    const uint32_t gap = began - previousCycle;
+    if (previousCycle && gap > motorCanDiagnostic[MC_CONTROL_GAP]) motorCanDiagnostic[MC_CONTROL_GAP] = gap;
+    previousCycle = began;
     __HAL_TIM_CLEAR_IT(&htim4, TIM_IT_UPDATE);
 
     if (encoderCalibrator.isTriggered)
         encoderCalibrator.Tick20kHz();
     else
         motor.Tick20kHz();
+    const uint32_t elapsed = DWT->CYCCNT - began;
+    if (elapsed > motorCanDiagnostic[MC_CONTROL_MAX]) motorCanDiagnostic[MC_CONTROL_MAX] = elapsed;
+    if (elapsed >= SystemCoreClock / 20000U || __HAL_TIM_GET_FLAG(&htim4, TIM_FLAG_UPDATE))
+        ++motorCanDiagnostic[MC_CONTROL_LATE];
 }
 
 

@@ -199,9 +199,15 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
         return true;
     }
     // Only these read-only diagnostics may pass the protection command lock.
+    if (command == "#MOTION_STATUS")
+    {
+        dummy.PrintMotionStatus(response);
+        return true;
+    }
     if (command == "#RGB_STATUS" || command == "#RGB_GET" || command == "!RGB_BRIGHT")
         return HandleRGBCommand(command.c_str(), command.size(), response);
-    if (command.rfind("#STALL_STATUS", 0) == 0 || command.rfind("#CAL_STATUS", 0) == 0)
+    if (command.rfind("#STALL_STATUS", 0) == 0 || command.rfind("#CAL_STATUS", 0) == 0 ||
+        command.rfind("#FW_VERSION", 0) == 0 || command.rfind("#CAN_DIAG", 0) == 0)
         return dummy.HandleProtectionCommand(command.c_str(), command.size(), response);
     if (dummy.IsStopLocked())
     {

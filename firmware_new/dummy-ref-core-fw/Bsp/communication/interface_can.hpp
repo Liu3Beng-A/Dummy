@@ -23,6 +23,15 @@ struct CAN_context
         uint8_t node = 0;
         bool aborting = false;
     } motionTx[3];
+    // Read-only QUERY diagnostics. Independent of ordinary motion ownership.
+    struct ProbeTxCounters {
+        uint32_t accepted = 0, txok = 0, alst = 0, terr = 0, aborted = 0;
+        uint16_t lastTxOk = 0;
+    } probeTxCounters[9];
+    struct ProbeTx {
+        uint16_t nonce = 0;
+        uint8_t node = 0;
+    } probeTx[3];
     uint32_t tx_msg_cnt = 0;
 
     uint8_t node_id_rng_state = 0;

@@ -40,11 +40,12 @@ private:
         uint32_t event = 0, eventMs = 0, contextMs = 0, healthMs = 0;
         uint32_t aliveMs = 0, probeSentMs = 0, probeFirstMs = 0;
         uint32_t probeTx = 0, probeRx = 0, probeRetry = 0;
+        uint32_t probeReceived = 0, probeRejected = 0;
         uint32_t leaseNonce = 0, leaseSentMs = 0, leaseAckMs = 0;
         uint16_t leaseTask = 0;
         uint8_t profileVersion = 0, probeVersion = 0, leaseVersion = 0;
         bool probePending = false;
-        uint16_t task = 0, probe = 0, issuedProbe = 0;
+        uint16_t task = 0, probe = 0, issuedProbe = 0, lastGotProbe = 0;
         uint8_t phase = 0, reason = 0, version = 0, flags = 0, eventPhase = 0, probeFlags = 0;
         uint8_t eventReason = 0; // CONTEXT request rejection cannot overwrite EVENT cause.
         float position = 0;
@@ -89,6 +90,12 @@ private:
     uint16_t diagnosticSerial = 0, diagnosticRequest = 0;
     uint8_t diagnosticNode = 0, diagnosticLine = 0;
     uint8_t diagnosticSelector = ProtectionProtocol::DS_LIVE;
+    struct MainProbeDiagnostic {
+        uint32_t accepted = 0, txok = 0, alst = 0, terr = 0, aborted = 0;
+        uint32_t received = 0, matched = 0, rejected = 0;
+        uint32_t atMs = 0, aliveMs = 0, healthMs = 0;
+        uint16_t issued = 0, lastGot = 0, lastTxOk = 0;
+    } diagnosticMainProbe;
     struct Notice { StreamSink* sink; char text[64]; };
     Notice notices[24]{};
     uint8_t writeNotice = 0, readNotice = 0;

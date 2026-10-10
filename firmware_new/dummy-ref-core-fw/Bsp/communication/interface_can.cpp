@@ -48,6 +48,50 @@ static CAN_context* ctxs = nullptr;
 static CAN_RxHeaderTypeDef headerRx;
 static uint8_t data[8];
 
+namespace {
+enum class ProbeTxResult : uint8_t { TXOK, ALST, TERR, ABORTED };
+
+uint8_t ProbeMailboxIndex(uint32_t mailbox)
+{
+    return mailbox == CAN_TX_MAILBOX0 ? 0 : mailbox == CAN_TX_MAILBOX1 ? 1 :
+        mailbox == CAN_TX_MAILBOX2 ? 2 : 3;
+}
+
+void ClearProbeMailbox(CAN_context* ctx, uint32_t mailbox)
+{
+    const uint8_t index = ProbeMailboxIndex(mailbox);
+    if (index < 3) ctx->probeTx[index] = {};
+}
+
+void RecordProbeAccepted(CAN_context* ctx, const CAN_TxHeaderTypeDef* header,
+                         const uint8_t* payload, uint32_t mailbox)
+{
+    const uint8_t index = ProbeMailboxIndex(mailbox);
+    if (index >= 3) return;
+    // Every successful mailbox assignment clears the former diagnostic owner.
+    ctx->probeTx[index] = {};
+    const uint32_t node = header->StdId >> 7;
+    if (header->IDE != CAN_ID_STD || header->RTR != CAN_RTR_DATA || header->DLC != 8 ||
+        (header->StdId & 0x7F) != ProtectionProtocol::CONTEXT ||
+        payload[0] != ProtectionProtocol::QUERY || node < 1 || node > 8) return;
+    ctx->probeTx[index] = {uint16_t(payload[2] | (uint16_t(payload[3]) << 8)), uint8_t(node)};
+    ++ctx->probeTxCounters[node].accepted;
+}
+
+void RecordProbeResult(CAN_context* ctx, uint8_t index, ProbeTxResult result)
+{
+    if (!ctx || index >= 3) return;
+    const CAN_context::ProbeTx probe = ctx->probeTx[index];
+    ctx->probeTx[index] = {}; // One hardware result, even if HAL reports it twice.
+    if (probe.node < 1 || probe.node > 8) return;
+    CAN_context::ProbeTxCounters& counters = ctx->probeTxCounters[probe.node];
+    if (result == ProbeTxResult::TXOK) { ++counters.txok; counters.lastTxOk = probe.nonce; }
+    else if (result == ProbeTxResult::ALST) ++counters.alst;
+    else if (result == ProbeTxResult::TERR) ++counters.terr;
+    else ++counters.aborted;
+}
+}
+
 
 struct CAN_context* get_can_ctx(CAN_HandleTypeDef* hcan)
 {
@@ -132,13 +176,17 @@ static void FinishCanTransmit(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx, bool
 }
 
 void tx_complete_callback(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx)
-{ FinishCanTransmit(hcan, mailbox_idx, true); }
+{
+    RecordProbeResult(get_can_ctx(hcan), mailbox_idx, ProbeTxResult::TXOK);
+    FinishCanTransmit(hcan, mailbox_idx, true);
+}
 
 void tx_aborted_callback(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx)
 {
     if (!get_can_ctx(hcan))
         return;
     get_can_ctx(hcan)->TxMailboxAbortCallbackCnt++;
+    RecordProbeResult(get_can_ctx(hcan), mailbox_idx, ProbeTxResult::ABORTED);
     // An aborted protection transmission must not consume the sole send token.
     FinishCanTransmit(hcan, mailbox_idx, false);
 }
@@ -223,10 +271,12 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
     // handle transmit errors in all three mailboxes
     if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST0)
     {
+        RecordProbeResult(ctx, 0, ProbeTxResult::ALST);
         tx_error(ctx, 0);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_ALST0;
     } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR0)
     {
+        RecordProbeResult(ctx, 0, ProbeTxResult::TERR);
         tx_error(ctx, 0);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_EWG;
         hcan->ErrorCode &= ~HAL_CAN_ERROR_ACK;
@@ -235,10 +285,12 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
 
     if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST1)
     {
+        RecordProbeResult(ctx, 1, ProbeTxResult::ALST);
         tx_error(ctx, 1);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_ALST1;
     } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR1)
     {
+        RecordProbeResult(ctx, 1, ProbeTxResult::TERR);
         tx_error(ctx, 1);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_EWG;
         hcan->ErrorCode &= ~HAL_CAN_ERROR_ACK;
@@ -247,10 +299,12 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
 
     if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST2)
     {
+        RecordProbeResult(ctx, 2, ProbeTxResult::ALST);
         tx_error(ctx, 2);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_ALST2;
     } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR2)
     {
+        RecordProbeResult(ctx, 2, ProbeTxResult::TERR);
         tx_error(ctx, 2);
         hcan->ErrorCode &= ~HAL_CAN_ERROR_EWG;
         hcan->ErrorCode &= ~HAL_CAN_ERROR_ACK;
@@ -280,7 +334,10 @@ bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef
     const bool stale = !protectionTraffic && (dummy.IsStopLocked() || epoch != dummy.GetMotionEpoch());
     const bool sent = !stale && HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData,
                             &canCtx->last_heartbeat_mailbox) == HAL_OK;
-    if (sent) canCtx->inFlightMailboxes |= canCtx->last_heartbeat_mailbox;
+    if (sent) {
+        RecordProbeAccepted(canCtx, txHeader, txData, canCtx->last_heartbeat_mailbox);
+        canCtx->inFlightMailboxes |= canCtx->last_heartbeat_mailbox;
+    }
     taskEXIT_CRITICAL();
     if (!sent)
     {
@@ -323,7 +380,10 @@ void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* t
         {
             taskENTER_CRITICAL();
             status = HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData, &canCtx->last_heartbeat_mailbox);
-            if (status == HAL_OK) canCtx->inFlightMailboxes |= canCtx->last_heartbeat_mailbox;
+            if (status == HAL_OK) {
+                ClearProbeMailbox(canCtx, canCtx->last_heartbeat_mailbox);
+                canCtx->inFlightMailboxes |= canCtx->last_heartbeat_mailbox;
+            }
             taskEXIT_CRITICAL();
             if (status == HAL_OK) break;
             if ((micros() - start) > 1000)   // 1ms 超时
@@ -362,6 +422,7 @@ bool CanSendMotionMessage(CAN_context* ctx, uint8_t* data, CAN_TxHeaderTypeDef* 
         sent = current && HAL_CAN_AddTxMessage(ctx->handle, header, data, &ctx->last_heartbeat_mailbox) == HAL_OK;
         if (sent) {
             const uint32_t mailbox = ctx->last_heartbeat_mailbox;
+            ClearProbeMailbox(ctx, mailbox);
             const uint8_t index = mailbox == CAN_TX_MAILBOX0 ? 0 : mailbox == CAN_TX_MAILBOX1 ? 1 : 2;
             const uint8_t node = header->StdId >> 7;
             if ((header->StdId & 0x7F) == 0x07 && node >= 1 && node <= 7) {

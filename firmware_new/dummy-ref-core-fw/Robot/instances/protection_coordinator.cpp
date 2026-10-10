@@ -1,11 +1,49 @@
 #include "common_inc.h"
 #include "protection_coordinator.h"
+#include "fw_build_identity.h"
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
 #include <cmath>
 using namespace ProtectionProtocol;
+static_assert(sizeof(FWIdentity::WORDS) == FW_VERSION_FIELD_COUNT * sizeof(uint32_t), "Identity schema mismatch");
+
+static bool VersionPayloadValid(const uint32_t* s, uint8_t node) {
+    const uint8_t type = uint8_t(s[1] >> 16);
+    const bool validType = node == 0 ? type == 0 : node == 7 ? type == 57 :
+        node == 8 ? type == 8 : (type == 35 || type == 42 || type == 57);
+    return s[0] == FW_VERSION_MAGIC && uint8_t(s[1]) == FW_VERSION_SCHEMA &&
+        uint8_t(s[1] >> 8) == DS_FW_VERSION && !(s[1] >> 24) && validType;
+}
+static bool CanDiagnosticPayloadValid(const uint32_t* s, uint8_t node) {
+    const uint8_t type = uint8_t(s[CD_META] >> 16);
+    const bool validType = node == 7 ? type == 57 : node == 8 ? type == 8 :
+        (node >= 1 && node <= 6 && (type == 35 || type == 42 || type == 57));
+    return s[CD_MAGIC] == CAN_DIAG_MAGIC && uint8_t(s[CD_META]) == CAN_DIAG_SCHEMA &&
+        uint8_t(s[CD_META] >> 8) == DS_CAN_DIAG && !((s[CD_META] >> 24) & ~1U) && validType;
+}
+static void PrintVersionLine(StreamSink& output, uint8_t node, uint16_t request,
+                             uint8_t line, const uint32_t* s) {
+    const uint8_t type = uint8_t(s[1] >> 16);
+    const char* name = type == 0 ? "CORE" : type == 35 ? "M35" : type == 42 ? "M42" :
+        type == 57 ? "M57" : "GRIPPER";
+    char text[40]{};
+    switch (line) {
+    case 0: snprintf(text, sizeof(text), "v=%08lu.%02lu type=%s",
+        (unsigned long)(s[2] / 100), (unsigned long)(s[2] % 100), name); break;
+    case 1: snprintf(text, sizeof(text), "epoch=%lu", (unsigned long)s[3]); break;
+    case 2: snprintf(text, sizeof(text), "group=%08lX%08lX", (unsigned long)s[4], (unsigned long)s[5]); break;
+    case 3: case 4: {
+        const uint8_t at = line == 3 ? 6 : 10;
+        snprintf(text, sizeof(text), "h%u=%08lX%08lX%08lX%08lX", unsigned(line - 3),
+            (unsigned long)s[at], (unsigned long)s[at + 1],
+            (unsigned long)s[at + 2], (unsigned long)s[at + 3]); break;
+    }
+    case 5: snprintf(text, sizeof(text), "end"); break;
+    }
+    Respond(output, "FW_VERSION [%u] req=%u %s", unsigned(node), unsigned(request), text);
+}
 
 static uint16_t Read16(const uint8_t* p) { return p[0] | (uint16_t(p[1]) << 8); }
 static bool Finite(float v) {
@@ -74,6 +112,7 @@ void ProtectionCoordinator::PrintDiagnostic() {
         "STARTUP", "CONTROL_RESET", "PARAMETERS", "TRIGGERED", "COMPLETED"};
     for (unsigned i = 0; i < 4; ++i) {
         uint32_t s[DIAG_FIELD_COUNT], mask;
+        MainProbeDiagnostic main{};
         uint8_t node, line; uint16_t request; StreamSink* output;
         taskENTER_CRITICAL();
         if (diagnosticState != DIAG_READY && diagnosticState != DIAG_TIMEOUT) {
@@ -83,15 +122,79 @@ void ProtectionCoordinator::PrintDiagnostic() {
         std::memcpy(s, diagnosticValues, sizeof(s)); mask = diagnosticMask;
         node = diagnosticNode; request = diagnosticRequest; output = diagnosticSink;
         line = diagnosticLine++;
+        const bool version = diagnosticSelector == DS_FW_VERSION;
+        const bool can = diagnosticSelector == DS_CAN_DIAG;
         const bool cal = diagnosticSelector == DS_CAL_LIVE || diagnosticSelector == DS_CAL_FAILURE;
-        const char* prefix = cal ? "CAL_STATUS" : "STALL_STATUS";
-        const bool noTrigger = (s[D_DIRECTION] >> 24) == (cal ? DS_NO_CAL_FAILURE : DS_NO_TRIGGER);
-        if (timeout || line == 20 || (noTrigger && line == 1)) diagnosticState = DIAG_IDLE;
+        const char* prefix = version ? "FW_VERSION" : can ? "CAN_DIAG" : cal ? "CAL_STATUS" : "STALL_STATUS";
+        const bool noTrigger = !version && !can && (s[D_DIRECTION] >> 24) == (cal ? DS_NO_CAL_FAILURE : DS_NO_TRIGGER);
+        const bool invalidVersion = version && !timeout && !VersionPayloadValid(s, node);
+        const bool invalidCan = can && !timeout &&
+            (mask != (1U << CAN_DIAG_FIELD_COUNT) - 1 || !CanDiagnosticPayloadValid(s, node));
+        if (can && line == 0 && !timeout && !invalidCan) {
+            const Node& a = nodes[node];
+            MainProbeDiagnostic snapshot{};
+            snapshot.received = a.probeReceived; snapshot.matched = a.probeRx;
+            snapshot.rejected = a.probeRejected; snapshot.issued = a.issuedProbe;
+            snapshot.lastGot = a.lastGotProbe;
+            snapshot.atMs = HAL_GetTick(); snapshot.aliveMs = a.aliveMs; snapshot.healthMs = a.healthMs;
+            const CAN_context* context = get_can_ctx(robot.hcan);
+            if (context) {
+                const CAN_context::ProbeTxCounters& counters = context->probeTxCounters[node];
+                snapshot.accepted = counters.accepted; snapshot.txok = counters.txok;
+                snapshot.alst = counters.alst; snapshot.terr = counters.terr;
+                snapshot.aborted = counters.aborted; snapshot.lastTxOk = counters.lastTxOk;
+            }
+            diagnosticMainProbe = snapshot;
+        }
+        main = diagnosticMainProbe;
+        if (timeout || invalidVersion || invalidCan || line == (version ? 5 : 20) || (noTrigger && line == 1)) diagnosticState = DIAG_IDLE;
         taskEXIT_CRITICAL();
         if (timeout) {
             Respond(*output, "error %s J%u req=%u missing=%05lX", prefix, node, request,
-                (unsigned long)(((1U << DIAG_FIELD_COUNT) - 1) & ~mask));
+                (unsigned long)(((1U << (version ? FW_VERSION_FIELD_COUNT : DIAG_FIELD_COUNT)) - 1) & ~mask));
             break;
+        }
+        if (invalidVersion) {
+            Respond(*output, "error FW_VERSION J%u req=%u invalid_schema", unsigned(node), unsigned(request));
+            break;
+        }
+        if (invalidCan) {
+            Respond(*output, "error CAN_DIAG J%u req=%u invalid_schema", unsigned(node), unsigned(request));
+            break;
+        }
+        if (version) {
+            PrintVersionLine(*output, node, request, line, s);
+            continue;
+        }
+        if (can) {
+            const uint8_t type = uint8_t(s[CD_META] >> 16);
+            const char* name = type == 35 ? "M35" : type == 42 ? "M42" : type == 57 ? "M57" : "GRIPPER";
+            char text[40]{}; // 23-byte prefix at req=65535, at most 38 bytes of body.
+            switch (line) {
+            case 0: snprintf(text, sizeof(text), "schema=%u type=%s dwt=%u", unsigned(CAN_DIAG_SCHEMA), name, unsigned(s[CD_META] >> 24)); break;
+            case 1: snprintf(text, sizeof(text), "up=%lu cpu=%lu", (unsigned long)s[CD_UPTIME], (unsigned long)s[CD_CPU_HZ]); break;
+            case 2: snprintf(text, sizeof(text), "ctl_max=%lu ctl_gap=%lu", (unsigned long)s[CD_CONTROL_MAX], (unsigned long)s[CD_CONTROL_GAP]); break;
+            case 3: snprintf(text, sizeof(text), "ctl_late=%lu pollgap=%lu", (unsigned long)s[CD_CONTROL_LATE], (unsigned long)s[CD_POLL_GAP]); break;
+            case 4: snprintf(text, sizeof(text), "rx_ovr=%lu query_rx=%lu", (unsigned long)s[CD_RX_OVERRUN], (unsigned long)s[CD_QUERY_RX]); break;
+            case 5: snprintf(text, sizeof(text), "probe_q=%lu merge=%lu", (unsigned long)s[CD_PROBE_QUEUED], (unsigned long)s[CD_PROBE_MERGED]); break;
+            case 6: snprintf(text, sizeof(text), "txok=%lu alst=%lu", (unsigned long)s[CD_PROBE_TXOK], (unsigned long)s[CD_PROBE_ALST]); break;
+            case 7: snprintf(text, sizeof(text), "terr=%lu full=%lu", (unsigned long)s[CD_PROBE_TERR], (unsigned long)s[CD_PROBE_FULL]); break;
+            case 8: snprintf(text, sizeof(text), "age=%lu tries=%lu", (unsigned long)s[CD_PROBE_AGE], (unsigned long)s[CD_PROBE_TRIES]); break;
+            case 9: snprintf(text, sizeof(text), "nonce_rx=%u nonce_tx=%u", unsigned(s[CD_NONCES] & 65535), unsigned(s[CD_NONCES] >> 16)); break;
+            case 10: snprintf(text, sizeof(text), "last_tx=%lu last_rx=%lu", (unsigned long)s[CD_LAST_TX_MS], (unsigned long)s[CD_LAST_RX_MS]); break;
+            case 11: snprintf(text, sizeof(text), "depth=%u peak=%u head=%02X flags=%02X", unsigned(s[CD_QUEUE] & 255), unsigned((s[CD_QUEUE] >> 8) & 255), unsigned((s[CD_QUEUE] >> 16) & 255), unsigned(s[CD_QUEUE] >> 24)); break;
+            case 12: snprintf(text, sizeof(text), "head_age=%lu boot=%lu", (unsigned long)s[CD_HEAD_AGE], (unsigned long)s[CD_BOOT_SESSION]); break;
+            case 13: snprintf(text, sizeof(text), "m_q=%lu m_txok=%lu", (unsigned long)main.accepted, (unsigned long)main.txok); break;
+            case 14: snprintf(text, sizeof(text), "m_alst=%lu m_terr=%lu", (unsigned long)main.alst, (unsigned long)main.terr); break;
+            case 15: snprintf(text, sizeof(text), "m_abort=%lu m_rx=%lu", (unsigned long)main.aborted, (unsigned long)main.received); break;
+            case 16: snprintf(text, sizeof(text), "m_match=%lu m_reject=%lu", (unsigned long)main.matched, (unsigned long)main.rejected); break;
+            case 17: snprintf(text, sizeof(text), "m_sent=%u m_got=%u m_txn=%u", unsigned(main.issued), unsigned(main.lastGot), unsigned(main.lastTxOk)); break;
+            case 18: snprintf(text, sizeof(text), "m_rxage=%lu m_pbage=%lu", (unsigned long)(main.atMs - main.aliveMs), (unsigned long)(main.atMs - main.healthMs)); break;
+            case 19: snprintf(text, sizeof(text), "m_at=%lu", (unsigned long)main.atMs); break;
+            case 20: snprintf(text, sizeof(text), "end"); break;
+            }
+            Respond(*output, "CAN_DIAG [%u] req=%u %s", unsigned(node), unsigned(request), text);
+            continue;
         }
         const uint32_t flags = s[D_FLAGS], reset = s[D_RESET];
         const unsigned gate = s[D_META] >> 24, cause = reset & 255;
@@ -185,11 +288,12 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
     if (n < 1 || n > 8) return;
     if (command == DIAG_REPLY) {
         // CAN ISR: copy only. No task critical-section API or printing here.
+        const uint8_t fieldCount = diagnosticSelector == DS_FW_VERSION ? FW_VERSION_FIELD_COUNT : DIAG_FIELD_COUNT;
         if (diagnosticState == DIAG_COLLECT && n == diagnosticNode && data[1] == DIAG_VERSION &&
-            Read16(data + 2) == diagnosticRequest && data[0] < DIAG_FIELD_COUNT) {
+            Read16(data + 2) == diagnosticRequest && data[0] < fieldCount) {
             std::memcpy(diagnosticValues + data[0], data + 4, 4);
             diagnosticMask |= 1U << data[0];
-            if (diagnosticMask == (1U << DIAG_FIELD_COUNT) - 1) diagnosticState = DIAG_READY;
+            if (diagnosticMask == (1U << fieldCount) - 1) diagnosticState = DIAG_READY;
         }
         return;
     }
@@ -227,9 +331,12 @@ void ProtectionCoordinator::Receive(uint8_t n, uint8_t command, const uint8_t* d
         }
     } else if (command == PROBE_REPLY) {
         const uint16_t probe = Read16(data + 2);
+        ++a.probeReceived; a.lastGotProbe = probe;
         const bool ownerQuery = job == START_QUERY || job == START_VERIFY || job == CAL_QUERY ||
                                 (job == DEFAULTS_RESET && stage == 1);
-        if (!probe || (probe != a.issuedProbe && !(ownerQuery && probe == queryProbe))) return;
+        if (!probe || (probe != a.issuedProbe && !(ownerQuery && probe == queryProbe))) {
+            ++a.probeRejected; return;
+        }
         float position; std::memcpy(&position, data + 4, 4);
         a.probe = probe; a.healthMs = now; a.probeFlags = data[1];
         if (!Finite(position)) a.probeFlags &= ~FEEDBACK_VALID;
@@ -767,6 +874,84 @@ bool ProtectionCoordinator::Command(const char* cmd, unsigned len, StreamSink& r
     size_t first = text.find_first_not_of(" \t\r\n"), last = text.find_last_not_of(" \t\r\n");
     if (first == std::string::npos) return false;
     text = text.substr(first, last-first+1);
+    if (text.rfind("#FW_VERSION", 0) == 0) {
+        const size_t at = text.find_first_not_of(" \t", 11);
+        const bool separated = text.size() > 11 && (text[11] == ' ' || text[11] == '\t');
+        const bool validNode = at != std::string::npos && text[at] >= '0' && text[at] <= '8';
+        const size_t after = validNode ? text.find_first_not_of(" \t", at + 1) : std::string::npos;
+        unsigned long requested = 0;
+        bool validRequest = true;
+        if (after != std::string::npos) {
+            const std::string digits = text.substr(after);
+            validRequest = after > at + 1 && digits.size() <= 5 &&
+                digits.find_first_not_of("0123456789") == std::string::npos;
+            if (validRequest) requested = strtoul(digits.c_str(), nullptr, 10);
+            validRequest = validRequest && requested > 0 && requested <= 65535;
+        }
+        if (!separated || !validNode || !validRequest) {
+            Respond(response, "error FW_VERSION syntax 0..8 [1..65535]"); return true;
+        }
+        const uint8_t node = uint8_t(text[at] - '0');
+        taskENTER_CRITICAL();
+        if (diagnosticState != DIAG_IDLE) {
+            taskEXIT_CRITICAL();
+            Respond(response, "error FW_VERSION J%u req=%u busy", unsigned(node), unsigned(requested)); return true;
+        }
+        if (!requested) {
+            if (!diagnosticSerial) diagnosticSerial = uint16_t(HAL_GetTick() ^ 0xD135U);
+            if (!++diagnosticSerial) ++diagnosticSerial;
+            requested = diagnosticSerial;
+        } else diagnosticSerial = uint16_t(requested);
+        diagnosticRequest = uint16_t(requested); diagnosticNode = node;
+        diagnosticSelector = DS_FW_VERSION; diagnosticSink = &response;
+        diagnosticMask = 0; diagnosticLine = 0;
+        diagnosticAt = HAL_GetTick(); diagnosticLastSend = diagnosticAt - 100;
+        if (!node) {
+            std::memcpy(diagnosticValues, FWIdentity::WORDS, sizeof(FWIdentity::WORDS));
+            diagnosticMask = (1U << FW_VERSION_FIELD_COUNT) - 1;
+            diagnosticState = DIAG_READY;
+        } else diagnosticState = DIAG_COLLECT;
+        taskEXIT_CRITICAL();
+        Respond(response, "ok FW_VERSION [%u] req=%u pending", unsigned(node), unsigned(requested)); return true;
+    }
+    if (text.rfind("#CAN_DIAG", 0) == 0) {
+        const size_t at = text.find_first_not_of(" \t", 9);
+        const bool separated = text.size() > 9 && (text[9] == ' ' || text[9] == '\t');
+        const bool validNode = at != std::string::npos && text[at] >= '1' && text[at] <= '8';
+        const size_t after = validNode ? text.find_first_not_of(" \t", at + 1) : std::string::npos;
+        unsigned long requested = 0;
+        bool validRequest = true;
+        if (after != std::string::npos) {
+            const std::string digits = text.substr(after);
+            validRequest = after > at + 1 && digits.size() <= 5 &&
+                digits.find_first_not_of("0123456789") == std::string::npos;
+            if (validRequest) {
+                requested = std::strtoul(digits.c_str(), nullptr, 10);
+                validRequest = requested >= 1 && requested <= 65535;
+            }
+        }
+        if (!separated || !validNode || !validRequest) {
+            Respond(response, "error CAN_DIAG syntax 1..8 [req1..65535]"); return true;
+        }
+        const uint8_t node = uint8_t(text[at] - '0');
+        taskENTER_CRITICAL();
+        if (diagnosticState != DIAG_IDLE) {
+            taskEXIT_CRITICAL();
+            Respond(response, "error CAN_DIAG J%u req=%u busy", unsigned(node), unsigned(requested)); return true;
+        }
+        if (!requested) {
+            if (!diagnosticSerial) diagnosticSerial = uint16_t(HAL_GetTick() ^ 0xD135U);
+            if (!++diagnosticSerial) ++diagnosticSerial;
+            requested = diagnosticSerial;
+        } else diagnosticSerial = uint16_t(requested);
+        diagnosticRequest = uint16_t(requested); diagnosticNode = node;
+        diagnosticSelector = DS_CAN_DIAG; diagnosticSink = &response;
+        diagnosticMask = 0; diagnosticLine = 0;
+        diagnosticAt = HAL_GetTick(); diagnosticLastSend = diagnosticAt - 100;
+        diagnosticState = DIAG_COLLECT;
+        taskEXIT_CRITICAL();
+        Respond(response, "ok CAN_DIAG [%u] req=%u pending", unsigned(node), unsigned(requested)); return true;
+    }
     if (text.rfind("#MOTOR_DEFAULT", 0) == 0) {
         unsigned n = 0; unsigned long request = 0; char extra[2]{};
         const size_t at = text.find_last_of(" \t");

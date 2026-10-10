@@ -75,7 +75,12 @@ void MX_ADC1_Init(void)
   }
   /* USER CODE BEGIN ADC1_Init 2 */
   HAL_ADCEx_Calibration_Start(&hadc1);
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&whole_adc_data[0][0], 2);
+  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&whole_adc_data[0][0], 2) == HAL_OK)
+  {
+    // Samples are read from the DMA buffer; no half/complete business callbacks.
+    // Keep circular data transfers and transfer-error notification active.
+    __HAL_DMA_DISABLE_IT(&hdma_adc1, DMA_IT_HT | DMA_IT_TC);
+  }
 
   /* USER CODE END ADC1_Init 2 */
 

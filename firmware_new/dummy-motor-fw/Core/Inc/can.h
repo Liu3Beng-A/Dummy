@@ -50,6 +50,18 @@ void MX_CAN_Init(void);
 void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data);
 bool CAN_TrySend(CAN_TxHeaderTypeDef* pHeader, const uint8_t* data);
 void CAN_PollTransmit(void);
+// RAM-only diagnostics. The numbering mirrors ProtectionProtocol::CD_*;
+// this C header is shared by the interrupt/main code and the C++ transport.
+enum MotorCanDiagnosticIndex {
+    MC_UPTIME = 2, MC_CPU_HZ, MC_CONTROL_MAX, MC_CONTROL_GAP,
+    MC_CONTROL_LATE, MC_POLL_GAP, MC_RX_OVERRUN, MC_QUERY_RX,
+    MC_PROBE_QUEUED, MC_PROBE_MERGED, MC_PROBE_TXOK, MC_PROBE_ALST,
+    MC_PROBE_TERR, MC_PROBE_FULL, MC_PROBE_AGE, MC_PROBE_TRIES,
+    MC_NONCES, MC_LAST_TX_MS, MC_LAST_RX_MS, MC_QUEUE, MC_HEAD_AGE,
+    MC_BOOT_SESSION, MOTOR_CAN_DIAG_WORDS
+};
+extern volatile uint32_t motorCanDiagnostic[MOTOR_CAN_DIAG_WORDS];
+void CAN_CaptureDiagnostic(uint32_t* values);
 void OnProtectionPeerFrame(uint8_t node, uint8_t command, uint8_t* data, uint32_t length);
 
 /* USER CODE END Prototypes */

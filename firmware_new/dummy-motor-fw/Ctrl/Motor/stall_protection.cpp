@@ -1,6 +1,7 @@
 #include "motor.h"
 #include "configurations.h"
 #include "can.h"
+#include "fw_build_identity.h"
 #include <cstring>
 #include <cmath>
 #include <initializer_list>
@@ -17,6 +18,12 @@ extern bool MotorDefaultsRestoreAllowed();
 #define PROTECTION_CAN_SIZE
 #endif
 namespace {
+static_assert(sizeof(FWIdentity::WORDS) == FW_VERSION_FIELD_COUNT * sizeof(uint32_t), "Firmware identity schema size mismatch");
+static_assert(FW_VERSION_FIELD_COUNT <= DIAG_FIELD_COUNT, "Firmware identity exceeds diagnostic snapshot");
+static_assert(MOTOR_CAN_DIAG_WORDS == CAN_DIAG_FIELD_COUNT && unsigned(MC_BOOT_SESSION) == unsigned(CD_BOOT_SESSION) &&
+              unsigned(MC_CONTROL_MAX) == unsigned(CD_CONTROL_MAX) && unsigned(MC_QUERY_RX) == unsigned(CD_QUERY_RX) &&
+              unsigned(MC_NONCES) == unsigned(CD_NONCES),
+              "C/C++ CAN diagnostic field numbering must agree");
 constexpr int32_t STEPS = Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
 constexpr uint32_t HZ = 20000;
 struct IrqGuard {
@@ -210,7 +217,17 @@ PROTECTION_CAN_SIZE void Motor::Controller::CaptureStallDiagnostic(uint16_t requ
     IrqGuard guard;
     if (request == diagnosticRequest && selector != diagnosticSelector) return;
     if (request != diagnosticRequest) {
-        if (selector == DS_LIVE) FillStallDiagnostic(diagnosticSnapshot, DS_LIVE);
+        if (selector == DS_CAN_DIAG) {
+            CAN_CaptureDiagnostic(diagnosticSnapshot);
+            diagnosticSnapshot[CD_MAGIC] = CAN_DIAG_MAGIC;
+            // Type is a build identity, distinct from the configurable node ID.
+            diagnosticSnapshot[CD_META] = CAN_DIAG_SCHEMA | (uint32_t(DS_CAN_DIAG) << 8) |
+                (uint32_t(FW_TARGET_TYPE) << 16) |
+                ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) ? (1U << 24) : 0U);
+            diagnosticSnapshot[CD_BOOT_SESSION] = bootSession;
+        }
+        else if (selector == DS_FW_VERSION) memcpy(diagnosticSnapshot, FWIdentity::WORDS, sizeof(FWIdentity::WORDS));
+        else if (selector == DS_LIVE) FillStallDiagnostic(diagnosticSnapshot, DS_LIVE);
         else if (selector == DS_CAL_LIVE) FillCalDiagnostic(diagnosticSnapshot, DS_CAL_LIVE);
         else if (selector == DS_CAL_FAILURE && calFailureSnapshotValid)
             memcpy(diagnosticSnapshot, calFailureSnapshot, sizeof(calFailureSnapshot));
@@ -229,7 +246,8 @@ PROTECTION_CAN_SIZE void Motor::Controller::PollStallDiagnostic() {
     const uint32_t now = HAL_GetTick();
     {
         IrqGuard guard;
-        if (diagnosticCursor >= DIAG_FIELD_COUNT || now - diagnosticSendMs < 1) return;
+        const uint8_t fieldCount = diagnosticSelector == DS_FW_VERSION ? FW_VERSION_FIELD_COUNT : DIAG_FIELD_COUNT;
+        if (diagnosticCursor >= fieldCount || now - diagnosticSendMs < 1) return;
         data[0] = diagnosticCursor++; data[1] = DIAG_VERSION;
         data[2] = uint8_t(diagnosticRequest); data[3] = uint8_t(diagnosticRequest >> 8);
         memcpy(data + 4, diagnosticSnapshot + data[0], 4);
@@ -276,7 +294,9 @@ PROTECTION_CAN_SIZE bool Motor::Controller::ProcessProtectionCan(uint8_t command
         const bool stall = boardConfig.canNodeId >= 1 && boardConfig.canNodeId <= 7 && data[0] <= DS_TRIGGER;
         const bool cal = (boardConfig.canNodeId == 7 || boardConfig.canNodeId == 8) &&
             (data[0] == DS_CAL_LIVE || data[0] == DS_CAL_FAILURE);
-        if ((stall || cal) && data[1] == DIAG_VERSION && U16(data + 2))
+        const bool version = boardConfig.canNodeId >= 1 && boardConfig.canNodeId <= 8 && data[0] == DS_FW_VERSION;
+        const bool can = boardConfig.canNodeId >= 1 && boardConfig.canNodeId <= 8 && data[0] == DS_CAN_DIAG;
+        if ((stall || cal || version || can) && data[1] == DIAG_VERSION && U16(data + 2))
             CaptureStallDiagnostic(U16(data + 2), data[0]);
         return true;
     }

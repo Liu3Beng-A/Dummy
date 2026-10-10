@@ -15,13 +15,14 @@ constexpr uint8_t CONFIG = 0x33, CONTEXT = 0x34, CONTEXT_REPLY = 0x35;
 // real motor-r float32[4..7]. Storage VERSION stays 1: no EEPROM migration.
 constexpr uint8_t PROBE_REPLY = 0x36;
 // Read-only diagnostics. QUERY: selector[0] (0/1 STALL live/last trigger,
-// 3/4 CAL live/first failure), version[1], nonzero
+// 3/4 CAL live/first failure, 6 CAN/runtime diagnostics, 7 firmware identity), version[1], nonzero
 // request u16[2..3], zero[4..7]. REPLY: field[0], version[1], same request,
 // integer value u32[4..7]. Retries retain the first coherent capture.
 constexpr uint8_t DIAG_QUERY = 0x37, DIAG_REPLY = 0x38, DIAG_VERSION = 2;
 enum DiagnosticSource : uint8_t {
     DS_LIVE = 0, DS_TRIGGER = 1, DS_NO_TRIGGER = 2,
-    DS_CAL_LIVE = 3, DS_CAL_FAILURE = 4, DS_NO_CAL_FAILURE = 5
+    DS_CAL_LIVE = 3, DS_CAL_FAILURE = 4, DS_NO_CAL_FAILURE = 5,
+    DS_CAN_DIAG = 6, DS_FW_VERSION = 7 // Independent payloads, never STALL/CAL field meanings.
 };
 enum DiagnosticField : uint8_t {
     D_META, D_FLAGS, D_CURRENT, D_RAW_SPEED, D_FILTER_SPEED,
@@ -32,6 +33,30 @@ enum DiagnosticField : uint8_t {
     DIAG_FIELD_COUNT
 };
 static_assert(DIAG_FIELD_COUNT < 32, "Diagnostic fields must fit the received-field mask");
+constexpr uint32_t FW_VERSION_MAGIC = 0x31565746U; // FWV1
+constexpr uint8_t FW_VERSION_SCHEMA = 1, FW_VERSION_FIELD_COUNT = 14;
+static_assert(FW_VERSION_FIELD_COUNT <= DIAG_FIELD_COUNT, "Identity must fit the diagnostic buffer");
+constexpr uint32_t CAN_DIAG_MAGIC = 0x31444E43U; // CND1
+constexpr uint8_t CAN_DIAG_SCHEMA = 1, CAN_DIAG_FIELD_COUNT = 24;
+// META bytes: schema, selector, motor type, flags (bit0: DWT enabled).
+// Counters accumulate in RAM since boot; timings are DWT cycles except *_MS.
+// RX_OVERRUN is a latched HAL RX FIFO overrun error-bit mask, not a frame count.
+// NONCES packs last received QUERY u16 / last TXOK PROBE u16. QUEUE packs
+// current depth / peak depth / head command / flags (owned=1, aborting=2).
+// BOOT_SESSION is existing boot namespace, not a strict reset counter.
+enum CanDiagnosticField : uint8_t {
+    CD_MAGIC, CD_META, CD_UPTIME, CD_CPU_HZ, CD_CONTROL_MAX, CD_CONTROL_GAP,
+    CD_CONTROL_LATE, CD_POLL_GAP, CD_RX_OVERRUN, CD_QUERY_RX,
+    CD_PROBE_QUEUED, CD_PROBE_MERGED, CD_PROBE_TXOK, CD_PROBE_ALST,
+    CD_PROBE_TERR, CD_PROBE_FULL, CD_PROBE_AGE, CD_PROBE_TRIES,
+    CD_NONCES, CD_LAST_TX_MS, CD_LAST_RX_MS, CD_QUEUE, CD_HEAD_AGE,
+    CD_BOOT_SESSION
+};
+static_assert(CD_BOOT_SESSION + 1 == CAN_DIAG_FIELD_COUNT && CAN_DIAG_FIELD_COUNT == DIAG_FIELD_COUNT,
+              "CAN diagnostic schema must fit the existing buffer");
+// Identity words: magic, packed schema/selector/type/flags, release YYYYMMDDnn,
+// UTC epoch, buildset high/low words, eight SHA256 words in printed hex order.
+// Complete identity and header validation are required before reporting a version.
 // META bytes: running mode, requested mode, protection phase, detection gate.
 // FLAGS low byte: intent=1, valid feedback=2, enabled=4, detection switch=8,
 // STOP lock=16. Next byte: unmet CURRENT=1, SPEED=2, ERROR=4 (eligible only).

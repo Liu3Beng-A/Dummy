@@ -63,7 +63,7 @@ include_directories(
 
 add_definitions(-DUSE_HAL_DRIVER -D__MICROLIB -DSTM32F1 -DSTM32F1xx -DSTM32F103xB)
 
-file(GLOB_RECURSE SOURCES
+file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
         "startup/*.*"
         "Drivers/*.*"
         "Core/*.*"
@@ -102,6 +102,8 @@ foreach(i RANGE 0 ${NUM_TARGETS})
 
     add_executable(${TARGET_NAME}.elf ${SOURCES} ${LINKER_SCRIPT})
     target_compile_definitions(${TARGET_NAME}.elf PRIVATE ${TARGET_COMPILE_DEFS})
+    target_compile_definitions(${TARGET_NAME}.elf PRIVATE FW_TARGET_TYPE=${MOTOR_TYPE_VAL})
+    set_property(TARGET ${TARGET_NAME}.elf APPEND PROPERTY LINK_DEPENDS "${LINKER_SCRIPT}")
     # Target-scope link options so each motor-N.elf gets its own
     # -T linker script, -mcpu, -Wl,-Map=... (was directory-scope add_link_options,
     # which accumulated across the foreach loop and made the linker overwrite
@@ -112,8 +114,13 @@ foreach(i RANGE 0 ${NUM_TARGETS})
         -Wl,-gc-sections,--print-memory-usage,-Map=${TARGET_MAP})
 
     add_custom_command(TARGET ${TARGET_NAME}.elf POST_BUILD
+            BYPRODUCTS ${TARGET_HEX} ${TARGET_BIN}
             COMMAND ${CMAKE_OBJCOPY} -Oihex $<TARGET_FILE:${TARGET_NAME}.elf> ${TARGET_HEX}
             COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${TARGET_NAME}.elf> ${TARGET_BIN}
             COMMENT "Building ${TARGET_HEX}
 Building ${TARGET_BIN}")
 endforeach()
+
+include("${CMAKE_SOURCE_DIR}/../cmake/firmware_identity.cmake")
+firmware_configure_identity(TARGETS
+        motor-35.elf motor-42.elf motor-57.elf motor-gripper.elf)

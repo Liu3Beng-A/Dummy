@@ -30,6 +30,19 @@ JOINT_DEFAULTS = [0, -75, 180, 0, 0, 0]
 # v3.1 默认速度 35（slider 35 ≈ 10.5 r/s，与新版串口助手对齐）
 DEFAULT_SPEED = 35
 
+# CAN_DIAG schema 1：主控已校验 CND1/selector/type，助手仍要求完整同请求回复。
+CAN_DIAG_U32_FIELDS = (
+    "up", "cpu", "ctl_max", "ctl_gap", "ctl_late", "pollgap", "rx_ovr",
+    "query_rx", "probe_q", "merge", "txok", "alst", "terr", "full", "age", "tries",
+    "last_tx", "last_rx", "head_age", "boot", "m_q", "m_txok", "m_alst", "m_terr",
+    "m_abort", "m_rx", "m_match", "m_reject", "m_rxage", "m_pbage", "m_at",
+)
+CAN_DIAG_U16_FIELDS = ("nonce_rx", "nonce_tx", "m_sent", "m_got", "m_txn")
+CAN_DIAG_U8_FIELDS = ("depth", "peak")
+CAN_DIAG_HEX_FIELDS = ("head", "flags")
+CAN_DIAG_REQUIRED_FIELDS = ("schema", "type", "dwt") + CAN_DIAG_U32_FIELDS + \
+    CAN_DIAG_U16_FIELDS + CAN_DIAG_U8_FIELDS + CAN_DIAG_HEX_FIELDS
+
 # [v3.1 新增] 地轨（J7）参数：直连丝杆1605，5mm/圈，行程 ±250 mm
 RAIL_RANGE = (-250, 250)
 RAIL_DEFAULT = 0
@@ -218,6 +231,14 @@ class RobotSerialAssistantOld:
         self._stop_rx_fragment = ""
         self._acc_sync_waiting = False
         self._acc_sync_timeout_id = None
+        self._fw_version_request_counter = (time.monotonic_ns() & 0xFFFF) or 1
+        self._fw_version_batch = None
+        self._fw_version_pending = None
+        self._fw_version_timeout_id = None
+        self._fw_version_results = {}
+        self._can_diag_pending = None
+        self._can_diag_timeout_id = None
+        self._can_diag_results = {}
 
         self.create_widgets()
         self.refresh_ports()
@@ -347,6 +368,14 @@ class RobotSerialAssistantOld:
                                           bg="#495057", fg="white", relief=tk.FLAT, pady=5,
                                           command=lambda: self.send_cmd("#MOTION_STATUS"))
         self.btn_motion_status.pack(fill=tk.X, padx=1, pady=(2, 0))
+        self.btn_fw_version = tk.Button(query_f, text="查询固件版本", font=("Arial", 10),
+                                        bg="#495057", fg="white", relief=tk.FLAT, pady=5,
+                                        command=self._query_firmware_versions)
+        self.btn_fw_version.pack(fill=tk.X, padx=1, pady=(2, 0))
+        self.btn_can_diag = tk.Button(query_f, text="CAN诊断（参数节点）", font=("Arial", 10),
+                                      bg="#495057", fg="white", relief=tk.FLAT, pady=5,
+                                      command=self._query_can_diagnostic)
+        self.btn_can_diag.pack(fill=tk.X, padx=1, pady=(2, 0))
 
         # --- 电机（旧固件只有 J1~J6，节点 1~6）---
         motor_f = ttk.LabelFrame(left_col, text="电机", padding=6)
@@ -1196,6 +1225,8 @@ class RobotSerialAssistantOld:
                 self._mode_pending = self._mode_request = None
                 self._calibration_busy = False
                 self._cancel_defaults_restore("重新连接")
+                self._cancel_firmware_versions("重新连接")
+                self._cancel_can_diagnostic("重新连接")
                 self._stop_locked = False
                 self._update_motor_state(None)
                 self.btn_connect.config(text="断开", bg="#c92a2a", activebackground="#a02222")
@@ -1224,6 +1255,8 @@ class RobotSerialAssistantOld:
             self.lbl_status.config(text="未连接", fg="#ff6b6b")
             self._calibration_busy = False
             self._cancel_defaults_restore("断开连接")
+            self._cancel_firmware_versions("断开连接")
+            self._cancel_can_diagnostic("断开连接")
             self._stop_locked = False
             self._update_motor_state(None)
             # 清掉所有等待中的异步状态，避免重连后被上一轮的残留状态卡住
@@ -1305,6 +1338,8 @@ class RobotSerialAssistantOld:
             self.log("磁编码器校准 CAN 帧已提交；协议没有完成回执，请观察电机校准及重启结果", "INFO")
         self._handle_protection_parameter_status(line)
         self._handle_defaults_status(line)
+        self._handle_firmware_version_status(line)
+        self._handle_can_diagnostic_status(line)
 
         # 电机参数查询回包解析：节点匹配且非 0 时，把数值回填到右侧 Entry（仅 UI 辅助，不影响主日志）
         m = re.match(r'ok PID \[(\d+)\] kp=(-?\d+) kv=(-?\d+) ki=(-?\d+) kd=(-?\d+)', line)
@@ -1658,6 +1693,278 @@ class RobotSerialAssistantOld:
         self.send_cmd(f"#{kind}_GET {self._protection_nodes[kind].get()}")
 
     @staticmethod
+    def _is_firmware_version_query(cmd):
+        match = re.fullmatch(r"#FW_VERSION[ \t]+[0-8](?:[ \t]+([0-9]{1,5}))?", cmd)
+        return match is not None and (match.group(1) is None or 0 < int(match.group(1)) <= 0xFFFF)
+
+    def _query_firmware_versions(self):
+        if self._can_diag_pending is not None:
+            self.log("CAN诊断正在进行，请等待完整回复后查询整组版本", "WARN")
+            return
+        if self._fw_version_batch is not None:
+            self.log("固件版本查询正在进行，请等待本次汇总", "WARN")
+            return
+        if not self.is_connected or not self.serial_port:
+            self.log("请先连接串口再查询固件版本", "WARN")
+            return
+        if (self._seq_active or self._calibration_busy or self._defaults_request is not None or
+                self._acc_sync_waiting or not self._motor_state_known or self._motor_enabled):
+            self.log("整组版本查询请先结束当前任务并 !DISABLE，等待 Disabled ok；"
+                     "单条 #FW_VERSION <0～8> 可在 STOP / 校准期间查询", "WARN")
+            return
+        self._fw_version_batch = {"nodes": list(range(9))}
+        self._fw_version_results = {}
+        self.btn_fw_version.config(state=tk.DISABLED)
+        self.log("开始查询主控及 J1～J8 固件版本；每板独立等待完整回复，不自动重试")
+        self._firmware_version_next(self._fw_version_batch)
+
+    def _firmware_version_next(self, batch):
+        if self._fw_version_batch is not batch or self._fw_version_pending is not None:
+            return
+        if not batch["nodes"]:
+            self._finish_firmware_versions()
+            return
+        node = batch["nodes"].pop(0)
+        self._fw_version_request_counter = (self._fw_version_request_counter + 1) & 0xFFFF or 1
+        request = self._fw_version_request_counter
+        state = {"node": node, "request": request, "fields": {}, "bare_ok": False,
+                 "conflict": False, "command": f"#FW_VERSION {node} {request}"}
+        self._fw_version_pending = state
+        if not self.send_cmd(state["command"]):
+            self._complete_firmware_version("未发送：串口或当前任务门禁拒绝")
+            return
+        self._fw_version_timeout_id = self.root.after(3000, self._firmware_version_timeout, state)
+
+    def _firmware_version_timeout(self, state):
+        if self._fw_version_pending is not state:
+            return
+        self._fw_version_timeout_id = None
+        detail = "超时：未收到匹配的完整版本回复"
+        if state["bare_ok"]:
+            detail += "；收到裸 ok，版本查询可能未支持或回复未匹配"
+        elif state["fields"]:
+            detail += "；回复不完整"
+        self._complete_firmware_version(detail)
+
+    def _handle_firmware_version_status(self, line):
+        state = self._fw_version_pending
+        if state is None:
+            return  # 手动单条查询只保留原始 RX 日志，不改变整组结果。
+        if line == "ok":
+            state["bare_ok"] = True  # 没有节点/请求号，不能据此确认或推进查询。
+            return
+        match = re.fullmatch(r"error FW_VERSION J([0-8]) req=(\d+) (.+)", line)
+        if match:
+            if (int(match.group(1)), int(match.group(2))) == (state["node"], state["request"]):
+                self._complete_firmware_version(f"查询失败：{match.group(3)}")
+            return
+        match = re.fullmatch(r"FW_VERSION \[([0-8])\] req=(\d+) (.+)", line)
+        if match is None or (int(match.group(1)), int(match.group(2))) != (state["node"], state["request"]):
+            return
+        body = match.group(3)
+        if body == "end":
+            required = ("v", "type", "epoch", "group", "h0", "h1")
+            fields = state["fields"]
+            missing = [key for key in required if key not in fields]
+            if missing:
+                self._complete_firmware_version("回复不完整：缺少 " + "/".join(missing))
+                return
+            node = state["node"]
+            types = ("CORE",) if node == 0 else ("M57",) if node == 7 else ("GRIPPER",) if node == 8 else ("M35", "M42", "M57")
+            invalid = []
+            if re.fullmatch(r"[0-9]{8}\.[0-9]{2}", fields["v"]) is None or fields["v"].startswith("00000000"):
+                invalid.append("版本")
+            if fields["type"] not in types:
+                invalid.append("板卡类型")
+            if not fields["epoch"].isdigit() or not 0 < int(fields["epoch"]) <= 0xFFFFFFFF:
+                invalid.append("UTC时间戳")
+            for key, width in (("group", 16), ("h0", 32), ("h1", 32)):
+                if re.fullmatch(rf"[0-9a-fA-F]{{{width}}}", fields[key]) is None:
+                    invalid.append(key)
+            if state["conflict"] or invalid:
+                self._complete_firmware_version("回复无效：" + ("同一请求字段冲突" if state["conflict"] else "/".join(invalid)))
+                return
+            result = dict(fields)
+            result["epoch"] = int(result["epoch"])
+            result["group"] = result["group"].lower()
+            result["sha256"] = (result.pop("h0") + result.pop("h1")).lower()
+            result["built_utc"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(result["epoch"]))
+            self._complete_firmware_version("已确认", result)
+            return
+        for token in body.split():
+            key, sep, value = token.partition("=")
+            if sep and key in ("v", "type", "epoch", "group", "h0", "h1"):
+                previous = state["fields"].get(key)
+                if previous is not None and previous != value:
+                    state["conflict"] = True
+                state["fields"][key] = value
+
+    def _complete_firmware_version(self, detail, result=None):
+        state = self._fw_version_pending
+        if state is None:
+            return
+        if self._fw_version_timeout_id is not None:
+            self.root.after_cancel(self._fw_version_timeout_id)
+            self._fw_version_timeout_id = None
+        self._fw_version_results[state["node"]] = {"status": detail, "data": result}
+        self._fw_version_pending = None
+        self.root.after(40, self._firmware_version_next, self._fw_version_batch)
+
+    def _finish_firmware_versions(self):
+        self._fw_version_batch = None
+        self.btn_fw_version.config(state=tk.NORMAL)
+        self.log("FW_SUMMARY 板卡 | 状态 | 版本 | 类型 | UTC构建时间 | 同批标识 | 源码SHA256")
+        complete = {}
+        for node in range(9):
+            row = self._fw_version_results.get(node, {"status": "未查询", "data": None})
+            label = "主控" if node == 0 else f"J{node}"
+            data = row["data"]
+            if data is None:
+                self.log(f"FW_SUMMARY {label} | {row['status']} | — | — | — | — | —", "WARN")
+            else:
+                complete[node] = data
+                self.log(f"FW_SUMMARY {label} | {row['status']} | {data['v']} | {data['type']} | "
+                         f"{data['built_utc']} | {data['group']} | {data['sha256']}")
+        if not complete:
+            self.log("FW_SUMMARY 未确认任何板卡版本；不能判断固件是否配套", "WARN")
+            return
+        baseline = complete.get(0, next(iter(complete.values())))
+        differences = []
+        for key, label in (("v", "版本"), ("epoch", "构建时间"), ("group", "同批标识"), ("sha256", "源码SHA256")):
+            nodes = ["主控" if node == 0 else f"J{node}" for node, data in complete.items() if data[key] != baseline[key]]
+            if nodes:
+                differences.append(f"{label}不同：" + ",".join(nodes))
+        if differences:
+            self.log("FW_SUMMARY 构建信息不一致；" + "；".join(differences), "WARN")
+        elif len(complete) == 9:
+            self.log("FW_SUMMARY 九块板卡版本、构建时间、同批标识及源码SHA256一致；板卡类型已分别核对")
+        else:
+            self.log("FW_SUMMARY 已回板卡构建信息一致，但存在缺失/失败，尚不能确认整组配套", "WARN")
+
+    def _cancel_firmware_versions(self, reason):
+        if self._fw_version_batch is None:
+            return
+        if self._fw_version_timeout_id is not None:
+            self.root.after_cancel(self._fw_version_timeout_id)
+            self._fw_version_timeout_id = None
+        self._fw_version_pending = None
+        self._fw_version_batch = None
+        self.btn_fw_version.config(state=tk.NORMAL)
+        self.log(f"固件版本整组查询已取消：{reason}；已收到内容保留在 RX 日志", "WARN")
+
+    @staticmethod
+    def _parse_can_diagnostic_query(cmd):
+        match = re.fullmatch(r"#CAN_DIAG[ \t]+([1-8])(?:[ \t]+([0-9]{1,5}))?", cmd)
+        if match is None:
+            return None
+        request = int(match.group(2)) if match.group(2) is not None else None
+        if request is not None and not 0 < request <= 0xFFFF:
+            return None
+        return int(match.group(1)), request
+
+    def _query_can_diagnostic(self):
+        node = self.param_node.get()
+        if node not in range(1, 9):
+            self.log("CAN诊断仅支持单个节点 J1～J8，请在电机参数页选择节点；禁止 ALL", "WARN")
+            return
+        self.send_cmd(f"#CAN_DIAG {node}")
+
+    def _can_diagnostic_timeout(self, state):
+        if self._can_diag_pending is not state:
+            return
+        self._can_diag_timeout_id = None
+        self._complete_can_diagnostic("超时：未收到匹配的完整 CAN_DIAG 回复")
+
+    def _handle_can_diagnostic_status(self, line):
+        state = self._can_diag_pending
+        if state is None:
+            return
+        match = re.fullmatch(r"error CAN_DIAG J([1-8]) req=([0-9]+) (.+)", line)
+        if match:
+            if (int(match.group(1)), int(match.group(2))) == (state["node"], state["request"]):
+                self._complete_can_diagnostic(f"查询失败：{match.group(3)}")
+            return
+        match = re.fullmatch(r"CAN_DIAG \[([1-8])\] req=([0-9]+) (.+)", line)
+        if match is None or (int(match.group(1)), int(match.group(2))) != (state["node"], state["request"]):
+            return
+        body = match.group(3)
+        if body != "end":
+            for token in body.split():
+                key, sep, value = token.partition("=")
+                if not sep or not value or key not in CAN_DIAG_REQUIRED_FIELDS:
+                    state["invalid"] = True
+                    continue
+                previous = state["fields"].get(key)
+                if previous is not None and previous != value:
+                    state["invalid"] = True
+                state["fields"][key] = value
+            return
+        fields = state["fields"]
+        missing = [key for key in CAN_DIAG_REQUIRED_FIELDS if key not in fields]
+        if missing:
+            self._complete_can_diagnostic("回复不完整：缺少 " + "/".join(missing))
+            return
+        types = ("M57",) if state["node"] == 7 else ("GRIPPER",) if state["node"] == 8 else ("M35", "M42", "M57")
+        invalid = state["invalid"] or fields["schema"] != "1" or fields["type"] not in types
+        invalid |= fields["dwt"] not in ("0", "1")
+        result = dict(fields)
+        for keys, limit in ((CAN_DIAG_U32_FIELDS, 0xFFFFFFFF), (CAN_DIAG_U16_FIELDS, 0xFFFF),
+                            (CAN_DIAG_U8_FIELDS, 0xFF)):
+            for key in keys:
+                if re.fullmatch(r"[0-9]+", fields[key]) is None or not 0 <= int(fields[key]) <= limit:
+                    invalid = True
+                else:
+                    result[key] = int(fields[key])
+        for key in CAN_DIAG_HEX_FIELDS:
+            if re.fullmatch(r"[0-9a-fA-F]{2}", fields[key]) is None:
+                invalid = True
+            else:
+                result[key] = int(fields[key], 16)
+        if invalid or result["cpu"] == 0:
+            self._complete_can_diagnostic("回复无效：schema / 板型 / 字段范围或重复字段冲突")
+            return
+        result["schema"] = 1
+        result["dwt"] = int(result["dwt"])
+        self._complete_can_diagnostic("已确认完整诊断", result)
+
+    def _complete_can_diagnostic(self, detail, result=None):
+        state = self._can_diag_pending
+        if state is None:
+            return
+        if self._can_diag_timeout_id is not None:
+            self.root.after_cancel(self._can_diag_timeout_id)
+            self._can_diag_timeout_id = None
+        self._can_diag_pending = None
+        self.btn_can_diag.config(state=tk.NORMAL)
+        self._can_diag_results[state["node"]] = {"status": detail, "data": result}
+        prefix = f"CAN_SUMMARY J{state['node']} req={state['request']}"
+        if result is None:
+            self.log(f"{prefix} {detail}；部分 RX 内容不能作为完整诊断", "WARN")
+            return
+        self.log(f"{prefix} {detail} type={result['type']} boot={result['boot']} up={result['up']}ms；"
+                 "计数包含查询本身，需比较同次启动的前后读数")
+        self.log(f"{prefix} probe 收到={result['query_rx']} 入队={result['probe_q']} 合并={result['merge']} "
+                 f"TXOK={result['txok']} 过期丢={result['age']} 尝试丢={result['tries']} 队满={result['full']}")
+        self.log(f"{prefix} nonce 电机RX/TX={result['nonce_rx']}/{result['nonce_tx']} "
+                 f"主控sent/got/TXOK={result['m_sent']}/{result['m_got']}/{result['m_txn']} "
+                 f"匹配={result['m_match']} 拒绝={result['m_reject']} RX溢出位图=0x{result['rx_ovr']:08X}")
+        if result["dwt"]:
+            cycles_per_us = result["cpu"] / 1000000
+            control_us = result["ctl_max"] / cycles_per_us
+            budget_cycles = result["cpu"] / 20000
+            self.log(f"{prefix} 控制观测max={control_us:.2f}us/{result['ctl_max']}cycles "
+                     f"周期预算=50us/{budget_cycles:g}cycles 占比={result['ctl_max'] / budget_cycles * 100:.1f}%")
+            self.log(f"{prefix} 控制入口gap={result['ctl_gap'] / cycles_per_us:.2f}us "
+                     f"late={result['ctl_late']} 主循环gap={result['pollgap'] / cycles_per_us:.2f}us；"
+                     "观测值需结合前后计数，不能单独判定 STOP 根因")
+        else:
+            self.log(f"{prefix} DWT不可用，零计时不能证明控制余量充足", "WARN")
+
+    def _cancel_can_diagnostic(self, reason):
+        if self._can_diag_pending is not None:
+            self._complete_can_diagnostic(f"已取消：{reason}")
+
+    @staticmethod
     def _is_stall_status_query(cmd):
         return re.fullmatch(r"#STALL_STATUS\s+[1-7](?:\s+LAST)?", cmd) is not None
 
@@ -1666,8 +1973,9 @@ class RobotSerialAssistantOld:
         return re.fullmatch(r"#CAL_STATUS\s+[78](?:\s+LAST)?", cmd) is not None
 
     def _is_protection_status_query(self, cmd):
-        return (cmd in ("#RGB_STATUS", "#RGB_GET", "!RGB_BRIGHT") or
-                self._is_stall_status_query(cmd) or self._is_cal_status_query(cmd))
+        return (cmd in ("#RGB_STATUS", "#RGB_GET", "!RGB_BRIGHT", "#MOTION_STATUS") or
+                self._is_stall_status_query(cmd) or self._is_cal_status_query(cmd) or
+                self._is_firmware_version_query(cmd) or self._parse_can_diagnostic_query(cmd) is not None)
 
     def _query_cal_status(self, last=False):
         node = self._protection_nodes["CAL"].get()
@@ -1799,7 +2107,8 @@ class RobotSerialAssistantOld:
 
     def _handle_defaults_status(self, line):
         state = self._defaults_request
-        if state is None:
+        if state is None or line.startswith(("FW_VERSION ", "ok FW_VERSION ", "error FW_VERSION ",
+                                             "CAN_DIAG ", "ok CAN_DIAG ", "error CAN_DIAG ")):
             return
         match = re.fullmatch(r"(ok |error )?MOTOR_DEFAULT \[([1-8])\] req=(\d+) (\w+)", line)
         if match:
@@ -2087,6 +2396,30 @@ class RobotSerialAssistantOld:
             self.log("未连接串口", "WARN")
             return False
         cmd = cmd.strip()
+        can_diagnostic = None
+        if cmd.startswith("#CAN_DIAG"):
+            can_diagnostic = self._parse_can_diagnostic_query(cmd)
+            if can_diagnostic is None:
+                self.log("CAN诊断格式为 #CAN_DIAG <1～8> [1～65535]，禁止 ALL", "WARN")
+                return False
+            if self._can_diag_pending is not None or self._fw_version_batch is not None:
+                self.log("诊断或整组版本查询正在进行，请等待完整回复；不会自动重试", "WARN")
+                return False
+            node, request = can_diagnostic
+            if request is None:
+                self._fw_version_request_counter = (self._fw_version_request_counter + 1) & 0xFFFF or 1
+                request = self._fw_version_request_counter
+            else:
+                self._fw_version_request_counter = request
+            can_diagnostic = node, request
+            cmd = f"#CAN_DIAG {node} {request}"
+        if self._can_diag_pending is not None and self._is_firmware_version_query(cmd):
+            self.log("CAN诊断正在进行，请等待完整回复后查询固件版本", "WARN")
+            return False
+        if (self._fw_version_batch is not None and self._is_firmware_version_query(cmd) and
+                (self._fw_version_pending is None or cmd != self._fw_version_pending["command"])):
+            self.log("整组版本查询正在进行，请等待汇总后再发送单条查询", "WARN")
+            return False
         if self._defaults_request is not None and not self._defaults_command_allowed(cmd):
             self.log("恢复及回读进行中，请等待完成；可发送 DISABLE 或 STOP", "WARN")
             return False
@@ -2134,6 +2467,12 @@ class RobotSerialAssistantOld:
             self._handle_stop_status("Stopping ok" if cmd == "!STOP" else "Disable pending")
         try:
             self._tx_queue.put((self._tx_generation, cmd))
+            if can_diagnostic is not None:
+                node, request = can_diagnostic
+                state = {"node": node, "request": request, "fields": {}, "invalid": False}
+                self._can_diag_pending = state
+                self.btn_can_diag.config(state=tk.DISABLED)
+                self._can_diag_timeout_id = self.root.after(3000, self._can_diagnostic_timeout, state)
             self.log(cmd, "TX")
             return True
         except Exception as e:
@@ -2144,6 +2483,7 @@ class RobotSerialAssistantOld:
     # 系统控制
     # ==============================================
     def _cancel_motion_for_stop(self):
+        self._cancel_firmware_versions("任务切换或 STOP / DISABLE")
         self._set_acc_sync_waiting(False)
         self._tx_generation += 1
         self._seq_running = self._seq_active = self._seq_wait_mode = False

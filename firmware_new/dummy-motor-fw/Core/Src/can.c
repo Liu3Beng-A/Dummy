@@ -29,6 +29,7 @@ CAN_RxHeaderTypeDef RxHeader;
 uint8_t TxData[8];
 uint8_t RxData[8];
 uint32_t TxMailbox;
+volatile uint32_t motorCanDiagnostic[MOTOR_CAN_DIAG_WORDS];
 // Mailbox acceptance is not delivery when NART is enabled. Protection replies
 // remain owned here until TXOK, with bounded retries independent of the master's
 // 5ms motion cycle. Ordinary position feedback keeps its best-effort semantics.
@@ -92,7 +93,16 @@ static void MotorCanPopProtection(void)
     motorCanProtectionAborting = false;
 }
 
-static void MotorCanProtectionResult(CAN_HandleTypeDef* handle, uint8_t mailbox, bool success)
+static void MotorCanProbeDrop(const MotorCanProtectionPending* pending, uint32_t now)
+{
+    if ((pending->frame.header.StdId & 0x7F) != 0x36) return;
+    ++motorCanDiagnostic[now - pending->createdMs >= MOTOR_CAN_PROTECTION_MAX_AGE_MS ?
+                         MC_PROBE_AGE : MC_PROBE_TRIES];
+}
+
+// Keep the added counters in one copy instead of duplicating them in six ISR
+// wrappers; the delivery/retry decisions below retain their existing behavior.
+static __attribute__((noinline)) void MotorCanProtectionResult(CAN_HandleTypeDef* handle, uint8_t mailbox, bool success)
 {
     if (handle != &hcan) return;
     const uint32_t irq = __get_PRIMASK(); __disable_irq();
@@ -100,9 +110,22 @@ static void MotorCanProtectionResult(CAN_HandleTypeDef* handle, uint8_t mailbox,
     if (motorCanProtectionMailbox == (1UL << mailbox)) {
         MotorCanProtectionPending* pending = &motorCanProtectionQueue[motorCanProtectionRead];
         const uint32_t now = HAL_GetTick();
+        if ((pending->frame.header.StdId & 0x7F) == 0x36) {
+            if (success) {
+                ++motorCanDiagnostic[MC_PROBE_TXOK];
+                const uint32_t nonce = pending->frame.data[2] | ((uint32_t)pending->frame.data[3] << 8);
+                motorCanDiagnostic[MC_NONCES] = (motorCanDiagnostic[MC_NONCES] & 0xFFFFU) | (nonce << 16);
+                motorCanDiagnostic[MC_LAST_TX_MS] = now;
+            } else {
+                const uint32_t shift = mailbox * 2U;
+                if (handle->ErrorCode & (HAL_CAN_ERROR_TX_ALST0 << shift)) ++motorCanDiagnostic[MC_PROBE_ALST];
+                if (handle->ErrorCode & (HAL_CAN_ERROR_TX_TERR0 << shift)) ++motorCanDiagnostic[MC_PROBE_TERR];
+            }
+        }
         if (success || motorCanProtectionAborting ||
             pending->attempts >= MOTOR_CAN_PROTECTION_MAX_ATTEMPTS ||
             now - pending->createdMs >= MOTOR_CAN_PROTECTION_MAX_AGE_MS) {
+            if (!success) MotorCanProbeDrop(pending, now);
             MotorCanPopProtection();
         } else {
             motorCanProtectionMailbox = 0;
@@ -275,6 +298,7 @@ void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data)
             if (!(index == motorCanProtectionRead && motorCanProtectionMailbox) &&
                 MotorCanSameReply(&motorCanProtectionQueue[index].frame, pHeader, data)) {
                 MotorCanCopy(&motorCanProtectionQueue[index].frame, pHeader, data);
+                if ((pHeader->StdId & 0x7F) == 0x36) ++motorCanDiagnostic[MC_PROBE_MERGED];
                 __set_PRIMASK(irq); return;
             }
             index = (uint8_t)((index + 1U) % MOTOR_CAN_PROTECTION_SLOTS);
@@ -285,6 +309,11 @@ void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data)
             MotorCanCopy(&pending->frame, pHeader, data);
             pending->createdMs = pending->retryAtMs = HAL_GetTick(); pending->attempts = 0;
             motorCanProtectionWrite = next;
+            if ((pHeader->StdId & 0x7F) == 0x36) ++motorCanDiagnostic[MC_PROBE_QUEUED];
+            const uint32_t depth = (next + MOTOR_CAN_PROTECTION_SLOTS - motorCanProtectionRead) % MOTOR_CAN_PROTECTION_SLOTS;
+            if (depth > (motorCanDiagnostic[MC_QUEUE] >> 8)) motorCanDiagnostic[MC_QUEUE] = depth << 8;
+        } else if ((pHeader->StdId & 0x7F) == 0x36) {
+            ++motorCanDiagnostic[MC_PROBE_FULL];
         }
         __set_PRIMASK(irq); return;
     }
@@ -322,6 +351,11 @@ bool CAN_TrySend(CAN_TxHeaderTypeDef* pHeader, const uint8_t* data)
 
 void CAN_PollTransmit(void)
 {
+    static uint32_t previousCycle;
+    const uint32_t cycle = DWT->CYCCNT;
+    const uint32_t gap = cycle - previousCycle;
+    if (previousCycle && gap > motorCanDiagnostic[MC_POLL_GAP]) motorCanDiagnostic[MC_POLL_GAP] = gap;
+    previousCycle = cycle;
     uint32_t irq = __get_PRIMASK();
     __disable_irq();
     const uint32_t now = HAL_GetTick();
@@ -337,6 +371,7 @@ void CAN_PollTransmit(void)
         }
         if (now - pending->createdMs >= MOTOR_CAN_PROTECTION_MAX_AGE_MS ||
             pending->attempts >= MOTOR_CAN_PROTECTION_MAX_ATTEMPTS) {
+            MotorCanProbeDrop(pending, now);
             MotorCanPopProtection(); continue;
         }
         if ((int32_t)(now - pending->retryAtMs) >= 0) {
@@ -366,6 +401,7 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* handle)
 {
     if (handle != &hcan) return;
     const uint32_t errors = handle->ErrorCode;
+    motorCanDiagnostic[MC_RX_OVERRUN] |= errors & (HAL_CAN_ERROR_RX_FOV0 | HAL_CAN_ERROR_RX_FOV1);
     if (errors & (HAL_CAN_ERROR_TX_ALST0 | HAL_CAN_ERROR_TX_TERR0)) MotorCanProtectionResult(handle, 0, false);
     if (errors & (HAL_CAN_ERROR_TX_ALST1 | HAL_CAN_ERROR_TX_TERR1)) MotorCanProtectionResult(handle, 1, false);
     if (errors & (HAL_CAN_ERROR_TX_ALST2 | HAL_CAN_ERROR_TX_TERR2)) MotorCanProtectionResult(handle, 2, false);
@@ -388,10 +424,35 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* CanHandle)
     uint8_t cmd = RxHeader.StdId & 0x7F; // 4Bits ID & 7Bits Msg
     if (id == 0 || id == boardConfig.canNodeId)
     {
+        if (cmd == 0x34 && RxHeader.DLC == 8 && RxData[0] == 0) {
+            ++motorCanDiagnostic[MC_QUERY_RX];
+            motorCanDiagnostic[MC_NONCES] = (motorCanDiagnostic[MC_NONCES] & 0xFFFF0000U) |
+                RxData[2] | ((uint32_t)RxData[3] << 8);
+            motorCanDiagnostic[MC_LAST_RX_MS] = HAL_GetTick();
+        }
         OnCanCmd(cmd, RxData, RxHeader.DLC);
     }
     else if (cmd == 0x0B && id >= 1 && id <= 7)
         OnProtectionPeerFrame(id, cmd, RxData, RxHeader.DLC);
+}
+
+// Only capture immutable evidence; never clear counters or change a queue here.
+void CAN_CaptureDiagnostic(uint32_t* values)
+{
+    const uint32_t irq = __get_PRIMASK(); __disable_irq();
+    for (uint32_t i = 0; i < MOTOR_CAN_DIAG_WORDS; ++i) values[i] = motorCanDiagnostic[i];
+    values[MC_UPTIME] = HAL_GetTick(); values[MC_CPU_HZ] = SystemCoreClock;
+    const uint32_t depth = (motorCanProtectionWrite + MOTOR_CAN_PROTECTION_SLOTS - motorCanProtectionRead) % MOTOR_CAN_PROTECTION_SLOTS;
+    uint32_t command = 0, age = 0;
+    if (depth) {
+        const MotorCanProtectionPending* head = &motorCanProtectionQueue[motorCanProtectionRead];
+        command = head->frame.header.StdId & 0x7F;
+        age = values[MC_UPTIME] - head->createdMs;
+    }
+    values[MC_QUEUE] |= depth | (command << 16) |
+        (((motorCanProtectionMailbox ? 1U : 0U) | (motorCanProtectionAborting ? 2U : 0U)) << 24);
+    values[MC_HEAD_AGE] = age;
+    __set_PRIMASK(irq);
 }
 /* USER CODE END 1 */
 
