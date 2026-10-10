@@ -26,6 +26,11 @@ QGroupBox { background: #1c2c40; border: 1px solid #32485f; border-radius: 9px; 
 QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; background: #142031; color: #9fbfd9; }
 QGroupBox[compact='true'] { margin-top: 14px; padding: 8px 6px 6px; }
 QFrame#Card { background: #1c2c40; border: 1px solid #32485f; border-radius: 9px; }
+QFrame#GamepadPanel { background: #1c2c40; border: 1px solid #344a61; border-radius: 7px; }
+QDialog#GamepadSettingsDialog { background: #142031; color: #d1deec; }
+QLabel#GamepadStatus { background: #263a50; color: #c0d3e6; padding: 5px 7px; border-radius: 5px; }
+QLabel#GamepadStatus[ready='true'] { background: #17483e; color: #91e3c0; }
+QPlainTextEdit#GamepadRawInput { background: #0d1929; color: #dce8f5; border: 1px solid #344b63; border-radius: 5px; font-family: Consolas, 'Microsoft YaHei UI'; font-size: 14px; padding: 6px; }
 QPushButton, QToolButton { background: #263a51; color: #c6daeb; border: 1px solid #3b536a; border-radius: 6px; padding: 7px 11px; font-weight: 500; }
 QPushButton:hover, QToolButton:hover { background: #304d69; border-color: #6899bd; }
 QPushButton#ViewerToggle:hover { background: #2a4561; color: #d2e8fc; border-color: #6899bd; }
@@ -46,7 +51,7 @@ QPushButton#PointShortcutButton { background: #22384f; color: #d2e4f3; border-co
 QPushButton#PointShortcutButton:hover { background: #2b4863; border-color: #6899bd; }
 QPushButton#PointShortcutButton:pressed { background: #365672; }
 QPushButton#PointShortcutButton:disabled { background: #233044; color: #8198ae; border-color: #30455b; }
-QPushButton[role='danger']:disabled, QPushButton[role='primary']:disabled, QPushButton[role='success']:disabled { background: #293b50; color: #586f85; border-color: #293b50; }
+QPushButton[role='danger']:disabled, QPushButton[role='primary']:disabled, QPushButton[role='success']:disabled, QPushButton[role='secondary']:disabled, QPushButton[role='slate']:disabled, QPushButton[role='calibration']:disabled { background: #293b50; color: #586f85; border-color: #293b50; }
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #142337; border: 1px solid #3a516a; border-radius: 5px; padding: 6px; min-height: 16px; selection-background-color: #287bba; }
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border-color: #4badd9; }
 QSpinBox, QDoubleSpinBox { padding-right: 6px; }

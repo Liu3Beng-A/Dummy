@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot, Qt
 from app.core.business import RobotBusiness
 from app.core.fields import ValueField, ListField
 from app.core.scheduler import QtScheduler
+from app.core.gamepad_session import GamepadSession
 from app.protocol import capabilities
 from app.protocol.constants import *
 from app.protocol.parser import finite_numbers
@@ -27,6 +28,7 @@ class RobotController(QObject, RobotBusiness):
     log_message = Signal(str, str)  # message, tag
     state_changed = Signal(dict)
     actual_pose_changed = Signal(list)  # J1..J6 in degrees, rail in millimetres
+    actual_cartesian_changed = Signal(list)  # Device flange XYZABC; never an edit target.
     position_synced = Signal(str, list)  # Explicit successful target sync: MoveJ / MoveL.
     preset_pose_completed = Signal(str, list)  # Matched HOME / RESET completion; target only.
     rgb_changed = Signal(dict)
@@ -45,6 +47,8 @@ class RobotController(QObject, RobotBusiness):
         self._connection_id = 0
         self._tx_queue = queue.Queue()
         self._tx_generation = 0
+        self._control_owner = "ui"
+        self._wire_admitted = queue.Queue(maxsize=256)
         self.is_connected = False
         self.port_name = ""
         self.connection_type = "USB"
@@ -64,6 +68,8 @@ class RobotController(QObject, RobotBusiness):
         self._last_position_warning = 0.0
         self.actual_pose = None
         self.last_actual_at = None
+        self.actual_cartesian_pose = None
+        self.last_actual_cartesian_at = None
         self.stored_positions = []
         self._seq_running = self._seq_active = self._seq_wait_mode = False
         self._seq_motion_id = None
@@ -100,6 +106,7 @@ class RobotController(QObject, RobotBusiness):
         self._rgb_monitor_timer = QTimer(self)
         self._rgb_monitor_timer.setInterval(1000)
         self._rgb_monitor_timer.timeout.connect(self._poll_rgb)
+        self.gamepad = GamepadSession(self)
 
     def _default_fields(self):
         for name, value in {
@@ -161,6 +168,7 @@ class RobotController(QObject, RobotBusiness):
             pass
         return {
             "connected": self.is_connected, "port": self.port_name,
+            "control_owner": self._control_owner,
             "connection_type": self.connection_type,
             "motor_enabled": self._motor_enabled if self._motor_state_known else None,
             "stop_locked": self._stop_locked, "calibration_busy": self._calibration_busy,
@@ -173,6 +181,7 @@ class RobotController(QObject, RobotBusiness):
             "last_actual_at": self.last_actual_at,
             "polling_enabled": self._poll_enabled, "polling_hz": self._poll_hz,
             "actual_pose": self.actual_pose,
+            "actual_cartesian_pose": deepcopy(self.actual_cartesian_pose),
             "parameter_busy": self._parameter_request is not None,
             "parameter_task": (self._parameter_request["command"] if self._parameter_request else None),
         }
@@ -357,6 +366,7 @@ class RobotController(QObject, RobotBusiness):
         self.serial_port = port_object
         self.port_name = port
         self._tx_queue = queue.Queue()
+        self._wire_admitted = queue.Queue(maxsize=256)
         self.is_connected = True
         self.current_cmdmode = None
         self._motor_state_known = self._motor_enabled = False
@@ -365,6 +375,7 @@ class RobotController(QObject, RobotBusiness):
         self._update_motor_state(None)
         self.actual_pose = None
         self.last_actual_at = None
+        self.actual_cartesian_pose = self.last_actual_cartesian_at = None
         # The default GET below publishes only after its in-flight ledger is
         # established; UI monitoring listeners cannot enqueue a second GET.
         self._reset_rgb_state(emit=False)
@@ -386,6 +397,7 @@ class RobotController(QObject, RobotBusiness):
     def disconnect_port(self):
         self._connection_id += 1  # Ignore callbacks from a previous connection.
         self.is_connected = False
+        self.gamepad.disconnected()
         self._poll_timer.stop()
         self._rgb_monitor_timer.stop()
         self._cancel_motion_for_stop()
@@ -395,6 +407,7 @@ class RobotController(QObject, RobotBusiness):
             transport.close()
             transport.deleteLater()
         self.serial_port = None
+        self.actual_cartesian_pose = self.last_actual_cartesian_at = None
         self.current_cmdmode = None
         self._stop_locked = self._calibration_busy = False
         self._update_motor_state(None)
@@ -404,6 +417,7 @@ class RobotController(QObject, RobotBusiness):
         self._publish()
 
     def close(self):
+        self.gamepad.close()
         self.set_rgb_monitoring(False)
         if self.is_connected or self._transport is not None:
             self.disconnect_port()
@@ -422,6 +436,20 @@ class RobotController(QObject, RobotBusiness):
     def _on_written(self, command, connection_id):
         if connection_id == self._connection_id:
             self.log(command, "TX")
+            try:
+                generation, admitted_command, admitted_connection = self._wire_admitted.get_nowait()
+            except queue.Empty:
+                return  # A notification without actual writer admission is not proof of TX.
+            if (admitted_command != command or admitted_connection != connection_id or
+                    generation != self._tx_generation):
+                return
+            request = self._position_request
+            if request and command == ("#GETJPOS" if request["kind"] == "j" else "#GETLPOS"):
+                if request.get("source") == "gamepad":
+                    self._discard_gamepad_position_request()
+                else:
+                    request["written_at"] = time.monotonic()
+            self.gamepad.command_written(command, generation, connection_id)
 
     @Slot(str, int)
     def _on_transport_failure(self, message, connection_id):
@@ -432,13 +460,25 @@ class RobotController(QObject, RobotBusiness):
     def supports(self, command):
         return capabilities.supported(command, self.connection_type)
 
+    @staticmethod
+    def _is_position_command(command):
+        fields = str(command).split()
+        return bool(fields) and fields[0] in ("#GETJPOS", "#GETLPOS", "#GETRAILPOS")
+
     def _can_write(self, generation, command):
         diagnostic = capabilities.diagnostic(command)
-        return (self.is_connected and generation == self._tx_generation and
+        allowed = (self.is_connected and generation == self._tx_generation and
+                not (self._control_owner == "gamepad" and self._is_position_command(command)) and
                 (not self._stop_locked or diagnostic or command in ("!STOP", "!START", "!DISABLE")) and
                 (not self._calibration_busy or diagnostic or command in ("!CALIBRATION", "!STOP", "!DISABLE")))
+        if allowed:
+            try:
+                self._wire_admitted.put_nowait((generation, command, self._connection_id))
+            except queue.Full:
+                return False
+        return allowed
 
-    def send_cmd(self, command, sequence=False):
+    def send_cmd(self, command, sequence=False, source="ui"):
         """Only command dispatch path; STOP invalidates every pending generation."""
         if not self.is_connected or self.serial_port is None:
             self.log("未连接串口", "WARN")
@@ -450,6 +490,21 @@ class RobotController(QObject, RobotBusiness):
         if not command.isascii() or len(command.encode()) > 256:
             self.log("指令须为 ASCII 且长度不能超过 256 字节", "WARN")
             return False
+        if source not in ("ui", "gamepad", "telemetry"):
+            self.log("未知指令来源", "WARN")
+            return False
+        if self._is_position_command(command) and (source == "gamepad" or self._control_owner == "gamepad"):
+            self.log("手柄控制已取消位置查询；保留最后一次实际姿态", "WARN")
+            return False
+        if source == "gamepad" and not self.gamepad.claimed and command not in ("!STOP", "!DISABLE"):
+            self.log("手柄尚未接管，指令未发送", "WARN")
+            return False
+        if self._control_owner == "gamepad" and source == "ui" and command not in ("!STOP", "!DISABLE"):
+            verb = command.split()[0]
+            readonly = verb in {"#GET_PID", "#GETJACC", "#GETI", "#STACK", "#MOTION_STATUS", "#RGB_GET", "#RGB_STATUS", "#STALL_STATUS", "#CAL_STATUS"}
+            if not readonly:
+                self.log("手柄控制中，请先释放并确认停止；STOP / DISABLE 始终可用", "WARN")
+                return False
         if not self.supports(command):
             self.log(f"当前 UART4 固件不支持 {command.split()[0]}；请使用 USB", "WARN")
             return False
@@ -497,6 +552,8 @@ class RobotController(QObject, RobotBusiness):
             self._calibration_busy = True
             self.lbl_motor_state.config(text="校准入口检查中")
         if command in ("!STOP", "!DISABLE"):
+            if source != "gamepad":
+                self.gamepad.external_stop(command)
             self._cancel_motion_for_stop()
             self._stop_locked = True
             self._handle_stop_status("Stopping ok" if command == "!STOP" else "Disable pending")
@@ -702,6 +759,26 @@ class RobotController(QObject, RobotBusiness):
         self._position_request = None
         self._position_token += 1
         self._finish_parameter_request(False, "参数任务已被停止或断连取消")
+        if hasattr(self, "gamepad"):
+            self.gamepad.controller_cancelled()
+
+    def allocate_command_mode_request(self):
+        self._mode_request_counter = (self._mode_request_counter + 1) & 0xFFFFFFFF or 1
+        return self._mode_request_counter
+
+    def _query_command_mode(self):
+        if self._control_owner != "gamepad":
+            super()._query_command_mode()
+
+    def _handle_stop_status(self, line):
+        if (line == "Start pending" and self.gamepad.claimed and self.gamepad.stage == "starting" and
+                self.gamepad._system is not None and self.gamepad._system["command"] == "!START"):
+            # Claim already invalidated UI motion. This is the acknowledgement
+            # of our own START, so do not cancel that transaction's generation.
+            self._stop_locked = True
+            self.lbl_motor_state.config(text="● 等待停稳并解锁")
+            return
+        super()._handle_stop_status(line)
 
     def _sync_acc(self):
         if self._acc_sync_waiting:
@@ -766,6 +843,9 @@ class RobotController(QObject, RobotBusiness):
                     self.position_synced.emit("MoveJ", list(nums))
                     self.log("实际位置已同步到编辑目标")
         elif nums is not None and len(nums) == 6:
+            self.actual_cartesian_pose = list(nums)
+            self.last_actual_cartesian_at = time.monotonic()
+            self.actual_cartesian_changed.emit(list(nums))
             request = self._position_request
             if request and request["kind"] == "l":
                 self._position_request = None
@@ -776,6 +856,7 @@ class RobotController(QObject, RobotBusiness):
                     self.log("实际笛卡尔位姿已同步到编辑目标")
         before_id = self._seq_motion_id
         super()._process_rx_line(line)
+        self.gamepad.handle_line(line)
         self._handle_system_pose_receipt(line)
         if self._seq_motion_id is not None and self._seq_motion_id != before_id:
             self.root.after(self.sequence_timeout_ms, self._motion_completion_timeout,
@@ -955,31 +1036,51 @@ class RobotController(QObject, RobotBusiness):
                 self._position_request is not None or self._acc_sync_waiting or
                 self._parameter_request is not None):
             return
+        # Gamepad ownership pauses all position queries; actual data can go stale.
+        if self.gamepad.claimed:
+            return
         if self.connection_type == "UART4" and self._motor_state_known and not self._motor_enabled:
             return
-        self._request_position("j", False)
+        self._request_position("j", False, source="telemetry")
 
-    def _request_position(self, kind, sync):
+    def _discard_gamepad_position_request(self):
+        request = self._position_request
+        if request is not None and request.get("source") == "gamepad":
+            self._position_request = self._pending_sync = None
+
+    def _request_position(self, kind, sync, source="ui"):
+        if source == "gamepad" or self.gamepad.claimed:
+            self.log("手柄控制已取消位置查询；保留最后一次实际姿态", "WARN")
+            return False
         if self._position_request:
-            if self._position_request["kind"] == kind:
+            if self._position_request["kind"] == kind and source != "gamepad":
                 self._position_request["sync"] |= sync
                 return True
             self.log("已有位置回读请求，请等待后再读取另一种位置", "WARN")
             return False
         command = "#GETJPOS" if kind == "j" else "#GETLPOS"
-        if not self.send_cmd(command):
+        if not self.send_cmd(command, source=source):
             return False
         self._position_token += 1
         token = self._position_token
-        self._position_request = {"kind": kind, "sync": sync, "token": token, "generation": self._tx_generation}
+        self._position_request = {"kind": kind, "sync": sync, "token": token, "generation": self._tx_generation,
+                                  "source": source, "written_at": None}
         self._pending_sync = kind
         self.root.after(1200, self._position_timeout, token)
         return True
 
+    def _position_unwritten_timeout(self, token):
+        request = self._position_request
+        if request and request["token"] == token and request.get("written_at") is None:
+            self._position_timeout(token)
+
     def _position_timeout(self, token):
         if self._position_request and self._position_request["token"] == token:
-            sync = self._position_request["sync"]
+            request = self._position_request
+            sync = request["sync"]
             self._position_request = self._pending_sync = None
+            if request.get("source") == "gamepad":
+                return  # Retired query watchdog cannot stop the software-target session.
             now = time.monotonic()
             if sync or now - self._last_position_warning > 5:
                 self.log("位置回读超时，三维实际姿态数据已过期", "WARN")

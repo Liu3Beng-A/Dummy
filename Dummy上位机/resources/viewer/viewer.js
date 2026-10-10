@@ -150,16 +150,21 @@ function setState(state) {
   const dark = state.theme === 'dark';
   document.body.classList.toggle('dark', dark);
   scene.background.setHex(dark ? 0x141e2c : 0xedf2f8);
-  const preview = state.mode === 'preview';
-  document.getElementById('mode').textContent = preview ? '目标预览 · 不发送运动' : '实际位置 · 串口回读';
+  const actualOnly = state.actualOnly === true;
+  const feedbackPaused = state.feedbackPaused === true;
+  const preview = !actualOnly && state.mode === 'preview';
+  document.getElementById('mode').textContent = actualOnly ? feedbackPaused
+    ? '最近实际姿态 · 回读已暂停' : '实际关节 · 串口回读'
+    : preview ? '目标预览 · 不发送运动' : '实际位置 · 串口回读';
   const telemetry = document.getElementById('telemetry');
   telemetry.textContent = !state.actualKnown ? '尚无位置回读'
+    : feedbackPaused ? '保留最近姿态 · 非实时'
     : state.stale ? '回读已过期 · 保留最近姿态' : '位置数据有效';
-  telemetry.classList.toggle('warning', state.actualKnown && state.stale);
-  document.getElementById('solid-label').textContent = preview ? '目标预览' : '实际回读';
+  telemetry.classList.toggle('warning', state.actualKnown && (state.stale || feedbackPaused));
+  document.getElementById('solid-label').textContent = preview ? '目标预览' : feedbackPaused ? '最近实际姿态' : '实际回读';
   document.getElementById('ghost-label').hidden = !preview || !state.actualKnown;
   document.getElementById('gripper-status').textContent = !preview && state.actualGripperKnown
-    ? '夹爪：实际回读' : '夹爪：目标开度（无实际回读）';
+    ? '夹爪：实际回读' : actualOnly ? '夹爪：固定示意（无实际回读）' : '夹爪：目标开度（无实际回读）';
   if (target && actual) {
     target.setJointValues(state.target || {});
     actual.setJointValues(state.actual || {});
@@ -168,13 +173,14 @@ function setState(state) {
     styleRobot(target, false, state.highlight);
     styleRobot(actual, preview, state.highlight);
   }
-  marker.visible = Boolean(state.marker);
-  if (state.marker) {
+  const markerVisible = !actualOnly && Boolean(state.marker);
+  marker.visible = markerVisible;
+  if (markerVisible) {
     marker.position.set(...state.marker.position);
     // This is a target-position marker; it does not solve IK or certify a path.
     marker.rotation.set(...state.marker.orientation, 'ZYX');
   }
-  document.getElementById('marker-label').hidden = !state.marker;
+  document.getElementById('marker-label').hidden = !markerVisible;
   if (previousCameraSeq !== state.cameraSeq) {
     previousCameraSeq = state.cameraSeq;
     setCamera(state.camera);
@@ -194,6 +200,8 @@ window.robotViewer = {
     visuals: actual ? Object.keys(actual.visual).length : 0,
     renderedMeshes: actual ? countMeshes(actual) : 0,
     gridVisible: grid.visible, axesVisible: axes.visible,
+    targetVisible: Boolean(target?.visible), actualVisible: Boolean(actual?.visible),
+    markerVisible: marker.visible,
     actualJointValues: actual ? Object.fromEntries(Object.entries(actual.joints)
       .map(([name, joint]) => [name, joint.jointValue])) : {},
   }),

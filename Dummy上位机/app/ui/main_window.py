@@ -5,13 +5,14 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 import copy
+import re
 import time
 
 from PySide6.QtCore import QByteArray, QEvent, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFormLayout,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDockWidget, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
@@ -21,9 +22,13 @@ from PySide6.QtWidgets import (
 from app.ui.adapters import FieldAdapter, TableAdapter
 from app.core.dialogs import install_dialog_appearance
 from app.ui.widgets import AxisRow, ColorEditor, PointShortcutButton, button, hint, number
+from app.ui.gamepad_panel import GamepadPanel, GamepadSettingsDialog
+from app.gamepad.backend import GamepadReader
+from app.gamepad.config import default_config as default_gamepad_config, validate_config as validate_gamepad_config
 from app.ui.rgb_ring import RgbRing
 from app.core.rgb_simulator import RgbSimulator, default_config
 from app.visualization.robot_view import RobotView
+from app.protocol.parser import finite_numbers
 from app.protocol.constants import (
     CAL_PARAMETERS, DEFAULT_SPEED, JOINT_DEFAULTS, JOINT_RANGES,
     POSE_DEFAULTS, POSE_RANGES, RGB_AUTO_MODES, RGB_COLOR_SOURCES, RGB_MODES,
@@ -32,7 +37,7 @@ from app.protocol.constants import (
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, controller, store):
+    def __init__(self, controller, store, gamepad_reader=None):
         super().__init__()
         install_dialog_appearance()
         self.controller = controller
@@ -40,6 +45,22 @@ class MainWindow(QMainWindow):
         self.fields = {}
         self._closed = False
         self._building = True
+        self._gamepad_reader_active = False
+        self._gamepad_settings_dialog = None
+        self._gamepad_state = {}
+        self._gamepad_target = None
+        self._control_owner = "ui"
+        self._gamepad_conflict_states = {}
+        self._gamepad_close_pending = False
+        self._gamepad_close_allowed = False
+        self._gamepad_close_timer = QTimer(self)
+        self._gamepad_close_timer.setSingleShot(True)
+        self._gamepad_close_timer.timeout.connect(self._finish_gamepad_close)
+        try:
+            self._gamepad_config = validate_gamepad_config(store.settings.get("gamepad_config", default_gamepad_config()))
+        except ValueError as error:
+            self._gamepad_config = default_gamepad_config()
+            controller.log(f"手柄配置无效，使用本地默认配置：{error}", "WARN")
         self._logs = deque(maxlen=int(store.settings.get("log_limit", 5000)))
         self._last_drag = {"j": 0., "l": 0., "hand": 0., "teaching": 0.}
         self._rgb_draft = default_config()
@@ -84,6 +105,13 @@ class MainWindow(QMainWindow):
         controller.ports_changed.connect(self._ports_updated)
         controller.rgb_changed.connect(self._rgb_device_changed)
         controller.preset_pose_completed.connect(self._preset_pose_completed)
+        self.gamepad_reader = gamepad_reader if gamepad_reader is not None else GamepadReader(self)
+        self.gamepad_reader.sampled.connect(self._gamepad_sampled)
+        self.gamepad_reader.status_changed.connect(self._gamepad_reader_status)
+        controller.gamepad.state_changed.connect(self._gamepad_state_changed)
+        controller.gamepad.target_changed.connect(self._gamepad_target_changed)
+        controller.gamepad.set_config(self._gamepad_config)
+        self._gamepad_state_changed(controller.gamepad.state())
         if hasattr(controller, "position_synced"):
             controller.position_synced.connect(self._position_synced)
         self.connection_combo.currentIndexChanged.connect(lambda *_: self._update_state({}))
@@ -103,7 +131,9 @@ class MainWindow(QMainWindow):
         self.controller.set_polling(store.settings.get("auto_poll", True), store.settings.get("poll_hz", 5))
         self.controller.refresh_ports()
         self._update_state({})
+        self._sync_viewer_mode()
         self._preview_changed()
+        QApplication.instance().installEventFilter(self)
         for error in store.load_errors:
             controller.log(error, "WARN")
 
@@ -251,6 +281,7 @@ class MainWindow(QMainWindow):
     def _build_motion_page(self):
         row = QHBoxLayout()
         row.setSpacing(4)
+        self.motion_system_buttons = []
         for text, callback, role in (
             ("启动 START", lambda: self._system_command("!START"), "success"),
             ("失能 DISABLE", lambda: self._system_command("!DISABLE"), "secondary"),
@@ -258,12 +289,16 @@ class MainWindow(QMainWindow):
             ("休息 REST", lambda: self._system_command("!RESET"), "slate"),
             ("置零 / 校准", self._calibration_command, "calibration"),
         ):
-            row.addWidget(button(text, callback, role))
+            control = button(text, callback, role)
+            row.addWidget(control)
+            self.motion_system_buttons.append(control)
         self.mode_combo = self._combo(("1 · SEQ 顺序", "2 · INT 打断", "3 · TRJ 连续", "4 · TUN 扫频"), 1)
         self.mode_combo.setToolTip("TUN 使用固件内置扫频激励；切换前确认各轴运动空间")
         row.addWidget(self.mode_combo)
-        row.addWidget(button("设置模式", lambda: self.controller._set_cmdmode(self.mode_combo.currentIndex() + 1)))
-        row.addWidget(button("查询", self.controller._query_command_mode))
+        self.mode_set_button = button("设置模式", lambda: self.controller._set_cmdmode(self.mode_combo.currentIndex() + 1))
+        row.addWidget(self.mode_set_button)
+        self.mode_query_button = button("查询", self.controller._query_command_mode)
+        row.addWidget(self.mode_query_button)
         row.addStretch()
         layout = self._page("运动控制", "编辑目标与设备实际位置分别管理；三维预览不会自动发送运动指令。", False, row)
         layout.setContentsMargins(20, 14, 20, 14)
@@ -275,7 +310,8 @@ class MainWindow(QMainWindow):
         scene_layout = QVBoxLayout(scene)
         scene_layout.setContentsMargins(10, 10, 10, 8)
         toolbar = QHBoxLayout()
-        self.viewer_mode = self._combo(("目标预览", "实际跟随"), 1 if self.store.settings.get("viewer_mode") == "actual" else 0)
+        self._viewer_mode_preference = 1 if self.store.settings.get("viewer_mode") == "actual" else 0
+        self.viewer_mode = self._combo(("目标预览", "实际跟随"), self._viewer_mode_preference)
         self.viewer_mode.currentIndexChanged.connect(self._view_mode_changed)
         toolbar.addWidget(self.viewer_mode)
         for title, view in (("等轴", "isometric"), ("正面", "front"), ("俯视", "top")):
@@ -316,6 +352,17 @@ class MainWindow(QMainWindow):
         controls_layout = QVBoxLayout(self.motion_controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(8)
+        input_row = QHBoxLayout()
+        input_row.addWidget(QLabel("输入方式"))
+        self.input_mode = self._combo(("界面", "手柄"))
+        self.input_mode.setObjectName("MotionInputMode")
+        self.input_mode_combo = self.input_mode
+        self.input_mode.setToolTip("切换输入方式不会自动使能或接管；手柄检查与接管需主动操作。")
+        self.input_mode.currentIndexChanged.connect(self._input_mode_changed)
+        input_row.addWidget(self.input_mode, 1)
+        controls_layout.addLayout(input_row)
+        self.motion_input_stack = QStackedWidget()
+        self.motion_input_stack.setObjectName("MotionInputStack")
         self.motion_tabs = QTabWidget()
         self.motion_tabs.setObjectName("MotionTabs")
         self.motion_tabs.setDocumentMode(True)
@@ -428,7 +475,14 @@ class MainWindow(QMainWindow):
         self.motion_tabs.addTab(pose_tab, "MoveL")
         self.motion_tabs.currentChanged.connect(self._motion_tab_changed)
         self._motion_axis_scrolls = (joint_scroll, pose_scroll)
-        controls_layout.addWidget(self.motion_tabs, 1)
+        self.motion_input_stack.addWidget(self.motion_tabs)
+        self.gamepad_panel = GamepadPanel(self._gamepad_config)
+        self.gamepad_panel.action_requested.connect(self._gamepad_action)
+        self.gamepad_panel.config_requested.connect(self._open_gamepad_settings)
+        self.gamepad_panel.tuning_requested.connect(self._gamepad_apply_tuning)
+        self.gamepad_panel.gripper_base_requested.connect(self._gamepad_gripper_base)
+        self.motion_input_stack.addWidget(self.gamepad_panel)
+        controls_layout.addWidget(self.motion_input_stack, 1)
         self._build_motion_gripper(controls_layout)
         self._build_quick_points(controls_layout)
         controls_layout.addStretch()
@@ -466,6 +520,228 @@ class MainWindow(QMainWindow):
                           + area.maximumHeight())
         self.motion_tabs.setMaximumHeight(natural_height
                                           + self.motion_tabs.tabBar().sizeHint().height() + 4)
+        self.motion_input_stack.setMaximumHeight(self.motion_tabs.maximumHeight()
+                                                 if self.input_mode.currentIndex() == 0 else 16777215)
+
+    def _input_mode_changed(self, index):
+        self._cancel_drag()
+        self._teaching_sync = None
+        if index == 0:
+            self._suspend_gamepad("切换至界面输入，手柄控制已暂停")
+        for control in self.quick_point_buttons:
+            control.setVisible(index == 0)
+        self.motion_input_stack.setCurrentIndex(index)
+        self._schedule_motion_fit()
+        self._sync_viewer_mode()
+        self._preview_changed()
+
+    def _gamepad_locked(self):
+        return self._control_owner == "gamepad" or bool(self._gamepad_state.get("claimed", False))
+
+    def _start_gamepad_reader(self, config=None):
+        if self._closed:
+            return False
+        self._gamepad_reader_active = True
+        try:
+            result = self.gamepad_reader.start(config or self._gamepad_config)
+        except (ValueError, RuntimeError, OSError) as error:
+            self._gamepad_reader_active = False
+            self.controller.log(f"手柄采集未启动：{error}", "WARN")
+            return False
+        if result is False:
+            self._gamepad_reader_active = False
+        return self._gamepad_reader_active
+
+    def _gamepad_action(self, action):
+        if self._closed or self._gamepad_close_pending:
+            return False
+        session = self.controller.gamepad
+        if action == "check":
+            if self._gamepad_locked():
+                return False
+            if self._gamepad_reader_active:
+                self._suspend_gamepad("原始输入检查已停止")
+                return True
+            return self._start_gamepad_reader()
+        if action == "claim":
+            if (self.input_mode.currentIndex() != 1 or self.navigation.currentRow() != 0 or
+                    self.isMinimized() or self._gamepad_locked()):
+                return False
+            self._cancel_drag()
+            self._teaching_sync = None
+            for control in (self.j_drag, self.l_drag, self.motion_hand_drag,
+                            self.hand_drag_checkbox, self.teaching_drag):
+                with QSignalBlocker(control):
+                    control.setChecked(False)
+            if not self._gamepad_reader_active and not self._start_gamepad_reader():
+                return False
+            return session.claim()
+        if action == "release":
+            self._suspend_gamepad("已请求释放手柄控制；等待停止确认")
+            return True
+        if action == "stop":
+            return self._system_command("!STOP")
+        if not self._gamepad_state.get("claimed") or self._gamepad_state.get("release_pending"):
+            return False
+        if action in ("start", "initialize", "rest", "disable"):
+            return getattr(session, action)()
+        return False
+
+    def _suspend_gamepad(self, reason):
+        if self._closed or not hasattr(self, "gamepad_reader"):
+            return
+        active = self._gamepad_reader_active
+        claimed = self._gamepad_locked()
+        if not active and not claimed:
+            return
+        self._cancel_drag()
+        self._teaching_sync = None
+        if claimed and not self._gamepad_state.get("release_pending", False):
+            self.controller.gamepad.release()
+        if active:
+            self._gamepad_reader_active = False
+            self.gamepad_reader.stop()
+        if active or claimed:
+            self.statusBar().showMessage(reason)
+
+    def _gamepad_sampled(self, snapshot):
+        if self._closed or (not self._gamepad_reader_active and snapshot.get("connected")):
+            return
+        self.gamepad_panel.set_sample(snapshot)
+        if self._gamepad_settings_dialog is not None:
+            self._gamepad_settings_dialog.set_sample(snapshot)
+        # Preserve the acquisition timestamp, including samples queued before a stall.
+        if self._gamepad_settings_dialog is None:
+            self.controller.gamepad.handle_input(snapshot)
+
+    def _gamepad_reader_status(self, status):
+        if self._closed:
+            return
+        self._gamepad_reader_active = bool(status.get("running", False))
+        self.gamepad_panel.set_reader_status(status)
+        if self._gamepad_settings_dialog is not None:
+            self._gamepad_settings_dialog.set_reader_status(status)
+
+    def _gamepad_state_changed(self, state):
+        if self._closed:
+            return
+        self._gamepad_state = copy.deepcopy(state)
+        self.gamepad_panel.set_session_state(state)
+        self._sync_feedback_display()
+        self._apply_gamepad_conflicts()
+        if self._gamepad_close_pending and not self._gamepad_locked():
+            self._finish_gamepad_close()
+
+    def _apply_gamepad_conflicts(self):
+        if self._closed or not hasattr(self, "teaching_send_button"):
+            return
+        locked = self._gamepad_locked()
+        controls = [self.motion_tabs, self.motion_gripper_group, self.mode_combo,
+                    self.mode_set_button, self.mode_query_button, self.teaching_drag,
+                    self.teaching_send_button, self.teaching_read_button,
+                    self.point_send_button, self.point_sequence_button,
+                    self.motor_page_content, self.protection_tabs, self.pages.widget(3),
+                    *self.motion_system_buttons[:1], *self.motion_system_buttons[2:]]
+        for control in controls:
+            if locked:
+                if control not in self._gamepad_conflict_states:
+                    self._gamepad_conflict_states[control] = (control.isEnabled(), control.toolTip())
+                control.setEnabled(False)
+                control.setToolTip("手柄正在接管或等待停止确认；先释放控制后使用此操作。")
+            elif control in self._gamepad_conflict_states:
+                enabled, tooltip = self._gamepad_conflict_states.pop(control)
+                control.setEnabled(enabled)
+                control.setToolTip(tooltip)
+        for index, control in enumerate(self.quick_point_buttons):
+            control.setEnabled(not locked and index < len(self.points))
+        if not locked:
+            self.motor_page_content.setEnabled(self.connection_combo.currentText() == "USB")
+        self.gamepad_settings_button.setEnabled(not locked)
+
+    def _gamepad_target_changed(self, target):
+        if self._closed or not target.get("flange") or len(target["flange"]) != 6:
+            return
+        self._cancel_drag()
+        self._gamepad_target = copy.deepcopy(target)
+        for row, value in zip(self.pose_rows, target["flange"]):
+            row.set_value(value)
+        with QSignalBlocker(self.l_speed):
+            self.l_speed.setValue(self._gamepad_config["robot"]["cmd_speed"])
+        with QSignalBlocker(self.motion_tabs):
+            self.motion_tabs.setCurrentIndex(1)
+        gripper = target.get("gripper")
+        if gripper is not None:
+            self.hand_row.set_value(gripper)
+            self.motion_hand_row.set_value(gripper)
+        # Target diagnostics never manufacture or update actual robot geometry.
+
+    def _gamepad_gripper_base(self, value):
+        if self._gamepad_state.get("ready") and not self._gamepad_state.get("release_pending"):
+            return self.controller.gamepad.set_gripper_base(value)
+        return False
+
+    def _gamepad_apply_tuning(self, values):
+        config = copy.deepcopy(self._gamepad_config)
+        config["control"].update({key: values[key] for key in ("linear_speed_mm_s", "angular_speed_deg_s")})
+        config["robot"].update({key: values[key] for key in ("cmd_speed", "tool_offset_z")})
+        return self._save_gamepad_config(config)
+
+    def _save_gamepad_config(self, config):
+        if self._gamepad_locked():
+            self.controller.log("手柄接管期间不能修改配置，请先释放并等待停止确认。", "WARN")
+            return False
+        try:
+            validated = validate_gamepad_config(config)
+            self._suspend_gamepad("应用手柄配置，输入检查已停止")
+            self.store.update_settings(gamepad_config=validated)
+            self.controller.gamepad.set_config(validated)
+            self.gamepad_reader.set_config(validated)
+        except (ValueError, OSError) as error:
+            self.controller.log(f"手柄配置未应用：{error}", "ERROR")
+            QMessageBox.warning(self, "手柄配置", str(error))
+            return False
+        self._gamepad_config = validated
+        self.gamepad_panel.set_config(validated)
+        self.controller.log("手柄本地配置已应用；未发送机器人指令。", "INFO")
+        return True
+
+    def _open_gamepad_settings(self):
+        if self._gamepad_locked():
+            self._suspend_gamepad("打开设置前先释放手柄控制")
+            return
+        self._suspend_gamepad("打开手柄设置，输入检查已停止")
+        dialog = GamepadSettingsDialog(self._gamepad_config, self)
+        self._gamepad_settings_dialog = dialog
+        dialog.diagnostic_requested.connect(self._gamepad_dialog_diagnostic)
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            if accepted:
+                self._save_gamepad_config(dialog.result_config())
+        finally:
+            self._suspend_gamepad("手柄设置已关闭，输入检查已停止")
+            self._gamepad_settings_dialog = None
+            dialog.deleteLater()
+
+    def _gamepad_dialog_diagnostic(self, enabled):
+        if enabled and self._gamepad_settings_dialog is not None and not self._gamepad_locked():
+            try:
+                config = self._gamepad_settings_dialog.result_config()
+            except ValueError as error:
+                QMessageBox.warning(self._gamepad_settings_dialog, "手柄映射", str(error))
+                return
+            self._start_gamepad_reader(config)
+        else:
+            self._suspend_gamepad("原始输入检查已停止")
+
+    def _finish_gamepad_close(self):
+        if not self._gamepad_close_pending:
+            return
+        self._gamepad_close_timer.stop()
+        if self._gamepad_locked():
+            self.controller.log("关闭等待已结束，STOP 尚未确认；不会将设备状态视为已停止。", "WARN")
+        self._gamepad_close_pending = False
+        self._gamepad_close_allowed = True
+        QTimer.singleShot(0, self.close)
 
     def _build_motion_gripper(self, layout):
         """Always visible under the movement tabs; mirrors the gripper page."""
@@ -536,10 +812,12 @@ class MainWindow(QMainWindow):
     def _refresh_quick_points(self):
         for index, control in enumerate(self.quick_point_buttons):
             control.set_point(self.points[index] if index < len(self.points) else None)
+        self._apply_gamepad_conflicts()
 
     def _load_quick_point(self, index):
-        if not 0 <= index < min(4, len(self.points)):
+        if self._gamepad_locked() or not 0 <= index < min(4, len(self.points)):
             return
+        self.input_mode.setCurrentIndex(0)
         record = self.points[index]
         # Selection is mirrored even when the same row was already selected.
         with QSignalBlocker(self.point_table):
@@ -642,10 +920,12 @@ class MainWindow(QMainWindow):
         self.teaching_gripper_spin.setObjectName("TeachingGripperPreview")
         self.teaching_gripper_spin.valueChanged.connect(lambda *_: self._preview_changed())
         edit_row.addWidget(self.teaching_gripper_spin, 1)
-        edit_row.addWidget(button("发送目标", self._send_teaching_target, "primary"))
+        self.teaching_send_button = button("发送目标", self._send_teaching_target, "primary")
+        edit_row.addWidget(self.teaching_send_button)
         box.addLayout(edit_row)
         edit_row = QHBoxLayout()
         read = button("读取 → 同步目标", self._read_teaching)
+        self.teaching_read_button = read
         read.setToolTip("读取实际位置或位姿并同步当前类型的教学编辑器；不会发送运动")
         edit_row.addWidget(read)
         edit_row.addWidget(button("从运动页载入", self._load_motion_target))
@@ -666,8 +946,10 @@ class MainWindow(QMainWindow):
         self.point_speed = number(DEFAULT_SPEED, 1, 100, 0)
         self._bind("ent_pos_speed", self.point_speed)
         bottom.addWidget(self.point_speed)
-        bottom.addWidget(button("发送选中", self._send_selected_point, "primary"))
-        bottom.addWidget(button("顺序执行全部", self.controller.send_all_positions, "success"))
+        self.point_send_button = button("发送选中", self._send_selected_point, "primary")
+        self.point_sequence_button = button("顺序执行全部", self.controller.send_all_positions, "success")
+        bottom.addWidget(self.point_send_button)
+        bottom.addWidget(self.point_sequence_button)
         bottom.addWidget(button("取消后续", lambda: self.controller._stop_sequence("用户取消后续点位；当前运动需软停")))
         layout.addLayout(bottom)
         self.sequence_status = QLabel("未运行")
@@ -1298,6 +1580,11 @@ class MainWindow(QMainWindow):
 
     def _build_settings_page(self):
         layout = self._page("软件设置", "本地偏好会自动保存；打开或恢复软件配置不会向设备写入参数。")
+        gamepad_group, gamepad_box = self._group("手柄输入")
+        gamepad_box.addWidget(hint("映射、死区、速度与设备选择保存在本机。默认不启动手柄采集；检查原始输入不接管机器人。"))
+        self.gamepad_settings_button = button("手柄设置与输入诊断", self._open_gamepad_settings)
+        gamepad_box.addWidget(self.gamepad_settings_button)
+        layout.addWidget(gamepad_group)
         group, box = self._group("显示与刷新")
         form = QFormLayout()
         self.theme_combo = self._combo(("浅色", "深色"), 1 if self.store.settings.get("theme") == "dark" else 0)
@@ -1388,6 +1675,12 @@ class MainWindow(QMainWindow):
         self.log_refresh_status.setObjectName("LogRefreshStatus")
         self.log_refresh_status.setProperty("paused", False)
         filter_row.addWidget(self.log_refresh_status)
+        self.hide_joint_logs_checkbox = QCheckBox("隐藏关节回读")
+        self.hide_joint_logs_checkbox.setObjectName("HideJointLogs")
+        self.hide_joint_logs_checkbox.setToolTip("隐藏 #GETJPOS 发送及七轴数值回读，显示和导出均生效；完整缓冲与磁盘日志仍保留。")
+        self.hide_joint_logs_checkbox.setChecked(self.store.settings.get("hide_joint_logs", True))
+        self.hide_joint_logs_checkbox.toggled.connect(self._hide_joint_logs_changed)
+        filter_row.addWidget(self.hide_joint_logs_checkbox)
         layout.addWidget(filters)
 
         toolbar = QHBoxLayout()
@@ -1454,6 +1747,13 @@ class MainWindow(QMainWindow):
             self._render_logs()
 
     def eventFilter(self, watched, event):
+        if not self._closed and not self._building:
+            if watched is self and event.type() == QEvent.Type.WindowDeactivate:
+                self._suspend_gamepad("窗口失焦，手柄控制已暂停")
+            elif watched is QApplication.instance() and event.type() == QEvent.Type.ApplicationDeactivate:
+                self._suspend_gamepad("应用失焦，手柄控制已暂停")
+            elif isinstance(watched, QDialog) and event.type() == QEvent.Type.Show and watched.isWindow():
+                self._suspend_gamepad("打开对话框，手柄控制已暂停")
         if watched is getattr(self, "motion_controls", None) and event.type() == QEvent.Type.Resize:
             self._schedule_motion_fit()
         if watched is getattr(self, "custom_command", None) and event.type() == QEvent.Type.KeyPress:
@@ -1472,6 +1772,7 @@ class MainWindow(QMainWindow):
             self._expand_log()
 
     def _expand_log(self):
+        self._suspend_gamepad("打开终端，手柄控制已暂停")
         self.log_dock.setFloating(True)
         self.log_dock.show()
         self.log_dock.raise_()
@@ -1502,6 +1803,7 @@ class MainWindow(QMainWindow):
         widget.style().polish(widget)
 
     def _update_state(self, state):
+        self._control_owner = state.get("control_owner", self._control_owner)
         connected = state.get("connected", self.controller.is_connected)
         generation = state.get("generation", getattr(self.controller, "_tx_generation", 0))
         if generation != getattr(self, "_state_generation", generation):
@@ -1544,9 +1846,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"参数任务：{task} · 实际位置轮询暂停")
         elif status:
             self.statusBar().showMessage(str(status))
-        if stale:
-            self.actual_status.setText("实际位置未回读 / 已过期 · 夹爪显示目标开度")
+        self._sync_feedback_display()
+        if not self._gamepad_locked() and stale:
+            self.actual_status.setText("实际位置未回读 / 已过期 · 夹爪固定示意，无实际回读"
+                                       if self.input_mode.currentIndex() == 1 else
+                                       "实际位置未回读 / 已过期 · 夹爪显示目标开度")
         self._sync_rgb_preview_activity()
+        self._apply_gamepad_conflicts()
+        if self._gamepad_close_pending and not self._gamepad_locked():
+            self._finish_gamepad_close()
 
     def _actual_pose(self, values):
         self.viewer.set_actual_pose(values, None)
@@ -1555,19 +1863,26 @@ class MainWindow(QMainWindow):
         for index, (row, value) in enumerate(zip(self.joint_rows, values)):
             row.readback.setText(f"{value:.2f}")
             row.readback.setToolTip(f"J{index+1} 实际回读：{value:.2f} {'°' if index < 6 else 'mm'}")
-        self.actual_status.setText(f"实际七轴已更新 · {datetime.now():%H:%M:%S} · 夹爪无实际回读")
+        if self._gamepad_locked():
+            self._sync_feedback_display()
+        else:
+            gripper_text = "夹爪固定示意，无实际回读" if self.input_mode.currentIndex() == 1 else "夹爪无实际回读"
+            self.actual_status.setText(f"实际七轴已更新 · {datetime.now():%H:%M:%S} · {gripper_text}")
 
     def _fields_updated(self):
         self._preview_changed()
 
     def _viewer_ready(self):
         self._preview_changed()
-        self._view_mode_changed(self.viewer_mode.currentIndex())
+        self._sync_viewer_mode()
         self._grid_changed(self.grid_check.isChecked())
         self._axes_changed(self.axes_check.isChecked())
 
     def _preview_changed(self):
         if not hasattr(self, "hand_row"):
+            return
+        if self.input_mode.currentIndex() == 1:
+            self.viewer.set_cartesian_target(None)
             return
         teaching = hasattr(self, "teaching_tabs") and self.navigation.currentRow() == 1
         if teaching:
@@ -1586,7 +1901,7 @@ class MainWindow(QMainWindow):
 
     def _target_edited(self, kind):
         self._preview_changed()
-        if self._building or getattr(self.controller, "_suppress_drag_send", False):
+        if self._building or self._gamepad_locked() or getattr(self.controller, "_suppress_drag_send", False):
             return
         if not self._drag_enabled(kind):
             return
@@ -1618,6 +1933,7 @@ class MainWindow(QMainWindow):
             return
         epoch, generation, target = pending
         if (self._closed or epoch != self._drag_epoch or
+                self._gamepad_locked() or
                 generation != getattr(self.controller, "_tx_generation", 0) or
                 getattr(self.controller, "_suppress_drag_send", False) or
                 getattr(self.controller, "_stop_locked", False) or
@@ -1693,6 +2009,13 @@ class MainWindow(QMainWindow):
         self._teaching_sync = None
         if command in ("!STOP", "!DISABLE") and hasattr(self, "teaching_drag"):
             self.teaching_drag.setChecked(False)
+        if self._gamepad_locked():
+            if command == "!STOP":
+                return self.controller.gamepad.stop()
+            if command == "!DISABLE":
+                return self.controller.gamepad.disable()
+            self.controller.log("手柄已接管，请先释放控制并等待停止确认。", "WARN")
+            return False
         return self.controller.send_cmd(command)
 
     def _preset_pose_completed(self, command, values):
@@ -1716,12 +2039,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{command} 已完成 · 模型已同步到{'回零' if command == 'HOME' else '休息'}目标")
 
     def _calibration_command(self):
+        if self._gamepad_locked():
+            self.controller.log("手柄接管期间不能校准，请先释放控制。", "WARN")
+            return False
         self._cancel_drag()
         self._teaching_sync = None
         self.teaching_drag.setChecked(False)
         return self.controller._cmd_calibration()
 
     def _navigation_changed(self, index):
+        if index != 0:
+            self._suspend_gamepad("离开运动页，手柄控制已暂停")
         self._cancel_drag()
         self._teaching_sync = None
         self._preview_changed()
@@ -1740,7 +2068,8 @@ class MainWindow(QMainWindow):
 
     def _teaching_target_edited(self):
         self._preview_changed()
-        if not self._building and not self.controller._suppress_drag_send and self.teaching_drag.isChecked():
+        if (not self._building and not self._gamepad_locked() and
+                not self.controller._suppress_drag_send and self.teaching_drag.isChecked()):
             self._queue_drag("teaching")
 
     def _send_teaching_target(self):
@@ -1785,9 +2114,35 @@ class MainWindow(QMainWindow):
     def _view_mode_changed(self, index):
         if not hasattr(self, "viewer"):
             return
-        self.viewer.set_follow_actual(index == 1)
-        if not self._building:
+        if self.input_mode.currentIndex() == 1:
+            with QSignalBlocker(self.viewer_mode):
+                self.viewer_mode.setCurrentIndex(self._viewer_mode_preference)
+        else:
+            self._viewer_mode_preference = index
+        self._sync_viewer_mode()
+        if not self._building and self.input_mode.currentIndex() == 0:
             self.store.update_settings(viewer_mode="actual" if index == 1 else "preview")
+
+    def _sync_viewer_mode(self):
+        gamepad_mode = self.input_mode.currentIndex() == 1
+        self.viewer_mode.setVisible(not gamepad_mode)
+        self.viewer.set_follow_actual(self._viewer_mode_preference == 1)
+        self.viewer.set_actual_only(gamepad_mode)
+        if gamepad_mode:
+            self.viewer.set_cartesian_target(None)
+            self.actual_status.setText("左侧显示最近实际姿态 · 夹爪固定示意，无实际回读")
+        self._sync_feedback_display()
+
+    def _sync_feedback_display(self):
+        paused = self._gamepad_locked()
+        previous = getattr(self, "_viewer_feedback_paused", None)
+        if paused != previous:
+            self._viewer_feedback_paused = paused
+            self.viewer.set_feedback_paused(paused)
+        if paused:
+            self.actual_status.setText("位置回读暂停 · 保留最近实际姿态 · 夹爪无实际回读")
+        elif previous:
+            self.actual_status.setText("最近实际姿态 · 等待按软件设置更新 · 夹爪无实际回读")
 
     def _query_all_parameters(self):
         self.controller._qry_pid()
@@ -2026,7 +2381,24 @@ class MainWindow(QMainWindow):
 
     def _matches_log(self, tag, text):
         selected = self.log_filter.currentText()
-        return (selected == "全部" or tag == selected) and self.log_search.text().casefold() in text.casefold()
+        return (not self._joint_log_hidden(tag, text) and
+                (selected == "全部" or tag == selected) and
+                self.log_search.text().casefold() in text.casefold())
+
+    def _joint_log_hidden(self, tag, text):
+        if not self.hide_joint_logs_checkbox.isChecked():
+            return False
+        prefix, separator, payload = text.partition(f" [{tag}] ")
+        if not separator or re.fullmatch(r"\d{2}:\d{2}:\d{2}\.\d{3}", prefix) is None:
+            payload = text
+        payload = payload.strip()
+        if tag == "TX":
+            return payload == "#GETJPOS"
+        return tag == "RX" and payload.startswith("ok ") and finite_numbers(payload[3:], 7) is not None
+
+    def _hide_joint_logs_changed(self, hidden):
+        self.store.update_settings(hide_joint_logs=hidden)
+        self._render_logs()
 
     def _render_logs(self, *args):
         if hasattr(self, "log_view") and not self.log_pause.isChecked():
@@ -2041,7 +2413,8 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "导出终端日志", "Dummy串口日志.txt", "文本日志 (*.txt)")
         if path:
             try:
-                Path(path).write_text("\n".join(text for _, text in self._logs) + "\n", encoding="utf-8")
+                Path(path).write_text("\n".join(text for tag, text in self._logs
+                                               if not self._joint_log_hidden(tag, text)) + "\n", encoding="utf-8")
                 self.controller.log(f"终端日志已导出：{path}", "INFO")
             except OSError as exc:
                 self.controller.log(f"日志导出失败：{exc}", "ERROR")
@@ -2115,17 +2488,33 @@ class MainWindow(QMainWindow):
         self._sync_rgb_preview_activity()
 
     def hideEvent(self, event):
+        self._suspend_gamepad("窗口隐藏，手柄控制已暂停")
         self._sync_rgb_preview_activity()
         super().hideEvent(event)
 
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
+            if self.isMinimized():
+                self._suspend_gamepad("窗口最小化，手柄控制已暂停")
             self._sync_rgb_preview_activity()
 
     def closeEvent(self, event):
+        if (not self._closed and not self._gamepad_close_allowed and
+                self._gamepad_locked() and self.controller.is_connected):
+            event.ignore()
+            if not self._gamepad_close_pending:
+                self._gamepad_close_pending = True
+                self.setEnabled(False)
+                self._gamepad_close_timer.start(1000)
+                self._suspend_gamepad("关闭窗口，正在等待软停确认")
+            return
         if not self._closed:
+            self._suspend_gamepad("关闭窗口，手柄输入已停止")
             self._closed = True
+            self._gamepad_close_timer.stop()
+            QApplication.instance().removeEventFilter(self)
+            self.gamepad_reader.close()
             self._rgb_render_timer.stop()
             self.controller.set_rgb_monitoring(False)
             self.log_dock.hide()

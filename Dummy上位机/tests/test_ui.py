@@ -29,6 +29,9 @@ class FakeView(QWidget):
         super().__init__()
         self.target = self.actual = self.cartesian = None
         self.mode = "preview"
+        self.preferred_mode = "preview"
+        self.actual_only = False
+        self.feedback_paused = False
         self.closed = False
 
     def set_target_pose(self, values, gripper=100):
@@ -44,7 +47,15 @@ class FakeView(QWidget):
         self.cartesian = list(values) if values is not None else None
 
     def set_follow_actual(self, follow):
-        self.mode = "actual" if follow else "preview"
+        self.preferred_mode = "actual" if follow else "preview"
+        self.mode = "actual" if self.actual_only else self.preferred_mode
+
+    def set_actual_only(self, value):
+        self.actual_only = bool(value)
+        self.mode = "actual" if self.actual_only else self.preferred_mode
+
+    def set_feedback_paused(self, value):
+        self.feedback_paused = bool(value)
 
     def set_theme(self, theme):
         self.theme = theme
@@ -424,6 +435,103 @@ class UiIntegrationTests(unittest.TestCase):
         self.scheduler.run_ready()
         self.assertEqual(self.window.joint_spins[0].value(), 30)
         self.assertEqual(self.commands(), [])
+
+    def test_joint_log_hiding_preserves_actual_pose_buffer_and_disk(self):
+        self.controller.log_message.connect(lambda message, tag: self.store.log(tag, message))
+        self.assertTrue(self.window.hide_joint_logs_checkbox.isChecked())
+        self.controller.log("#GETJPOS", "TX")
+        actual = [10, -60, 160, 5, 6, 7, 20]
+        response = "ok " + " ".join(map(str, actual))
+        self.controller._process_rx_line(response)
+        self.scheduler.run_ready()
+        self.assertEqual(self.window.viewer.actual, (actual, None))
+        self.assertEqual(self.controller.actual_pose, actual)
+        self.assertEqual(self.window.joint_rows[0].readback.text(), "10.00")
+        self.assertNotIn("#GETJPOS", self.window.log_view.toPlainText())
+        self.assertNotIn(response, self.window.log_view.toPlainText())
+        buffered = list(self.window._logs)
+        self.assertTrue(any(response in text for _tag, text in buffered))
+        disk = (self.store.log_dir / "dummyrobot.log").read_text(encoding="utf-8")
+        self.assertIn("#GETJPOS", disk)
+        self.assertIn(response, disk)
+        self.window.hide_joint_logs_checkbox.setChecked(False)
+        self.assertIn(response, self.window.log_view.toPlainText())
+        self.assertEqual(list(self.window._logs), buffered)
+        reloaded = AppStore(self.directory.name)
+        try:
+            self.assertFalse(reloaded.settings["hide_joint_logs"])
+        finally:
+            reloaded.close()
+        self.window.hide_joint_logs_checkbox.setChecked(True)
+        self.assertNotIn(response, self.window.log_view.toPlainText())
+        self.assertEqual(self.commands(), [])
+
+    def test_joint_log_filter_requires_exact_command_and_seven_finite_values(self):
+        hidden = [("TX", "#GETJPOS"), ("RX", "ok 1 2 3 4 5 6 7"),
+                  ("RX", "ok +1.5,-2e1,3,4,5,6,7")]
+        visible = [("TX", "#GETJPOS extra"), ("TX", "prefix #GETJPOS"),
+                   ("INFO", "#GETJPOS"), ("RX", "ok 1 2 3 4 5 6"),
+                   ("RX", "ok 1 2 3 4 5 6 7 extra"), ("RX", "ok 1 2 3 4 5 6 NaN"),
+                   ("RX", "ok 1 2 3 4 5 6 inf"), ("RX", "ok 1 2 3 4 5 6 1e309"),
+                   ("RX", "ok MOVEJ id=1 ms=100"), ("RX", "error GETJPOS OFFLINE"),
+                   ("WARN", "位置回读超时"), ("ERROR", "串口发送失败：Write timeout"),
+                   ("RX", "prefix ok 1 2 3 4 5 6 7"), ("RX", "ok 1 2 3 4 5 6 7 8")]
+        for tag, message in hidden + visible:
+            self.controller.log(message, tag)
+        displayed = self.window.log_view.toPlainText().splitlines()
+        for tag, message in hidden:
+            self.assertFalse(any(line.endswith(f"[{tag}] {message}") for line in displayed), message)
+        for tag, message in visible:
+            self.assertTrue(any(line.endswith(f"[{tag}] {message}") for line in displayed), message)
+        self.assertEqual(len(self.window._logs), len(hidden) + len(visible))
+
+    def test_joint_log_export_obeys_only_hiding_switch_and_cancel_keeps_buffer(self):
+        self.controller.log("#GETJPOS", "TX")
+        response = "ok 1 2 3 4 5 6 7"
+        self.controller.log(response, "RX")
+        self.controller.log("ok 1 2 3 4 5 6", "RX")
+        self.controller.log("ok MOVEJ id=1", "RX")
+        self.controller.log("Write timeout", "ERROR")
+        self.window.log_filter.setCurrentText("ERROR")
+        self.window.log_search.setText("Write")
+        filtered = Path(self.directory.name) / "filtered.txt"
+        with patch("app.ui.main_window.QFileDialog.getSaveFileName", return_value=(str(filtered), "")):
+            self.window._export_logs()
+        exported = filtered.read_text(encoding="utf-8")
+        self.assertNotIn("#GETJPOS", exported)
+        self.assertNotIn(response, exported)
+        self.assertIn("ok 1 2 3 4 5 6", exported)
+        self.assertIn("ok MOVEJ id=1", exported)
+        self.assertIn("Write timeout", exported)
+        self.window.hide_joint_logs_checkbox.setChecked(False)
+        complete = Path(self.directory.name) / "complete.txt"
+        with patch("app.ui.main_window.QFileDialog.getSaveFileName", return_value=(str(complete), "")):
+            self.window._export_logs()
+        self.assertIn(response, complete.read_text(encoding="utf-8"))
+        before = list(self.window._logs)
+        with patch("app.ui.main_window.QFileDialog.getSaveFileName", return_value=("", "")):
+            self.window._export_logs()
+        self.assertEqual(list(self.window._logs), before)
+
+    def test_joint_log_toggle_respects_pause_type_and_search(self):
+        self.controller.log("ok 1 2 3 4 5 6 7", "RX")
+        self.controller.log("MOVEJ marker", "TX")
+        self.controller.log("ok MOVEJ id=2", "RX")
+        self.window.log_pause.setChecked(True)
+        before = self.window.log_view.toPlainText()
+        self.window.hide_joint_logs_checkbox.setChecked(False)
+        self.assertEqual(self.window.log_view.toPlainText(), before)
+        self.window.log_pause.setChecked(False)
+        self.assertIn("ok 1 2 3 4 5 6 7", self.window.log_view.toPlainText())
+        self.window.log_filter.setCurrentText("RX")
+        self.window.log_search.setText("MOVEJ")
+        self.assertIn("ok MOVEJ id=2", self.window.log_view.toPlainText())
+        self.assertNotIn("MOVEJ marker", self.window.log_view.toPlainText())
+        self.assertNotIn("ok 1 2 3 4 5 6 7", self.window.log_view.toPlainText())
+        self.window.log_search.clear()
+        self.window.hide_joint_logs_checkbox.setChecked(True)
+        self.assertEqual(self.window.log_view.document().blockCount(), 1)
+        self.assertIn("ok MOVEJ id=2", self.window.log_view.toPlainText())
 
 
 if __name__ == "__main__":

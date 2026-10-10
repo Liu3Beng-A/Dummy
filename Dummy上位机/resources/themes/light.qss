@@ -27,6 +27,11 @@ QGroupBox { background: #ffffff; border: 1px solid #dce5ee; border-radius: 9px; 
 QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; background: #f2f5f9; color: #35506d; }
 QGroupBox[compact='true'] { margin-top: 14px; padding: 8px 6px 6px; }
 QFrame#Card { background: #ffffff; border: 1px solid #dce5ee; border-radius: 9px; }
+QFrame#GamepadPanel { background: #ffffff; border: 1px solid #dce5ee; border-radius: 7px; }
+QDialog#GamepadSettingsDialog { background: #f2f5f9; color: #223248; }
+QLabel#GamepadStatus { background: #eef3f8; color: #3b5169; padding: 5px 7px; border-radius: 5px; }
+QLabel#GamepadStatus[ready='true'] { background: #e6f5ef; color: #147359; }
+QPlainTextEdit#GamepadRawInput { background: #ffffff; color: #223248; border: 1px solid #b9cbdc; border-radius: 5px; font-family: Consolas, 'Microsoft YaHei UI'; font-size: 14px; padding: 6px; }
 QPushButton, QToolButton { background: #ffffff; color: #3b5169; border: 1px solid #d4dfe9; border-radius: 6px; padding: 7px 11px; font-weight: 500; }
 QPushButton:hover, QToolButton:hover { background: #edf5fc; border-color: #87afcf; }
 QPushButton#ViewerToggle:hover { background: #edf5fc; color: #236da9; border-color: #87afcf; }
@@ -46,7 +51,7 @@ QPushButton[role='calibration'] { background: #8963aa; color: white; border-colo
 QPushButton[role='calibration']:hover { background: #745092; }
 QPushButton[role='danger'] { background: #d74348; color: white; border-color: #d74348; font-weight: 700; }
 QPushButton[role='danger']:hover { background: #be3339; }
-QPushButton[role='danger']:disabled, QPushButton[role='primary']:disabled, QPushButton[role='success']:disabled { background: #dee5ec; color: #a2afbc; border-color: #dee5ec; }
+QPushButton[role='danger']:disabled, QPushButton[role='primary']:disabled, QPushButton[role='success']:disabled, QPushButton[role='secondary']:disabled, QPushButton[role='slate']:disabled, QPushButton[role='calibration']:disabled { background: #dee5ec; color: #a2afbc; border-color: #dee5ec; }
 QPushButton#StopButton { min-width: 80px; min-height: 24px; font-size: 14px; }
 QPushButton#PointShortcutButton { background: #f4f8fc; color: #314e6b; border-color: #cbddeb; padding: 4px 8px; font-size: 14px; font-weight: 500; text-align: left; }
 QPushButton#PointShortcutButton:hover { background: #e7f2fb; border-color: #87afcf; }

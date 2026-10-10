@@ -49,8 +49,10 @@ class RobotView(QWidget):
         self._target_gripper = 100.0
         self._actual_gripper = None
         self._cartesian = None
+        self._display_mode = "preview"
         self._state = {
             "mode": "preview", "theme": "light", "stale": True,
+            "actualOnly": False, "feedbackPaused": False,
             "actualKnown": False, "actualGripperKnown": False,
             "highlight": None, "camera": "isometric", "cameraSeq": 0,
             "grid": True, "axes": True, "visibilitySeq": 0,
@@ -139,10 +141,15 @@ class RobotView(QWidget):
         if self._closed:
             return
         self._state["target"] = firmware_to_urdf(self._target_pose, self._target_gripper, preview=True)
-        gripper = self._actual_gripper if self._actual_gripper is not None else self._target_gripper
+        actual_only = self._state["actualOnly"]
+        self._state["mode"] = "actual" if actual_only else self._display_mode
+        gripper = self._actual_gripper
+        if gripper is None:
+            # No gripper telemetry exists: keep a fixed illustration in actual-only mode.
+            gripper = 100.0 if actual_only else self._target_gripper
         self._state["actual"] = firmware_to_urdf(self._actual_pose, gripper)
         self._state["marker"] = (cartesian_marker(self._cartesian, self._target_pose[6])
-                                 if self._cartesian is not None else None)
+                                 if self._cartesian is not None and not actual_only else None)
         if self._ready:
             self._bridge.state_changed.emit(json.dumps(self._state, ensure_ascii=False, allow_nan=False))
 
@@ -178,7 +185,17 @@ class RobotView(QWidget):
     def set_display_mode(self, mode):
         if mode not in {"preview", "actual"}:
             raise ValueError("Display mode must be preview or actual")
-        self._state["mode"] = mode
+        self._display_mode = mode
+        self._sync()
+
+    def set_actual_only(self, enabled):
+        """Temporarily hide all target displays without inventing telemetry."""
+        self._state["actualOnly"] = bool(enabled)
+        self._sync()
+
+    def set_feedback_paused(self, paused):
+        """Annotate retained telemetry; software targets never refresh it."""
+        self._state["feedbackPaused"] = bool(paused)
         self._sync()
 
     def set_target_cartesian(self, pose):

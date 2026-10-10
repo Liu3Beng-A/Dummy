@@ -1,6 +1,7 @@
 """Persistent local data. Reading a profile never writes to a robot."""
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -10,17 +11,42 @@ from pathlib import Path
 import tempfile
 import threading
 
+from app.gamepad.config import default_config as default_gamepad_config
+from app.gamepad.config import validate_config as validate_gamepad_config
+
 
 DEFAULT_SETTINGS = {
-    "theme": "light", "poll_hz": 5, "log_limit": 5000,
+    "theme": "light", "poll_hz": 5, "log_limit": 5000, "hide_joint_logs": True,
     "port": "", "connection_type": "USB", "geometry": "",
     "window_state": "", "viewer_mode": "preview", "show_grid": True,
     "show_axes": True, "auto_poll": True, "poll_enabled": True, "model_path": "",
+    "gamepad_config": default_gamepad_config(),
+    "gamepad_defaults_revision": 4,
 }
 JOINT_LIMITS = [(-175, 175), (-75, 90), (0, 180), (-270, 270),
                 (-100, 100), (-180, 180), (-250, 250)]
 POSE_LIMITS = [(-10000, 10000)] * 3 + [(-3600, 3600)] * 3
 POINT_SCHEMA_VERSION = 2
+
+
+class _Settings(dict):
+    """Keep existing flat settings access while detaching nested profiles."""
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        return deepcopy(value) if key == "gamepad_config" else value
+
+    def get(self, key, default=None):
+        return self[key] if key in self else default
+
+    def items(self):
+        return {key: self[key] for key in self}.items()
+
+    def values(self):
+        return {key: self[key] for key in self}.values()
+
+    def copy(self):
+        return dict(self.items())
 
 
 def _point_number(value, name, field, limits):
@@ -89,12 +115,45 @@ class AppStore:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self.load_errors = []
-        self.settings = dict(DEFAULT_SETTINGS)
+        self.settings = _Settings(deepcopy(DEFAULT_SETTINGS))
         raw = self._read(self.base_dir / "settings.json", {})
         if isinstance(raw, dict):
             for key in DEFAULT_SETTINGS:
                 if key in raw:
                     self.settings[key] = raw[key]
+        try:
+            self.settings["gamepad_config"] = validate_gamepad_config(self.settings["gamepad_config"])
+            revision = raw.get("gamepad_defaults_revision", 1) if isinstance(raw, dict) else 1
+            if type(revision) is int and revision == 1:
+                profile = self.settings["gamepad_config"]
+                robot = profile["robot"]
+                defaults = default_gamepad_config()["robot"]
+                if robot["tool_offset_z"] == 160:
+                    robot["tool_offset_z"] = defaults["tool_offset_z"]
+                if robot["flange_limits"]["z"] == [-150, 250]:
+                    robot["flange_limits"]["z"] = list(defaults["flange_limits"]["z"])
+                if robot["init_joints"] == [0, -45, 90, 0, 0, 0]:
+                    if all(low <= value <= high for value, (low, high) in
+                           zip(defaults["init_joints"], robot["joint_limits"])):
+                        robot["init_joints"] = list(defaults["init_joints"])
+                    else:
+                        self.load_errors.append("新手柄初始化默认姿态超出自定义关节范围；已保留原初始化姿态和限制")
+                self.settings["gamepad_config"] = validate_gamepad_config(profile)
+            if type(revision) is int and revision in (1, 2):
+                profile = self.settings["gamepad_config"]
+                if profile["control"]["linear_speed_mm_s"] == 10:
+                    profile["control"]["linear_speed_mm_s"] = default_gamepad_config()["control"]["linear_speed_mm_s"]
+                self.settings["gamepad_config"] = validate_gamepad_config(profile)
+                self.settings["gamepad_defaults_revision"] = 3
+            if type(revision) is int and revision in (1, 2, 3):
+                profile = self.settings["gamepad_config"]
+                if profile["robot"]["cmd_speed"] == 10:
+                    profile["robot"]["cmd_speed"] = default_gamepad_config()["robot"]["cmd_speed"]
+                self.settings["gamepad_config"] = validate_gamepad_config(profile)
+                self.settings["gamepad_defaults_revision"] = 4
+        except ValueError as exc:
+            self.settings["gamepad_config"] = default_gamepad_config()
+            self.load_errors.append(f"手柄配置读取失败：{exc}；已使用默认配置")
         self._normalize_settings()
         raw = self._read(self.base_dir / "points.json", {"points": []})
         try:
@@ -123,24 +182,27 @@ class AppStore:
             self.load_errors.append(f"{path.name} 读取失败：{exc}")
             return fallback
 
-    def _normalize_settings(self):
-        if self.settings["theme"] not in ("light", "dark"):
-            self.settings["theme"] = "light"
-        if self.settings["connection_type"] not in ("USB", "UART4"):
-            self.settings["connection_type"] = "USB"
-        if self.settings["viewer_mode"] not in ("preview", "actual"):
-            self.settings["viewer_mode"] = "preview"
+    def _normalize_settings(self, settings=None):
+        settings = self.settings if settings is None else settings
+        if type(settings["gamepad_defaults_revision"]) is not int or settings["gamepad_defaults_revision"] < 4:
+            settings["gamepad_defaults_revision"] = 4
+        if settings["theme"] not in ("light", "dark"):
+            settings["theme"] = "light"
+        if settings["connection_type"] not in ("USB", "UART4"):
+            settings["connection_type"] = "USB"
+        if settings["viewer_mode"] not in ("preview", "actual"):
+            settings["viewer_mode"] = "preview"
         for key, low, high, default in (("poll_hz", 1, 10, 5), ("log_limit", 500, 50000, 5000)):
             try:
-                self.settings[key] = max(low, min(high, int(self.settings[key])))
+                settings[key] = max(low, min(high, int(settings[key])))
             except (TypeError, ValueError, OverflowError):
-                self.settings[key] = default
+                settings[key] = default
         for key in ("port", "geometry", "window_state", "model_path"):
-            if not isinstance(self.settings[key], str):
-                self.settings[key] = ""
-        for key in ("show_grid", "show_axes", "auto_poll", "poll_enabled"):
-            if not isinstance(self.settings[key], bool):
-                self.settings[key] = DEFAULT_SETTINGS[key]
+            if not isinstance(settings[key], str):
+                settings[key] = ""
+        for key in ("show_grid", "show_axes", "auto_poll", "poll_enabled", "hide_joint_logs"):
+            if not isinstance(settings[key], bool):
+                settings[key] = DEFAULT_SETTINGS[key]
 
     @staticmethod
     def _write(path, value):
@@ -163,6 +225,19 @@ class AppStore:
 
     def update_settings(self, **kwargs):
         with self._lock:
+            if "gamepad_config" in kwargs:
+                # Validate and persist before replacing any in-memory settings.
+                # Failed validation/writes cannot leave a partially applied profile.
+                profile = validate_gamepad_config(kwargs["gamepad_config"])
+                candidate = _Settings(deepcopy(self.settings.copy()))
+                for key, value in kwargs.items():
+                    if key in DEFAULT_SETTINGS:
+                        candidate[key] = profile if key == "gamepad_config" else value
+                self._normalize_settings(candidate)
+                self._write(self.base_dir / "settings.json", candidate)
+                self.settings.clear()
+                self.settings.update(candidate)
+                return
             for key, value in kwargs.items():
                 if key in DEFAULT_SETTINGS:
                     self.settings[key] = value

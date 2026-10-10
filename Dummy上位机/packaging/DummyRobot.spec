@@ -5,7 +5,7 @@ project = Path(SPECPATH).parent
 analysis = Analysis(
     [str(project / "main.py")], pathex=[str(project)],
     binaries=[], datas=[(str(project / "resources"), "resources")],
-    hiddenimports=["PySide6.QtWebEngineWidgets", "PySide6.QtWebChannel"],
+    hiddenimports=["PySide6.QtWebEngineWidgets", "PySide6.QtWebChannel", "pygame"],
     hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=["tkinter"],
     noarchive=False,
 )

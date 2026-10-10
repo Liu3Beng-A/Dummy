@@ -1,5 +1,101 @@
 # SESSION STATUS（2026-10-10）
 
+## 当前分析：手柄控制期间上位机主动STOP，具体触发来源待定位（2026-10-10，只读分析与离线复现）
+
+- **当前问题/用户澄清**：用户要求分析21:28:21.656及21:32:40.142的`[TX] !STOP`，明确未打开其他窗口；已澄清第一次没有点击“确认到位”，随后21:32日志已能连续发送MoveL并收到受理。当前只分析，不修改生产源码、配置、固件或用户日志，不连接硬件、不打包、不提交；仅按工作状态同步要求更新本文。此前手柄布局问题已由用户叫停，不继续展开。
+- **已确认事实/主动发送**：`Dummy上位机/app/core/controller.py:436`在实际writer的command_written通知中记录TX，因此这两次STOP是上位机主动写出，后续Stopping ok/STOP locked是设备响应。`app/core/gamepad_session.py:475`初始化INT受理清除回执及运动完成期限，进入init_confirmation；未点击确认只阻挡MoveL，不会因等待确认时间长而自动STOP。21:32最后一条MOVEL id=14于36.705受理，`gamepad_session.py:504`匹配受理后清除_stream；没有“摇杆回中后固定三秒STOP”规则，也不能把三秒串口静默等同于手柄采样超时。
+- **已验证STOP入口**：`gamepad_session.py:577`无效/断开的采样、采样时间异常/过期、映射stop动作（当前用户配置按钮6，Start为7）可调用stop；`:633`超过0.5秒未收到新鲜手柄样本会主动STOP；真正仍在途的指令发送/回执超时及未完成的运动也有停止入口。`app/ui/main_window.py:590`释放控制和暂停采集调用release，窗口/应用失焦、打开对话框/终端、离开运动页、隐藏/最小化/关闭等会走这一路。用户未开窗口是现象反馈，现有日志不能证明是否收到短暂失焦事件或SDL采样错误。
+- **离线复现/已排除方向**：使用现有GamepadSessionTests的FakePort/ManualScheduler及真实会话代码，无实际串口。单条初始化MoveJ受理后连续提供1200个新鲜采样约20.4秒，保持init_confirmation且0新增TX；本地确认、回中后可发MoveL，随后停止采样0.501秒复现“手柄输入超时”及单条!STOP。重放用户12条MoveL目标并逐条馈入queued/accepted后，所有在途槽清空；继续健康采样20秒保持ready、0 TX，单独stop按键动作立即发!STOP。支持排除正常受理后的固定超时，不能代替用户实机事件复现。
+- **定位缺口/待确认**：`gamepad_session.py:101/308`停止原因仅写会话状态/界面消息，没有持久化日志；`main_window.py:590`暂停原因也未持久化且release使用通用原因。因此现有用户粘贴日志及实际dummyrobot.log无法区分按键6、输入超过0.5秒、采集失效、界面暂停或其他停止入口，不宣称已找到唯一根因。若用户授权改动，建议在STOP调用前记录来源、原状态、输入年龄、按键/采集错误，并保留UI暂停原始原因；先补诊断，不改停止规则。当前没有生产代码改动。
+
+## 当前完成：手柄第二次Start只发MoveJ、MoveL默认档位35（2026-10-10，源码验证完成）
+
+- **当前问题/授权**：用户要求第二次按钮7初始化期间只发送`>0,10,80,0,90,0,0,10`，删除MOTION_STATUS及所有附带命令；追加要求默认速度档位35，并询问线速度与档位关系、MoveL发送频率。本节替代下方“初始化仍查询MOTION_STATUS/确认INT”的历史流程。修改范围仅独立上位机手柄会话、配置/存储/面板、对应测试及文档；未改固件、原助手、URDF、实际用户配置，未连接硬件、打包或提交。
+- **已确认事实**：`app/gamepad/input.py`按线速度积分软件TCP目标；主控`firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp`的MoveL经IK调用关节同步规划，档位×0.3限制电机轴r/s，35为最高10.5r/s，与TCP的mm/s没有固定换算。`app/core/gamepad_session.py`MoveL至少间隔50ms、单条在途等待accepted且目标变化才发，上限20Hz；20msQt调度与回执耗时会降低实际频率。线速度高且档位低可能产生实际滞后，取消位置回读后无法检测或自动修正实物误差；5mm/5°只限制软件命令步长。
+- **最新改动/初始化**：`app/core/gamepad_session.py`初始化直接发送单条紧凑MoveJ，不发前置GET_CMDMODE、后置CMDMODE/GET_CMDMODE或MOTION_STATUS；仅被动读取queued的实际模式与运动编号。INT accepted只表示受理，改为init_confirmation等待用户观察到位；`app/ui/gamepad_panel.py`复用初始化按钮显示“确认到位”，确认仅本地FK+tool建立软件目标，再等待手柄回中，不产生TX或伪造actual。连续控制需预先选择INT，SEQ/TRJ不自动切换。初始化受理后无运动完成轮询/等待到位超时，输入失效/指令回执超时/STOP/固件保护仍有效；单独“休息”保留原模式空闲及完成状态检查。断连清零本地已知运动编号，允许设备重启后从1开始；无初始化issued/busy查询，仍不能严格识别同连接极晚的无客户端token回包或证明当前空闲。
+- **最新改动/默认与兼容**：`app/gamepad/config.py`MoveL的cmd_speed=35，init_speed=10与linear_speed=50保持，默认第二次Start串口正文20字节+LF为21字节。`app/storage/store.py`revision4迁移旧revision1～3原MoveL档位10→35，其他自定义值及初始化档位保留，revision4明确保存10后不再迁移；读取不写盘。面板/设置提示及README/开发方案同步更新。
+- **验证完成**：133项手柄session/controller/input/store及原controller/store/system_pose回归通过；真实Qt+收发线程及UI共14项通过，最终改动后针对2项线程端到端与2项变更UI再次全部通过。模拟真实writer证明第二次Start至手动确认、回中只写一条MoveJ，0查询/模式命令，RX先于written、错误编号、超过60秒等待本地确认、STOP与断连旧回执均覆盖。两主题1120×690离屏检查“确认到位”按钮117×34完整可见、面板viewport156、0 TX；Windows雅黑字体注册后截图已目视检查，位于忽略目录`Dummy上位机/build/qa/gamepad-single-movej/`。源码语法、实际布局读回与Git空白检查通过。
+- **未完成/待实机**：重启源码版，在接管前设置INT，第一次Start使能，第二次Start只发MoveJ，观察实物到位后点击“确认到位”并回中，再测试连续控制。卡顿根因仍未被实机排除，本轮不宣称已修复硬件冻结；线速度与档位的实际配合需按姿态、负载与加速度复测。
+
+## 当前完成：取消手柄接管期间全部位置查询（2026-10-10，源码验证完成）
+
+- **当前问题/用户澄清**：用户要求“取消手柄控制时的同步姿态”，异步澄清后明确是“去掉手柄控制时的getjops”（现有协议GETJPOS）。本轮覆盖并替代上一轮手柄JPOS同步实现：接管及释放等待确认期间不查询位置，包括初始化后的单次同步；保留未接管时的普通轮询、手动界面读取及初始化INT编号完成MOTION_STATUS。修改仅独立上位机及相关验证/工作文档，不改固件、原助手、URDF、实际用户配置，不连接硬件、打包或提交。
+- **已确认事实/方案边界**：取消JPOS/LPOS后没有实时TCP反馈，不能继续检测相对实物的5mm/5°超前或回读年龄；已在用户可见说明中讲清。初始化仍等匹配编号真正完成，随后用实际发送的关节目标本地FK+tool建立软件targetTCP，并确认INT与回中，actual_tcp保持None，controller实际缓存/三维模型不更新为软件目标。原限值改为相对最近已受理指令的软件步长，不表示实物误差或到位；输入过期、发送/回执超时、STOP与固件保护门禁保留。
+- **最新改动/core**：`app/core/gamepad_session.py`删除全部pose job/intent/轮询/回读超时与resync，休息匹配完成直接rested。新增command_reference_tcp深复制状态，初始化从规范化已发joints播种，连续MoveL仅同job/id的accepted且真正written后推进不可变已发TCP，不能用错误编号/提前或迟到回执推进。`controller.py`在send/admission/_can_write阻挡GETJPOS/GETLPOS/GETRAILPOS，清退历史手柄位置ledger/pending_sync，旧written/超时不误STOP；接管仍等旧UI位置请求完成，正常界面读取保持。
+- **最新改动/UI与兼容**：`ui/gamepad_panel.py`与`main_window.py`删除同步按钮/B动作、路由与设置映射，五按钮保留两行；初始化提示不再要求回读，回读频率/超时设置隐藏，5mm/5°明确软件命令步长。`visualization/robot_view.py`与`resources/viewer/viewer.js`新增feedbackPaused，只按实际接管状态显示“最近实际姿态·回读已暂停”，保留actual-only/过期及未知状态，不伪造实际；未接管不擅自关闭普通poll。`gamepad/config.py/backend.py`退役manual动作，旧buttons.manual仅深复制删除退休字段，GUID/其他映射/自定义速度等保留，读取不写盘；默认50与114维持。README/开发方案同步。
+- **最终验证**：101项核心/原控制器/预设回归、2项真实Qt及Transport线程集成、44项输入/采集/手柄存储、6项必要QtUI回归均通过；根最终53项原Controller/Store/SystemPose通过（其37项包含于核心101），合计去重169项。覆盖接管全阶段及释放等待0位置查询、完成后无回读直接ready、旧位置watchdog不误STOP、软件reference正确匹配/精度/世代、actual不受目标影响、B按键无动作与旧profile兼容、两主题最小布局。两主题8个真实WebGL场景通过，截图/DOM位于忽略的`build/qa/gamepad-no-query-{light,dark}/`。源码读回、语法和Git差异空白检查通过。
+- **已排除/待实机**：没有新增连续MOTION_STATUS或其他位置查询替代JPOS；MOTION_STATUS仅初始化/休息MoveJ完成确认。取消回读是一轮隔离试验，卡顿根因尚不能据此宣称解决。需重启源码版复测第二次Start与手柄连续控制；软件目标与实物位置偏差现在不由上位机回读监测。
+
+## 当前完成：手柄改用关节回读、隐藏目标预览、默认线速度50（2026-10-10，源码验证完成）
+
+- **当前问题/授权范围**：用户要求删除持续GETLPOS、用GETJPOS同步左侧实时模型、手柄模式去掉目标预览，默认线速度50mm/s，并询问速度档位。用户补充手动MoveJ到初始化姿态后再按两次按钮7能正常启动，此为用户实机观察，根因仍未定位。本轮仅独立上位机手柄/core/显示/默认迁移/相关测试及本工作文档，未改固件、原助手、URDF、实际用户配置，未连接硬件、打包或提交。
+- **已确认事实/速度含义**：`app/gamepad/input.py`线速度积分TCP目标，角速度积分姿态；`firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:441`指令最后档位1～100映射电机上限档位×0.3r/s，10为3r/s、100为30r/s，各轴同步规划会进一步降速。MoveL经IK后使用关节同步规划，不保证TCP恒速50mm/s。本轮仅将control.linear_speed_mm_s改50，cmd_speed/init_speed仍10。
+- **最新改动/回读**：新增`app/gamepad/kinematics.py`，沿用当前主控165/170/117/69.5/113mm几何与DH、Euler近奇点分支，由实际七轴回报的前六角计算法兰并加114mm工具得到TCP；不加入地轨位移或URDF的62.3mm显示偏移。`core/gamepad_session.py`初始化完成、同步及enabled/joint_moving/centering/ready统一GETJPOS，最多5Hz，拒绝kind=l；`controller.py`普通poll在接管时让出调度，单在途/真实written/令牌和世代保持。JPOS更新实际模型含真实地轨，但发送初始化/休息地轨仍0；反馈不作为完成依据、不覆盖软件目标，运动完成时待原在途反馈收尾后重新采样播种TCP。INT编号MOTION_STATUS完成确认保留，界面手动MoveL读取仍可GETLPOS。
+- **最新改动/显示与默认**：`ui/main_window.py`、`ui/gamepad_panel.py`、`visualization/robot_view.py`、`resources/viewer/viewer.js`在选择手柄时临时actual-only，隐藏目标模型/marker/目标图例及预览选项，切回恢复持久偏好；initial_pose_completed与目标信号不得制造实际模型，右侧TCP目标诊断保留。无回读不画假实际、过期保留最近姿态；夹爪固定100%示意并明确无实际回读。`gamepad/config.py`与`storage/store.py`默认50，版本3仅迁移缺失/1/2版中的旧原厂线速度10，保留其他自定义值；版本3后明确保存10不再覆盖，读取迁移不写磁盘。README和开发方案同步。
+- **最终验证**：57项专有回归（FK6、session35、gamepadController14、真实Qt/TX/RX线程集成2），41项UI/视觉回归（gamepadUI12、UI20、visualization9），24项输入/手柄存储与53项原Controller/存储/预设回归均通过，去重175项。覆盖无自动LPOS、单在途5Hz、RX早于written、初始化反馈不误完成/旧采样不播种、真实地轨/工具转换、停止和超时门禁、默认迁移及自定义10保留、手柄actual-only及切回偏好。真实WebGL两主题共12场景通过，截图/DOM报告在忽略的`build/qa/gamepad-actual-only-{light,dark}/`，根查看实际姿态截图；源码读回、语法及Git差异空白检查通过。
+- **已排除/待实机**：用户最新19:55样本停在初始化MoveJ前2秒，尚无GETLPOS，不能把卡顿根因归因于它；删除LPOS属于本次隔离试验。此前同步串口清理可能阻塞UI、J1限幅与主控浮点解析栈余量证据保持，未扩展修改。需源码重启后复测第二次Start及连续控制；本地正解尺寸今后须随固件机械参数同步。
+
+## 当前分析：INT初始化状态轮询与J1限幅观察（2026-10-10，19:55实机日志）
+
+- **当前问题/范围**：用户提供`C:/Users/Liu3Beng/.codex/attachments/cb86e534-e111-408f-83de-eaa650ea6b4d/已粘贴的文本.txt`，询问发生何事及为什么一直发`#MOTION_STATUS`。本轮只读分析日志/源码，按5.2仅更新本记录；未改程序/配置/固件、未连接硬件/编译/打包/提交。
+- **已确认事实**：382行日志19:55:23.774发送紧凑MoveJ，收到`queued MOVEJ id=1 mode=INT`与`accepted MOVEJ id=1`；10次查询间隔207～229ms，1次phase1、9次phase2，无phase3/error/STOP/LPOS，最后ms1997小于plan_ms4736.8，且附件截在最后一轮J3行。J2/J3/J5反馈持续向目标变化，记录期间主控仍响应；不能据这段约2秒记录宣称最终成功或继续全机卡死。
+- **轮询原因/可读性问题**：`Dummy上位机/app/core/gamepad_session.py:668`在INT的MoveJ已accepted、joint_moving且没有在途查询时最多5Hz发送完整MOTION_STATUS，492～509仅同id/MOVEJ/当前mode的phase3确认完成；完成后停止该查询，回读LPOS/确认INT。647～661有默认3秒单条响应和60秒总运动预算，非无限等待。该指令每次包含大量分轴诊断，用作周期查询会刷屏；日志隐藏只能改善显示，不能减少实际通信，精简回包或主动完成事件需另行方案授权。
+- **J1观察/待确认**：19:55:25.109 `J1 CURRENT_CMD_LIMITED`，实时目标0/反馈0.1280电机圈持续不变，50:1换算约0.9216°；`dummy_robot.cpp:123,1587`、`ctrl_step.cpp:413`及`motion_completion_protocol.h:13`确认单位/标志。`dummy-motor-fw/Ctrl/Motor/motor.cpp:317`该状态为控制电流命令达到额定限幅连续约1秒，并非实测过流或DRIVE_BLOCKED；持续限幅/未到位会阻止完成。需要超过4.74秒后的状态与实物J1观察，才能判断是否因此长期等待，不盲目修改电流/PID或到位门槛。
+- **已排除/日志顺序**：ready0FE说明七轴采纳目标，confirmed090→0D0是J4/J7后加J6，尚非全轴完成。J4一次发送失败后重试并ready46/settled150，CAN累计alst1/terr0不再增加，不足以判定持续总线故障。`business.py:292`将RX日志after(0)排队、`controller.py:854`先同步处理回执、438直接记录TX，`main_window.py:2357`追加时取时间，因此TX显示可能早于触发它的RX，不代表实际先盲发。当前长度/SEQ切换疑点不适用于这条已在INT受理并运行的记录；之前未响应问题是否彻底消失仍待更长实机记录。
+
+## 当前完成：手柄初始化取消自动SEQ并缩短运动指令（2026-10-10，源码验证完成）
+
+- **当前问题/授权范围**：用户再次报告第二次Start未响应，截图已到MoveJ#1执行中；明确要求去掉切SEQ、只发送MoveJ并核查长度。修改仅独立上位机手柄会话、面板、相关测试及README/开发方案/本记录；不修改原助手、固件、实际配置或URDF，不连接硬件、不打包、不提交。
+- **已确认事实/排除方向**：默认`>0.000,10.000,80.000,0.000,90.000,0.000,0.000,10.000`正文52字节，加LF53；`firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:1286`按QueueItem.command[64]校验正文<64，最多63。USB每包64、ASCII跨包累计256，不能套用单包限制；queued MOVEJ id说明已通过入队，当前超长不是已确认原因。固件1359/1396-1407中INT返回accepted，SEQ/TRJ才回复完成OK，删切SEQ后若仍只等OK会错误等待。
+- **最新方案/改动**：移除初始切SEQ与确认、去掉无用途GETJPOS地轨读取，保留最少一条GET_CMDMODE查询busy/actualmode/issued编号下界后发当前SEQ/INT/TRJ下的MoveJ；TUN拒绝。紧凑格式保留三位小数精度去尾零，默认`>0,10,80,0,90,0,0,10`正文20/+LF21，运动正文门禁63。INT按同id accepted后查询MOTION_STATUS phase3完成，SEQ/TRJ匹配ok；末端回读、INT确认及回中门禁保留。面板删除过时SEQ/地轨读取说明，文档同步。
+- **最终验证/改动文件**：`app/core/gamepad_session.py`、`app/ui/gamepad_panel.py`与`tests/test_gamepad_session.py`、`test_gamepad_integration.py`、`test_gamepad_controller.py`、`test_gamepad_ui.py`完成；README/开发方案/本记录同步。152项核心相关测试通过，含33项会话、12项手柄控制器、2项真实Qt与TX/RX线程集成及105项控制器/预设/RGB/存储/输入/采集回归；11项手柄Qt回归通过，最终移除read_rail及中文提示断言后仅重跑受影响的2项也通过。覆盖INT假OK不解锁、accepted仅受理、运行phase2→同id/kind/mode phase3完成、RX先于实际written、编号回卷/旧编号/旧连接/STOP世代、单在途最多5Hz、超时/取消停止与主控失败保护保留、SEQ/TRJ/TUN边界、精度/负零/63字节和超长不发送。源码读回、语法及Git差异空白检查通过；无硬件/EXE/提交。
+- **未完成/复测边界**：卡顿根因及实机是否恢复仍未确认，当前超长已排除为该52字节指令的原因。之前Qt主线程同步串口清理、ControlLoopUpdateTask2000字节浮点解析栈余量有限的证据保留，不在本轮扩展修改。新初始化沿用设备当前模式，不会自动把既有SEQ改为INT；本次用户复测应在接管前确认2·INT，再按两次Start。
+
+## 当前分析：19:28:36 上位机发送 STOP 的触发入口（2026-10-10）
+
+- **当前问题/范围**：用户提供19:27～19:28日志并询问为何自动发送`!STOP`；本轮只读核对独立上位机源代码并运行已有离线测试，按本仓库5.2要求仅更新本记录，不修改程序、配置或固件，不连接硬件、不打包、不提交。
+- **已确认事实**：19:28:36.032的`[TX] !STOP`是上位机发出的请求；36.058 `Stopping ok`、36.170 `STOP locked`是主控确认。`Dummy上位机/app/ui/main_window.py:1785`打开独立终端会先调用`_suspend_gamepad`；1760的窗口/应用失焦及弹出对话框、2060离开运动页、2473隐藏、2481最小化、2492关闭等路径也会暂停采集。若已接管，598调用`gamepad.release()`，`app/core/gamepad_session.py:139`释放时通过151→247发送`!STOP`；未接管时这些界面事件不会凭空发送STOP。
+- **其他入口/可读性问题**：手柄Back（默认按钮6）、手柄输入失效/超过0.5秒、位置或指令回执超时及显式STOP也可发送。会话`_stage`只更新界面，`_suspend_gamepad`的具体界面原因仅在状态栏显示，当前串口日志没有记录STOP来源/原因，因此不能仅凭本日志唯一归因于打开终端、失焦、按键或输入异常。
+- **已排除方向/第二次Start边界**：日志没有MoveJ、queued或运动超时，不能将本次STOP归因于先前MoveJ格式问题。同一次已使能的手柄会话第二次Start应在`gamepad_session.py:185`转initialize并查询模式/SEQ/七轴位置后发送MoveJ，日志29.869仍为`!START`，表明未进入该步骤；可能是普通界面使能、重新接管或其他需重新使能的会话阶段，尚不能唯一确定。
+- **用户澄清/配置核对**：用户确认只按了手柄Start编号7，随后要求先提供详细使用流程再复测。只读核对`C:/Users/Liu3Beng/AppData/Local/DummyRobot/settings.json`，revision2、Start7/Stop6/B1/Y3/LB4/RB5、工具114及初始化六角均正确；未修改实际配置。源码Start只调用使能/初始化，没有直接转STOP路径；当前证据仍不能排除输入采集或界面事件等其他原因，不能声称程序完全无问题。
+- **验证/复测流程/未完成**：现有Qt用例`test_page_interface_hide_and_dialog_release_without_auto_resume`（含失焦及展开终端）、会话释放等待实际发送/停止确认、手柄输入丢失停止、两次Start至固定地轨0并INT确认、按键仅新边沿触发共5项通过。复测应检查输入→接管→按7并松开等“已使能·待初始化”→再按7并松开等初始化完成/回读/INT确认/回中后“已就绪”；保持运动主页焦点，结束STOP后再开终端查日志。实际STOP触发事件仍未唯一定位，STOP来源日志和界面行为未修改。
+
+## 当前完成：114mm工具与夹爪朝下的初始化姿态（2026-10-10，源码验证完成）
+
+- **用户授权/范围**：用户要求工具默认114mm、手柄初始化`[0,10,80,0,90,0,0]`、MoveL默认`[146.52,0,288.92,180,0,180]`，并确认“手柄控制不包含地轨，地轨始终是0”。本轮仅独立上位机默认配置、已有偏好迁移、手柄会话/提示、MoveL初始控件及相关验证/文档；不修改固件、原助手或URDF，不连接硬件，不打包或提交。先前第二次Start故障修复仍不在本轮范围。
+- **已确认事实**：`firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.cpp:134`的当前参数与`Robot/algorithms/kinematic/6dof_kinematic.cpp:133`正解得到法兰XYZ约146.520190/0/288.917318mm、ABC180/0/±180°；`UserApp/protocols/ascii_protocol.cpp:451`的GETLPOS是此法兰值。`Dummy上位机/app/core/business.py:976`首页MoveL原样发法兰；`gamepad_session.py::tool_translation/position_received/tick`手柄回读加工具偏移、发送减偏移，所以新姿态下114mm TCP的Z约174.917318mm。±180等价，不将其当角度不一致。
+- **最新改动/方案**：`app/protocol/constants.py` MoveL默认六值及Z滑块上限300；`app/gamepad/config.py`工具114、初始化六角及法兰Z上限300；`app/storage/store.py`顶层默认版本迁移旧原厂值、保留映射和自定义值；`gamepad_session.py`初始化/休息六角+地轨0，并同步中文提示。新控制不硬编码实际TCP，也不把未执行/未回读的固定姿态标成实际。
+- **已排除/最终验证**：Z滑块及默认法兰上限已在构造前更新到300，避免288.92被250裁剪或初始化后目标被旧范围拒绝。66项输入/存储/会话/控制器/真实串口线程集成及31项真实Qt界面（手柄11+通用20）全部通过，共97项。包含初始化/休息即使回读地轨非零仍发送0、收回法兰288.92加114工具后TCP174.92且新目标正确还原法兰、运动及示教MoveL六输入/工具字段114/提示/无自动TX；旧原厂值迁移不写磁盘、保存revision2后明确旧值/自定义值不再次覆盖及磁盘失败保持原配置。源码读回、语法及Git差异空白检查通过。
+- **迁移边界/待实机**：仅缺失/1版旧原厂tool160、旧初始化`[0,-45,90,0,0,0]`、旧Z范围`[-150,250]`迁移一次；设备映射、速度和其他自定义配置保留。若自定义关节限制容不下新初始化，保留该限制与旧姿态并记录提示；手柄地轨目标范围必须含0。没有写入用户实际数据目录、连接设备、运行EXE、提交或修改第二次Start故障路径；实机运动与该故障仍待后续验证。
+
+## 当前完成：默认隐藏关节回读日志；第二次手柄 Start 故障已完成初步分析（2026-10-10）
+
+- **用户授权/范围**：用户先要求只读分析第二次 Start 后未响应并提供完整串口记录，随后要求优先增加日志过滤。实施范围为独立上位机终端显示/导出、本地偏好、相关 Qt 验证和对应文档；原助手、固件、URDF、串口清理和手柄状态机不在本次修改内，不连接硬件、不打包、不提交。
+- **过滤方案/最新改动**：终端新增默认勾选的“隐藏关节回读”，仅过滤整条 TX `#GETJPOS` 和 RX `ok` 后七个有限数值的当前位置回报；六值 LPOS、异常/非有限数据、超时警告及编号运动完成保持可见。显示和导出遵守开关；原始缓冲及磁盘日志完整保留，取消可恢复查看。本地 `app/storage/store.py` 新增 `hide_joint_logs=True` 及布尔校验，不改变查询/回包业务。
+- **故障已确认事实**：用户日志末段19:00:50.527发送`>0.000,-45.000,90.000,0.000,0.000,0.000,0.000,10.000`；50.569收到`queued MOVEJ id=1 mode=SEQ`，51.752位置超时，52.773写超时，19:01:22.787断开（约30.014秒）。固件`Robot/instances/dummy_robot.cpp:1365`解析七轴+速度，old助手和`E:/Dummy_Hand`也使用此格式；第七参数0与本次地轨回读一致，格式错误没有日志依据。queued只证明入队，不证明规划/执行/完成。
+- **已排除/复现**：未发现 GamepadSession 同步等待运动或无限 UI 信号循环。`app/core/controller.py::_on_transport_failure`在Qt主线程直接`disconnect_port→SerialTransport.close`，同步取消/关闭串口与join；stdin Qt假端口关闭0.45秒造成10ms心跳最大缺口0.469秒，确认该路径可以冻结窗口，不等于确认实际30秒卡在某个具体Win32调用。
+- **最终验证**：20项真实Qt界面用例及16项存储回归全部通过，新增4项验证严格过滤、实际姿态/数值更新、原始缓冲/磁盘保留、开关持久化、导出及暂停/分类/搜索。用户2810行日志用生产过滤函数减少为53行，2757行关节回读隐藏，Start/模式/MoveJ/超时/写错误均保留。浅深主题×720×340/840×480共4个终端场景尺寸/包含/不重叠及人工截图检查通过；产物在忽略的`Dummy上位机/build/qa/joint-log-toolbar/`。源码读回、语法与Git差异空白检查通过；没有提交或EXE验证。
+- **待确认/验证边界**：主控为何停止回应仍未确定；用户未观察到第二次Start后实物运动/RGB/OLED情况，不能断言整块主控死机。`ControlLoopUpdateTask`仍2000字节，当前ELF读取到Thread→ParseCommand→sscanf→vfscanf→strtod前五层1640字节，不含更深库及上下文；旧USB2048结论不适用于这条链，不能据此认定溢出。第二次Start故障未实施修复；后续优先处理Qt主线程同步清理并取得故障现场再判断固件。
+
+## 当前完成：手柄控制集成到独立上位机（2026-10-10，源码验证完成）
+
+- **用户授权/基线提交**：用户认可只读讨论方案，要求实施前提交一次。已用本地Liu3Beng-A/liu3beng@icloud.com提交`70fb78e5398506a36bb653bf285ec931ba4cae59`（feat: refine desktop RGB preview and motion workspace），27项仅含此前独立上位机源码/测试、开发方案及本工作状态记录；共享文档中其他主控启动彩虹记录未纳入，工作区保留。无推送。
+- **当前范围**：只改`Dummy上位机/`控制器、UI、手柄输入/配置/Qt采集模块、存储/依赖、必要离线测试及本工作文档；读取`E:/Dummy_Hand`作为依据，不修改该仓库、old助手、固件或URDF，不连接机器人或手柄、不打包、不提交新增集成功能。
+- **已确认事实/方案**：Hand新入口main.py基于pygame2.6.1，decode/motion_delta为纯输入映射；两次Start、SEQ初始化`[0,-45,90,0,0,0]`保持J7、匹配MoveJ完成后回读LPOS换TCP，再INT确认+输入回中解锁。手柄MoveL/夹爪单在途+最新目标合并，≤20/10Hz、反馈5Hz、领先5mm/5°。原夹爪首次扳机直接0/100，集成改为显式建立目标基准。默认工具长度160mm可编辑。现上位机没有手柄控制权，六值LPOS未独立缓存、J/L回读共用单请求，必须统一发送、模式token、位置调度与回执所有权，不能复制独立RobotSerial或并存整份状态机。
+- **最新实现**：新增`app/gamepad/{config,input,backend}.py`与`app/core/gamepad_session.py`，控制器加入control_owner、笛卡尔实际缓存、共享mode req/位置调度及实际写入证据；新建手柄面板/中文配置诊断窗口，运动页切换界面/手柄共用URDF。手柄模式收起四个快捷槽，保留保存/管理与固定夹爪。默认构造不初始化pygame或枚举设备，依赖及两个打包入口补pygame隐藏导入，未执行打包。
+- **关键验证/已排除**：输入/SDL替身/存储35项、核心及真实串口线程E2E32项、手柄UI11项已单独通过。真实Qt两主题×三尺寸×J/L/手柄18场景无重叠，1120×690手柄viewport156px且Start整行可见。源码WebGL深色1600×1000/DPR1.25、浅色1120×690/DPR1.5各10场景正常，10网格、marker与actual分离、严格尺寸/纵滚/0SDL/0实际连接/0TX已检查；截图在忽略的`Dummy上位机/build/qa/gamepad-source-final-{dark,light150}/`。读审修复合法Start pending取消自身世代、RX先于written、初始化旧MoveL标记恢复、writer延迟后的真实节流、清会话后中央位置请求丢失超时、旧时间戳回中/重放、保存失败runtime错配、MOTION fail异步执行故障及fault确认后的Start按钮。
+- **最终回归/边界**：根执行完整`python -m unittest discover -s tests -q`，235项全部通过（212.680秒），原157+新78；全模块语法编译与Git差异空白检查通过。最终灰态另两主题各3场景源码抓图通过，人工确认未接管的休息/失能及被接管的手动/校准按钮灰显，照片在`build/qa/gamepad-source-buttons-{dark,light150}/`。位置新鲜仅指本地回包收到时间；#GETJPOS/LPOS裸数值、START/STOP/DISABLE/CMDMODE设置/hand回执无客户端token，不能严格识别同连接极晚同类裸回执，也不能证明电机缓存采样年龄。保护故障锁本机队列不额外STOP破坏固件退避；关闭最多异步等1秒，未确认明确记录，不承诺实机已停。README/开发方案同步；实机映射、方向、工具长度及EXE仍待后续验收，新功能未提交，暂存区为空，HEAD仍70fb78e。
+
+## 当前完成：启动彩虹保持到首次操作（2026-10-10，已编译，待实机验证）
+
+- **当前问题/授权**：用户要求上电后一直显示彩虹，直到使能、失能等指令切换相应灯效；明确授权修改主控RGB行为。本轮仅改主控`Bsp/gpio/rgb.hpp/.cpp`、`Robot/instances/dummy_robot.cpp`及RGB说明/本文，保留其他未提交工作。
+- **已确认事实**：原`RGB::Update`首次刷新计时满2000ms清除bootPending；上电`isEnabled=false`、`stopState=DISABLED`，默认BOOT绑定彩虹、DISABLED绑定白色呼吸，所以即使没有操作也会自动切换。`RequestDisable`会进入DISABLING；仅靠20ms RGB轮询可能漏掉快速完成的过渡状态。
+- **最新改动**：移除启动超时及计时成员；新增带临界区的`RGB::EndBoot`，在受理START/DISABLE/STOP的机器人入口结束启动场景，实际校准/故障等非DISABLED状态仍结束BOOT。启动标志只结束一次，后续失能不回启动彩虹；只读查询不结束BOOT。已保存配置、手动/自动开关、亮度、渐变与状态绑定协议保持，old助手无需新增协议/UI。
+- **已排除方向**：不靠改DISABLED绑定为彩虹实现，以保证显式失能后仍显示原白色呼吸；未改电机固件、old助手或独立上位机。所有其他既有改动及四种电机BIN已与本轮前摘要核对，保持不变。
+- **验证**：本机回归直接编译生产RGB.cpp并抽取当前命令解析、RGB状态映射及START/DISABLE/STOP真实入口，393716项检查通过（多数为既有帧/动画断言）。新增覆盖旧2秒期限、10秒/60秒长期保持及tick回绕；只读查询保持BOOT；上电直接DISABLE、操作在首帧前或两帧之间完成仍退出BOOT；START/STOP及后续失能不恢复BOOT；拒绝的START保留BOOT；校准/故障覆盖和既有手动、存储、渐变、DMA回归。主控Release/Ninja成功，RAM59976B/128KiB、CCM64KiB/64KiB、FLASH453764B/896KiB；既有RWX链接告警保留。BIN/HEX记录校验与逐字节一致，最高地址0x0806EC83低于RGB预留扇区；被测生产源摘要与最终源码一致，Git差异空白检查通过。硬件替身不能代替实机灯效验收。
+- **产物/构建身份**：修改生产源码后旧F08D62A917C34EB5批次注册记录拒绝复用；仅主控build重新配置为版本20261010.04、批次3D8460C4CBB44FA2，共同生产输入SHA256为a5ed5d4e98ebe3215f02e4ac253c72c09e27132f790649d294d584e4f7e1c5ba。新主控BIN为`firmware_new/dummy-ref-core-fw/build/Core-STM32F4-fw.bin`，453764B，SHA256为6254377243597fbb4741a1e1917775f056e6dd6dfd7f8490d0c0b74d8811c1cd；同目录HEX为d898baae5b6e665c8c46a8edbc7674d0e70de4bef3a137b3d993b8f7df496513。BIN内身份已核对；电机保留原产物及身份，因此整组版本查询会显示主控/电机批次差异，但本轮CAN协议及电机逻辑未改，无需为RGB功能更新电机。记录在忽略目录`build/analysis/rgb/boot_command_*`。
+- **待实机确认/提交**：只更新主控，上电不发送操作指令至少10秒，默认彩虹应持续，#RGB_STATUS为state=DISABLED/source=BOOT/mode=3；直接DISABLE后应白色呼吸，重上电START后应进入使能及模式待机灯效。保存配置仍优先，不自动擦除RGB配置。用户明确要求仅提交相关程序后，已用仓库本地身份Liu3Beng-A/liu3beng@icloud.com提交`27c5ac9f85d0ba8bc38e8b0729ee56b21bff1681`（fix: keep startup rainbow until robot operation），提交仅含rgb.cpp、rgb.hpp、dummy_robot.cpp三项主控源码；已核对提交内容与被测源码一致。RGB说明、本文及其他已有改动均未纳入提交；未推送、未烧录或连接设备。
+
 ## 当前完成：坐标轴不可见修复（2026-10-10，真实画布验证完成）
 
 - **当前问题/用户反馈**：用户反馈坐标轴开或关都看不到。上一轮验证了开关状态、同步及重启，但没有证明轴线实际可见；回查旧真实截图，grid-hidden与both-hidden裁去Qt控件后的三维区域像素差为0，确认测试遗漏。

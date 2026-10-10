@@ -6,6 +6,7 @@ import math
 import re
 import struct
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -104,6 +105,53 @@ class OfflineResourceTests(unittest.TestCase):
                      '/abc/viewer/', '/abc/app/main.py', '/abc/viewer/..\\main.py']
         for path in bad_paths:
             self.assertIsNone(resource_path(resources, path, 'abc'), path)
+
+
+class ActualOnlyViewTests(unittest.TestCase):
+    def test_actual_only_hides_targets_and_restores_display_preference(self):
+        from PySide6.QtCore import QCoreApplication, Qt
+        from PySide6.QtWidgets import QApplication
+        QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+        application = QApplication.instance() or QApplication([])
+        from app.visualization.robot_view import RobotView
+        # Exercise the real widget state API without starting HTTP or WebEngine.
+        with patch('app.visualization.robot_view.AssetServer', side_effect=RuntimeError('offline test')):
+            view = RobotView()
+        try:
+            view.set_target_pose([10, -45, 90, 0, 10, 20, 15], 0)
+            view.set_cartesian_target([100, 20, 300, 0, 10, 20])
+            self.assertIsNotNone(view._state['marker'])
+            view.set_actual_only(True)
+            view.set_feedback_paused(True)
+            self.assertEqual(view._state['mode'], 'actual')
+            self.assertTrue(view._state['feedbackPaused'])
+            self.assertIsNone(view._state['marker'])
+            self.assertFalse(view._state['actualKnown'])
+            actual = [2, 9, 78, 3, 87, -2, 0]
+            view.set_actual_pose(actual)
+            self.assertTrue(view._state['actualKnown'])
+            self.assertFalse(view._state['actualGripperKnown'])
+            self.assertEqual(view._state['actual'], firmware_to_urdf(actual, 100))
+            view.set_target_gripper(50)
+            view.set_target_pose([20, -40, 100, 10, 20, 30, 0], 20)
+            self.assertEqual(view._state['actual'], firmware_to_urdf(actual, 100))
+            view.set_stale(True)
+            self.assertTrue(view._state['stale'])
+            for preference in ('preview', 'actual'):
+                view.set_display_mode(preference)
+                self.assertEqual(view._state['mode'], 'actual')
+                view.set_actual_only(False)
+                self.assertEqual(view._state['mode'], preference)
+                self.assertIsNotNone(view._state['marker'])
+                view.set_actual_only(True)
+            view.set_actual_known(False)
+            self.assertFalse(view._state['actualKnown'])
+            view.set_feedback_paused(False)
+            self.assertFalse(view._state['feedbackPaused'])
+        finally:
+            view.close()
+            view.deleteLater()
+            application.processEvents()
 
 
 if __name__ == '__main__':
