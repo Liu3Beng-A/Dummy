@@ -19,8 +19,8 @@ class ProtectionCoordinator;
 constexpr uint8_t MOTOR_REDUCTION[7] = {1, 50, 50, 50, 50, 50, 30};
 // 各轴电机轴 r/s 上限（与电机端 EEPROM velocityLimit 对齐；本期统一 30）
 constexpr float SLIDER_CAPS_V[7] = {30.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f};
-// 各轴加速度兜底（r/s²）：运行时回填未就绪时使用；地轨=30（57 电机端），J1=150, J2=100, J3~J6=200
-constexpr float JOINT_ACC_FALLBACK[7] = {30.0f, 150.0f, 100.0f, 200.0f, 200.0f, 200.0f, 200.0f};
+// 各轴加速度兜底（电机轴 r/s²）：未收到有效回读时，地轨与 J1~J6 统一使用 30。
+constexpr float JOINT_ACC_FALLBACK[7] = {30.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f};
 
 /*
   |   PARAMS   | `current_limit` | `acceleration` | `dce_kp` | `dce_kv` | `dce_ki` | `dce_kd` |
@@ -207,12 +207,11 @@ public:
     // 7 个轴的速度缓存（电机轴 r/s, 索引 0=地轨, 1..6=J1..J6）
     float dynamicJointSpeeds7[7] = {0};
 
-    // §3.3.1 各轴运行时加速度（r/s²）：异步从电机端 EEPROM 回填（§9 #7）；
-    // 本期用 JOINT_ACC_FALLBACK 兜底（初始值同兜底，回填协议就绪后由电机端覆盖）
-    // [v2026-10-03] 查询端补齐：索引 [7] 扩到 [9]
-    //   [0]=ALL 代理空闲槽；[1..7]=J1~J7/地轨（与 motorJ[1..7] 对齐）；[8]=夹爪
-    //   初始值沿用 JOINT_ACC_FALLBACK[0..6] + 夹爪 30；由 Init() 末尾 SyncAllMotorAcceleration() 异步覆盖
-    float jointAccRuntime[9] = {0};
+    // 各轴运行时加速度（电机轴 r/s²）：默认 30，收到电机实际回读后覆盖。
+    // [0]=ALL 代理空闲槽；[1..7]=J1~J7/地轨（与 motorJ[1..7] 对齐）；[8]=夹爪。
+    // Init() 查询及 #SYNC_ACC 只回填缓存；默认值不写入电机 EEPROM。
+    // 时间戳仍从 0 开始，初值不代表已经收到回读。
+    float jointAccRuntime[9] = {0.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f, 30.0f};
     uint32_t jointAccLastUpdateMs[9] = {0};
     float jointCurrentLimitRuntime[9] = {0};
     uint32_t jointCurrentLimitLastUpdateMs[9] = {0};

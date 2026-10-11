@@ -165,6 +165,8 @@ standard names. */
 
 /* USER CODE BEGIN Defines */
 #define configCHECK_FOR_STACK_OVERFLOW 2
+/* Float printf/scanf keep Bigint freelists in the calling task's _reent. */
+#define configUSE_NEWLIB_REENTRANT 1
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
 /* USER CODE END Defines */
 

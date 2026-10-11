@@ -55,15 +55,14 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/times.h>
+#include <stdint.h>
+#include <malloc.h>
+#include <reent.h>
 
 
 /* Variables */
-//#undef errno
-extern int errno;
 extern int __io_putchar(int ch) __attribute__((weak));
 extern int __io_getchar(void) __attribute__((weak));
-
-register char * stack_ptr asm("sp");
 
 char *__env[1] = { 0 };
 char **environ = __env;
@@ -114,27 +113,51 @@ __attribute__((weak)) int _write(int file, char *ptr, int len)
 	return len;
 }
 
+void *_sbrk_r(struct _reent *reent, ptrdiff_t incr)
+{
+    extern char __HeapBase;
+    extern char __HeapLimit;
+    static uintptr_t heap_end;
+    const uintptr_t base = (uintptr_t)&__HeapBase;
+    const uintptr_t limit = (uintptr_t)&__HeapLimit;
+    void *result = (void *)-1;
+
+    /* malloc already holds this recursive lock; also protect direct sbrk calls. */
+    __malloc_lock(reent);
+    if (heap_end == 0U)
+        heap_end = base;
+
+    const uintptr_t previous = heap_end;
+    if (incr >= 0)
+    {
+        const uintptr_t growth = (uintptr_t)incr;
+        /* Check before adding so a large request cannot wrap past the limit. */
+        if (growth > limit - previous)
+            goto exhausted;
+        heap_end = previous + growth;
+    }
+    else
+    {
+        /* Unsigned subtraction also handles PTRDIFF_MIN without signed UB. */
+        const uintptr_t shrink = (uintptr_t)0 - (uintptr_t)incr;
+        if (shrink > previous - base)
+            goto exhausted;
+        heap_end = previous - shrink;
+    }
+    result = (void *)previous;
+    goto done;
+
+exhausted:
+    /* Set the requested reent's errno, not newlib's legacy global errno stub. */
+    reent->_errno = ENOMEM;
+done:
+    __malloc_unlock(reent);
+    return result;
+}
+
 caddr_t _sbrk(int incr)
 {
-	extern char end asm("end");
-	static char *heap_end;
-	char *prev_heap_end;
-
-	if (heap_end == 0)
-		heap_end = &end;
-
-	prev_heap_end = heap_end;
-	if (heap_end + incr > stack_ptr)
-	{
-//		write(1, "Heap and stack collision\n", 25);
-//		abort();
-		errno = ENOMEM;
-		return (caddr_t) -1;
-	}
-
-	heap_end += incr;
-
-	return (caddr_t) prev_heap_end;
+    return (caddr_t)_sbrk_r(_REENT, (ptrdiff_t)incr);
 }
 
 int _close(int file)

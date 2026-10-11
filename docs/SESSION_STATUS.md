@@ -1,4 +1,51 @@
-# SESSION STATUS（2026-10-10）
+# SESSION STATUS（2026-10-11）
+
+## 当前验收：卡死回归未复现，用户批准与ACC默认值修复合并提交（2026-10-11）
+
+- **用户反馈/授权**：用户提供95cd40e2附件，明确“试了很久，没有复现这个bug，可以和acc同步修复一起提交”。本轮按此执行本地Git提交，范围为newlib集成修复、主控加速度缓存/兜底统一30及相关状态记录；不推送，不纳入独立上位机、测试助手或其他工作区改动。
+- **日志核对**：附件时间18:38:21.929～18:44:00.221，共45853个非空行，覆盖1234条MoveL、1140次MOTION_STATUS、533次GETJPOS、549次GETLPOS；1140次状态查询均有末行 `MOTION J7 v=`。MOTION_STATUS设10Hz，位置查询先各5Hz后各10Hz组合。18:43:58.514返回 `ok RESET id=1241 ms=4433`，18:44:00.221返回 `Disabled ok`，与用户报告本轮没有卡死一致；不将附件长度表述为完整长测总时长。
+- **结论边界**：18:39:10.116发送SYNC_ACC，10.303已finish；因此日志不单独证明“冷启动后完全不手动同步，J6仍同步抵达”。期间15条PLAN_FAILED后继续正常收发，属于规划拒绝，不归为HardFault。附件未打印FW_VERSION，本轮不重新宣称通过日志独立校验设备Flash版本，也不把一次回归通过视为排除所有未来故障。
+- **归档与验证**：附件及统计保存在 `build/diagnostics/acc_defaults_20261011/user_stress_test_1838.txt` 和同名前缀summary.json，原文SHA256=5ac632648c9825dac8d95a480f1e1fd2bd815d5add89e0a427979bbe2308129a。沿用已通过的Ninja Release构建、37053个分配器离线断言、链接检查与默认值/构建清单核对；本轮代码未再修改。使用仓库本地身份 Liu3Beng-A <liu3beng@icloud.com> 提交五个主控源文件及本文件中本任务相关段落，其他未提交内容保留。
+
+## 当前完成：主控各电机加速度默认值统一30（2026-10-11，待实机）
+
+- **当前问题/授权**：用户要求先核对主控默认加速度，若并非全30则统一为30；用户报告重新烧录后J6抵达不同步，发送#SYNC_ACC后恢复。此条件已由代码核实，直接按授权修改；不操作设备、不刷写、不提交。
+- **已确认事实**：`firmware_new/dummy-ref-core-fw/Robot/instances/dummy_robot.h:23` 原JOINT_ACC_FALLBACK依次为地轨30、J1 150、J2 100、J3~J6 200（电机轴r/s²），J6不是唯一不同的关节。原jointAccRuntime九槽全0，`dummy_robot.cpp:84,105,464` 在未回填时使用上述兜底。`dummy_robot.cpp:203,227,251` 的#SYNC_ACC查询电机并回填缓存，并不把电机加速度设置成30。缓存与真实值不一致可解释同步前后的差异，但本轮没有实机证明启动时具体哪个轴漏回读。
+- **最新改动**：仅修改主控 `Robot/instances/dummy_robot.h`：规划兜底七轴全部30，运行缓存node1~8（含地轨/夹爪）初值全部30，node0空槽仍0；回读时间戳仍0，后续真实回读仍可覆盖。修正原缓存“已按兜底初始化”的不实注释。本轮不改变电机EEPROM、减速比、速度、同步算法或查询流程；电机main.cpp各板型源码默认velocityAcc原本均为30圈/s²，不等于已读取设备保存值。
+- **验证/交付**：Ninja Release编译成功，仅原有RWX LOAD段警告。读回核对七轴兜底、八电机缓存与时间戳，并验证新旧构建清单仅上述一个头文件不同；487个生产输入与当前文件哈希一致。保留上一轮newlib修复。新主控版本20261011.02，group=1272780AC943421E，源码SHA256=0a1f32017a80827eb4ebef2ffb3b71be25c506b06faa6c498faa99a3ee12d1d0，BIN 453972字节，SHA256=76608f88df76d9286180b512021344478b0f53345814e7472d3de452cca50417。HEX/BIN/ELF/MAP、构建清单、日志与核对结果固定保存于 `build/diagnostics/acc_defaults_20261011/`；上一轮20261011.01副本未覆盖。
+- **未完成/复测**：用户刷本轮主控后先不主动发送#SYNC_ACC，用原动作观察J6同步，再继续之前的MoveL+10Hz MOTION_STATUS卡死回归。尚未验证本轮上电回读、实际同步抵达或newlib修复实机效果。
+
+## 当前完成：主控 newlib 修复已编译，待用户实机复测（2026-10-11）
+
+- **本轮授权**：用户回复“可以，执行”，批准下述四个主控文件的修复与编译。已开始实施；不刷写、不复位、不恢复调试暂停、不发运动命令、不提交。前两轮现场证据实际保存在仓库根目录 `build/diagnostics/` 下，保持原样。
+- **实现补充**：核对发现 `Core/Src/stm32f4xx_it.c:559` 直接执行 USB HAL 中断；`USB_DEVICE/Target/usbd_conf.c:118` 配置优先级5，USB CDC Init/DeInit 调用malloc/free。虽然存在UsbDeferredInterruptTask，当前中断入口并未转交给它。因此不能采用只暂停调度的堆锁，也不能让ISR等待任务互斥量。新增 `newlib_freertos.c` 以BASEPRI_MAX保护分配器、支持递归、保留并恢复外层原屏蔽值，启动前/调度暂停/任务回收均不依赖阻塞RTOS API；优先级高于RTOS屏蔽阈值的ISR禁止分配。锁只覆盖分配器及sbrk，不包住整次格式化或USB发送；实际最长中断延迟仍需实机观察。
+- **边界处理**：同时实现 `_sbrk_r` 和兼容 `_sbrk`，固定 `__HeapBase..__HeapLimit`、上端保留原2KiB MSP；增长先做差值检查、负数收缩防越界且兼容PTRDIFF_MIN，失败返回-1并设置所传_reent的ENOMEM。避免旧库_sbrk_r依赖全局errno而与任务独立errno不匹配。只读审核发现的其他stdio/env retarget空桩未泛化替换；本修复明确覆盖任务浮点转换状态及共享malloc分配器。
+- **最终改动**：仅新增/修改已批准的四个主控文件及本状态记录。既有CAN/查询相关改动、电机源码和上位机等未由本轮改动。任务 `_reent` 由FreeRTOS初始化、切换和回收；堆锁直接实现newlib标准 `__malloc_lock/__malloc_unlock`，未把空的retarget桩误当作有效锁。
+- **编译与离线验证**：Ninja Release通过。首轮新文件缺少task.h导致configASSERT宏展开编译失败，补齐后通过；最终链接仅保留原有RWX LOAD段警告。实际ELF中malloc/free调用新增锁，malloc调用新_sbrk_r；vTaskStartScheduler及vTaskSwitchContext都将 `_impure_ptr` 设置为当前TCB+88。原生32位MSVC回归使用实际锁源码和提取的_sbrk函数，替换CMSIS寄存器/链接符号为模拟环境，共37053个断言通过，覆盖正常/递归锁、原BASEPRI保留、USB优先级ISR、拒绝高优先级ISR、上下界、PTRDIFF_MIN/MAX、失败不移动堆顶、指定reent errno、10000次随机伸缩。模拟测试不代替ARM中断时序或实机压力测试。
+- **内存结果**：_reent=512字节，TCB=608字节，USB/UART静态TCB同步增长；链接C堆为 `[0x2000AE60,0x2001F800)`，容量84384字节，上方保留2048字节MSP。SRAM静态段加最小堆栈预留共62048/131072字节；CCM的64KiB是FreeRTOS预留堆池，链接占用100%不代表动态空间已耗尽。根据既有任务配置与旧现场估算可容纳TCB增加，修复后的启动峰值、运行剩余/栈高水位及分配器屏蔽中断的最长延迟仍需实机确认。
+- **交付版本与证据**：`20261011.01`，group=`0C20FB336DF9441E`，源码SHA256=`c2cccf03aef0c45e933dca3662d32130bee7809b8fdfb7b02a852f483828b08d`。BIN大小453956，SHA256=`5e574c2063b2da733ef87e1f8e34f5b8cbf7b5031baa112e6bc6e8da96b31fe6`。已核对构建清单487个生产输入均与当前源码一致。固定交付副本在 `build/diagnostics/newlib_repair_20261011/firmware/`（HEX/BIN/ELF/MAP/manifest）；父目录保存离线测试脚本、编译/测试结果、链接反汇编与build_verification.json。两轮旧现场BIN校验和均仍为625437...1c1cd。
+- **对照边界**：与已抓取的旧固件比较，除四个修复文件，还包含此前已存在的主控 `Bsp/communication/interface_can.cpp/.hpp` 与 `UserApp/protocols/ascii_protocol.cpp` 差异；共享身份清单另包含此前电机 `UserApp/main.cpp` 差异，本轮没有编译或交付电机固件。因此交付件是当前工作区主控测试版本，不是严格只含newlib四文件的旧固件A/B版本，也不是主控+电机配套发布包。全部差异路径保存在build_verification.json。
+- **下一步实机**：用户只刷主控，重启后用 `#FW_VERSION 0` 核对版本/group；先在串口助手test重复此前的MoveL加10Hz MOTION_STATUS，其他周期查询关闭，观察10分钟并保留日志/现象。通过后再考虑三路各5Hz组合与Dummy手柄回归。若再次OLED/RGB全停刷，保留供电和ST-Link，不复位，重新读现场；仅黄色闪灯/OLED刷新或PLAN_FAILED应单独分类。当前尚未刷写、未恢复暂停、未执行运动，不能宣称实机卡死已消除。
+
+以下为执行前方案与预算，授权状态以上述最新记录为准：
+
+- **当前请求与授权边界**：用户问“下一步是什么”。本轮只核对方案和内存预算，未修改代码/配置，未操作硬件。优先修复先前已经实机抓获的newlib链表损坏风险，再复测10Hz MOTION_STATUS + MoveL；手柄PLAN_FAILED单独分析，不混入本次主控运行库改动。
+- **拟修改范围（尚未执行）**：主控 `Core/Inc/FreeRTOSConfig.h` 启用任务独立newlib状态；新增 `Core/Src/newlib_freertos.c` 补RTOS下运行库/堆分配互斥与启动期处理；`Core/Src/syscalls.c` 修正 `_sbrk` 的边界/溢出检查，不再用当前任务SP作为堆上界；`STM32F405RGTx_FLASH.ld` 明确C堆的起止界限并保留主栈空间；同步本状态记录。修复不只包住MOTION_STATUS，因为OLED输出、运动参数sscanf和其他动态分配都需满足同一运行库约束。实施前遵守AGENTS明确文件/作用并等待确认；刷写和运动测试不由此自动授权。
+- **内存预检**：用已安装Arm编译器仅向stdout编译类型尺寸探针（未产生项目源码/目标文件）：`sizeof(struct _reent)=512`，StaticTask_t由92变608字节，即每任务增加516字节。两轮已保存SRAM中的FreeRTOS堆历史最低剩余均7400字节，当前剩余9512字节，累计任务编号12、当前任务10；UART/USB的栈和TCB为静态存储。初步预算可行，但不能替代修复后链接图、启动峰值/任务创建成功及实机高水位验证。
+- **需覆盖的集成检查**：启动前全局对象分配、RTOS调度开始/暂停、递归分配与任务删除回收；不得因互斥策略引入死锁或长时间关闭中断。已确认通信初始化任务45000字节栈随后常驻，不能把其内存当作已回收。验证生成ELF的库锁确实生效、_impure_ptr随任务切换，C堆与SRAM主栈不重叠，再交付固件供原场景回归。
+
+## 实机现场已抓获：MOTION_STATUS 浮点转换内部链表损坏触发 HardFault（2026-10-11）
+
+- **用户授权/范围**：用户提供前段日志 `33516103-d7c2-431f-95d8-aca9b2368e1a/已粘贴的文本.txt`，明确“ST-Link 已连接，已卡死，未复位”。本轮执行 ST-Link 热连接、halt、读取寄存器/故障状态/SRAM/CCM/Flash；未发送 reset、program、resume，未改固件/助手/配置，未构建或提交。新增取证输出在 `build/diagnostics/freeze_20261011_1709/`，并更新本状态。
+- **证据已保存**：目录含 `openocd_capture.txt`、SRAM 128KiB、CCM 64KiB、Flash 1MiB、对应 ELF/BIN/构建清单副本、`gdb_fault_backtrace.txt` 和 `fault_analysis.json`。后续调用栈分析用 Python 在本机回环提供只读快照给 GDB，未再次连接/操作实机。沙箱内回环被拒绝后，在沙箱外离线分析成功。工具已退出；未下发恢复运行。
+- **版本闭环**：用户日志 `#FW_VERSION 0` 返回主控 `20261010.04`、group `3D8460C4CBB44FA2`，与现有清单一致。实际 Flash 前 453764 字节与本地 BIN 完全相等；BIN SHA256 `6254377243597fbb4741a1e1917775f056e6dd6dfd7f8490d0c0b74d8811c1cd`。因此本次地址/反汇编确实对应设备固件。
+- **硬故障寄存器**：当前 PC `0x080085dc=HardFault_Handler`，LR/EXC_RETURN `0xffffffed`，PSP `0x20002db8`。异常硬件栈帧 PC `0x08045082`、LR `0x0804c64b`、R0 `0x00320000`；CFSR=`0x00008200`（PRECISERR、BFARVALID），HFSR=`0x40000000`（FORCED），BFAR=`0x00320000`。当前 PRIMASK/BASEPRI/FAULTMASK 均0。FP扩展帧还原后的异常前SP=`0x20002e20`，与 `_Balloc` 序言保存寄存器位置核对一致。
+- **已确认调用链**：GDB 从保存的故障上下文还原 `_Balloc → _dtoa_r → _svfprintf_r → snprintf → DummyRobot::PrintMotionStatus → HandleStopCommand → OnUsbAsciiCmd → ASCII_protocol_process_line → ASCII_protocol_parse_stream`。更外层回溯停止，不能据此单独断言栈损坏。`pxCurrentTCB=0x2000284c` 对应 `UsbServerTask`。正在格式化 `Robot/instances/dummy_robot.cpp:1620` 的 J1 goal/real 行，axis=1、goal≈2.415766e-6、real=0，为有效数值；当前输出尚未进入发送。
+- **具体损坏对象**：故障指令 `_Balloc+0x12` 为 `ldr r2,[r0,#0]`。实际 `_impure_ptr=0x200008c8`，其偏移0x44的 `_freelist` 指向 `0x2000b998`；第0项内容已经是非法指针 `0x00320000`。`_Balloc` 从此槽读取R0再解引用，精确触发总线错误。这是浮点转文字内部 Bigint 空闲链表损坏，已经超出“疑似格式化”的日志推测；尚未抓到首次把此链表写坏的指令。
+- **发送侧反证**：USB CDC class=`0x2000b920`，CDC Tx Buffer=`0x200053cc`，Length=34、State=0；最后发送内容完整为 `MOTION CAN alst=75 terr=2 busy=0\r\n`，USB统计rx=135、tx=3171、tx_overrun_cnt=0。本次停止发生在下一条J1格式化内部，不能解释成仅仅USB发送忙/等待超时。局部response缓冲尚未格式化完成、含前一行残留，不能把那些残留算成新的一次乱码发送证据。
+- **栈检查**：`stackOverflowTask`/`stackOverflowTaskName` 均0；USB栈底连续0xA5保留620字节，OLED栈底保留812字节。未见本轮栈溢出钩子触发或底部填充值耗尽，不声称由此排除所有内存越界。
+- **上游原因分级**：已证实同一版本 snprintf/vsnprintf 共用 `_impure_ptr`，FreeRTOS未启用NEWLIB_REENTRANT，retarget递归锁实现为空；OLED 50Hz也格式化浮点。多任务共享newlib状态/分配缺少保护是最强上游解释，与内部链表损坏一致，但快照没有首次写坏动作，不能伪称已观测到具体抢占顺序。`_sbrk`使用当前SP的问题仍是独立已知风险，本次故障不在 `_sbrk` 或分配返回NULL路径。继续遵守修复前说明范围并取得用户确认。
+- **日志/助手补充**：用户明确此次附件是前段快照，末尾17:11:18.952正常关闭查询，并非故障尾段，不能据此推算本次故障时刻。用户反馈当前界面没有保存日志；仓库测试副本 `串口助手_test.py:338` 有“保存测试日志”按钮，运行版本/窗口可见性尚未核对，本轮不为此延误现场或修改UI。
 
 ## 当前分析：手柄控制期间上位机主动STOP，具体触发来源待定位（2026-10-10，只读分析与离线复现）
 

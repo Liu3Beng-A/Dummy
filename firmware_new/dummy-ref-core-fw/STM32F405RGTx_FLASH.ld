@@ -187,6 +187,7 @@ SECTIONS
   ._user_heap_stack :
   {
     . = ALIGN(8);
+    __HeapBase = .;
     PROVIDE ( end = . );
     PROVIDE ( _end = . );
     . = . + _Min_Heap_Size;
@@ -195,6 +196,14 @@ SECTIONS
   } >RAM
 
   
+
+  /* The C heap grows in SRAM; task stacks may be in CCM or static SRAM.
+     Reserve the top of SRAM for MSP instead of comparing against task SP. */
+  __HeapLimit = _estack - _Min_Stack_Size;
+  ASSERT(__HeapBase + _Min_Heap_Size <= __HeapLimit,
+         "SRAM cannot fit the minimum C heap and MSP stack")
+  ASSERT((__HeapBase & 7) == 0 && (__HeapLimit & 7) == 0,
+         "C heap bounds must be 8-byte aligned")
 
   /* Remove information from the standard libraries */
   /DISCARD/ :
