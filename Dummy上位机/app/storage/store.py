@@ -21,7 +21,7 @@ DEFAULT_SETTINGS = {
     "window_state": "", "viewer_mode": "preview", "show_grid": True,
     "show_axes": True, "auto_poll": True, "poll_enabled": True, "model_path": "",
     "gamepad_config": default_gamepad_config(),
-    "gamepad_defaults_revision": 4,
+    "gamepad_defaults_revision": 8,
 }
 JOINT_LIMITS = [(-175, 175), (-75, 90), (0, 180), (-270, 270),
                 (-100, 100), (-180, 180), (-250, 250)]
@@ -151,6 +151,34 @@ class AppStore:
                     profile["robot"]["cmd_speed"] = default_gamepad_config()["robot"]["cmd_speed"]
                 self.settings["gamepad_config"] = validate_gamepad_config(profile)
                 self.settings["gamepad_defaults_revision"] = 4
+            if type(revision) is int and revision in (1, 2, 3, 4):
+                profile = self.settings["gamepad_config"]
+                defaults = default_gamepad_config()["control"]
+                for key, previous in (("linear_speed_mm_s", 50), ("angular_speed_deg_s", 5)):
+                    if profile["control"][key] == previous:
+                        profile["control"][key] = defaults[key]
+                self.settings["gamepad_config"] = validate_gamepad_config(profile)
+                self.settings["gamepad_defaults_revision"] = 5
+            if type(revision) is int and revision in (1, 2, 3, 4, 5):
+                profile = self.settings["gamepad_config"]
+                if profile["control"]["gripper_speed_percent_s"] == 30:
+                    profile["control"]["gripper_speed_percent_s"] = default_gamepad_config()["control"]["gripper_speed_percent_s"]
+                self.settings["gamepad_config"] = validate_gamepad_config(profile)
+                self.settings["gamepad_defaults_revision"] = 6
+            if type(revision) is int and revision in (1, 2, 3, 4, 5, 6):
+                profile = self.settings["gamepad_config"]
+                if profile["control"]["gripper_speed_percent_s"] == 90:
+                    profile["control"]["gripper_speed_percent_s"] = default_gamepad_config()["control"]["gripper_speed_percent_s"]
+                self.settings["gamepad_config"] = validate_gamepad_config(profile)
+                self.settings["gamepad_defaults_revision"] = 7
+            if type(revision) is int and revision in (1, 2, 3, 4, 5, 6, 7):
+                profile = self.settings["gamepad_config"]
+                defaults = default_gamepad_config()["control"]
+                for key, previous in (("linear_speed_mm_s", 100), ("send_interval_s", .05)):
+                    if profile["control"][key] == previous:
+                        profile["control"][key] = defaults[key]
+                self.settings["gamepad_config"] = validate_gamepad_config(profile)
+                self.settings["gamepad_defaults_revision"] = 8
         except ValueError as exc:
             self.settings["gamepad_config"] = default_gamepad_config()
             self.load_errors.append(f"手柄配置读取失败：{exc}；已使用默认配置")
@@ -184,15 +212,15 @@ class AppStore:
 
     def _normalize_settings(self, settings=None):
         settings = self.settings if settings is None else settings
-        if type(settings["gamepad_defaults_revision"]) is not int or settings["gamepad_defaults_revision"] < 4:
-            settings["gamepad_defaults_revision"] = 4
+        if type(settings["gamepad_defaults_revision"]) is not int or settings["gamepad_defaults_revision"] < 8:
+            settings["gamepad_defaults_revision"] = 8
         if settings["theme"] not in ("light", "dark"):
             settings["theme"] = "light"
         if settings["connection_type"] not in ("USB", "UART4"):
             settings["connection_type"] = "USB"
         if settings["viewer_mode"] not in ("preview", "actual"):
             settings["viewer_mode"] = "preview"
-        for key, low, high, default in (("poll_hz", 1, 10, 5), ("log_limit", 500, 50000, 5000)):
+        for key, low, high, default in (("poll_hz", 1, 30, 5), ("log_limit", 500, 50000, 5000)):
             try:
                 settings[key] = max(low, min(high, int(settings[key])))
             except (TypeError, ValueError, OverflowError):

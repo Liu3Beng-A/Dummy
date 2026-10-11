@@ -41,6 +41,24 @@ class GamepadControllerTests(GamepadFixture, unittest.TestCase):
         self.assertTrue(self.g.claim())
         self.assertEqual(self.take(), [])
 
+    def test_claim_cancels_passive_poll_then_resumes_shared_poll_in_new_generation(self):
+        self.c.set_polling(True, 30)
+        self.c._poll_position()
+        queued = self.take()[0]
+        token = self.c._position_request["token"]
+        self.assertTrue(self.g.claim())
+        self.assertIsNone(self.c._position_request)
+        self.assertFalse(self.c._can_write(*queued))
+        self.c._poll_position()
+        current = self.c._position_request
+        self.c._position_timeout(token)
+        self.assertIs(self.c._position_request, current)
+        self.assertEqual(self.write(), ["#GETJPOS"])
+        self.feed("ok 2 9 78 3 87 -2 0")
+        self.assertTrue(self.g.claimed)
+        self.assertEqual(self.g.stage, "connected")
+        self.assertIsNone(self.g.target_tcp)
+
     def test_deadline_needs_actual_admission_not_enqueue_or_spurious_written(self):
         self.g.claim()
         self.g.start()
@@ -87,26 +105,73 @@ class GamepadControllerTests(GamepadFixture, unittest.TestCase):
         self.c._query_command_mode()
         self.assertEqual([command for _gen, command in self.take()], ["#GET_CMDMODE 101"])
 
-    def test_claimed_blocks_all_position_queries_and_preserves_targets(self):
+    def test_claimed_shared_joint_polling_updates_actual_and_preserves_targets(self):
         self.ready_session()
         target = list(self.g.target_tcp)
-        self.c.set_polling(True, 10)
+        reference = list(self.g.command_reference_tcp)
+        edit = [field.get() for field in self.c.ent_joints]
+        synced = []
+        self.c.position_synced.connect(lambda *args: synced.append(args))
+        self.c.set_polling(True, 30)
+        self.assertEqual(self.c._poll_timer.interval(), 34)
         for _ in range(20):
             self.clock.advance(.2)
             self.sample()
             self.g.tick()
             self.c._poll_position()
+            request = self.c._position_request
+            self.assertEqual(request["source"], "telemetry")
+            self.assertFalse(request["sync"])
+            for _ in range(30):
+                self.c._poll_position()
+            self.assertEqual(self.write(), ["#GETJPOS"])
+            self.feed("ok 2 9 78 3 87 -2 0")
+        self.assertEqual(self.c.actual_pose, [2, 9, 78, 3, 87, -2, 0])
+        self.assertEqual(synced, [])
+        self.assertEqual([field.get() for field in self.c.ent_joints], edit)
         for source in ("ui", "telemetry", "gamepad"):
             for command in ("#GETJPOS", "#GETLPOS", "#GETRAILPOS", "#GETJPOS\tignored"):
+                # Direct, untracked queries cannot bypass the shared request path.
                 self.assertFalse(self.c.send_cmd(command, source=source), (source, command))
                 self.assertFalse(self.c._can_write(self.c._tx_generation, command))
             for kind in ("j", "l"):
-                self.assertFalse(self.c._request_position(kind, False, source=source))
+                if source != "telemetry" or kind != "j":
+                    self.assertFalse(self.c._request_position(kind, False, source=source))
+            self.assertFalse(self.c._request_position("j", True, source=source))
         self.assertEqual(self.take(), [])
         self.assertIsNone(self.c._position_request)
         self.assertEqual(self.g.target_tcp, target)
+        self.assertEqual(self.g.command_reference_tcp, reference)
         self.assertIsNone(self.g.actual_tcp)
         self.assertTrue(self.g.ready)
+
+    def test_shared_poll_off_timeout_stop_and_failed_enqueue_do_not_change_session(self):
+        self.ready_session()
+        self.c.set_polling(False, 30)
+        self.c._poll_position()
+        self.assertEqual(self.take(), [])
+        self.assertFalse(self.c._poll_timer.isActive())
+        self.c.set_polling(True, 30)
+        self.c._poll_position()
+        request = self.c._position_request
+        self.assertEqual(self.write(), ["#GETJPOS"])
+        self.c._position_timeout(request["token"])
+        self.assertTrue(self.g.ready)
+        self.assertEqual(self.take(), [])
+        self.assertTrue(self.c.state()["actual_stale"])
+        self.c._poll_position()
+        queued = self.take()[0]
+        self.assertFalse(self.c.read_and_sync_from_robot())
+        self.assertFalse(self.c._position_request["sync"])
+        self.g.stop()
+        self.assertFalse(self.c._can_write(*queued))
+        self.c._position_timeout(request["token"])
+        self.c._poll_position()
+        self.assertEqual(self.write(), ["!STOP"])
+        self.feed("STOP locked")
+        self.assertFalse(self.c._request_position("j", False, source="telemetry"))
+        self.assertIsNone(self.c._position_request)
+        self.assertIsNone(self.c._pending_sync)
 
     def test_ui_stop_is_priority_and_releasing_does_not_send_a_second_stop(self):
         self.ready_session()
@@ -117,7 +182,7 @@ class GamepadControllerTests(GamepadFixture, unittest.TestCase):
         self.g.release()
         self.g.release()
         self.assertEqual(self.write(), ["!STOP"])
-        self.assertFalse(self.c._can_write(old_generation, "@147.52,0,288.917,180,0,180,10"))
+        self.assertFalse(self.c._can_write(old_generation, "@147.5,0,288.9,180,0,180,10"))
         self.feed("accepted MOVEL id=42", "ok CMDMODE mode=2", "ok MOVEJ id=41", "STOP locked")
         self.assertEqual(self.take(), [])
         self.assertFalse(self.g.claimed)
@@ -145,7 +210,7 @@ class GamepadControllerTests(GamepadFixture, unittest.TestCase):
         self.assertTrue(self.c._stop_locked)
         self.assertEqual(self.take(), [])
 
-    def test_delayed_writer_starts_motion_and_gripper_throttle_at_real_write(self):
+    def test_delayed_writer_coalesces_motion_while_gripper_throttle_uses_real_write(self):
         self.ready_session()
         self.g.set_target(self.target(1))
         self.g.set_gripper_base(50)
@@ -157,14 +222,14 @@ class GamepadControllerTests(GamepadFixture, unittest.TestCase):
         self.g.set_target(self.target(2))
         self.g.gripper_target = 51
         self.g.tick()
-        self.assertEqual(self.take(), [])
+        commands = self.write()
+        self.assertIn("@148.5,0,288.9,180,0,180,10", commands)
+        self.assertNotIn("!HAND_POS 51", commands)
+        self.feed("queued MOVEL id=43 mode=INT", "accepted MOVEL id=43", "ok 0 10 80 0 90 0 37.25")
         self.clock.advance(.051)
         self.sample()
         self.g.tick()
-        commands = self.write()
-        self.assertIn("@148.52,0,288.917,180,0,180,10", commands)
-        self.assertNotIn("!HAND_POS 51", commands)
-        self.feed("queued MOVEL id=43 mode=INT", "accepted MOVEL id=43", "ok 0 10 80 0 90 0 37.25")
+        self.assertEqual(self.take(), [])
         self.clock.advance(.05)
         self.sample()
         self.g.tick()
@@ -223,17 +288,20 @@ class GamepadControllerTests(GamepadFixture, unittest.TestCase):
         self.assertEqual(self.g.command_reference_tcp, initial)
         self.assertIsNotNone(self.g._stream)
         self.write(pending)
-        self.assertAlmostEqual(self.g.command_reference_tcp[0], 147.52)
+        self.assertAlmostEqual(self.g.command_reference_tcp[0], 147.5)
         self.assertAlmostEqual(self.g.target_tcp[0], 148.520190203)
         self.assertIsNone(self.g._stream)
         self.assertIsNone(self.g.actual_tcp)
         self.assertEqual(self.c.actual_pose, actual)
         self.c._poll_position()
-        self.assertEqual(self.take(), [])
+        self.assertEqual(self.write(), ["#GETJPOS"])
+        self.feed("ok 2 9 78 3 87 -2 0")
+        self.assertAlmostEqual(self.g.command_reference_tcp[0], 147.5)
+        self.assertAlmostEqual(self.g.target_tcp[0], 148.520190203)
         self.clock.advance(.051)
         self.sample()
         self.g.tick()
-        self.assertEqual(self.write(), ["@148.52,0,288.917,180,0,180,10"])
+        self.assertEqual(self.write(), ["@148.5,0,288.9,180,0,180,10"])
         self.g.stop()
         self.feed("accepted MOVEL id=43")
         self.assertIsNone(self.g.command_reference_tcp)

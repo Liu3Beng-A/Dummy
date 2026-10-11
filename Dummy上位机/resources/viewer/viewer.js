@@ -56,6 +56,54 @@ let previousVisibilitySeq = -1;
 let disposed = false;
 const meshMaterials = new Map();
 let cameraName = 'isometric';
+// Display-only damping. Keep currentState.actual as the unmodified feedback.
+const ACTUAL_SMOOTHING_SECONDS = 0.05;
+const FEEDBACK_JOINTS = new Set(['Joint1', 'Joint2', 'Joint3', 'Joint4', 'Joint5', 'Joint6', 'rail']);
+let displayedActual = null;
+let feedbackContinuous = false;
+let previousFrameTime = null;
+
+function updateActualState(state) {
+  if (!state.actualKnown) {
+    displayedActual = null;
+    feedbackContinuous = false;
+    return;
+  }
+  const values = state.actual || {};
+  const continuous = !state.stale && !state.feedbackPaused && !document.hidden;
+  // Never interpolate from an invented pose or replay a paused/expired session.
+  if (!displayedActual || !feedbackContinuous || !continuous) {
+    displayedActual = { ...values };
+    actual.setJointValues(values);
+  } else {
+    // Fingers may illustrate a commanded opening rather than real feedback.
+    actual.setJointValues(Object.fromEntries(Object.entries(values)
+      .filter(([name]) => !FEEDBACK_JOINTS.has(name))));
+  }
+  feedbackContinuous = continuous;
+}
+
+function animateActual(dt) {
+  if (!actual || !currentState?.actualKnown || !displayedActual) return;
+  const values = currentState.actual || {};
+  if (!feedbackContinuous || document.hidden || dt > 0.25) {
+    displayedActual = { ...values };
+    actual.setJointValues(values);
+    return;
+  }
+  const updates = {};
+  for (const name of FEEDBACK_JOINTS) {
+    const goal = values[name];
+    if (!Number.isFinite(goal)) continue;
+    const previous = displayedActual[name] ?? goal;
+    const damped = THREE.MathUtils.damp(previous, goal, 1 / ACTUAL_SMOOTHING_SECONDS, dt);
+    const epsilon = name === 'rail' ? 1e-7 : 1e-6;
+    const next = Math.abs(goal - damped) <= epsilon ? goal : damped;
+    if (next !== previous) updates[name] = next;
+    displayedActual[name] = next;
+  }
+  actual.setJointValues(updates);
+}
 
 function setCamera(name) {
   const points = {
@@ -63,7 +111,9 @@ function setCamera(name) {
     top: [0.001, -0.001, 1.7], isometric: [1.02, -1.2, 0.9],
   };
   cameraName = name;
-  const reference = currentState?.mode === 'actual' && currentState?.actualKnown ? actual : target;
+  const jointPreview = currentState?.mode === 'preview'
+    && currentState?.actualOnly !== true && !currentState?.marker;
+  const reference = jointPreview ? target : currentState?.actualKnown ? actual : null;
   const center = new THREE.Vector3(0, 0, 0.28);
   const outward = new THREE.Vector3(...(points[name] || points.isometric)).sub(center).normalize();
   let distance = 1.6;
@@ -132,12 +182,12 @@ function styleRobot(robot, ghost, highlight) {
       const base = meshMaterials.get(material);
       if (base?.color) material.color.copy(base.color);
       if (base?.emissive) material.emissive.copy(base.emissive);
-      material.opacity = ghost ? 0.18 : 1;
+      material.opacity = ghost ? (selected ? 0.42 : 0.28) : 1;
       material.transparent = ghost;
       material.depthWrite = !ghost;
-      if (ghost && material.color) material.color.setHex(0x6481a6);
-      if (selected && !ghost) {
-        material.color?.lerp(new THREE.Color(0x4389ff), 0.55);
+      if (ghost && material.color) material.color.setHex(0x4389ff);
+      if (selected) {
+        if (!ghost) material.color?.lerp(new THREE.Color(0x4389ff), 0.55);
         material.emissive?.setHex(0x16386d);
       }
     }
@@ -153,6 +203,8 @@ function setState(state) {
   const actualOnly = state.actualOnly === true;
   const feedbackPaused = state.feedbackPaused === true;
   const preview = !actualOnly && state.mode === 'preview';
+  const markerVisible = !actualOnly && Boolean(state.marker);
+  const jointPreview = preview && !markerVisible;
   document.getElementById('mode').textContent = actualOnly ? feedbackPaused
     ? '最近实际姿态 · 回读已暂停' : '实际关节 · 串口回读'
     : preview ? '目标预览 · 不发送运动' : '实际位置 · 串口回读';
@@ -161,19 +213,25 @@ function setState(state) {
     : feedbackPaused ? '保留最近姿态 · 非实时'
     : state.stale ? '回读已过期 · 保留最近姿态' : '位置数据有效';
   telemetry.classList.toggle('warning', state.actualKnown && (state.stale || feedbackPaused));
-  document.getElementById('solid-label').textContent = preview ? '目标预览' : feedbackPaused ? '最近实际姿态' : '实际回读';
-  document.getElementById('ghost-label').hidden = !preview || !state.actualKnown;
-  document.getElementById('gripper-status').textContent = !preview && state.actualGripperKnown
-    ? '夹爪：实际回读' : actualOnly ? '夹爪：固定示意（无实际回读）' : '夹爪：目标开度（无实际回读）';
+  const solidLabel = document.getElementById('solid-label');
+  solidLabel.hidden = !state.actualKnown;
+  solidLabel.querySelector('span').textContent = feedbackPaused || state.stale
+    ? '最近回读 · 实体' : '实际回读 · 实体';
+  document.getElementById('ghost-label').hidden = !jointPreview;
+  document.getElementById('gripper-status').textContent = state.actualKnown && state.actualGripperKnown
+    ? jointPreview ? '夹爪：实体回读 · 虚体目标' : '夹爪：实际回读'
+    : actualOnly ? state.commandedGripper != null
+      ? `夹爪：已发送目标 ${state.commandedGripper}%（无实际回读）`
+      : '夹爪：固定示意（无实际回读）'
+    : '夹爪：目标开度（无实际回读）';
   if (target && actual) {
     target.setJointValues(state.target || {});
-    actual.setJointValues(state.actual || {});
-    target.visible = preview;
+    updateActualState(state);
+    target.visible = jointPreview;
     actual.visible = Boolean(state.actualKnown);
-    styleRobot(target, false, state.highlight);
-    styleRobot(actual, preview, state.highlight);
+    styleRobot(target, true, state.highlight);
+    styleRobot(actual, false, preview ? null : state.highlight);
   }
-  const markerVisible = !actualOnly && Boolean(state.marker);
   marker.visible = markerVisible;
   if (markerVisible) {
     marker.position.set(...state.marker.position);
@@ -181,6 +239,7 @@ function setState(state) {
     marker.rotation.set(...state.marker.orientation, 'ZYX');
   }
   document.getElementById('marker-label').hidden = !markerVisible;
+  document.querySelector('.legend').hidden = !state.actualKnown && !jointPreview && !markerVisible;
   if (previousCameraSeq !== state.cameraSeq) {
     previousCameraSeq = state.cameraSeq;
     setCamera(state.camera);
@@ -230,6 +289,8 @@ manager.onLoad = () => {
   target = sourceRobot.clone(true);
   prepareRobot(actual);
   prepareRobot(target);
+  styleRobot(actual, false, null);
+  styleRobot(target, true, null);
   scene.add(actual, target);
   actual.visible = false;
   target.setJointValues({ Joint2: -75 * Math.PI / 180, Joint3: Math.PI });
@@ -260,9 +321,12 @@ const resize = new ResizeObserver(() => {
   if (window.robotViewer?.loaded) setCamera(cameraName);
 });
 resize.observe(root);
-function animate() {
+function animate(time = performance.now()) {
   if (disposed) return;
   requestAnimationFrame(animate);
+  const dt = previousFrameTime == null ? 0 : Math.max(0, (time - previousFrameTime) / 1000);
+  previousFrameTime = time;
+  animateActual(dt);
   controls.update();
   // An obscured/tabbed view can skip expensive GL drawing while preserving state.
   if (!document.hidden) renderer.render(scene, camera);

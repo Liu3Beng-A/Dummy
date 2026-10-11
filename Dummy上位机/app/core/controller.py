@@ -98,6 +98,7 @@ class RobotController(QObject, RobotBusiness):
         self._poll_enabled = True
         self._poll_hz = 5
         self._poll_timer = QTimer(self)
+        self._poll_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._poll_timer.timeout.connect(self._poll_position)
         self._stale_timer = QTimer(self)
         self._stale_timer.setInterval(500)
@@ -180,6 +181,7 @@ class RobotController(QObject, RobotBusiness):
                              now - self.last_actual_at > max(1.5, 3 / self._poll_hz)),
             "last_actual_at": self.last_actual_at,
             "polling_enabled": self._poll_enabled, "polling_hz": self._poll_hz,
+            "polling_paused": self._position_polling_paused(),
             "actual_pose": self.actual_pose,
             "actual_cartesian_pose": deepcopy(self.actual_cartesian_pose),
             "parameter_busy": self._parameter_request is not None,
@@ -465,10 +467,19 @@ class RobotController(QObject, RobotBusiness):
         fields = str(command).split()
         return bool(fields) and fields[0] in ("#GETJPOS", "#GETLPOS", "#GETRAILPOS")
 
+    def _is_joint_telemetry_request(self, generation, command):
+        request = self._position_request
+        return bool(command == "#GETJPOS" and request and request["kind"] == "j" and
+                    request.get("source") == "telemetry" and not request["sync"] and
+                    request["generation"] == generation)
+
     def _can_write(self, generation, command):
         diagnostic = capabilities.diagnostic(command)
         allowed = (self.is_connected and generation == self._tx_generation and
-                not (self._control_owner == "gamepad" and self._is_position_command(command)) and
+                (self._control_owner != "gamepad" or not command.startswith("@") or
+                 self.gamepad.can_write_stream(generation, command)) and
+                (self._control_owner != "gamepad" or not self._is_position_command(command) or
+                 self._is_joint_telemetry_request(generation, command)) and
                 (not self._stop_locked or diagnostic or command in ("!STOP", "!START", "!DISABLE")) and
                 (not self._calibration_busy or diagnostic or command in ("!CALIBRATION", "!STOP", "!DISABLE")))
         if allowed:
@@ -493,17 +504,19 @@ class RobotController(QObject, RobotBusiness):
         if source not in ("ui", "gamepad", "telemetry"):
             self.log("未知指令来源", "WARN")
             return False
-        if self._is_position_command(command) and (source == "gamepad" or self._control_owner == "gamepad"):
-            self.log("手柄控制已取消位置查询；保留最后一次实际姿态", "WARN")
+        if self._is_position_command(command) and (source == "gamepad" or
+                (self._control_owner == "gamepad" and not
+                 (source == "telemetry" and self._is_joint_telemetry_request(self._tx_generation, command)))):
+            self.log("手柄控制中仅使用共享关节轮询更新实际模型，请勿手动同步编辑目标", "WARN")
             return False
         if source == "gamepad" and not self.gamepad.claimed and command not in ("!STOP", "!DISABLE"):
             self.log("手柄尚未接管，指令未发送", "WARN")
             return False
         if self._control_owner == "gamepad" and source == "ui" and command not in ("!STOP", "!DISABLE"):
             verb = command.split()[0]
-            readonly = verb in {"#GET_PID", "#GETJACC", "#GETI", "#STACK", "#MOTION_STATUS", "#RGB_GET", "#RGB_STATUS", "#STALL_STATUS", "#CAL_STATUS"}
+            readonly = capabilities.diagnostic(command) or verb in {"#GET_PID", "#GETJACC", "#GETI", "#STACK"}
             if not readonly:
-                self.log("手柄控制中，请先释放并确认停止；STOP / DISABLE 始终可用", "WARN")
+                self.log("手柄控制中，请先释放控制；STOP / DISABLE 始终可用", "WARN")
                 return False
         if not self.supports(command):
             self.log(f"当前 UART4 固件不支持 {command.split()[0]}；请使用 USB", "WARN")
@@ -698,7 +711,10 @@ class RobotController(QObject, RobotBusiness):
 
     @staticmethod
     def _validate_command(command):
-        if command[0] in (">", "&", "@"):
+        if command.split()[0] in ("#FW_VERSION", "#CAN_DIAG"):
+            if not capabilities.identity_query(command):
+                raise ValueError("固件版本查询需节点 0～8，CAN 诊断需节点 1～8；可选请求号为 1～65535")
+        elif command[0] in (">", "&", "@"):
             count = 7 if command[0] == "@" else 8
             values = finite_numbers(command[1:], count)
             if values is None:
@@ -1022,24 +1038,22 @@ class RobotController(QObject, RobotBusiness):
 
     def set_polling(self, enabled, hz=5):
         hz = float(hz)
-        if not math.isfinite(hz) or not 1 <= hz <= 10:
-            raise ValueError("位置回读频率应为 1～10 Hz")
+        if not math.isfinite(hz) or not 1 <= hz <= 30:
+            raise ValueError("位置回读频率应为 1～30 Hz")
         self._poll_enabled, self._poll_hz = bool(enabled), hz
         if self.is_connected and self._poll_enabled:
-            self._poll_timer.start(round(1000 / hz))
+            self._poll_timer.start(math.ceil(1000 / hz))
         else:
             self._poll_timer.stop()
         self._emit_state()
 
+    def _position_polling_paused(self):
+        return (not self._poll_enabled or not self.is_connected or self._stop_locked or
+                self._calibration_busy or self._acc_sync_waiting or self._parameter_request is not None or
+                (self.connection_type == "UART4" and self._motor_state_known and not self._motor_enabled))
+
     def _poll_position(self):
-        if (not self.is_connected or self._stop_locked or self._calibration_busy or
-                self._position_request is not None or self._acc_sync_waiting or
-                self._parameter_request is not None):
-            return
-        # Gamepad ownership pauses all position queries; actual data can go stale.
-        if self.gamepad.claimed:
-            return
-        if self.connection_type == "UART4" and self._motor_state_known and not self._motor_enabled:
+        if self._position_polling_paused() or self._position_request is not None:
             return
         self._request_position("j", False, source="telemetry")
 
@@ -1049,8 +1063,9 @@ class RobotController(QObject, RobotBusiness):
             self._position_request = self._pending_sync = None
 
     def _request_position(self, kind, sync, source="ui"):
-        if source == "gamepad" or self.gamepad.claimed:
-            self.log("手柄控制已取消位置查询；保留最后一次实际姿态", "WARN")
+        if source == "gamepad" or (self.gamepad.claimed and
+                not (source == "telemetry" and kind == "j" and not sync)):
+            self.log("手柄控制中仅使用共享关节轮询更新实际模型，请勿手动同步编辑目标", "WARN")
             return False
         if self._position_request:
             if self._position_request["kind"] == kind and source != "gamepad":
@@ -1059,13 +1074,17 @@ class RobotController(QObject, RobotBusiness):
             self.log("已有位置回读请求，请等待后再读取另一种位置", "WARN")
             return False
         command = "#GETJPOS" if kind == "j" else "#GETLPOS"
-        if not self.send_cmd(command, source=source):
-            return False
         self._position_token += 1
         token = self._position_token
-        self._position_request = {"kind": kind, "sync": sync, "token": token, "generation": self._tx_generation,
-                                  "source": source, "written_at": None}
+        # Install before enqueue: the TX worker may check admission immediately.
+        request = {"kind": kind, "sync": sync, "token": token, "generation": self._tx_generation,
+                   "source": source, "written_at": None}
+        self._position_request = request
         self._pending_sync = kind
+        if not self.send_cmd(command, source=source):
+            if self._position_request is request:
+                self._position_request = self._pending_sync = None
+            return False
         self.root.after(1200, self._position_timeout, token)
         return True
 

@@ -1,15 +1,35 @@
 """Qt gamepad controls and local configuration, without hardware access."""
 from copy import deepcopy
+import sys
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGridLayout,
+    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QScrollArea,
     QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from app.gamepad.config import default_config, validate_config
 from app.ui.widgets import button, hint, number
+
+
+class _UncappedSpeedSpinBox(QDoubleSpinBox):
+    """Use the native float range without sizing the panel for its maximum."""
+
+    def __init__(self, value, decimals=2, step=1):
+        super().__init__()
+        self.setDecimals(decimals)
+        self.setRange(.01, sys.float_info.max)
+        self.setSingleStep(step)
+        self.setValue(value)
+        self.setKeyboardTracking(False)
+        self.setMinimumWidth(90)
+
+    def sizeHint(self):
+        return QSize(140, super().sizeHint().height())
+
+    def minimumSizeHint(self):
+        return QSize(90, super().minimumSizeHint().height())
 
 
 def _raw_text(snapshot):
@@ -39,6 +59,8 @@ class GamepadPanel(QFrame):
         "init_confirmation": "等待确认到位",
         "int_mode": "切换 INT", "int_check": "确认 INT", "centering": "等待手柄回中",
         "ready": "已就绪 · 手柄可控制", "rested": "休息完成 · 待初始化",
+        "target_rejected": "目标被拒绝 · 等待回中",
+        "released": "已释放 · 实机可能仍在运动",
         "stopping": "停止确认中", "stopped": "已停止", "disabling": "失能确认中",
         "disabled": "已失能", "fault": "故障锁定", "protected": "保护锁定",
         "calibrating": "校准中",
@@ -61,6 +83,7 @@ class GamepadPanel(QFrame):
         self.check_button = button("检查输入", lambda: self.action_requested.emit("check"))
         self.claim_button = button("接管控制", lambda: self.action_requested.emit("claim"), "primary")
         self.release_button = button("释放", lambda: self.action_requested.emit("release"))
+        self.release_button.setToolTip("停止手柄后续发令，不发送STOP；实机可能继续执行最后目标。")
         self.settings_button = button("设置", self.config_requested.emit)
         for control in (self.check_button, self.claim_button, self.release_button, self.settings_button):
             control.setMinimumWidth(0)
@@ -100,13 +123,13 @@ class GamepadPanel(QFrame):
         tuning.setContentsMargins(0, 0, 0, 0)
         tuning.setHorizontalSpacing(6)
         tuning.setVerticalSpacing(5)
-        self.linear_speed_spin = number(config["control"]["linear_speed_mm_s"], .01, 100, 2, 1)
-        self.angular_speed_spin = number(config["control"]["angular_speed_deg_s"], .01, 90, 2, 1)
+        self.linear_speed_spin = _UncappedSpeedSpinBox(config["control"]["linear_speed_mm_s"])
+        self.angular_speed_spin = _UncappedSpeedSpinBox(config["control"]["angular_speed_deg_s"])
         self.speed_spin = number(config["robot"]["cmd_speed"], 1, 100, 0)
         self.tool_spin = number(config["robot"]["tool_offset_z"], 0, 1000, 1, 1)
-        self.linear_speed_spin.setToolTip("摇杆推动软件 TCP 目标的速度；实际运动受电机档位与加速度限制，不保证恒定线速度。软件命令步长不代表实际位置误差。")
-        self.angular_speed_spin.setToolTip("摇杆每秒改变姿态目标的速率；不是 MoveL 指令的速度档位。")
-        self.speed_spin.setToolTip("MoveL 的主控电机速度上限：档位 35 最高 10.5 r/s，档位 100 最高 30 r/s，不是 mm/s；同步规划时各轴可能更低。初始化仍使用独立档位 10。线速度过高而档位过低时，实物可能跟不上软件目标；此处没有实际位置回读。")
+        self.linear_speed_spin.setToolTip("满杆时的软件 TCP 目标速度，默认200 mm/s；轻推按杆量比例减速，暂不设输入上限。实际运动受电机档位与加速度限制，不保证恒定线速度。")
+        self.angular_speed_spin.setToolTip("摇杆每秒改变姿态目标的速率，暂不设上限；软件命令旋转步长限制仍生效。不是 MoveL 指令的速度档位。")
+        self.speed_spin.setToolTip("MoveL 的主控电机速度上限：档位 35 最高 10.5 r/s，档位 100 最高 30 r/s，不是 mm/s；同步规划时各轴可能更低。初始化仍使用独立档位 10。线速度过高而档位过低时，实物可能跟不上软件目标；实际模型按软件设置轮询更新，回读不自动修正手柄目标。")
         for index, (title, control, suffix) in enumerate((
                 ("线速度", self.linear_speed_spin, " mm/s"),
                 ("角速度", self.angular_speed_spin, " °/s"),
@@ -122,14 +145,14 @@ class GamepadPanel(QFrame):
         base = QHBoxLayout()
         self.gripper_base_spin = number(100, 0, 100, 0)
         self.gripper_base_spin.setSuffix(" %")
-        self.gripper_base_button = button("建立夹爪目标", lambda: self.gripper_base_requested.emit(self.gripper_base_spin.value()))
-        self.gripper_base_button.setToolTip("明确设定软件目标基准；没有基准时扳机不会自动跳到全开或全闭。无实际开度回读。")
+        self.gripper_base_button = button("发送夹爪位置", lambda: self.gripper_base_requested.emit(self.gripper_base_spin.value()))
+        self.gripper_base_button.setToolTip("发送此开度并设为软件目标；初始化后默认目标100%，可直接用LT减小、RT增加。无实际开度回读。")
         base.addWidget(self.gripper_base_spin)
         base.addWidget(self.gripper_base_button, 1)
         layout.addLayout(base)
         self.tcp_label = hint("TCP 软件目标：—\n夹爪目标：未建立", "muted")
         layout.addWidget(self.tcp_label)
-        layout.addWidget(hint("左摇杆 X/Y · 右摇杆上下 Z · 十字键 Pitch/Yaw · LB/RB Roll · LT/RT 夹爪。Back 软停；Y 休息。"))
+        layout.addWidget(hint("左摇杆 X/Y · 右摇杆上下 Z · 十字键 Pitch/Yaw · LB/RB Roll。夹爪默认100%，LT减小、RT增加。Back 软停；A 初始位姿；Y 休息。"))
         self.raw_label = hint("原始输入尚未采集", "muted")
         self.raw_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.raw_label)
@@ -146,7 +169,7 @@ class GamepadPanel(QFrame):
         self.speed_spin.setValue(robot["cmd_speed"])
         self.tool_spin.setValue(robot["tool_offset_z"])
         joints = " / ".join(f"{value:g}" for value in robot["init_joints"])
-        self.initial_hint.setText(f"第一次 Start 仅使能；第二次 Start 只发一条 MoveJ，初始化关节至 {joints}°，地轨固定 0 mm。观察实物到位后点击“确认到位”，手柄回中后解锁；连续控制需预先设置 INT。初始化不查询状态、不自动切换模式；接管期间暂停位置回读。")
+        self.initial_hint.setText(f"第一次 Start 仅使能；使能后按 A（按键0）或第二次 Start 发一条初始化 MoveJ，关节至 {joints}°，地轨固定 0 mm。观察实物到位后再按 Start（按键7）或点击“确认到位”，手柄回中后解锁；连续控制需预先设置 INT。初始化不查询运动状态、不自动切换模式；实际模型按软件设置共用关节位置轮询。")
 
     def _apply_tuning(self):
         self.tuning_requested.emit({
@@ -173,7 +196,7 @@ class GamepadPanel(QFrame):
         claimed = bool(state.get("claimed", False))
         pending = bool(state.get("release_pending", False))
         stage = str(state.get("stage", "idle"))
-        self.status_label.setText(self._STAGES.get(stage, stage) if claimed else "未接管 · 仅检查输入")
+        self.status_label.setText(self._STAGES.get(stage, stage) if claimed or stage == "released" else "未接管 · 仅检查输入")
         self.status_label.setProperty("ready", bool(state.get("ready", False)))
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
@@ -185,7 +208,7 @@ class GamepadPanel(QFrame):
         self.tuning_widget.setEnabled(not claimed)
         available = claimed and not pending
         allowed = {
-            "start": (stage in ("connected", "disabled", "stopped", "protected", "enabled", "rested")
+            "start": (stage in ("connected", "disabled", "stopped", "protected", "enabled", "rested", "init_confirmation")
                       or stage == "fault" and bool(state.get("stop_confirmed"))),
             "initialize": stage in ("enabled", "rested", "ready", "init_confirmation"),
             "rest": bool(state.get("ready")),
@@ -194,12 +217,15 @@ class GamepadPanel(QFrame):
         for key, control in self.action_buttons.items():
             control.setEnabled(key == "stop" or (available and allowed[key]))
         self.action_buttons["initialize"].setText("确认到位" if stage == "init_confirmation" else "初始化")
+        self.action_buttons["start"].setToolTip("第三次Start确认实物到位；只在本地解锁，不发送命令" if stage == "init_confirmation" else "第一次使能，第二次初始化，第三次确认到位；默认按键7")
         self.action_buttons["initialize"].setToolTip("请观察实物到位后确认；只在本地解锁，不发送查询或模式指令" if stage == "init_confirmation" else "只发送初始化 MoveJ")
         self.gripper_base_button.setEnabled(available and bool(state.get("ready")))
         tcp = state.get("target_tcp")
         gripper = state.get("gripper_target")
         position = " / ".join(f"{float(value):.1f}" for value in tcp) if tcp else "—"
         opening = f"{float(gripper):g}%（软件目标）" if gripper is not None else "未建立"
+        if state.get("gripper_paused"):
+            opening += " · 发送暂停，点击发送夹爪位置重试"
         self.tcp_label.setText(f"TCP 软件目标：{position}\n夹爪目标：{opening}")
 
 
@@ -251,30 +277,36 @@ class GamepadSettingsDialog(QDialog):
                 ("left_x", "左摇杆左右 → Y"), ("left_y", "左摇杆上下 → X"),
                 ("right_y", "右摇杆上下 → Z"), ("lt", "LT → 张开"), ("rt", "RT → 闭合"))))
         self._form(layout, "按键编号映射", tuple(
-            (f"gamepad.buttons.{key}", title, 0, 255, 0, 1) for key, title in (
+            (f"gamepad.buttons.{key}", title, -1 if key == "initialize" else 0, 255, 0, 1) for key, title in (
                 ("start", "Start → 使能 / 初始化"), ("stop", "Back → 软停"),
+                ("initialize", "A → 初始位姿"),
                 ("rest", "Y → 休息"),
                 ("roll_minus", "LB → Roll −"), ("roll_plus", "RB → Roll +"))))
+        self.fields["gamepad.buttons.initialize"].setSpecialValueText("未绑定")
         self._form(layout, "软件目标速度与发送", (
-            ("control.linear_speed_mm_s", "平移速度（mm/s）", .01, 100, 2, 1),
-            ("control.angular_speed_deg_s", "旋转速度（°/s）", .01, 90, 2, 1),
-            ("control.gripper_speed_percent_s", "夹爪速度（%/s）", .01, 100, 2, 1),
+            ("control.linear_speed_mm_s", "平移速度（mm/s）", .01, None, 2, 1),
+            ("control.angular_speed_deg_s", "旋转速度（°/s）", .01, None, 2, 1),
+            ("control.gripper_speed_percent_s", "夹爪速度（%/s）", .01, 150, 2, 1),
             ("robot.cmd_speed", "MoveL 速度档位", 1, 100, 0, 1),
             ("robot.init_speed", "初始化速度档位", 1, 100, 0, 1),
             ("robot.tool_offset_z", "工具长度（mm）", 0, 1000, 1, 1),
-            ("control.max_position_lead_mm", "软件命令位置步长上限（mm）", .1, 50, 1, .5),
-            ("control.max_rotation_lead_deg", "软件命令旋转步长上限（°）", .1, 45, 1, .5),
-            ("control.send_interval_s", "运动发送间隔（秒）", .02, 1, 3, .01),
+            ("control.max_position_lead_mm", "最小位置目标缓冲（mm）", .1, 50, 1, .5),
+            ("control.max_rotation_lead_deg", "最小旋转目标缓冲（°）", .1, 45, 1, .5),
+            ("control.send_interval_s", "运动发送间隔（秒）", .05, 1, 3, .01),
+            ("control.velocity_smoothing_s", "速度平滑时间（秒，0关闭）", 0, .5, 3, .01),
             ("control.gripper_interval_s", "夹爪发送间隔（秒）", .02, 1, 3, .01),
             ("control.response_timeout_s", "指令响应超时（秒）", .1, 30, 2, .1),
             ("robot.motion_timeout_s", "关节运动超时（秒）", 1, 600, 1, 1),
         ))
-        self.fields["control.linear_speed_mm_s"].setToolTip("摇杆推动软件 TCP 目标的速度；实际运动受电机档位与加速度限制，不保证恒定线速度。软件命令步长不代表实际位置误差。")
+        self.fields["control.linear_speed_mm_s"].setToolTip("满杆时的软件 TCP 目标速度，默认200 mm/s；轻推按杆量比例减速，暂不设输入上限。实际运动受电机档位与加速度限制，不保证恒定线速度。")
+        self.fields["control.angular_speed_deg_s"].setToolTip("摇杆每秒改变姿态目标的速率，暂不设上限；软件命令旋转步长限制仍生效。不是 MoveL 指令的速度档位。")
         for key in ("control.max_position_lead_mm", "control.max_rotation_lead_deg"):
-            self.fields[key].setToolTip("相对最近已受理的软件命令参考限制下一次目标步长；手柄期间不读实际位置，不能据此判断实物误差或实际超前量。")
+            self.fields[key].setToolTip("目标缓冲取此值和两次发送周期对应位移中的较大者，以最近已写出目标为参考；超出时截断增量，不整次丢弃、不等待受理。不能据此判断实物误差。")
+        self.fields["control.send_interval_s"].setToolTip("默认100 ms发送最新目标，不等待每条accepted MOVEL；目标相同不重复发送，串口尚未写出时合并后续变化。")
+        self.fields["control.velocity_smoothing_s"].setToolTip("平滑速度和换向，默认60 ms；0为线性即时响应。摇杆回中立即停止新增位移，STOP不受平滑影响。")
         self.fields["robot.cmd_speed"].setToolTip("MoveL 的主控电机速度上限：档位 35 最高 10.5 r/s，档位 100 最高 30 r/s，不是 mm/s；同步规划时各轴可能更低。")
         self.fields["robot.init_speed"].setToolTip("初始化与休息 MoveJ 的独立电机速度档位，不随 MoveL 速度档位变化。")
-        layout.addWidget(hint("十字键竖向为 Pitch，横向为 Yaw。第二次 Start 只发送初始化 MoveJ；观察实物到位后点击“确认到位”，并将手柄回中。连续控制需预先设置 INT；接管期间暂停位置回读，左侧保留最近一次实际姿态。初始化与休息时地轨固定 0 mm。"))
+        layout.addWidget(hint("十字键竖向为 Pitch，横向为 Yaw。使能后按 A 或第二次 Start 发送一条初始化 MoveJ；观察实物到位后按Start确认，或点击“确认到位”，再将手柄回中。A 不代替到位确认。连续控制需预先设置 INT；左侧实际模型通过 GETJPOS 更新，轮询开关和频率使用软件设置（1～30 Hz）。回读不覆盖手柄软件目标。初始化与休息时地轨固定 0 mm。"))
         self.raw_view = QPlainTextEdit()
         self.raw_view.setObjectName("GamepadRawInput")
         self.raw_view.setReadOnly(True)
@@ -308,7 +340,8 @@ class GamepadSettingsDialog(QDialog):
             value = self._config
             for part in path.split("."):
                 value = value[part]
-            control = number(value, minimum, maximum, decimals, step)
+            control = (_UncappedSpeedSpinBox(value, decimals, step) if maximum is None
+                       else number(value, minimum, maximum, decimals, step))
             self.fields[path] = control
             form.addRow(text, control)
         box.addLayout(form)

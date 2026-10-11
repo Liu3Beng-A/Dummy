@@ -32,6 +32,7 @@ class FakeView(QWidget):
         self.preferred_mode = "preview"
         self.actual_only = False
         self.feedback_paused = False
+        self.commanded_gripper = None
         self.closed = False
 
     def set_target_pose(self, values, gripper=100):
@@ -39,6 +40,9 @@ class FakeView(QWidget):
 
     def set_target_gripper(self, gripper):
         self.target = (self.target[0], gripper)
+
+    def set_commanded_gripper(self, gripper):
+        self.commanded_gripper = gripper
 
     def set_actual_pose(self, values, gripper=None):
         self.actual = (list(values), gripper)
@@ -267,12 +271,14 @@ class UiIntegrationTests(unittest.TestCase):
 
     def test_display_and_poll_settings_do_not_dispatch_commands(self):
         self.window.theme_combo.setCurrentIndex(1)
-        self.window.poll_hz.setValue(10)
+        self.assertEqual(self.window.poll_hz.maximum(), 30)
+        self.window.poll_hz.setValue(30)
         self.window.poll_enabled.setChecked(False)
         self.window.grid_check.setChecked(False)
         self.window.axes_check.setChecked(False)
         self.assertEqual(self.store.settings["theme"], "dark")
-        self.assertEqual(self.controller._poll_hz, 10)
+        self.assertEqual(self.controller._poll_hz, 30)
+        self.assertEqual(self.store.settings["poll_hz"], 30)
         self.assertFalse(self.controller._poll_enabled)
         self.assertFalse(self.window.viewer.grid)
         self.assertFalse(self.window.viewer.axes)
@@ -465,6 +471,77 @@ class UiIntegrationTests(unittest.TestCase):
         self.window.hide_joint_logs_checkbox.setChecked(True)
         self.assertNotIn(response, self.window.log_view.toPlainText())
         self.assertEqual(self.commands(), [])
+
+    def test_terminal_diagnostics_node_scope_and_stop_lock(self):
+        panel = self.window.terminal_diagnostics
+        self.assertTrue(panel.export_button.isEnabled())
+        self.assertTrue(all(not control.isEnabled() for control in panel.buttons.values()))
+        self.connect_fake()
+        self.controller._stop_locked = True
+        self.controller._control_owner = "gamepad"
+        self.window._update_state({})
+        self.assertFalse(panel.buttons["stack"].isEnabled())
+        self.assertFalse(panel.buttons["cal"].isEnabled())
+        self.assertTrue(panel.buttons["stall_last"].isEnabled())
+        for key in ("core_version", "motor_version", "can", "stall", "stall_last", "motion", "rgb"):
+            panel.buttons[key].click()
+        self.assertEqual(self.commands(), ["#FW_VERSION 0", "#FW_VERSION 1", "#CAN_DIAG 1",
+                                          "#STALL_STATUS 1", "#STALL_STATUS 1 LAST", "#MOTION_STATUS", "#RGB_STATUS"])
+        panel.node.setCurrentIndex(7)
+        self.assertFalse(panel.buttons["stall"].isEnabled())
+        self.assertTrue(panel.buttons["cal_last"].isEnabled())
+        for key in ("can", "cal", "cal_last"):
+            panel.buttons[key].click()
+        self.assertEqual(self.commands(), ["#CAN_DIAG 8", "#CAL_STATUS 8", "#CAL_STATUS 8 LAST"])
+        panel.node.setCurrentIndex(6)
+        self.assertTrue(panel.buttons["stall"].isEnabled())
+        self.assertTrue(panel.buttons["cal"].isEnabled())
+        self.assertEqual(self.commands(), [])  # Selecting a node never queries or moves.
+        self.controller._control_owner = "ui"
+        self.window._update_state({"control_owner": "ui"})
+
+    def test_terminal_stack_shortcut_matches_firmware_availability(self):
+        self.connect_fake()
+        panel = self.window.terminal_diagnostics
+        c = self.controller
+        c._motor_state_known = True
+        c._motor_enabled = False
+        for connection, locked, calibrating, available in (
+                ("USB", False, False, True), ("UART4", False, False, False),
+                ("USB", True, False, False), ("USB", False, True, False)):
+            c.connection_type = connection
+            c._stop_locked = locked
+            c._calibration_busy = calibrating
+            self.window._update_state({})
+            self.assertEqual(panel.buttons["stack"].isEnabled(), available)
+            panel.buttons["stack"].click()
+            self.assertEqual(self.commands(), ["#STACK"] if available else [])
+
+    def test_complete_diagnostic_export_preserves_hidden_and_paused_records(self):
+        entries = [("#GETJPOS", "TX"), ("ok 1 2 3 4 5 6 7", "RX"),
+                   ("CAN_DIAG [1] req=7 end", "RX"), ("GAMEPAD_STOP timeout", "WARN")]
+        self.window.log_pause.setChecked(True)
+        self.window.log_filter.setCurrentText("ERROR")
+        self.window.log_search.setText("absent")
+        for message, tag in entries:
+            self.controller.log(message, tag)
+        before = list(self.window._logs)
+        path = Path(self.directory.name) / "diagnostic.txt"
+        with patch("app.ui.main_window.QFileDialog.getSaveFileName", return_value=(str(path), "")):
+            self.window.terminal_diagnostics.export_button.click()
+        contents = path.read_text(encoding="utf-8")
+        for message, tag in entries:
+            self.assertIn(f"[{tag}] {message}", contents)
+        self.assertIn("当前缓冲 4 / 5000 条", contents)
+        self.assertIn(str(self.store.log_dir), contents)
+        self.assertEqual(list(self.window._logs)[:4], before)
+        self.assertEqual(self.commands(), [])
+        with patch("app.ui.main_window.QFileDialog.getSaveFileName", return_value=("", "")):
+            self.window.terminal_diagnostics.export_button.click()
+        with patch("app.ui.main_window.QFileDialog.getSaveFileName", return_value=(str(path), "")), \
+                patch("app.ui.main_window.Path.write_text", side_effect=OSError("denied")):
+            self.window.terminal_diagnostics.export_button.click()
+        self.assertTrue(any("日志导出失败" in text for tag, text in self.window._logs if tag == "ERROR"))
 
     def test_joint_log_filter_requires_exact_command_and_seven_finite_values(self):
         hidden = [("TX", "#GETJPOS"), ("RX", "ok 1 2 3 4 5 6 7"),

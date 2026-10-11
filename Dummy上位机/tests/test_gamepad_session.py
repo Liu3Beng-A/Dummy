@@ -1,5 +1,6 @@
 """Offline control-session tests using real Qt/controller and a fake writer."""
 import math
+import json
 import queue
 import time
 import unittest
@@ -29,7 +30,10 @@ class GamepadFixture:
         self.c.serial_port = FakePort()
         self.g = self.c.gamepad
         self.g.clock = self.clock
-        self.g.set_config({"robot": {"tool_offset_z": 0, "cmd_speed": 10}, "control": {"linear_speed_mm_s": 10}})
+        self.g.set_config({"robot": {"tool_offset_z": 0, "cmd_speed": 10},
+                           "control": {"linear_speed_mm_s": 10, "angular_speed_deg_s": 5,
+                                       "gripper_speed_percent_s": 30, "send_interval_s": .05,
+                                       "velocity_smoothing_s": 0}})
         self.writes = []
         self.sample()
 
@@ -121,7 +125,47 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertEqual(self.take(), [])
         self.assertEqual(self.c.state()["control_owner"], "ui")
 
-    def test_two_starts_send_only_movej_and_require_local_confirmation_and_center(self):
+    def test_a_sends_one_initial_movej_after_enable_and_never_confirms_arrival(self):
+        self.sample(("initialize",))
+        self.assertEqual(self.take(), [])
+        self.assertTrue(self.g.claim())
+        self.clock.advance(.02)
+        self.sample(("initialize",))
+        self.assertEqual(self.take(), [])  # A does not enable the motors.
+        self.assertTrue(self.g.start())
+        self.assertEqual(self.write(), ["!START"])
+        self.feed("Started ok")
+        self.c.current_cmdmode = 2
+        self.clock.advance(.02)
+        self.sample(("initialize",))
+        self.assertEqual(self.write(), [">0,10,80,0,90,0,0,10"])
+        self.clock.advance(.02)
+        self.sample(("initialize",))
+        self.assertEqual(self.take(), [])  # No repeated request while awaiting its receipt.
+        self.feed("queued MOVEJ id=1 mode=INT", "accepted MOVEJ id=1")
+        self.clock.advance(.02)
+        self.sample(("initialize",))
+        self.assertEqual(self.g.stage, "init_confirmation")
+        self.assertFalse(self.g.ready)
+        self.assertEqual(self.take(), [])
+        self.clock.advance(.02)
+        self.sample(("start",))
+        self.g.tick()
+        self.assertTrue(self.g.ready)
+        self.assertEqual(self.take(), [])
+
+    def test_a_reinitializes_ready_control_and_stop_takes_priority(self):
+        self.ready_session()
+        self.clock.advance(.02)
+        self.sample(("initialize",))
+        self.assertEqual(self.write(), [">0,10,80,0,90,0,0,10"])
+        self.assertFalse(self.g.ready)
+        self.feed("queued MOVEJ id=42 mode=INT", "accepted MOVEJ id=42")
+        self.clock.advance(.02)
+        self.sample(("initialize", "stop"))
+        self.assertEqual(self.write(), ["!STOP"])
+
+    def test_two_starts_send_one_movej_and_poll_does_not_confirm_arrival(self):
         completed = []
         self.g.initial_pose_completed.connect(completed.append)
         self.begin_init(mode=2)
@@ -138,6 +182,8 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
             self.sample(ly=-1, centered=False)
             self.g.tick()
             self.c._poll_position()
+            self.assertEqual(self.write(), ["#GETJPOS"])
+            self.feed("ok 0 10 80 0 90 0 0")
         self.assertEqual(self.take(), [])
         self.assertIsNone(self.g.target_tcp)
         self.assertTrue(self.g.initialize())  # The UI's initialization button now confirms locally.
@@ -149,8 +195,84 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.g.tick()
         self.assertTrue(self.g.ready)
         self.assertEqual(self.take(), [])
-        self.assertIsNone(self.g.gripper_target)
+        self.assertEqual(self.g.gripper_target, 100)
         self.assertFalse(self.g.start())
+
+    def test_third_start_press_confirms_locally_then_requires_centered_input(self):
+        self.c.current_cmdmode = 2
+        self.assertTrue(self.g.claim())
+        self.clock.advance(.02)
+        self.sample(("start",))
+        self.assertEqual(self.write(), ["!START"])
+        self.feed("Started ok")
+        self.clock.advance(.02)
+        self.sample(("start",))
+        self.assertEqual(self.write(), [">0,10,80,0,90,0,0,10"])
+        self.assertFalse(self.g.start())  # Before the device's matching receipt.
+        self.feed("queued MOVEJ id=1 mode=INT", "accepted MOVEJ id=1")
+        self.clock.advance(.02)
+        self.sample(("start",), ly=-1, centered=False)
+        self.assertEqual(self.g.stage, "centering")
+        self.g.tick()
+        self.assertFalse(self.g.ready)
+        self.assertEqual(self.take(), [])
+        self.clock.advance(.02)
+        self.sample()
+        self.g.tick()
+        self.assertTrue(self.g.ready)
+        self.assertEqual(self.take(), [])
+        self.assertFalse(self.g.start())  # Further presses do not reinitialize ready control.
+        self.assertEqual(self.writes, ["!START", ">0,10,80,0,90,0,0,10"])
+
+    def test_legacy_workspace_and_minimum_height_no_longer_reject_movel(self):
+        self.g.set_config({"robot": {"flange_limits": {"x": [146.4, 146.6],
+                                                      "y": [-.1, .1], "z": [288.8, 289.]},
+                                     "z_min_height": 288.8}, "control": {"send_interval_s": .05}})
+        self.sample()
+        self.ready_session()
+        # TCP Z is already below the old minimum; move through each old XYZ
+        # boundary with a valid, small software step and matching receipts.
+        for motion_id, (axis, delta) in enumerate(((0, 1), (0, -2), (1, 1), (1, -2),
+                                                  (2, 1), (2, -2)), 42):
+            with self.subTest(axis=axis, delta=delta):
+                target = list(self.g.command_reference_tcp)
+                target[axis] += delta
+                self.assertTrue(self.g.set_target(target))
+                self.clock.advance(.06)
+                self.sample()
+                self.g.tick()
+                commands = self.write()
+                self.assertEqual(len(commands), 1)
+                self.assertTrue(commands[0].startswith("@"))
+                self.feed(f"queued MOVEL id={motion_id} mode=INT", f"accepted MOVEL id={motion_id}")
+        target = list(self.g.command_reference_tcp)
+        target[0] += 6
+        self.assertTrue(self.g.set_target(target))  # Dynamic buffer accepts a step above the old 5mm cap.
+        target = list(self.g.command_reference_tcp)
+        target[3] += 6
+        self.assertTrue(self.g.set_target(target))
+        from app.core.gamepad_session import angle_difference
+        self.assertAlmostEqual(abs(angle_difference(self.g.target_tcp[3], self.g.written_reference_tcp[3])), 5)
+        self.assertNotIn("!STOP", self.writes)
+
+    def test_default_gripper_rate_is_150_without_changing_protocol(self):
+        self.g.set_config({})
+        self.sample()
+        self.ready_session()
+        self.clock.advance(.051)
+        self.sample(lt=1, centered=False)
+        self.g.tick()
+        self.assertEqual(self.g.gripper_target, 92.5)
+        self.assertEqual(100 - self.g.gripper_target, 150 * .05)
+        self.assertEqual(self.write(), ["!HAND_POS 92"])
+        self.feed("ok hand pos=91")
+        self.assertIsNotNone(self.g._hand)
+        self.feed("ok hand pos=92")
+        self.clock.advance(.101)
+        self.sample(rt=1, centered=False)
+        self.g.tick()
+        self.assertEqual(self.g.gripper_target, 100)
+        self.assertEqual(self.write(), ["!HAND_POS 100"])
 
     def test_rx_before_written_cannot_confirm_init_or_emit_extra_commands(self):
         self.g.claim()
@@ -170,36 +292,127 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertTrue(self.g.confirm_initialization())
         self.assertEqual(self.take(), [])
 
-    def test_move_stream_coalesces_until_matching_accepted_and_respects_lead(self):
+    def test_move_stream_sends_next_written_target_without_waiting_for_accepted(self):
         self.ready_session()
-        self.assertFalse(self.g.set_target(self.target(6)))
-        self.assertFalse(self.g.set_target(self.target(droll=6)))
         self.assertTrue(self.g.set_target(self.target(1)))
         self.g.tick()
         first = self.write()
-        self.assertEqual(first, ["@147.52,0,288.917,180,0,180,10"])
+        self.assertEqual(first, ["@147.5,0,288.9,180,0,180,10"])
         self.g.set_target(self.target(2))
         self.clock.advance(.06)
         self.sample()
         self.g.tick()
-        self.assertEqual(self.take(), [])
+        self.assertEqual(self.write(), ["@148.5,0,288.9,180,0,180,10"])
         self.feed("queued MOVEL id=42 mode=INT", "accepted MOVEL id=43", "ok MOVEL id=42")
-        self.assertIsNotNone(self.g._stream)
+        self.assertEqual(len(self.g._streams), 2)
         self.feed("accepted MOVEL id=42")
         self.g.tick()
-        self.assertEqual(self.write(), ["@148.52,0,288.917,180,0,180,10"])
+        self.assertEqual(self.write(), [])
+        self.assertEqual(len(self.g._streams), 1)
 
-    def test_gripper_needs_explicit_base_and_only_target_ack_unlocks(self):
+    def test_translation_preserves_positive_180_for_all_axes_with_default_tool(self):
+        self.g.set_config({"control": {"send_interval_s": .05, "velocity_smoothing_s": 0}})
+        self.sample()
+        self.ready_session()
+        for motion_id, axis in enumerate(("ly", "lx", "ry"), 42):
+            with self.subTest(axis=axis):
+                self.clock.advance(.06)
+                # Half stick preserves the +/-180 wire representation with the default tool.
+                self.sample(centered=False, **{axis: -.5})
+                self.g.tick()
+                commands = self.write()
+                self.assertEqual(len(commands), 1)
+                fields = commands[0][1:].split(",")
+                self.assertEqual(fields[3:], ["180", "0", "180", "35"])
+                self.assertTrue(all("." not in value or len(value.split(".")[1]) == 1
+                                    for value in fields[:6]))
+                self.assertEqual(self.g.target_tcp[3:], [180., 0., 180.])
+                self.feed(f"queued MOVEL id={motion_id} mode=INT", f"accepted MOVEL id={motion_id}")
+        self.assertIsNone(self.g.actual_tcp)
+        self.assertFalse(any(command.startswith("#GET") for command in self.writes))
+
+    def test_rotation_changes_only_driven_angle_and_translation_retains_negative_180(self):
+        self.ready_session()
+        target = self.target(droll=-.25)
+        self.assertTrue(self.g.set_target(target))
+        self.clock.advance(.06)  # dt is capped at 50ms: 5deg/s * .05 = .25deg.
+        self.sample(roll=1, centered=False)
+        self.assertEqual(self.g.target_tcp[3:], [180., 0., 180.])
+        self.clock.advance(.06)
+        self.sample(roll=1, centered=False)
+        self.g.tick()
+        self.assertEqual(self.write(), ["@146.5,0,288.9,-179.8,0,180,10"])
+        self.assertEqual(self.g.target_tcp[3:], [-179.75, 0., 180.])
+        self.feed("queued MOVEL id=42 mode=INT", "accepted MOVEL id=42")
+        target = list(self.g.target_tcp)
+        target[3] = -180.
+        self.assertTrue(self.g.set_target(target))
+        self.clock.advance(.06)
+        self.sample(ly=-1, centered=False)
+        self.g.tick()
+        self.assertEqual(self.write(), ["@147,0,288.9,-180,0,180,10"])
+        self.assertEqual(self.g.target_tcp[3:], [-180., 0., 180.])
+
+    def test_small_input_accumulates_but_duplicate_wire_targets_do_not_send(self):
+        self.ready_session()
+        for _ in range(5):
+            self.clock.advance(.02)
+            self.sample(ly=-.025, centered=False)  # About .005mm per sample.
+            self.g.tick()
+            self.assertEqual(self.take(), [])
+        self.clock.advance(.02)
+        self.sample(ly=-.025, centered=False)
+        self.g.tick()
+        self.assertEqual(self.write(), ["@146.6,0,288.9,180,0,180,10"])
+        self.feed("queued MOVEL id=42 mode=INT", "accepted MOVEL id=42")
+        for _ in range(10):
+            self.clock.advance(.02)
+            self.sample(ly=-.025, centered=False)
+            self.g.tick()
+            self.assertEqual(self.take(), [])
+        self.assertAlmostEqual(self.g.target_tcp[0] - self.seed_tcp[0], .08, places=6)
+        self.assertEqual(self.g.command_reference_tcp[0], 146.6)
+        self.assertTrue(self.g.set_gripper_base(40))
+        self.assertEqual(self.write(), ["!HAND_POS 40"])
+        for _ in range(10):
+            self.clock.advance(.02)
+            self.sample(ly=-.025, centered=False)
+            self.g.tick()
+        self.assertEqual(self.write(), ["@146.7,0,288.9,180,0,180,10"])
+
+    def test_quantization_follows_tool_conversion_and_receipt_uses_sent_pose(self):
+        from app.core.gamepad_session import tool_translation
+        self.g.set_config({})
+        self.sample()
+        self.ready_session()
+        target = list(self.g.target_tcp)
+        target[4] = .24
+        offset = tool_translation(target, 114)
+        target[0] = 147.0496 + offset[0]
+        self.assertTrue(self.g.set_target(target))
+        self.g.tick()
+        command = self.write()[0]
+        # No intermediate TCP rounding: 147.0496 rounds directly to 147.0.
+        self.assertEqual(command, "@147,0,288.9,180,0.2,180,35")
+        sent_flange = [float(value) for value in command[1:].split(",")[:6]]
+        sent_offset = tool_translation(sent_flange, 114)
+        expected = [sent_flange[i] + sent_offset[i] for i in range(3)] + sent_flange[3:]
+        self.feed("queued MOVEL id=42 mode=INT", "accepted MOVEL id=42")
+        self.assertEqual(self.g.command_reference_tcp, expected)
+        self.assertEqual(self.g.target_tcp, target)
+        self.assertIsNone(self.g.actual_tcp)
+
+    def test_gripper_defaults_to_100_and_only_target_ack_unlocks(self):
         self.ready_session()
         self.clock.advance(.05)
         self.sample(rt=1, centered=False)
         self.g.tick()
-        self.assertIsNone(self.g.gripper_target)
+        self.assertEqual(self.g.gripper_target, 100)
         self.assertEqual(self.take(), [])
         self.assertTrue(self.g.set_gripper_base(50))
         self.assertEqual(self.write(), ["!HAND_POS 50"])
-        self.clock.advance(.05)
-        self.sample(lt=1, centered=False)
+        self.clock.advance(.051)  # Clamp to exact .05, away from clock subtraction roundoff.
+        self.sample(rt=1, centered=False)
         self.g.tick()
         self.assertGreater(self.g.gripper_target, 50)
         self.assertEqual(self.take(), [])
@@ -211,9 +424,119 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.g.tick()
         self.assertEqual(self.write(), ["!HAND_POS 52"])
 
-    def test_release_is_idempotent_and_waits_for_written_and_stop_confirmation(self):
+    def test_gripper_display_signal_uses_immutable_written_opening_not_latest_target(self):
         self.ready_session()
+        sent = []
+        self.g.gripper_command_written.connect(sent.append)
+        self.assertTrue(self.g.set_gripper_base(50.4))
+        pending = self.take()
+        self.assertEqual(sent, [])
+        self.g.gripper_target = 20
+        self.feed("ok hand pos=50")  # Receipt can arrive before the queued written signal.
+        self.assertEqual(sent, [])
+        self.assertEqual(self.write(pending), ["!HAND_POS 50"])
+        self.assertEqual(sent, [50.])
+        self.c._on_written("!HAND_POS 50", self.c._connection_id)
+        self.assertEqual(sent, [50.])  # An unadmitted notification is not a new send.
+        self.clock.advance(.11)
+        self.sample()
+        self.g.tick()
+        self.assertEqual(sent, [50.])
+        self.assertEqual(self.write(), ["!HAND_POS 20"])
+        self.feed("ok hand pos=20")
+        self.assertEqual(sent, [50., 20.])
+        self.clock.advance(.11)
+        self.sample()
+        self.assertTrue(self.g.set_gripper_base(0))
+        old = self.take()[0]
+        self.g.stop()
+        self.assertFalse(self.c._can_write(*old))
+        self.c._on_written(old[1], self.c._connection_id)
+        self.assertEqual(sent, [50., 20.])  # STOP canceled the unsent opening.
+        self.assertEqual(self.write(), ["!STOP"])
+
+    def test_raw_triggers_use_hand_pos_lt_decreases_rt_increases_and_both_cancel(self):
+        from app.gamepad.input import decode_gamepad
+        self.ready_session()
+        self.assertEqual(self.g.gripper_target, 100)
+        self.assertEqual(self.take(), [])
+
+        def trigger(lt, rt):
+            self.clock.advance(.11)
+            axes = [0., 0., 0., 0., lt, rt]
+            decoded = decode_gamepad(axes, [0] * 8, [(0, 0)], self.g.config["gamepad"])
+            self.g.handle_input({"connected": True, "decoded": decoded, "pressed": [],
+                                 "timestamp": self.clock(), "raw": {"axes": axes}, "error": ""})
+            self.g.tick()
+
+        trigger(-1, 1)  # RT at the default upper limit does not create a command.
+        self.assertEqual(self.g.gripper_target, 100)
+        self.assertEqual(self.take(), [])
+        trigger(1, -1)
+        self.assertEqual(self.write(), ["!HAND_POS 98"])
+        self.assertEqual(self.g.gripper_target, 98.5)
+        self.feed("ok hand pos=98")
+        trigger(1, 0)  # Both triggers active, even with unequal pressure.
+        self.assertEqual(self.take(), [])
+        self.assertEqual(self.g.gripper_target, 98.5)
+        trigger(-1, 1)
+        self.assertEqual(self.write(), ["!HAND_POS 100"])
+        self.feed("ok hand pos=100")
+        self.clock.advance(.11)
+        self.sample()
+        self.assertTrue(self.g.set_gripper_base(1))
+        self.assertEqual(self.write(), ["!HAND_POS 1"])
+        self.feed("ok hand pos=1")
+        trigger(1, -1)
+        self.assertEqual(self.write(), ["!HAND_POS 0"])
+        self.feed("ok hand pos=0")
+        trigger(1, -1)
+        self.assertEqual(self.take(), [])
+        self.assertEqual(self.g.gripper_target, 0)
+        self.assertFalse(any(command.startswith(("!HAND_O", "!HAND_C", "#GET")) for command in self.writes))
+
+    def test_explicit_default_gripper_position_sends_and_reinitialization_only_seeds(self):
+        self.ready_session()
+        self.assertTrue(self.g.set_gripper_base(100))
+        self.assertEqual(self.write(), ["!HAND_POS 100"])
+        self.feed("ok hand pos=100")
+        self.assertTrue(self.g.initialize())
+        self.assertIsNone(self.g.gripper_target)
+        self.assertEqual(self.write(), [">0,10,80,0,90,0,0,10"])
+        self.feed("queued MOVEJ id=42 mode=INT", "accepted MOVEJ id=42")
+        self.assertTrue(self.g.confirm_initialization())
+        self.clock.advance(.11)
+        self.sample()
+        self.g.tick()
+        self.assertEqual(self.g.gripper_target, 100)
+        self.assertEqual(self.take(), [])
+
+    def test_local_release_invalidates_queued_targets_without_stop(self):
+        self.ready_session()
+        self.g.set_target(self.target(dx=1))
+        self.g.tick()
+        self.g.set_gripper_base(40)
+        pending = self.take()
+        self.assertTrue(any(command.startswith("@") for _gen, command in pending))
+        self.assertTrue(any(command.startswith("!HAND_POS") for _gen, command in pending))
         self.g.release()
+        self.g.release()
+        self.assertFalse(self.g.claimed)
+        self.assertFalse(self.g._timer.isActive())
+        self.assertEqual(self.g.stage, "released")
+        self.assertIn("实机可能仍在执行最后目标", self.g.message)
+        self.assertEqual(self.c.state()["control_owner"], "ui")
+        self.assertTrue(all(not self.c._can_write(gen, command) for gen, command in pending))
+        self.clock.advance(4)
+        self.sample(ly=-1., rt=1., centered=False)
+        self.g.tick()
+        self.assertEqual(self.take(), [])
+        self.assertFalse(self.c._stop_locked)
+        self.assertFalse(self.c.movej_drag_enable.get())
+
+    def test_stopping_handover_waits_for_written_and_stop_confirmation(self):
+        self.ready_session()
+        self.g.release(request_stop=True)
         self.g.release()
         pending = self.take()
         self.assertEqual([command for _gen, command in pending], ["!STOP"])
@@ -227,6 +550,53 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertEqual(self.c.state()["control_owner"], "ui")
         self.assertFalse(self.c.movej_drag_enable.get())
 
+    def test_release_preserves_a_stop_already_queued(self):
+        self.ready_session()
+        self.g.stop()
+        pending = self.take()
+        self.g.release()
+        self.assertTrue(self.g.release_pending)
+        self.assertEqual(self.take(), [])
+        self.assertEqual(self.write(pending), ["!STOP"])
+        self.feed("STOP locked")
+        self.assertFalse(self.g.claimed)
+
+    def test_hand_receipt_timeout_pauses_only_gripper_and_explicit_position_retries(self):
+        self.ready_session()
+        self.g.set_gripper_base(40)
+        self.assertEqual(self.write(), ["!HAND_POS 40"])
+        self.clock.advance(3.1)
+        self.sample(ly=-.5, centered=False)
+        self.g.tick()
+        commands = self.write()
+        self.assertEqual(len(commands), 1)
+        self.assertTrue(commands[0].startswith("@"))
+        self.assertTrue(self.g.ready)
+        self.assertTrue(self.g.state()["gripper_paused"])
+        self.feed("queued MOVEL id=42 mode=INT", "accepted MOVEL id=42", "ok hand pos=40")
+        for _ in range(10):
+            self.clock.advance(.1)
+            self.sample(rt=1., centered=False)
+            self.g.tick()
+        self.assertEqual(self.take(), [])
+        self.assertEqual(self.g.gripper_target, 40)
+        self.assertTrue(self.g.set_gripper_base(50))
+        self.assertFalse(self.g.state()["gripper_paused"])
+        self.assertEqual(self.write(), ["!HAND_POS 50"])
+        self.feed("ok hand pos=40")
+        self.assertIsNotNone(self.g._hand)
+        self.feed("ok hand pos=50")
+        self.assertIsNone(self.g._hand)
+        self.assertNotIn("!STOP", self.writes)
+
+    def test_hand_stuck_before_write_still_stops_shared_transport(self):
+        self.ready_session()
+        self.g.set_gripper_base(40)
+        self.clock.advance(10.1)
+        self.sample()
+        self.g.tick()
+        self.assertEqual(self.write(), ["!STOP"])
+
     def test_loss_and_feedback_timeout_soft_stop_but_protection_does_not_interrupt_backoff(self):
         self.ready_session()
         self.g.handle_input({"timestamp": self.clock(), "connected": False, "decoded": None})
@@ -236,13 +606,15 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertFalse(self.g.ready)
         self.assertFalse(self.c.send_cmd("!START"))
 
-    def test_no_position_watchdog_but_lost_stop_keeps_owner_locked(self):
+    def test_shared_position_timeout_does_not_stop_but_lost_stop_keeps_owner_locked(self):
         self.ready_session()
         for _ in range(20):
             self.clock.advance(.2)
             self.sample()
             self.g.tick()
             self.c._poll_position()
+            self.assertEqual(self.write(), ["#GETJPOS"])
+            self.c._position_timeout(self.c._position_request["token"])
         self.assertTrue(self.g.ready)
         self.assertEqual(self.take(), [])
         self.assertIsNone(self.g.actual_tcp)
@@ -327,7 +699,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.g.tick()
         command = self.write()[0]
         self.assertEqual([float(value) for value in command[1:].split(",")],
-                         [147.02, 0, 288.917, 180, 0, 180, 35])
+                         [147, 0, 288.9, 180, 0, 180, 35])
         self.assertNotIn("#GETJPOS", self.writes)
         self.assertEqual(self.c.actual_pose, actual)
 
@@ -395,7 +767,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.clock.advance(.03)
         self.sample()
         self.g.tick()
-        self.assertEqual(self.write(), ["@148.52,0,288.917,180,0,180,10"])
+        self.assertEqual(self.write(), ["@148.5,0,288.9,180,0,180,10"])
         self.feed("queued MOVEL id=43 mode=INT", "accepted MOVEL id=43")
         self.clock.advance(.05)
         self.sample()
@@ -420,7 +792,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         target[0] += 1
         self.assertTrue(self.g.set_target(target))
         self.g.tick()
-        self.assertEqual(self.write(), ["@147.52,0,288.917,180,0,180,10"])
+        self.assertEqual(self.write(), ["@147.5,0,288.9,180,0,180,10"])
 
     def test_input_dt_clamp_and_invalid_trigger_cannot_create_gripper_target(self):
         self.ready_session()
@@ -598,7 +970,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.feed("MOTION id=42 kind=MOVEJ phase=3 mode=2 ms=80")
         self.assertEqual(self.g.stage, "rested")
 
-    def test_rest_int_status_timeout_stops_and_lost_stop_keeps_owner(self):
+    def test_rest_int_single_status_timeout_retries_without_stop(self):
         self.begin_rest()
         self.write()
         self.feed("queued MOVEJ id=42 mode=INT", "accepted MOVEJ id=42")
@@ -607,14 +979,34 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.clock.advance(3.1)
         self.sample()
         self.g.tick()
-        self.assertEqual(self.write(), ["!STOP"])
+        self.assertEqual(self.take(), [])
+        self.assertEqual(self.g.stage, "joint_moving")
+        self.assertIsNone(self.g._motion_status)
         self.feed("MOTION id=42 kind=MOVEJ phase=3 mode=2 ms=300")
-        self.assertEqual(self.g.stage, "stopping")
-        self.clock.advance(10.1)
+        self.assertEqual(self.g.stage, "joint_moving")
+        self.clock.advance(.21)
+        self.sample()
         self.g.tick()
-        self.assertEqual(self.g.stage, "fault")
+        self.assertEqual(self.write(), ["#MOTION_STATUS"])
+        self.feed("MOTION id=42 kind=MOVEJ phase=3 mode=2 ms=3500")
+        self.assertEqual(self.g.stage, "rested")
+        self.assertNotIn("!STOP", self.writes)
+
+    def test_rest_final_motion_timeout_still_stops_after_status_timeout(self):
+        self.begin_rest()
+        self.write()
+        self.feed("queued MOVEJ id=42 mode=INT", "accepted MOVEJ id=42")
+        self.g.tick()
+        self.assertEqual(self.write(), ["#MOTION_STATUS"])
+        self.clock.advance(3.1)
+        self.sample()
+        self.g.tick()
+        self.assertEqual(self.take(), [])
+        self.clock.advance(57.1)
+        self.sample()
+        self.g.tick()
+        self.assertEqual(self.write(), ["!STOP"])
         self.assertEqual(self.c.state()["control_owner"], "gamepad")
-        self.assertFalse(self.g.start())
 
     def test_rest_int_status_cancelled_soft_stops_without_completion(self):
         completed = []
@@ -693,7 +1085,11 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertEqual(len(command), 20)
         self.assertEqual(len((command + "\n").encode("ascii")), 21)
         self.assertEqual(motion_command("@", [1.23449, -1.23451, 0, 180, 0, -0., 10]),
-                         "@1.234,-1.235,0,180,0,0,10")
+                         "@1.2,-1.2,0,180,0,0,10")
+        self.assertEqual(motion_command(">", [1.23449, -1.23451, 0, 180, 0, -0., 0, 10]),
+                         ">1.234,-1.235,0,180,0,0,0,10")
+        self.assertEqual(motion_command("@", [146.582, -.663, 288.917, 180, -.019, -180, 35.125]),
+                         "@146.6,-0.7,288.9,180,0,-180,35.125")
         self.assertEqual(len(motion_command("@", [1.1e61])), 63)
         with self.assertRaisesRegex(ValueError, "63"):
             motion_command("@", [1.1e62])
@@ -709,7 +1105,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertEqual(self.take(), [])
         self.assertNotIn("#CMDMODE 1", self.writes)
 
-    def test_init_has_no_queries_and_unsolicited_actual_cannot_seed_target(self):
+    def test_init_shared_actual_poll_cannot_seed_target_or_confirm_arrival(self):
         self.begin_init(mode=2)
         self.write()
         self.feed("queued MOVEJ id=41 mode=INT", "accepted MOVEJ id=41")
@@ -717,7 +1113,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.sample(ly=-1, rt=1, centered=False)
         self.g.tick()
         self.c._poll_position()
-        self.assertEqual(self.write(), [])
+        self.assertEqual(self.write(), ["#GETJPOS"])
         self.feed("MOTION id=41 kind=MOVEJ phase=3 mode=2 ms=210", "ok 0 10 80 0 90 0 37.25")
         self.assertEqual(self.c.actual_pose[6], 37.25)
         self.assertIsNone(self.g.actual_tcp)
@@ -725,7 +1121,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertIsNone(self.g.command_reference_tcp)
         self.assertEqual(self.g.stage, "init_confirmation")
         self.assertFalse(self.g.ready)
-        self.assertEqual(self.writes, ["!START", ">0,10,80,0,90,0,0,10"])
+        self.assertEqual(self.writes, ["!START", ">0,10,80,0,90,0,0,10", "#GETJPOS"])
 
     def test_matching_acceptance_and_local_confirmation_seed_canonical_sent_joint_pose(self):
         from app.gamepad.kinematics import forward_kinematics
@@ -748,7 +1144,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertEqual(self.g.stage, "centering")
         self.assertEqual(self.take(), [])
 
-    def test_software_step_advances_only_from_matching_accepted_sent_pose(self):
+    def test_software_buffer_uses_written_pose_while_accepted_reference_remains_independent(self):
         self.ready_session()
         initial = list(self.g.command_reference_tcp)
         first = list(initial)
@@ -762,9 +1158,10 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertEqual(self.g.command_reference_tcp, initial)
         second = list(initial)
         second[0] += 8
-        self.assertFalse(self.g.set_target(second))
+        self.assertTrue(self.g.set_target(second))
+        self.assertAlmostEqual(self.g.written_reference_tcp[0], 150.5)
         self.feed("accepted MOVEL id=42")
-        self.assertAlmostEqual(self.g.command_reference_tcp[0], 150.52)
+        self.assertAlmostEqual(self.g.command_reference_tcp[0], 150.5)
         self.assertTrue(self.g.set_target(second))
         self.assertIsNone(self.g.actual_tcp)
         snapshot = self.g.state()
@@ -774,6 +1171,168 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertIsNone(self.g.command_reference_tcp)
         self.feed("accepted MOVEL id=42")
         self.assertIsNone(self.g.command_reference_tcp)
+
+
+    def test_plan_rejection_rolls_back_latest_unsent_target_and_requires_fresh_center(self):
+        self.ready_session()
+        reference = list(self.g.command_reference_tcp)
+        self.g.set_target(self.target(dx=1))
+        self.g.tick()
+        pending = self.take()
+        self.g.set_target(self.target(dx=4))  # Input continued before receipt.
+        self.feed("queued MOVEL id=42 mode=INT", "error MOVEL id=42 reason=PLAN_FAILED")
+        self.assertIsNotNone(self.g._stream)  # RX-before-written is deferred.
+        self.write(pending)
+        self.assertEqual(self.g.stage, "target_rejected")
+        self.assertEqual(self.g.target_tcp, reference)
+        self.assertFalse(self.c._stop_locked)
+        self.assertIsNone(self.g._stream)
+        self.feed("accepted MOVEL id=42", "error MOVEL id=42 reason=PLAN_FAILED")
+        for _ in range(10):
+            self.clock.advance(.1)
+            self.sample(ly=-1., centered=False)
+            self.g.tick()
+        self.assertEqual(self.take(), [])
+        self.assertEqual(self.g.target_tcp, reference)
+        self.assertEqual(self.g.stage, "target_rejected")
+        self.clock.advance(.02)
+        self.sample()
+        self.g.tick()
+        self.assertTrue(self.g.ready)
+        self.assertEqual(self.take(), [])  # No automatic retry/START/position query.
+        self.assertTrue(self.g.set_target(self.target(dx=-1)))
+        self.g.tick()
+        commands = self.write()
+        self.assertEqual(len(commands), 1)
+        self.assertTrue(commands[0].startswith("@"))
+        self.feed("error MOVEL id=42 reason=PLAN_FAILED")  # Late, unrelated failure.
+        self.assertEqual(len(self.g._streams), 1)
+        self.feed("queued MOVEL id=43 mode=INT", "accepted MOVEL id=43")
+        self.assertTrue(self.g.ready)
+        self.assertNotIn("!STOP", self.writes)
+        self.assertIsNone(self.g.actual_tcp)
+
+    def test_joint_plan_rejection_returns_to_initialization_without_stop(self):
+        self.begin_init(mode=2)
+        self.write()
+        self.feed("queued MOVEJ id=41 mode=INT", "error MOVEJ id=41 reason=PLAN_FAILED")
+        self.assertEqual(self.take(), [])
+        self.assertEqual(self.g.stage, "enabled")
+        self.assertFalse(self.g.ready)
+        self.assertFalse(self.c._stop_locked)
+        self.assertTrue(self.g.initialize())
+        self.assertEqual(self.write(), [">0,10,80,0,90,0,0,10"])
+
+    def test_invalid_new_target_preserves_pending_valid_motion_without_stop(self):
+        self.ready_session()
+        self.g.set_target(self.target(dx=1))
+        self.g.tick()
+        self.write()
+        valid = list(self.g.target_tcp)
+        self.assertFalse(self.g.set_target([math.nan] + valid[1:]))
+        self.assertEqual(self.g.target_tcp, valid)
+        self.assertEqual(len(self.g._streams), 1)
+        self.assertEqual(self.take(), [])
+        self.feed("queued MOVEL id=42 mode=INT", "accepted MOVEL id=42")
+        self.assertIsNone(self.g._stream)
+        self.clock.advance(.02)
+        self.sample()
+        self.g.tick()
+        self.assertTrue(self.g.ready)
+        self.assertEqual(self.take(), [])
+
+    def test_unencodable_target_rolls_back_without_stop(self):
+        self.ready_session()
+        self.g.target_tcp = [1e100] * 6
+        self.g.tick()
+        self.assertEqual(self.g.stage, "target_rejected")
+        self.assertEqual(self.g.target_tcp, self.seed_tcp)
+        self.assertEqual(self.take(), [])
+        self.assertFalse(self.c._stop_locked)
+
+    def test_plan_rejection_while_local_target_is_paused_defers_rx_without_stop(self):
+        self.ready_session()
+        self.g.set_target(self.target(dx=1))
+        self.g.tick()
+        pending = self.take()
+        self.assertFalse(self.g.set_target([math.nan] + self.g.target_tcp[1:]))
+        self.feed("queued MOVEL id=42 mode=INT", "error MOVEL id=42 reason=PLAN_FAILED")
+        self.assertIsNotNone(self.g._stream)
+        self.assertEqual(len(self.write(pending)), 1)
+        self.assertIsNone(self.g._stream)
+        self.assertEqual(self.g.stage, "target_rejected")
+        self.assertEqual(self.g.target_tcp, self.seed_tcp)
+        self.assertEqual(self.take(), [])
+        self.assertFalse(self.c._stop_locked)
+        self.assertIsNone(self.g.last_stop)
+        self.clock.advance(.02)
+        self.sample()
+        self.g.tick()
+        self.assertTrue(self.g.ready)
+        self.assertEqual(self.take(), [])
+
+    def test_other_stream_error_still_stops(self):
+        self.ready_session()
+        self.g.set_target(self.target(dx=1))
+        self.g.tick()
+        self.write()
+        self.feed("queued MOVEL id=42 mode=INT", "error MOVEL id=42 reason=MODE_UNSUPPORTED")
+        self.assertEqual(self.write(), ["!STOP"])
+        self.assertEqual(self.g.last_stop["source"], "motion_error")
+
+    def test_stop_log_captures_timeout_once_and_keeps_cause_after_confirmation(self):
+        records = []
+        self.c.log_message.connect(lambda message, tag: records.append((message, tag)))
+        self.ready_session()
+        self.clock.advance(.501)
+        self.g.tick()
+        self.g.tick()
+        self.assertEqual(self.write(), ["!STOP"])
+        stops = [json.loads(text.removeprefix("GAMEPAD_STOP ")) for text, tag in records if text.startswith("GAMEPAD_STOP ")]
+        self.assertEqual(len(stops), 1)
+        record = stops[0]
+        self.assertEqual(record["source"], "input_timeout")
+        self.assertEqual(record["stage"], "ready")
+        self.assertGreaterEqual(record["input_age_s"], .5)
+        self.assertIn("accepted MOVEJ", record["last_rx"]["line"])
+        self.feed("STOP locked")
+        self.assertIn("手柄输入超时", self.g.message)
+        snapshot = self.g.state()
+        snapshot["last_stop"]["reason"] = "changed"
+        self.assertEqual(self.g.last_stop["reason"], "手柄输入超时")
+
+    def test_stopping_handover_preserves_original_reason_and_pending_motion_evidence(self):
+        self.ready_session()
+        self.g.set_target(self.target(dx=1))
+        self.g.tick()
+        self.write()
+        self.feed("queued MOVEL id=42 mode=INT")
+        self.g.release("切换至界面控制", source="ui_suspend", request_stop=True)
+        record = self.g.last_stop
+        self.assertEqual(record["source"], "ui_suspend")
+        self.assertEqual(record["pending"][0]["id"], 42)
+        self.assertTrue(record["last_tx"]["command"].startswith("@"))
+        self.assertEqual(self.write(), ["!STOP"])
+        self.feed("STOP locked")
+        self.assertFalse(self.g.claimed)
+        self.assertIn("切换至界面控制", self.g.message)
+
+    def test_button_and_sampler_error_have_distinct_stop_evidence(self):
+        self.ready_session()
+        self.clock.advance(.02)
+        self.g.handle_input({"connected": True, "timestamp": self.clock(),
+                             "decoded": {"centered": True}, "pressed": ["stop"],
+                             "raw": {"buttons": [0, 0, 0, 0, 0, 0, 1]}})
+        self.assertEqual(self.g.last_stop["source"], "gamepad_button")
+        self.assertEqual(self.g.last_stop["buttons"][6], 1)
+        self.assertEqual(self.write(), ["!STOP"])
+
+    def test_lost_sampler_reason_is_logged_before_state_is_cleared(self):
+        self.ready_session()
+        self.g.handle_input({"connected": False, "timestamp": self.clock(), "error": "SDL device removed"})
+        self.assertEqual(self.g.last_stop["source"], "input_lost")
+        self.assertEqual(self.g.last_stop["input_error"], "SDL device removed")
+        self.assertEqual(self.write(), ["!STOP"])
 
 
 if __name__ == "__main__":

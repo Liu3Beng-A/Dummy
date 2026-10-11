@@ -1,12 +1,13 @@
 """Exercise Qt handover and local configuration without SDL or hardware."""
 from copy import deepcopy
 from pathlib import Path
+import json
 import queue
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QMessageBox
 
@@ -58,6 +59,7 @@ class FakeReader(QObject):
 class FakeSession(QObject):
     state_changed = Signal(dict)
     target_changed = Signal(dict)
+    gripper_command_written = Signal(float)
     initial_pose_completed = Signal(list)
 
     def __init__(self):
@@ -100,12 +102,18 @@ class FakeSession(QObject):
         self.update(claimed=True, stage="connected", ready=False)
         return True
 
-    def release(self):
+    def release(self, reason=None, **kwargs):
         self.calls.append("release")
-        self.update(release_pending=True, ready=False, stage="stopping")
+        self.release_reason = reason
+        self.release_request_stop = kwargs.get("request_stop", False)
+        if self.release_request_stop:
+            self.update(release_pending=True, ready=False, stage="stopping")
+        else:
+            self.update(claimed=False, release_pending=False, ready=False, stage="released",
+                        message="手柄已释放；实机可能仍在执行最后目标")
 
     def confirm_release(self):
-        self.update(claimed=False, release_pending=False, ready=False, stage="stopped")
+        self.update(claimed=False, release_pending=False, ready=False, stage="released")
 
     def start(self):
         self.calls.append("start")
@@ -123,7 +131,7 @@ class FakeSession(QObject):
         self.calls.append("rest")
         return True
 
-    def stop(self):
+    def stop(self, *args, **kwargs):
         self.calls.append("stop")
         return True
 
@@ -159,6 +167,9 @@ class GamepadUiTests(unittest.TestCase):
         self.window.close()
         APPLICATION.processEvents()
         self.window.deleteLater()
+        # processEvents alone leaves deferred deletions queued without app.exec(),
+        # retaining prior windows and making later timer checks depend on test order.
+        APPLICATION.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         APPLICATION.processEvents()
         self.store.close()
         self.viewer_patch.stop()
@@ -184,9 +195,11 @@ class GamepadUiTests(unittest.TestCase):
         angles = " / ".join(f"{value:g}" for value in expected["robot"]["init_joints"])
         self.assertIn(angles, self.window.gamepad_panel.initial_hint.text())
         self.assertIn("地轨固定 0 mm", self.window.gamepad_panel.initial_hint.text())
-        self.assertIn("第二次 Start 只发一条 MoveJ", self.window.gamepad_panel.initial_hint.text())
-        self.assertIn("观察实物到位后点击“确认到位”", self.window.gamepad_panel.initial_hint.text())
-        self.assertIn("暂停位置回读", self.window.gamepad_panel.initial_hint.text())
+        self.assertIn("第二次 Start 发一条初始化 MoveJ", self.window.gamepad_panel.initial_hint.text())
+        self.assertIn("观察实物到位后再按 Start（按键7）", self.window.gamepad_panel.initial_hint.text())
+        self.assertIn("按 A（按键0）", self.window.gamepad_panel.initial_hint.text())
+        self.assertIn("或点击“确认到位”", self.window.gamepad_panel.initial_hint.text())
+        self.assertIn("按软件设置共用关节位置轮询", self.window.gamepad_panel.initial_hint.text())
         self.assertEqual([spin.value() for spin in self.window.pose_spins], POSE_DEFAULTS)
         self.window.navigation.setCurrentRow(1)
         self.window.teaching_tabs.setCurrentIndex(1)
@@ -208,6 +221,33 @@ class GamepadUiTests(unittest.TestCase):
             self.assertEqual(self.commands(), [])
             reader_type.assert_not_called()
 
+    def test_uncapped_rates_apply_from_panel_and_dialog_without_robot_commands(self):
+        panel = self.window.gamepad_panel
+        for spin, value in ((panel.linear_speed_spin, 500), (panel.angular_speed_spin, 360)):
+            spin.setValue(value)
+            self.assertEqual(spin.value(), value)
+            self.assertLessEqual(spin.minimumSizeHint().width(), 140)
+        panel.apply_button.click()
+        control = self.store.settings["gamepad_config"]["control"]
+        self.assertEqual(control["linear_speed_mm_s"], 500)
+        self.assertEqual(control["angular_speed_deg_s"], 360)
+        self.assertEqual(control["gripper_speed_percent_s"], 150)
+        self.assertEqual(self.session.config, self.store.settings["gamepad_config"])
+        dialog = GamepadSettingsDialog(self.window._gamepad_config, self.window)
+        for path, value in (("control.linear_speed_mm_s", 10000),
+                            ("control.angular_speed_deg_s", 10000),
+                            ("control.gripper_speed_percent_s", 150)):
+            dialog.fields[path].setValue(value)
+            self.assertEqual(dialog.fields[path].value(), value)
+        candidate = dialog.result_config()
+        self.assertTrue(self.window._save_gamepad_config(candidate))
+        self.assertEqual(panel.linear_speed_spin.value(), 10000)
+        self.assertEqual(panel.angular_speed_spin.value(), 10000)
+        self.assertEqual(self.reader.config, candidate)
+        self.assertEqual(self.session.config, candidate)
+        self.assertEqual(self.commands(), [])
+        dialog.deleteLater()
+
     def test_inspection_preserves_timestamp_and_stopped_samples_are_ignored(self):
         self.window._gamepad_action("check")
         sample = {"connected": True, "timestamp": 123.4, "decoded": {"centered": True},
@@ -223,7 +263,7 @@ class GamepadUiTests(unittest.TestCase):
         self.reader.sampled.emit({"connected": False})
         self.assertEqual(len(self.session.samples), count + 1)
 
-    def test_claim_cancels_drag_and_keeps_conflicts_locked_until_confirmation(self):
+    def test_claim_cancels_drag_and_explicit_release_unlocks_without_stop(self):
         self.controller.current_cmdmode = 3
         self.window.j_drag.setChecked(True)
         self.claim()
@@ -233,18 +273,31 @@ class GamepadUiTests(unittest.TestCase):
         self.assertFalse(self.window.teaching_send_button.isEnabled())
         self.assertNotIn("start", self.session.calls)
         self.window._gamepad_action("release")
-        self.assertFalse(self.window.movej_send_button.isEnabled())
-        self.window._suspend_gamepad("再暂停")
+        self.assertFalse(self.session.release_request_stop)
+        self.assertFalse(self.reader.running)
         self.assertEqual(self.session.calls.count("release"), 1)
-        self.session.confirm_release()
         self.assertTrue(self.window.movej_send_button.isEnabled())
+        self.assertIn("已释放", self.window.gamepad_panel.status_label.text())
+        self.assertNotIn("已停止", self.window.gamepad_panel.status_label.text())
         self.assertFalse(self.window.j_drag.isChecked())
         self.assertEqual(self.commands(), [])
+
+    def test_switch_to_interface_waits_for_stop_confirmation(self):
+        self.claim()
+        self.window.input_mode.setCurrentIndex(0)
+        self.assertTrue(self.session.release_request_stop)
+        self.assertTrue(self.session.data["release_pending"])
+        self.assertFalse(self.reader.running)
+        self.assertFalse(self.window.movej_send_button.isEnabled())
+        self.session.confirm_release()
+        self.assertTrue(self.window.movej_send_button.isEnabled())
 
     def test_stage_actions_and_gripper_base_require_ready(self):
         self.claim()
         panel = self.window.gamepad_panel
         self.assertNotIn("resync", panel.action_buttons)
+        self.assertEqual(panel.gripper_base_button.text(), "发送夹爪位置")
+        self.assertIn("LT减小、RT增加", panel.gripper_base_button.toolTip())
         self.assertFalse(self.window._gamepad_action("resync"))
         self.assertNotIn("resync", self.session.calls)
         self.assertTrue(panel.action_buttons["start"].isEnabled())
@@ -256,7 +309,10 @@ class GamepadUiTests(unittest.TestCase):
         self.assertTrue(panel.action_buttons["initialize"].isEnabled())
         panel.action_buttons["initialize"].click()
         self.assertIn("initialize", self.session.calls)
-        self.assertFalse(panel.action_buttons["start"].isEnabled())
+        self.assertTrue(panel.action_buttons["start"].isEnabled())
+        panel.action_buttons["start"].click()
+        self.assertIn("start", self.session.calls)
+        self.assertIn("第三次", panel.action_buttons["start"].toolTip())
         self.assertFalse(panel.gripper_base_button.isEnabled())
         for stage in ("starting", "fault", "wait_idle", "joint_queued",
                       "joint_moving", "int_mode", "int_check", "centering"):
@@ -303,8 +359,8 @@ class GamepadUiTests(unittest.TestCase):
         self.assertEqual(self.window.viewer.actual, (actual, None))
         self.assertTrue(self.window.viewer.actual_known)
         self.session.update(stage="ready", claimed=True, ready=True)
-        self.assertTrue(self.window.viewer.feedback_paused)
-        self.assertIn("位置回读暂停", self.window.actual_status.text())
+        self.assertFalse(self.window.viewer.feedback_paused)
+        self.assertNotIn("位置回读暂停", self.window.actual_status.text())
         self.session.target_changed.emit(dict(target, gripper=20))
         self.session.initial_pose_completed.emit([0, 10, 80, 0, 90, 0, 0])
         self.window._update_state({"actual_pose": actual, "actual_stale": True})
@@ -317,6 +373,58 @@ class GamepadUiTests(unittest.TestCase):
         self.assertFalse(self.window.viewer.feedback_paused)
         self.assertNotIn("回读暂停", self.window.actual_status.text())
         self.assertEqual(self.commands(), [])
+
+    def test_written_gamepad_gripper_updates_only_command_illustration_and_disconnect_clears_it(self):
+        self.controller.is_connected = True
+        self.controller.serial_port = FakePort()
+        self.window.input_mode.setCurrentIndex(1)
+        actual = [2, 9, 78, 3, 87, -2, 0]
+        self.controller._process_rx_line("ok " + " ".join(map(str, actual)))
+        previous = deepcopy(self.window.viewer.actual)
+        target = deepcopy(self.window.viewer.target)
+        last_actual_at = self.controller.last_actual_at
+        self.session.target_changed.emit({"flange": [100, 20, 300, 180, 0, 180], "gripper": 20})
+        self.assertIsNone(self.window.viewer.commanded_gripper)
+        self.session.gripper_command_written.emit(40.)
+        self.assertEqual(self.window.viewer.commanded_gripper, 40.)
+        self.assertEqual(self.window.viewer.actual, previous)
+        self.assertEqual(self.window.viewer.target, target)
+        self.assertEqual(self.controller.last_actual_at, last_actual_at)
+        self.assertIsNone(self.window.viewer.cartesian)
+        self.controller._process_rx_line("ok " + " ".join(map(str, actual)))
+        self.assertEqual(self.window.viewer.commanded_gripper, 40.)
+        self.assertIn("已发送，无实际回读", self.window.actual_status.text())
+        self.controller.is_connected = False
+        self.window._update_state({"connected": False})
+        self.assertIsNone(self.window.viewer.commanded_gripper)
+        self.assertIsNone(self.window._gamepad_gripper_commanded)
+        self.assertEqual(self.commands(), [])
+
+    def test_gamepad_shared_feedback_uses_software_poll_toggle_and_rate(self):
+        self.controller.is_connected = True
+        self.controller.serial_port = FakePort()
+        self.claim()
+        self.controller._control_owner = "gamepad"
+        self.window.poll_hz.setValue(30)
+        self.assertEqual(self.controller._poll_timer.interval(), 34)
+        self.controller._poll_position()
+        self.assertEqual(self.commands(), ["#GETJPOS"])
+        actual = [2, 9, 78, 3, 87, -2, 0]
+        self.controller._process_rx_line("ok " + " ".join(map(str, actual)))
+        self.assertEqual(self.window.viewer.actual, (actual, None))
+        self.assertTrue(self.window.viewer.actual_only)
+        self.assertFalse(self.window.viewer.feedback_paused)
+        self.assertIn("实际七轴已更新", self.window.actual_status.text())
+        self.assertIsNone(self.window.viewer.cartesian)
+        self.window.poll_enabled.setChecked(False)
+        self.assertTrue(self.window.viewer.feedback_paused)
+        self.assertIn("位置回读暂停", self.window.actual_status.text())
+        self.controller._poll_position()
+        self.assertEqual(self.commands(), [])
+        self.window.poll_enabled.setChecked(True)
+        self.assertFalse(self.window.viewer.feedback_paused)
+        self.controller._poll_position()
+        self.assertEqual(self.commands(), ["#GETJPOS"])
 
     def test_gamepad_actual_only_is_temporary_even_before_claim(self):
         for preference in (0, 1):
@@ -344,27 +452,163 @@ class GamepadUiTests(unittest.TestCase):
         self.assertNotIn("claim", self.session.calls)
         self.assertEqual(self.commands(), [])
 
-    def test_page_interface_hide_and_dialog_release_without_auto_resume(self):
-        for action in (lambda: self.window.navigation.setCurrentRow(1),
-                       lambda: self.window.input_mode.setCurrentIndex(0),
-                       lambda: self.window.eventFilter(self.window, QEvent(QEvent.Type.WindowDeactivate)),
-                       self.window._expand_log):
-            self.window.navigation.setCurrentRow(0)
-            self.claim()
-            count = self.session.calls.count("release")
-            action()
-            self.assertEqual(self.session.calls.count("release"), count + 1)
-            self.assertFalse(self.reader.running)
-            self.session.confirm_release()
-            self.window.log_dock.hide()
+    def test_other_pages_and_dialog_keep_control_and_conflicting_writes_locked(self):
         self.claim()
+        for index in range(1, self.window.navigation.count()):
+            self.window.navigation.setCurrentRow(index)
+            self.assertTrue(self.session.claimed)
+            self.assertTrue(self.reader.running)
+            self.assertFalse(self.window.teaching_send_button.isEnabled())
+            self.assertFalse(self.window.motor_page_content.isEnabled())
         dialog = QDialog(self.window)
         dialog.show()
         APPLICATION.processEvents()
-        self.assertTrue(self.session.data["release_pending"])
+        self.assertFalse(self.session.data["release_pending"])
+        self.reader.sampled.emit({"connected": True, "timestamp": 123, "decoded": {"centered": True}})
+        self.assertEqual(self.session.samples[-1]["timestamp"], 123)
         dialog.close()
-        self.session.confirm_release()
-        self.assertFalse(self.reader.running)
+        self.assertTrue(self.reader.running)
+        self.assertNotIn("release", self.session.calls)
+        self.assertNotIn("stop", self.session.calls)
+        self.window._open_gamepad_settings()
+        self.assertIsNone(self.window._gamepad_settings_dialog)
+        self.assertTrue(self.session.claimed)
+
+    def test_gripper_timeout_display_keeps_arm_and_manual_retry_enabled(self):
+        self.claim()
+        self.session.update(stage="ready", ready=True, gripper_target=40, gripper_paused=True)
+        panel = self.window.gamepad_panel
+        self.assertIn("发送暂停", panel.tcp_label.text())
+        self.assertTrue(panel.gripper_base_button.isEnabled())
+        self.assertTrue(panel.action_buttons["rest"].isEnabled())
+
+    def test_internal_and_external_window_focus_keep_gamepad_control(self):
+        self.claim()
+        count = self.session.calls.count("release")
+        with patch("app.ui.main_window.QApplication.applicationState", return_value=Qt.ApplicationState.ApplicationActive), \
+                patch("app.ui.main_window.QApplication.activeWindow", return_value=self.window.log_dock):
+            self.window._expand_log()
+            self.window.eventFilter(self.window, QEvent(QEvent.Type.WindowDeactivate))
+            APPLICATION.processEvents()
+            self.assertEqual(self.session.calls.count("release"), count)
+            self.assertTrue(self.reader.running)
+        with patch("app.ui.main_window.QApplication.applicationState", return_value=Qt.ApplicationState.ApplicationActive), \
+                patch("app.ui.main_window.QApplication.activeWindow", return_value=self.window):
+            self.window.eventFilter(self.window.log_dock, QEvent(QEvent.Type.WindowDeactivate))
+            APPLICATION.processEvents()
+            self.assertEqual(self.session.calls.count("release"), count)
+        with patch("app.ui.main_window.QApplication.activeWindow", return_value=None):
+            self.window.eventFilter(self.window.log_dock, QEvent(QEvent.Type.WindowDeactivate))
+            APPLICATION.processEvents()
+        self.assertEqual(self.session.calls.count("release"), count)
+        self.assertFalse(self.session.data["release_pending"])
+        self.assertTrue(self.reader.running)
+
+    @staticmethod
+    def focus_records(log):
+        return [json.loads(call.args[0].removeprefix("GAMEPAD_FOCUS "))
+                for call in log.call_args_list if call.args[0].startswith("GAMEPAD_FOCUS ")]
+
+    def test_application_focus_trace_keeps_initialization_and_records_before_after(self):
+        self.claim()
+        self.session.update(stage="init_confirmation")
+        native = {"available": True, "hwnd": "0x123456789", "pid": 123, "own_process": False}
+        with patch.object(self.window, "_native_gamepad_focus", return_value=native), \
+                patch.object(self.controller, "log") as log, \
+                patch("app.ui.main_window.QApplication.applicationState", return_value=Qt.ApplicationState.ApplicationInactive), \
+                patch("app.ui.main_window.QApplication.activeWindow", return_value=None):
+            self.window.eventFilter(APPLICATION, QEvent(QEvent.Type.ApplicationDeactivate))
+            self.assertNotIn("release", self.session.calls)
+            self.assertTrue(self.reader.running)
+            before = self.focus_records(log)[0]
+            self.assertEqual(before["event"], "ApplicationDeactivate")
+            self.assertEqual(before["application_state"], "ApplicationInactive")
+            self.assertIsNone(before["active_window"])
+            self.assertEqual(before["native_foreground"], native)
+            self.assertTrue(before["reader_active"])
+            self.assertFalse(before["release_pending"])
+            APPLICATION.processEvents()
+            after = [r for r in self.focus_records(log) if r["event"] == "after_event_loop"][-1]
+            self.assertIn("ApplicationDeactivate", after["triggers"])
+            self.assertFalse(after["release_pending"])
+            self.assertTrue(after["reader_active"])
+            self.assertEqual(after["stage"], "init_confirmation")
+            self.assertNotIn("release", self.session.calls)
+        self.assertEqual(self.commands(), [])
+
+    def test_window_focus_trace_records_internal_and_external_without_releasing(self):
+        self.claim()
+        with patch.object(self.window, "_native_gamepad_focus", return_value={"available": True}), \
+                patch.object(self.controller, "log") as log, \
+                patch("app.ui.main_window.QApplication.applicationState", return_value=Qt.ApplicationState.ApplicationActive), \
+                patch("app.ui.main_window.QApplication.activeWindow", return_value=self.window.log_dock):
+            self.window.eventFilter(self.window, QEvent(QEvent.Type.WindowDeactivate))
+            APPLICATION.processEvents()
+            self.assertNotIn("release", self.session.calls)
+            self.assertTrue(self.reader.running)
+            records = self.focus_records(log)
+            self.assertEqual(records[0]["active_window"]["role"], "terminal")
+            self.assertTrue(any(r["event"] == "after_event_loop" for r in records))
+        native = {"available": True, "pid": 456, "own_process": False}
+        with patch.object(self.window, "_native_gamepad_focus", return_value=native), \
+                patch.object(self.controller, "log") as log, \
+                patch("app.ui.main_window.QApplication.applicationState", return_value=Qt.ApplicationState.ApplicationInactive), \
+                patch("app.ui.main_window.QApplication.activeWindow", return_value=None):
+            self.window.eventFilter(self.window.log_dock, QEvent(QEvent.Type.WindowDeactivate))
+            self.assertNotIn("release", self.session.calls)
+            APPLICATION.processEvents()
+            self.assertNotIn("release", self.session.calls)
+            self.assertTrue(self.reader.running)
+            self.assertEqual(self.focus_records(log)[0]["native_foreground"], native)
+        self.assertEqual(self.commands(), [])
+
+    def test_focus_trace_failure_keeps_control_and_explicit_stop_available(self):
+        self.claim()
+        with patch.object(self.window, "_native_gamepad_focus", side_effect=OSError("unavailable")), \
+                patch.object(self.controller, "log") as log:
+            self.window.eventFilter(APPLICATION, QEvent(QEvent.Type.ApplicationDeactivate))
+            self.assertNotIn("release", self.session.calls)
+            self.assertEqual(self.focus_records(log)[0]["snapshot_error"], "OSError")
+            APPLICATION.processEvents()
+        with patch.object(self.controller, "log", side_effect=OSError("log unavailable")):
+            self.window.eventFilter(APPLICATION, QEvent(QEvent.Type.ApplicationDeactivate))
+            self.assertNotIn("release", self.session.calls)
+            APPLICATION.processEvents()
+            self.assertTrue(self.window._system_command("!STOP"))
+            self.assertEqual(self.session.calls.count("stop"), 1)
+        self.assertTrue(self.reader.running)
+        self.assertEqual(self.commands(), [])
+
+    def test_hiding_or_minimizing_keeps_gamepad_input_and_control(self):
+        self.claim()
+        for action in (self.window.hide, self.window.showMinimized):
+            self.window.showNormal()
+            APPLICATION.processEvents()
+            count = self.session.calls.count("release")
+            action()
+            APPLICATION.processEvents()
+            self.assertEqual(self.session.calls.count("release"), count)
+            self.assertTrue(self.reader.running)
+            self.assertTrue(self.session.claimed)
+
+    def test_focus_trace_is_idle_without_gamepad_and_cancelled_on_close(self):
+        with patch.object(self.controller, "log") as log, \
+                patch.object(self.window, "_native_gamepad_focus") as native:
+            self.window.eventFilter(APPLICATION, QEvent(QEvent.Type.ApplicationDeactivate))
+            APPLICATION.processEvents()
+            self.assertEqual(self.focus_records(log), [])
+            native.assert_not_called()
+        self.claim()
+        with patch.object(self.window, "_native_gamepad_focus", return_value={"available": False}), \
+                patch.object(self.controller, "log") as log:
+            self.window.eventFilter(APPLICATION, QEvent(QEvent.Type.ApplicationDeactivate))
+            self.assertTrue(self.window._gamepad_focus_trace_timer.isActive())
+            self.session.confirm_release()
+            self.window.close()
+            APPLICATION.processEvents()
+            self.assertFalse(self.window._gamepad_focus_trace_timer.isActive())
+            self.assertEqual(self.window._gamepad_focus_trace_events, [])
+            self.assertFalse(any(r["event"] == "after_event_loop" for r in self.focus_records(log)))
 
     def test_config_save_failure_leaves_runtime_and_panel_unchanged(self):
         old = deepcopy(self.window._gamepad_config)
@@ -397,12 +641,25 @@ class GamepadUiTests(unittest.TestCase):
         dialog.deleteLater()
         self.assertEqual(self.commands(), [])
 
+    def test_a_mapping_can_be_configured_or_disabled_without_changing_start(self):
+        dialog = GamepadSettingsDialog(default_config(), self.window)
+        binding = dialog.fields["gamepad.buttons.initialize"]
+        self.assertEqual(binding.value(), 0)
+        binding.setValue(-1)
+        self.assertEqual(dialog.result_config()["gamepad"]["buttons"]["initialize"], -1)
+        self.assertEqual(dialog.result_config()["gamepad"]["buttons"]["start"], 7)
+        binding.setValue(2)
+        self.assertEqual(dialog.result_config()["gamepad"]["buttons"]["initialize"], 2)
+        dialog.deleteLater()
+        self.assertEqual(self.commands(), [])
+
     def test_close_waits_for_release_then_closes_reader_and_transport(self):
         self.controller.is_connected = True
         self.controller.serial_port = FakePort()
         self.claim()
         self.window.close()
         self.assertTrue(self.window._gamepad_close_pending)
+        self.assertTrue(self.session.release_request_stop)
         self.assertFalse(self.window._closed)
         self.assertTrue(self.controller.is_connected)
         self.assertFalse(self.reader.running)

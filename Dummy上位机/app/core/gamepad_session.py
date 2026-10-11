@@ -1,10 +1,11 @@
 """Qt-owned gamepad control, sharing the controller's transport and transactions."""
 from copy import deepcopy
+import json
 import math
 import re
 import time
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Qt, Signal
 from app.gamepad.kinematics import forward_kinematics
 
 
@@ -20,12 +21,13 @@ def tool_translation(pose, length):
 
 
 def motion_command(prefix, values):
-    """Keep the existing millesimal precision within the firmware's 63-byte body."""
+    """Match old-helper drag precision for MoveL; retain MoveJ/speed precision."""
     fields = []
-    for value in values:
+    for index, value in enumerate(values):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ValueError("运动目标包含无效数值")
-        field = f"{value:.3f}".rstrip("0").rstrip(".")
+        precision = 1 if prefix == "@" and index < 6 else 3
+        field = f"{value:.{precision}f}".rstrip("0").rstrip(".")
         fields.append("0" if field == "-0" else field)
     command = prefix + ",".join(fields)
     if len(command.encode("ascii")) > 63:
@@ -34,8 +36,11 @@ def motion_command(prefix, values):
 
 
 class GamepadSession(QObject):
+    UI_INTERVAL = .05
+    STREAM_HISTORY_LIMIT = 64
     state_changed = Signal(dict)
     target_changed = Signal(dict)
+    gripper_command_written = Signal(float)  # Sent target opening, never position telemetry.
     initial_pose_completed = Signal(list)
 
     def __init__(self, controller, config=None, clock=time.monotonic):
@@ -52,11 +57,19 @@ class GamepadSession(QObject):
         self.command_reference_tcp = None
         self.gripper_target = None
         self._last_move = self._last_hand = -math.inf
-        self._last_pose_sent = self._last_hand_sent = None
+        self._last_move_command = self._last_hand_sent = None
         self._mode_query = self._mode_set = self._motion = None
         self._motion_status = None
         self._last_motion_query = -math.inf
         self._stream = self._hand = self._system = None
+        self._streams = []  # Ordered receipt ledger; _stream is only the unwritten slot.
+        self._stream_serial = self._accepted_stream_serial = 0
+        self.written_reference_tcp = None
+        self._velocity = [0.] * 6
+        self._motion_input_active = False
+        self._target_dirty = False
+        self._last_state_publish = self._last_target_publish = -math.inf
+        self._hand_paused = False
         self._accepted_motion = {}  # Bounded IDs in this ownership generation only.
         self._purpose = None
         self._issued = 0
@@ -64,8 +77,13 @@ class GamepadSession(QObject):
         self._motion_deadline = self._stop_deadline = None
         self._stop_confirmed = False
         self._fault_after_stop = False
+        self.last_stop = None
+        self._last_written = self._last_receipt = None
+        self._input_error = ""
+        self._pressed = []
         self._timer = QTimer(self)
-        self._timer.setInterval(20)
+        self._timer.setInterval(10)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self.tick)
 
     @property
@@ -88,35 +106,61 @@ class GamepadSession(QObject):
         return deepcopy({"stage": self.stage, "message": self.message, "ready": self.ready,
                          "claimed": self.claimed, "release_pending": self.release_pending,
                          "stop_confirmed": self._stop_confirmed,
+                         "last_stop": self.last_stop,
                          "device_connected": self.device_connected, "centered": self.centered,
                          "last_input_at": self.last_input_at,
                          "input_age_s": None if self.last_input_at is None else max(0., now - self.last_input_at),
                          "target_tcp": self.target_tcp, "actual_tcp": self.actual_tcp,
                          "command_reference_tcp": self.command_reference_tcp,
-                         "gripper_target": self.gripper_target, "raw": self.raw})
+                         "gripper_target": self.gripper_target, "gripper_paused": self._hand_paused,
+                         "raw": self.raw})
 
-    def _publish(self):
+    def _publish(self, force=False):
+        if self._target_dirty:
+            self._publish_target(force)
+        if not force and self.clock() - self._last_state_publish < self.UI_INTERVAL:
+            return
+        self._last_state_publish = self.clock()
         self.state_changed.emit(self.state())
 
     def _stage(self, stage, message):
         self.stage, self.message = stage, message
-        self._publish()
+        self._publish(force=True)
         self.controller._emit_state()
 
     def _target_changed(self):
+        self._target_dirty = True
+        self._publish_target()
+
+    def _publish_target(self, force=False):
         if self.target_tcp is None:
+            self._target_dirty = False
             return
+        if not force and self.clock() - self._last_target_publish < self.UI_INTERVAL:
+            return
+        self._target_dirty = False
+        self._last_target_publish = self.clock()
         offset = tool_translation(self.target_tcp, self.robot["tool_offset_z"])
         flange = [self.target_tcp[i] - offset[i] for i in range(3)] + self.target_tcp[3:]
         self.target_changed.emit({"flange": flange, "tcp": list(self.target_tcp), "gripper": self.gripper_target})
 
+    def _move_command(self):
+        # Keep full precision in the input accumulator; quantize the flange
+        # only at the wire boundary, like the old helper's MoveL sliders.
+        offset = tool_translation(self.target_tcp, self.robot["tool_offset_z"])
+        flange = [self.target_tcp[i] - offset[i] for i in range(3)] + self.target_tcp[3:]
+        return motion_command("@", flange + [self.robot["cmd_speed"]])
+
     def set_config(self, config):
         from app.gamepad.config import validate_config
         if self.claimed:
-            raise ValueError("请先释放手柄控制并确认 STOP，再修改配置")
+            raise ValueError("请先释放手柄控制，再修改配置")
         self.config = validate_config(config)
         self.actual_tcp = self.target_tcp = None
         self.command_reference_tcp = None
+        self.written_reference_tcp = None
+        self._velocity = [0.] * 6
+        self._motion_input_active = False
         self.gripper_target = None
         self.device_connected = self.centered = False
         self.last_input_at = self._last_sample = None
@@ -133,13 +177,16 @@ class GamepadSession(QObject):
         if self.last_input_at is None or self.clock() - self.last_input_at > .5:
             self._stage("connected", "手柄输入已过期，请重新检查输入")
             return False
-        if (c._position_request is not None or c._seq_active or c._parameter_request is not None or
+        request = c._position_request
+        background_poll = bool(request and request.get("source") == "telemetry" and not request["sync"])
+        if ((request is not None and not background_poll) or c._seq_active or c._parameter_request is not None or
                 c._acc_sync_waiting or c._mode_request is not None or c._mode_pending is not None or c._calibration_busy):
             self._stage("connected", "当前任务或位置回读未结束，请等待后接管")
             return False
         c._cancel_motion_for_stop()
         c._control_owner = "gamepad"
         self.claimed = True
+        self.last_stop = None
         self.release_pending = False
         self._clear_pending()
         self.actual_tcp = self.target_tcp = None
@@ -148,26 +195,38 @@ class GamepadSession(QObject):
         self._stage("connected", "已接管；第一次 Start 使能，第二次 Start 到初始姿态，地轨归 0")
         return True
 
-    def _finish_release(self):
+    def _finish_release(self, *, invalidate=False, reason="手柄控制已释放"):
         self.claimed = self.release_pending = False
         self._timer.stop()
+        if invalidate:
+            # Invalidate queued targets without sending a device STOP. A write
+            # already admitted by the serial worker may still finish.
+            self.controller._cancel_motion_for_stop()
         self._clear_pending()
         self.controller._control_owner = "ui"
-        self._stage("disconnected" if not self.controller.is_connected else "stopped", "手柄控制已释放；拖发保持关闭")
+        self._stage("disconnected" if not self.controller.is_connected else "released",
+                    self._stop_message(reason + "；手柄不再发令，实机可能仍在执行最后目标；拖发保持关闭"))
 
-    def release(self):
+    def release(self, reason="释放手柄控制", *, source="release", request_stop=False):
         if not self.claimed or self.release_pending:
             return
         if not self.controller.is_connected:
             self._finish_release()
             return
-        self.release_pending = True
-        if self._stop_confirmed and self.stage in ("stopped", "disabled"):
-            self._finish_release()
-        elif self.stage in ("stopping", "disabling"):
+        if self.stage in ("stopping", "disabling"):
+            # Preserve a STOP/DISABLE already requested, including its queued write.
+            self.release_pending = True
             self._publish()
+        elif request_stop:
+            self.release_pending = True
+            if self._stop_confirmed and self.stage in ("stopped", "disabled"):
+                self._finish_release()
+            else:
+                self.stop(reason, source=source)
         else:
-            self.stop("释放控制；等待 STOP 确认")
+            self.controller.log("GAMEPAD_RELEASE " + json.dumps(
+                {"source": source, "reason": reason, "stop_requested": False}, ensure_ascii=False), "INFO")
+            self._finish_release(invalidate=True, reason=reason)
 
     def _clear_pending(self):
         self.controller._discard_gamepad_position_request()
@@ -175,11 +234,18 @@ class GamepadSession(QObject):
         self._motion_status = None
         self._last_motion_query = -math.inf
         self._stream = self._hand = self._system = None
+        self._streams.clear()
+        self._accepted_stream_serial = 0
+        self.written_reference_tcp = None
+        self._velocity = [0.] * 6
+        self._motion_input_active = False
+        self._target_dirty = False
+        self._hand_paused = False
         self._accepted_motion.clear()
         self._purpose = None
         self.command_reference_tcp = None
         self._idle_retry = self._motion_deadline = self._stop_deadline = None
-        self._last_pose_sent = self._last_hand_sent = self.gripper_target = None
+        self._last_move_command = self._last_hand_sent = self.gripper_target = None
 
     def _new_job(self, command, purpose):
         c = self.controller
@@ -190,6 +256,10 @@ class GamepadSession(QObject):
     def _send(self, command, purpose, slot):
         job = self._new_job(command, purpose)
         setattr(self, slot, job)
+        if slot == "_stream":
+            self._stream_serial += 1
+            job["serial"] = self._stream_serial
+            self._streams.append(job)
         if not self.controller.send_cmd(command, source="gamepad"):
             setattr(self, slot, None)
             if not self.controller.is_connected:
@@ -202,9 +272,37 @@ class GamepadSession(QObject):
         job["generation"] = self.controller._tx_generation
         return job
 
+    def _find_stream(self, motion_id, *, queued=False):
+        for job in self._streams:
+            if motion_id in (job.get("id"), job.get("queued_id")):
+                return job
+        if queued:
+            if motion_id in self._accepted_motion or not 0 < ((motion_id - self._issued) & 0xFFFFFFFF) < 0x80000000:
+                return None
+            return next((job for job in self._streams if job.get("id") is None and
+                         job.get("queued_id") is None), None)
+        return None
+
+    def _retire_stream(self, job):
+        if job in self._streams:
+            self._streams.remove(job)
+        if self._stream is job:
+            self._stream = None
+
+    def can_write_stream(self, generation, command):
+        job = self._stream
+        return bool(self.claimed and not self.release_pending and
+                    self.device_connected and self.controller._motor_enabled and
+                    self.controller.current_cmdmode == 2 and
+                    self.stage in ("ready", "target_rejected") and job and not job["written"] and
+                    job["generation"] == generation and job["command"] == command and
+                    job["connection"] == self.controller._connection_id)
+
     def start(self):
         if not self.claimed or self.release_pending:
             return False
+        if self.stage == "init_confirmation":
+            return self.confirm_initialization()
         if self.stage in ("enabled", "rested"):
             return self.initialize()
         if self.stage not in ("connected", "disabled", "stopped", "protected", "fault"):
@@ -215,6 +313,7 @@ class GamepadSession(QObject):
         self._clear_pending()
         self._stop_confirmed = False
         self._fault_after_stop = False
+        self.last_stop = None
         self._stage("starting", "等待 Started ok；尚未允许运动")
         return self._send("!START", "start", "_system") is not None
 
@@ -285,6 +384,7 @@ class GamepadSession(QObject):
         offset = tool_translation(flange, self.robot["tool_offset_z"])
         self.target_tcp = [flange[i] + offset[i] for i in range(3)] + flange[3:]
         self.command_reference_tcp = list(self.target_tcp)
+        self.written_reference_tcp = list(self.target_tcp)
         self._target_changed()
 
     def confirm_initialization(self):
@@ -297,6 +397,9 @@ class GamepadSession(QObject):
             self.message = "连续手柄控制需要 INT；请释放控制后设置 INT，再接管初始化。不会自动切换模式"
             self._publish()
             return False
+        # Software starting target only: confirming MoveJ must not send HAND_POS.
+        self.gripper_target = 100.
+        self._last_hand_sent = 100
         self._seed_joint_target(job)
         self._accepted_motion[job["id"]] = (job["generation"], job["connection"])
         self._motion = self._motion_status = None
@@ -305,9 +408,38 @@ class GamepadSession(QObject):
         self._stage("centering", "已手动确认到位；等待摇杆与扳机回中。未查询实际位置")
         return True
 
-    def stop(self, reason="手柄软停", fault=False):
+    def _stop_message(self, message):
+        return message + ("；停止原因：" + self.last_stop["reason"] if self.last_stop else "")
+
+    def _record_stop(self, reason, source, fault):
+        now = self.clock()
+        age = lambda at: None if at is None else round(max(0., now - at), 3)
+        pending = []
+        for slot in ("_system", "_mode_query", "_mode_set", "_motion", "_motion_status", "_stream", "_hand"):
+            job = getattr(self, slot)
+            if job:
+                pending.append({"slot": slot, "id": job.get("id"), "command": job["command"],
+                                "written": job["written"], "age_s": age(job["queued_at"])})
+        for job in self._streams:
+            if job is not self._stream:
+                pending.append({"slot": "stream_receipt", "id": job.get("id"), "command": job["command"],
+                                "written": job["written"], "age_s": age(job["queued_at"])})
+        self.last_stop = {"source": source, "reason": reason, "fault": bool(fault),
+                          "stage": self.stage, "connection": self.controller._connection_id,
+                          "generation": self.controller._tx_generation, "motion_id": self._issued,
+                          "input_age_s": age(self.last_input_at), "input_error": self._input_error,
+                          "pressed": list(self._pressed), "buttons": self.raw.get("buttons", []),
+                          "last_tx": None if self._last_written is None else
+                              {"command": self._last_written[1], "age_s": age(self._last_written[0])},
+                          "last_rx": None if self._last_receipt is None else
+                              {"line": self._last_receipt[1], "age_s": age(self._last_receipt[0])},
+                          "target_tcp": deepcopy(self.target_tcp), "pending": pending}
+        self.controller.log("GAMEPAD_STOP " + json.dumps(self.last_stop, ensure_ascii=False, separators=(",", ":")), "WARN")
+
+    def stop(self, reason="手柄软停", fault=False, *, source="session"):
         if not self.claimed or self.stage in ("stopping", "disabling"):
             return False
+        self._record_stop(reason, source, fault)
         self._clear_pending()
         self._stop_confirmed = False
         self._fault_after_stop = fault
@@ -326,6 +458,8 @@ class GamepadSession(QObject):
     def external_stop(self, command):
         if not self.claimed:
             return
+        if command == "!STOP":
+            self._record_stop("界面发送 !STOP", "ui_command", False)
         self._clear_pending()
         self._stop_confirmed = False
         self._fault_after_stop = False
@@ -345,6 +479,8 @@ class GamepadSession(QObject):
         self._stage("disconnected", "机械臂连接已断开；未发送到断开的链路")
 
     def command_written(self, command, generation, connection):
+        if self.claimed and generation == self.controller._tx_generation and connection == self.controller._connection_id:
+            self._last_written = (self.clock(), command)
         for slot in ("_system", "_mode_query", "_mode_set", "_motion", "_motion_status", "_stream", "_hand"):
             job = getattr(self, slot)
             if (job is None or job["written"] or job["command"] != command or
@@ -353,9 +489,13 @@ class GamepadSession(QObject):
             job["written"] = True
             job["deadline"] = self.clock() + (10.0 if job["purpose"] in ("stop", "disable") else self.control["response_timeout_s"])
             if slot == "_stream":
-                self._last_move = self.clock()
+                self.written_reference_tcp = list(job["tcp"])
+                self._stream = None  # Release on write, without waiting for accepted MOVEL.
             elif slot == "_hand":
                 self._last_hand = self.clock()
+                if (self.claimed and generation == self.controller._tx_generation and
+                        connection == self.controller._connection_id):
+                    self.gripper_command_written.emit(float(job["opening"]))
             elif slot == "_motion_status":
                 self._last_motion_query = self.clock()
             if slot == "_mode_query" and job["purpose"] == "idle" and self._motion_deadline is None:
@@ -375,6 +515,7 @@ class GamepadSession(QObject):
     def handle_line(self, line):
         if not self.claimed:
             return
+        self._last_receipt = (self.clock(), line[:200])
         if line in ("STOP locked", "STOP locked disabled", "Disabled ok"):
             if self.stage in ("stopping", "disabling") and self._system and self._defer(self._system, line):
                 return
@@ -383,7 +524,7 @@ class GamepadSession(QObject):
             if self.release_pending:
                 self._finish_release()
             else:
-                self._stage("fault" if self._fault_after_stop else "disabled" if line == "Disabled ok" else "stopped", "停止已确认；需重新 Start 与初始化")
+                self._stage("fault" if self._fault_after_stop else "disabled" if line == "Disabled ok" else "stopped", self._stop_message("停止已确认；需重新 Start 与初始化"))
             return
         protection = (line.startswith("STALL ") and "EXCLUDED" not in line and
                       not re.search(r"\bphase=(?:IDLE|0)(?:\s|$)", line))
@@ -441,9 +582,13 @@ class GamepadSession(QObject):
         match = re.fullmatch(r"queued (MOVEJ|MOVEL) id=([0-9]+) mode=(SEQ|INT|TRJ|TUN)", line)
         if match:
             kind, motion_id, mode = match[1], int(match[2]), match[3]
-            job = self._motion if kind == "MOVEJ" else self._stream
+            job = self._motion if kind == "MOVEJ" else self._find_stream(motion_id, queued=True)
             if job is None or not 1 <= motion_id <= 0xFFFFFFFF:
                 return
+            if kind == "MOVEL":
+                if not 0 < ((motion_id - job["floor"]) & 0xFFFFFFFF) < 0x80000000:
+                    return
+                job["queued_id"] = motion_id  # Reserve before an early RX is deferred.
             if self._defer(job, line):
                 return
             if not 0 < ((motion_id - job["floor"]) & 0xFFFFFFFF) < 0x80000000 or job.get("id") is not None:
@@ -502,13 +647,21 @@ class GamepadSession(QObject):
                 self.stop("主控报告 MoveJ 已取消或状态无效", fault=True)
             return
         match = re.fullmatch(r"accepted MOVEL id=([0-9]+)", line)
-        if match and self._stream:
-            if not self._defer(self._stream, line) and int(match[1]) == self._stream.get("id"):
-                self._accepted_motion[int(match[1])] = (self._stream["generation"], self._stream["connection"])
+        if match:
+            job = self._find_stream(int(match[1]))
+            if job and not self._defer(job, line) and int(match[1]) == job.get("id"):
+                self._accepted_motion[int(match[1])] = (job["generation"], job["connection"])
                 if len(self._accepted_motion) > 64:
                     del self._accepted_motion[next(iter(self._accepted_motion))]
-                self.command_reference_tcp = list(self._stream["tcp"])
-                self._stream = None
+                if job["serial"] > self._accepted_stream_serial:
+                    self._accepted_stream_serial = job["serial"]
+                    self.command_reference_tcp = list(job["tcp"])
+                    if self.stage == "target_rejected":
+                        self.target_tcp = list(self.command_reference_tcp)
+                        self.written_reference_tcp = list(self.command_reference_tcp)
+                        self._last_move_command = job["command"]
+                        self._target_changed()
+                self._retire_stream(job)
                 self._publish()
             return
         match = re.fullmatch(r"MOTION fail id=([0-9]+) reason=([A-Z_0-9]+)", line)
@@ -516,12 +669,12 @@ class GamepadSession(QObject):
             motion_id = int(match[1])
             if not 1 <= motion_id <= 0xFFFFFFFF:
                 return
-            for job in (self._motion, self._stream):
+            for job in [self._motion, *self._streams]:
                 if job and (job.get("id") == motion_id or
                             (not job["written"] and 0 < ((motion_id - job["floor"]) & 0xFFFFFFFF) < 0x80000000)):
                     if self._defer(job, line):
                         return
-            belongs = any(job and job.get("id") == motion_id for job in (self._motion, self._stream))
+            belongs = any(job and job.get("id") == motion_id for job in [self._motion, *self._streams])
             belongs |= self._accepted_motion.get(motion_id) == (self.controller._tx_generation, self.controller._connection_id)
             if belongs:
                 # Firmware already soft-stops without cancelling local retreat.
@@ -537,29 +690,72 @@ class GamepadSession(QObject):
             return
         match = re.fullmatch(r"error (MOVEJ|MOVEL) id=([0-9]+) reason=([A-Z_0-9]+)", line)
         if match:
-            job = self._motion if match[1] == "MOVEJ" else self._stream
+            job = self._motion if match[1] == "MOVEJ" else self._find_stream(int(match[2]))
             if job and not self._defer(job, line) and int(match[2]) == job.get("id"):
-                self.stop(line, fault=True)
+                if (match[1] == "MOVEL" and match[3] == "PLAN_FAILED" and
+                        (self.ready or self.stage == "target_rejected") and self.command_reference_tcp is not None):
+                    # The firmware rejected this target before publication. The
+                    # previous accepted target can still be executing.
+                    newer_written = any(other["written"] and other["serial"] > job["serial"]
+                                        for other in self._streams) or self._accepted_stream_serial > job["serial"]
+                    self._retire_stream(job)
+                    if newer_written:
+                        self.controller.log(f"GAMEPAD_TARGET_REJECTED id={match[2]} reason={match[3]}；已有更新的已发送目标，保留当前控制", "WARN")
+                    else:
+                        self._reject_stream_target(match[3], job)
+                elif match[1] == "MOVEJ" and match[3] == "PLAN_FAILED":
+                    self._clear_pending()
+                    self._stage("enabled", "MoveJ 规划被拒绝；本次目标未执行，请重试初始化。实机可能仍在执行上一目标")
+                else:
+                    self.stop(line, fault=True, source="motion_error")
         elif (line.startswith("error CMDMODE") and (self._mode_set or self._mode_query) or
               line in ("error DISABLED", "error motion queue full")):
             self.stop(line, fault=True)
+
+    def _reject_stream_target(self, reason, job=None):
+        self.controller.log("GAMEPAD_TARGET_REJECTED " + json.dumps(
+            {"id": job.get("id") if job else None, "command": job["command"] if job else None,
+             "reason": reason, "reference_tcp": self.command_reference_tcp}, ensure_ascii=False), "WARN")
+        if self._stream is not None:
+            self._retire_stream(self._stream)  # Writer admission rejects the retired queued target.
+        self._velocity = [0.] * 6
+        self._motion_input_active = False
+        if self.command_reference_tcp is not None:
+            self.target_tcp = list(self.command_reference_tcp)
+            self.written_reference_tcp = list(self.command_reference_tcp)
+            try:
+                self._last_move_command = self._move_command()
+            except ValueError:
+                self._last_move_command = None
+            self._target_changed()
+        self._stage("target_rejected", "目标被拒绝，已保留最后受理目标；实机可能继续运动。摇杆和扳机回中后可重试")
 
     def set_target(self, tcp):
         if not self.ready:
             return False
         if (not isinstance(tcp, (list, tuple)) or len(tcp) != 6 or
                 any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in tcp)):
-            self.stop("目标包含无效数值", fault=True)
+            self._stage("target_rejected", "新目标包含无效数值，未采用；实机可能仍在执行上一目标。回中后可重试")
             return False
-        offset = tool_translation(tcp, self.robot["tool_offset_z"])
-        flange = [tcp[i] - offset[i] for i in range(3)]
-        if tcp[2] < self.robot["z_min_height"] or any(not self.robot["flange_limits"][key][0] <= value <= self.robot["flange_limits"][key][1] for key, value in zip(("x", "y", "z"), flange)):
-            self.message = "目标超过配置范围，已拒绝该步"
+        reference = self.written_reference_tcp
+        if reference is None:
             return False
-        reference = self.command_reference_tcp
-        if reference is None or math.dist(tcp[:3], reference[:3]) > self.control["max_position_lead_mm"] or max(abs(angle_difference(a, b)) for a, b in zip(tcp[3:], reference[3:])) > self.control["max_rotation_lead_deg"]:
-            self.message = "软件命令步长达到上限，等待上一指令受理；未检测真实跟随误差"
-            return False
+        # Keep at most two send periods of software lead, with legacy values as
+        # a minimum buffer. Clip overshoot instead of dropping the whole sample.
+        budget_time = min(1., 2 * max(.05, self.control["send_interval_s"]))
+        position_budget = max(self.control["max_position_lead_mm"], self.control["linear_speed_mm_s"] * budget_time)
+        rotation_budget = max(self.control["max_rotation_lead_deg"], self.control["angular_speed_deg_s"] * budget_time)
+        tcp = list(tcp)
+        distance = math.dist(tcp[:3], reference[:3])
+        if distance > position_budget:
+            ratio = position_budget / distance
+            tcp[:3] = [start + (goal - start) * ratio for start, goal in zip(reference[:3], tcp[:3])]
+        for axis in range(3, 6):
+            delta = angle_difference(tcp[axis], reference[axis])
+            if abs(delta) > rotation_budget:
+                tcp[axis] = reference[axis] + math.copysign(rotation_budget, delta)
+                if not -180 <= tcp[axis] <= 180:
+                    tcp[axis] = (tcp[axis] + 180) % 360 - 180
         self.target_tcp = list(tcp)
         self._target_changed()
         return True
@@ -570,16 +766,22 @@ class GamepadSession(QObject):
         if isinstance(opening, bool) or not isinstance(opening, (int, float)) or not math.isfinite(opening) or not 0 <= opening <= 100:
             raise ValueError("夹爪目标应为 0～100 的有限数值")
         self.gripper_target = float(opening)
+        self._hand_paused = False
+        self._last_hand_sent = None  # An explicit position button also sends the default 100.
         self._target_changed()
+        self._publish(force=True)
         self.tick()
         return True
 
     def handle_input(self, snapshot):
         now = self.clock()
+        self._input_error = str(snapshot.get("error") or "")[:200]
+        self._pressed = list(snapshot.get("pressed") or [])
+        self.raw = deepcopy(snapshot.get("raw", {}))
         timestamp = snapshot.get("timestamp", now)
         if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp) or timestamp > now + .1:
             if self.claimed:
-                self.stop("手柄输入时间戳无效", fault=True)
+                self.stop("手柄输入时间戳无效", fault=True, source="input_timestamp")
             return
         connected = bool(snapshot.get("connected"))
         decoded = snapshot.get("decoded")
@@ -588,7 +790,7 @@ class GamepadSession(QObject):
             self.device_connected = self.centered = False
             self.raw = deepcopy(snapshot.get("raw", {}))
         if self.claimed and (not valid_input or now - timestamp > .5):
-            self.stop("手柄断开或输入过期", fault=True)
+            self.stop("手柄断开或输入过期", fault=True, source="input_lost")
         if self._last_sample is not None and timestamp <= self._last_sample:
             self._publish()
             return
@@ -602,32 +804,54 @@ class GamepadSession(QObject):
                        "rest": self.rest, "disable": self.disable}
             pressed = snapshot.get("pressed", [])
             if "stop" in pressed:
-                self.stop()
+                self.stop("手柄停止键", source="gamepad_button")
             else:
                 for action in pressed:
                     if action in actions:
+                        if action == "initialize" and self.stage == "init_confirmation":
+                            break  # A requests MoveJ; Start/UI retain arrival confirmation.
                         actions[action]()
                         break
+            if self.stage == "target_rejected" and self.centered:
+                self._stage("ready", "已回中；可向可达方向重试，最后受理目标不代表实际到位")
             if self.ready:
                 from app.gamepad.input import motion_delta
                 try:
                     pos, att = motion_delta(decoded, self.control, dt)
+                    active = any(pos.values()) or any(att.values())
+                    if active and dt > 0:
+                        alpha = dt / (self.control["velocity_smoothing_s"] + dt)
+                        rates = [pos[key] / dt for key in ("x", "y", "z")] + [att[key] / dt for key in ("r", "p", "y")]
+                        self._velocity = [previous + alpha * (goal - previous)
+                                          for previous, goal in zip(self._velocity, rates)]
+                        pos = dict(zip(("x", "y", "z"), (value * dt for value in self._velocity[:3])))
+                        att = dict(zip(("r", "p", "y"), (value * dt for value in self._velocity[3:])))
+                    else:
+                        self._velocity = [0.] * 6
+                        if self._motion_input_active:
+                            reference = self._stream["tcp"] if self._stream else self.written_reference_tcp
+                            if reference is not None:
+                                self.target_tcp = list(reference)
+                                self._target_changed()
+                    self._motion_input_active = active
                     target = [self.target_tcp[i] + pos[key] for i, key in enumerate(("x", "y", "z"))]
-                    target += [(self.target_tcp[i + 3] + att[key] + 180) % 360 - 180 for i, key in enumerate(("r", "p", "y"))]
+                    for angle, key in zip(self.target_tcp[3:], ("r", "p", "y")):
+                        if att[key]:
+                            angle += att[key]
+                            if not -180 <= angle <= 180:
+                                angle = (angle + 180) % 360 - 180
+                        target.append(angle)
                     if any(pos.values()) or any(att.values()):
                         self.set_target(target)
                     lt, rt = decoded["lt"], decoded["rt"]
                     if any(isinstance(value, bool) or not isinstance(value, (int, float)) or
                            not math.isfinite(value) or not 0 <= value <= 1 for value in (lt, rt)):
                         raise ValueError("invalid trigger")
-                    if bool(lt) != bool(rt):
-                        if self.gripper_target is None:
-                            self.message = "请先明确建立夹爪开度目标；首次扳机不会发送默认开度"
-                        else:
-                            self.gripper_target = max(0., min(100., self.gripper_target + (lt - rt) * self.control["gripper_speed_percent_s"] * dt))
-                            self._target_changed()
+                    if not self._hand_paused and bool(lt) != bool(rt) and self.gripper_target is not None:
+                        self.gripper_target = max(0., min(100., self.gripper_target + (rt - lt) * self.control["gripper_speed_percent_s"] * dt))
+                        self._target_changed()
                 except (ValueError, TypeError, KeyError, OverflowError):
-                    self.stop("手柄输入无效", fault=True)
+                    self.stop("手柄输入无效", fault=True, source="input_invalid")
         self._publish()
 
     def tick(self):
@@ -638,23 +862,37 @@ class GamepadSession(QObject):
             self.disconnected()
             return
         if self.stage not in ("stopping", "disabling", "stopped", "disabled", "protected", "fault") and (self.last_input_at is None or now - self.last_input_at > .5):
-            self.stop("手柄输入超时", fault=True)
+            self.stop("手柄输入超时", fault=True, source="input_timeout")
             return
-        for slot in ("_system", "_mode_query", "_mode_set", "_motion", "_motion_status", "_stream", "_hand"):
-            job = getattr(self, slot)
+        pending_jobs = [(slot, getattr(self, slot)) for slot in
+                        ("_system", "_mode_query", "_mode_set", "_motion", "_motion_status", "_hand")]
+        pending_jobs.extend(("_stream", job) for job in self._streams)
+        for slot, job in pending_jobs:
             if job and ((job["deadline"] is not None and now > job["deadline"]) or (not job["written"] and now - job["queued_at"] > 10.)):
                 if self.stage in ("stopping", "disabling"):
                     self._clear_pending()
-                    self._stage("fault", "停止或失能未确认；控制门禁保持锁定")
+                    self._stage("fault", self._stop_message("停止或失能未确认；控制门禁保持锁定"))
+                elif job["written"] and slot == "_hand":
+                    self._hand = None
+                    self._hand_paused = True
+                    self.controller.log("GAMEPAD_HAND_TIMEOUT " + job["command"] +
+                                        "；夹爪发送已暂停，机械臂控制保留；点击发送夹爪位置重试", "WARN")
+                    self._publish(force=True)
+                    continue
+                elif job["written"] and slot == "_motion_status":
+                    self._motion_status = None
+                    self._last_motion_query = now
+                    self.controller.log("手柄运动状态查询超时；继续等待，保留最终运动超时检查", "WARN")
+                    continue
                 else:
-                    self.stop("指令发送或回执超时", fault=True)
+                    self.stop("指令发送或回执超时", fault=True, source="command_timeout")
                 return
         if self._stop_deadline is not None and now > self._stop_deadline:
             self._clear_pending()
-            self._stage("fault", "停止未确认；控制门禁保持锁定")
+            self._stage("fault", self._stop_message("停止未确认；控制门禁保持锁定"))
             return
         if self._motion_deadline is not None and now > self._motion_deadline:
-            self.stop("初始化或休息运动超时", fault=True)
+            self.stop("初始化或休息运动超时", fault=True, source="motion_timeout")
             return
         if self._idle_retry is not None and now >= self._idle_retry:
             self._idle_retry = None
@@ -663,30 +901,35 @@ class GamepadSession(QObject):
                 self._motion_status is None and now - self._last_motion_query >= max(.2, self.control["feedback_interval_s"])):
             self._send("#MOTION_STATUS", "joint_status", "_motion_status")
         if self.stage == "centering" and self.device_connected and self.centered:
-            self._last_pose_sent = tuple(round(value, 3) for value in self.target_tcp)
+            try:
+                self._last_move_command = self._move_command()
+            except ValueError as error:
+                self._reject_stream_target(str(error))
+                return
             self._stage("ready", "INT 已确认；手柄 MoveL 解锁")
         if not self.ready:
             return
-        pose = tuple(round(value, 3) for value in self.target_tcp)
-        if self._stream is None and pose != self._last_pose_sent and now - self._last_move >= max(.05, self.control["send_interval_s"]):
-            offset = tool_translation(pose, self.robot["tool_offset_z"])
-            flange = [pose[i] - offset[i] for i in range(3)] + list(pose[3:])
+        if self._stream is None and now - self._last_move >= max(.05, self.control["send_interval_s"]):
             try:
-                command = motion_command("@", flange + [self.robot["cmd_speed"]])
+                command = self._move_command()
             except ValueError as error:
-                self.stop(str(error), fault=True)
+                self._reject_stream_target(str(error))
                 return
-            job = self._send(command, "stream", "_stream")
-            if job is not None:
-                sent_flange = [float(value) for value in command[1:].split(",")[:6]]
-                sent_offset = tool_translation(sent_flange, self.robot["tool_offset_z"])
-                sent_tcp = [sent_flange[i] + sent_offset[i] for i in range(3)] + sent_flange[3:]
-                job.update(id=None, floor=self._issued, tcp=tuple(sent_tcp))
-                self._last_pose_sent, self._last_move = pose, now
-            else:
-                return
+            if command != self._last_move_command:
+                if len(self._streams) >= self.STREAM_HISTORY_LIMIT:
+                    self.stop("运动受理记录已满，设备响应持续积压", fault=True, source="stream_backlog")
+                    return
+                job = self._send(command, "stream", "_stream")
+                if job is not None:
+                    sent_flange = [float(value) for value in command[1:].split(",")[:6]]
+                    sent_offset = tool_translation(sent_flange, self.robot["tool_offset_z"])
+                    sent_tcp = [sent_flange[i] + sent_offset[i] for i in range(3)] + sent_flange[3:]
+                    job.update(id=None, floor=self._issued, tcp=tuple(sent_tcp))
+                    self._last_move_command, self._last_move = command, now
+                else:
+                    return
         opening = None if self.gripper_target is None else round(self.gripper_target)
-        if self._hand is None and opening is not None and opening != self._last_hand_sent and now - self._last_hand >= max(.1, self.control["gripper_interval_s"]):
+        if not self._hand_paused and self._hand is None and opening is not None and opening != self._last_hand_sent and now - self._last_hand >= max(.1, self.control["gripper_interval_s"]):
             job = self._send(f"!HAND_POS {opening}", "hand", "_hand")
             if job is not None:
                 job["opening"] = opening

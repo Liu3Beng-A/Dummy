@@ -207,6 +207,18 @@ class GamepadBackendTests(unittest.TestCase):
         self.assertEqual(self.last()["pressed"], ["start"])
         self.assertEqual(config["gamepad"]["buttons"], {"start": 0, "manual": 1})
 
+    def test_a_initialization_uses_press_edges_and_held_startup_is_ignored(self):
+        self.joy.buttons[0] = 1
+        self.start()
+        self.assertEqual(self.last()["pressed"], [])
+        self.joy.buttons[0] = 0
+        self.reader._poll()
+        self.joy.buttons[0] = 1
+        self.reader._poll()
+        self.assertEqual(self.last()["pressed"], ["initialize"])
+        self.reader._poll()
+        self.assertEqual(self.last()["pressed"], [])
+
     def test_matching_removal_beats_new_buttons_and_added_device(self):
         self.start()
         before_reads = self.joy.read_calls

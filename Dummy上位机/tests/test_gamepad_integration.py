@@ -7,8 +7,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QObject, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt, Signal
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QDialog
 
 from app.core.controller import RobotController
 from app.gamepad.config import default_config
@@ -30,6 +31,9 @@ class MemoryFirmwarePort:
         self.joints = [0., -75., 180., 0., 0., 0., 37.25]
         self.flange = [175., 187., -31., 90., -45., 180.]
         self.hold_stop = False
+        self.hold_hand = False
+        self.hold_movel = False
+        self.reject_next_movel = False
         self.joint_status_queries = 0
 
     @property
@@ -83,12 +87,19 @@ class MemoryFirmwarePort:
                 self.joints = values[:7]
                 self.inject(f"accepted MOVEJ id={self.issued}" if self.mode == 2 else f"ok MOVEJ id={self.issued} ms=80")
             else:
+                if self.reject_next_movel:
+                    self.reject_next_movel = False
+                    self.inject(f"error MOVEL id={self.issued} reason=PLAN_FAILED")
+                    time.sleep(.06)
+                    return len(data)
                 self.flange = values[:6]
                 # Deterministic changing joint feedback, with no local IK or hardware.
                 self.joints[0] += .05
-                self.inject(f"accepted MOVEL id={self.issued}")
+                if not self.hold_movel:
+                    self.inject(f"accepted MOVEL id={self.issued}")
         elif command.startswith("!HAND_POS "):
-            self.inject(f"ok hand pos={command.split()[1]}")
+            if not self.hold_hand:
+                self.inject(f"ok hand pos={command.split()[1]}")
         elif command == "!STOP":
             self.inject("Stopping ok")
             if not self.hold_stop:
@@ -121,6 +132,7 @@ class TimerReader(QObject):
         self.config = default_config()
         self.decoded = {"lx": 0., "ly": 0., "ry": 0., "lt": 0., "rt": 0.,
                         "roll": 0, "hat": (0, 0), "centered": True}
+        self.pressed = []
         self.timer = QTimer(self)
         self.timer.setInterval(17)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -137,8 +149,9 @@ class TimerReader(QObject):
 
     def sample(self):
         self.sample_count += 1
+        pressed, self.pressed = self.pressed, []
         self.sampled.emit({"connected": self.running, "timestamp": time.monotonic(),
-                           "decoded": deepcopy(self.decoded), "pressed": [], "error": "",
+                           "decoded": deepcopy(self.decoded), "pressed": pressed, "error": "",
                            "raw": {"name": "60Hz fake reader", "axes": [self.decoded["ly"]],
                                    "buttons": [False] * 6, "hats": [(0, 0)]}})
 
@@ -208,7 +221,7 @@ class GamepadThreadedIntegrationTests(unittest.TestCase):
             APPLICATION.processEvents()
         self.assertTrue(predicate(), f"{message}: session={self.controller.gamepad.state()}, commands={self.port.commands()}")
 
-    def through_ui_to_ready(self):
+    def through_ui_to_ready(self, use_a=False):
         self.assertEqual(self.port.commands(), [])
         self.assertFalse(self.reader.running)
         self.window.port_combo.setEditText("MEMORY_ONLY")
@@ -237,15 +250,25 @@ class GamepadThreadedIntegrationTests(unittest.TestCase):
         self.wait_for(lambda: self.controller.gamepad.stage == "enabled", "first Start enable")
         self.assertFalse(any(command.startswith(">") for command in self.port.commands()))
         before_init = len(self.port.commands())
-        panel.action_buttons["start"].click()
+        if use_a:
+            from app.gamepad.input import decode_gamepad
+            axes, buttons = [0., 0., 0., 0., -1., -1.], [1] + [0] * 7
+            decoded = decode_gamepad(axes, buttons, [(0, 0)], self.reader.config["gamepad"])
+            self.reader.decoded = decoded
+            self.reader.pressed = ["initialize"]
+        else:
+            panel.action_buttons["start"].click()
         self.wait_for(lambda: self.controller.gamepad.stage == "init_confirmation", "second Start single MoveJ acceptance")
         QTest.qWait(300)
-        self.assertEqual(self.port.commands()[before_init:], [">0,10,80,0,90,0,0,10"])
+        self.assertEqual([command for command in self.port.commands()[before_init:] if command != "#GETJPOS"],
+                         [">0,10,80,0,90,0,0,10"])
         self.assertEqual(panel.action_buttons["initialize"].text(), "确认到位")
         self.assertFalse(self.controller.gamepad.ready)
-        panel.action_buttons["initialize"].click()
+        self.assertTrue(panel.action_buttons["start"].isEnabled())
+        panel.action_buttons["start"].click()
         self.wait_for(lambda: self.controller.gamepad.ready, "local arrival confirmation and centered unlock")
-        self.assertEqual(self.port.commands()[before_init:], [">0,10,80,0,90,0,0,10"])
+        self.assertEqual([command for command in self.port.commands()[before_init:] if command != "#GETJPOS"],
+                         [">0,10,80,0,90,0,0,10"])
         commands = self.port.commands()
         self.assertEqual(commands.count("!START"), 1)
         joint = next(command for command in commands if command.startswith(">"))
@@ -261,11 +284,79 @@ class GamepadThreadedIntegrationTests(unittest.TestCase):
         self.assertIsNone(self.controller.gamepad.actual_tcp)
         self.assertEqual(self.controller.gamepad.command_reference_tcp,
                          forward_kinematics([0, 10, 80, 0, 90, 0, 0]))
-        self.assertEqual(self.controller.actual_pose, self.last_actual)
-        self.assertEqual(self.window.viewer.actual, self.last_view_actual)
-        self.assertFalse(any(command in ("#GETJPOS", "#GETLPOS", "#GETRAILPOS")
-                             for command in commands[self.claim_commands:]))
+        self.wait_for(lambda: self.controller.actual_pose == [0, 10, 80, 0, 90, 0, 0],
+                      "shared JPOS updates actual model during initialization")
+        self.assertEqual(self.window.viewer.actual, ([0, 10, 80, 0, 90, 0, 0], None))
+        self.assertIn("#GETJPOS", self.port.commands()[self.claim_commands:])
+        self.assertFalse(any(command in ("#GETLPOS", "#GETRAILPOS")
+                             for command in self.port.commands()[self.claim_commands:]))
+        self.assertFalse(self.window.viewer.feedback_paused)
         self.assertTrue(all(thread.is_alive() for thread in self.worker_threads))
+
+    def test_physical_a_mapping_sends_single_movej_through_real_workers(self):
+        self.through_ui_to_ready(use_a=True)
+        self.assertEqual([command for command in self.port.commands() if command.startswith(">")],
+                         [">0,10,80,0,90,0,0,10"])
+
+    def test_background_focus_keeps_movel_and_gamepad_stop_through_real_workers(self):
+        self.through_ui_to_ready()
+        before = len(self.port.commands())
+        sample_count = self.reader.sample_count
+        with patch("app.ui.main_window.QApplication.applicationState", return_value=Qt.ApplicationState.ApplicationInactive), \
+                patch("app.ui.main_window.QApplication.activeWindow", return_value=None), \
+                patch.object(self.window, "_native_gamepad_focus", return_value={"available": True, "pid": 26500, "own_process": False}):
+            for watched, kind in ((APPLICATION, QEvent.Type.ApplicationDeactivate),
+                                  (APPLICATION, QEvent.Type.ApplicationStateChange),
+                                  (self.window, QEvent.Type.WindowDeactivate)):
+                self.window.eventFilter(watched, QEvent(kind))
+            self.reader.decoded.update(ly=-.5, centered=False)
+            self.wait_for(lambda: any(command.startswith("@") for command in self.port.commands()[before:]),
+                          "background input produces MoveL")
+            QTest.qWait(650)  # Background sampling must remain live beyond the 500ms input deadline.
+            APPLICATION.processEvents()
+            self.assertTrue(self.reader.running)
+            self.assertGreater(self.reader.sample_count, sample_count + 10)
+            self.assertTrue(self.controller.gamepad.ready)
+            self.assertNotIn("!STOP", self.port.commands()[before:])
+            self.assertGreater(sum(command.startswith("@") for command in self.port.commands()[before:]), 1)
+            self.reader.decoded.update(ly=0., centered=True)
+            self.reader.pressed = ["stop"]
+            self.wait_for(lambda: self.controller.gamepad.stage == "stopped", "background STOP button acknowledged")
+        self.assertEqual(self.port.commands()[before:].count("!STOP"), 1)
+        self.assertEqual(self.controller.gamepad.last_stop["source"], "gamepad_button")
+        self.window.eventFilter(APPLICATION, QEvent(QEvent.Type.ApplicationActivate))
+        APPLICATION.processEvents()
+        self.assertEqual(self.controller.gamepad.stage, "stopped")
+        self.assertEqual(self.port.commands().count("!START"), 1)
+
+    def test_background_focus_still_stops_on_lost_input_samples(self):
+        self.through_ui_to_ready()
+        self.window.eventFilter(APPLICATION, QEvent(QEvent.Type.ApplicationDeactivate))
+        self.window.eventFilter(self.window, QEvent(QEvent.Type.WindowDeactivate))
+        self.assertTrue(self.reader.running)
+        self.reader.timer.stop()
+        self.wait_for(lambda: self.controller.gamepad.stage == "fault", "input timeout still stops in background")
+        self.assertEqual(self.port.commands().count("!STOP"), 1)
+        self.assertEqual(self.controller.gamepad.last_stop["source"], "input_timeout")
+
+    def test_threaded_movel_continues_without_accepted_receipts_and_stop_clears_history(self):
+        self.through_ui_to_ready()
+        initial = list(self.controller.gamepad.command_reference_tcp)
+        self.port.hold_movel = True
+        self.reader.decoded.update(ly=-1., centered=False)
+        self.wait_for(lambda: len([command for command in self.port.commands() if command.startswith("@")]) >= 4,
+                      "four MoveL packets before any accepted receipt", timeout=2.)
+        self.assertTrue(self.controller.gamepad.ready)
+        self.assertGreaterEqual(len(self.controller.gamepad._streams), 3)
+        self.assertEqual(self.controller.gamepad.command_reference_tcp, initial)
+        values = [float(command[1:].split(",")[0]) for command in self.port.commands() if command.startswith("@")]
+        self.assertTrue(all(b > a for a, b in zip(values, values[1:])))
+        self.assertFalse(any(line.startswith("accepted MOVEL") for kind, line in self.order if kind == "rx"))
+        self.window.gamepad_panel.action_buttons["stop"].click()
+        self.wait_for(lambda: self.controller.gamepad.stage == "stopped", "STOP with unconfirmed MoveL history")
+        self.assertEqual(self.controller.gamepad._streams, [])
+        self.assertEqual(self.port.commands().count("!STOP"), 1)
+        self.assertNotIn("#GETLPOS", self.port.commands())
 
     def test_ui_threaded_handover_motion_gripper_conflicts_and_release(self):
         self.through_ui_to_ready()
@@ -273,20 +364,44 @@ class GamepadThreadedIntegrationTests(unittest.TestCase):
         self.wait_for(lambda: any(command.startswith("@") for command in self.port.commands()), "MoveL from 60Hz input")
         self.reader.decoded.update(ly=0., centered=True)
         self.wait_for(lambda: self.controller.gamepad._stream is None, "accepted MoveL releases in-flight slot")
-        self.assertEqual(self.controller.actual_pose, self.last_actual)
-        self.assertEqual(self.window.viewer.actual, self.last_view_actual)
+        moves = [command for command in self.port.commands() if command.startswith("@")]
+        for command in moves:
+            fields = command[1:].split(",")
+            self.assertEqual(fields[3:6], ["180", "0", "180"])
+            self.assertTrue(all("." not in value or len(value.split(".")[1]) == 1
+                                for value in fields[:6]))
+        self.wait_for(lambda: self.controller.actual_pose[0] > 0, "shared JPOS follows moving joints")
+        self.assertEqual(self.window.viewer.actual, (self.controller.actual_pose, None))
         self.assertIsNone(self.controller.gamepad.actual_tcp)
-        self.assertFalse(any(command in ("#GETJPOS", "#GETLPOS", "#GETRAILPOS")
+        self.assertFalse(any(command in ("#GETLPOS", "#GETRAILPOS")
                              for command in self.port.commands()[self.claim_commands:]))
         self.assertIsNone(self.window.viewer.cartesian)
         self.assertNotIn("#GETLPOS", self.port.commands())
-        self.assertIsNone(self.controller.gamepad.gripper_target)
+        self.assertEqual(self.controller.gamepad.gripper_target, 100)
+        self.assertFalse(any(command.startswith("!HAND_POS") for command in self.port.commands()))
+        self.reader.decoded.update(lt=1., centered=False)
+        self.wait_for(lambda: any(command.startswith("!HAND_POS ") and int(command.split()[1]) < 100
+                                  for command in self.port.commands()), "LT reduces default opening")
+        self.reader.decoded.update(lt=0., centered=True)
+        self.wait_for(lambda: self.controller.gamepad._hand is None and
+                      self.controller.gamepad._last_hand_sent == round(self.controller.gamepad.gripper_target),
+                      "LT final target accepted")
+        reduced = self.controller.gamepad._last_hand_sent
+        self.assertEqual(self.window.viewer.commanded_gripper, reduced)
+        before = len(self.port.commands())
+        self.reader.decoded.update(rt=1., centered=False)
+        self.wait_for(lambda: any(command.startswith("!HAND_POS ") and int(command.split()[1]) > reduced
+                                  for command in self.port.commands()[before:]), "RT increases opening")
+        self.reader.decoded.update(rt=0., centered=True)
+        self.wait_for(lambda: self.controller.gamepad._hand is None, "RT target accepted")
+        self.assertFalse(any(command.startswith(("!HAND_O", "!HAND_C")) for command in self.port.commands()))
         panel = self.window.gamepad_panel
         panel.gripper_base_spin.setValue(40)
         panel.gripper_base_button.click()
         self.wait_for(lambda: "!HAND_POS 40" in self.port.commands() and self.controller.gamepad._hand is None,
                       "explicit gripper base is sent and accepted")
         self.assertEqual(self.window.hand_row.spin.value(), 40)
+        self.assertEqual(self.window.viewer.commanded_gripper, 40)
         self.assertTrue(self.window.viewer.actual_only)
         self.assertNotEqual(self.window.viewer.target[1], 40)
         self.assertEqual(self.window.viewer.actual[1], None)
@@ -301,17 +416,16 @@ class GamepadThreadedIntegrationTests(unittest.TestCase):
         self.port.hold_stop = True
         panel.release_button.click()
         panel.release_button.click()
-        self.wait_for(lambda: "!STOP" in self.port.commands() and self.controller.gamepad._system["written"],
-                      "one STOP reaches writer")
-        self.assertEqual(self.port.commands().count("!STOP"), 1)
-        self.assertTrue(self.controller.gamepad.release_pending)
-        self.assertEqual(self.controller.state()["control_owner"], "gamepad")
+        self.wait_for(lambda: not self.controller.gamepad.claimed, "local release without device STOP")
+        self.assertEqual(self.port.commands().count("!STOP"), 0)
+        self.assertFalse(self.controller.gamepad.release_pending)
+        self.assertEqual(self.controller.gamepad.stage, "released")
+        self.assertEqual(self.controller.state()["control_owner"], "ui")
         self.assertFalse(self.reader.running)
-        self.assertFalse(self.controller.send_cmd("!HOME"))
-        self.assertFalse(any(command in ("#GETJPOS", "#GETLPOS", "#GETRAILPOS")
-                             for command in self.port.commands()[self.claim_commands:]))
-        self.port.inject("STOP locked")
-        self.wait_for(lambda: not self.controller.gamepad.claimed, "STOP confirmation releases owner")
+        release_index = len(self.port.commands())
+        QTest.qWait(250)
+        self.assertFalse(any(command.startswith(("@", ">", "!HAND_POS", "!STOP"))
+                             for command in self.port.commands()[release_index:]))
         self.assertEqual(self.controller.state()["control_owner"], "ui")
         self.assertTrue(self.window.movej_send_button.isEnabled())
         self.window.close()
@@ -320,6 +434,107 @@ class GamepadThreadedIntegrationTests(unittest.TestCase):
         self.assertTrue(self.port.closed)
         self.assertTrue(self.window.viewer.closed)
         self.assertTrue(all(not thread.is_alive() for thread in self.worker_threads))
+
+    def test_rejected_target_recovers_through_real_workers_without_stop(self):
+        self.through_ui_to_ready()
+        reference = list(self.controller.gamepad.command_reference_tcp)
+        self.port.reject_next_movel = True
+        self.reader.decoded.update(ly=-1., centered=False)
+        self.wait_for(lambda: self.controller.gamepad.stage == "target_rejected", "target rejection")
+        before = self.port.commands()
+        QTest.qWait(180)
+        self.assertEqual([command for command in self.port.commands() if command != "#GETJPOS"],
+                         [command for command in before if command != "#GETJPOS"])
+        self.assertEqual(self.controller.gamepad.target_tcp, reference)
+        self.reader.decoded.update(ly=0., centered=True)
+        self.wait_for(lambda: self.controller.gamepad.ready, "center rearm")
+        self.assertEqual([command for command in self.port.commands() if command != "#GETJPOS"],
+                         [command for command in before if command != "#GETJPOS"])
+        moves_before = sum(command.startswith("@") for command in before)
+        self.reader.decoded.update(ly=1., centered=False)
+        self.wait_for(lambda: sum(command.startswith("@") for command in self.port.commands()) > moves_before,
+                      "reverse target")
+        self.reader.decoded.update(ly=0., centered=True)
+        self.wait_for(lambda: self.controller.gamepad._stream is None, "reverse target accepted")
+        self.assertNotIn("!STOP", self.port.commands())
+        self.assertEqual(self.controller.gamepad.actual_tcp, None)
+
+    def test_page_modal_dialog_and_minimized_hidden_window_keep_motion_until_handover(self):
+        self.through_ui_to_ready()
+        self.reader.decoded.update(ly=-.2, centered=False)
+        self.wait_for(lambda: any(command.startswith("@") for command in self.port.commands()), "motion started")
+        dialog = QDialog(self.window)
+        dialog.setModal(True)
+        try:
+            for action in (lambda: self.window.navigation.setCurrentRow(1), dialog.show,
+                           dialog.close, self.window.showMinimized, self.window.hide,
+                           self.window.showNormal):
+                samples = self.reader.sample_count
+                moves = sum(command.startswith("@") for command in self.port.commands())
+                action()
+                QTest.qWait(220)
+                self.assertGreater(self.reader.sample_count, samples + 5)
+                self.assertGreater(sum(command.startswith("@") for command in self.port.commands()), moves)
+                self.assertTrue(self.controller.gamepad.ready)
+                self.assertTrue(self.reader.running)
+                self.assertNotIn("!STOP", self.port.commands())
+                self.assertFalse(self.window.teaching_send_button.isEnabled())
+            self.reader.decoded.update(ly=0., centered=True)
+            self.window.navigation.setCurrentRow(0)
+            self.window.input_mode.setCurrentIndex(0)
+            self.wait_for(lambda: not self.controller.gamepad.claimed, "interface handover STOP confirmed")
+            self.assertEqual(self.port.commands().count("!STOP"), 1)
+            self.assertFalse(self.reader.running)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+
+    def test_missing_gripper_receipt_keeps_arm_streaming_and_explicit_retry_recovers(self):
+        self.through_ui_to_ready()
+        self.port.hold_hand = True
+        panel = self.window.gamepad_panel
+        panel.gripper_base_spin.setValue(40)
+        panel.gripper_base_button.click()
+        self.reader.decoded.update(ly=-.2, centered=False)
+        self.wait_for(lambda: self.controller.gamepad.state()["gripper_paused"], "gripper receipt timeout", timeout=5.)
+        self.assertTrue(self.controller.gamepad.ready)
+        self.assertIn("发送暂停", panel.tcp_label.text())
+        self.assertGreater(sum(command.startswith("@") for command in self.port.commands()), 2)
+        self.assertEqual([command for command in self.port.commands() if command.startswith("!HAND_POS")],
+                         ["!HAND_POS 40"])
+        self.assertNotIn("!STOP", self.port.commands())
+        self.port.hold_hand = False
+        panel.gripper_base_spin.setValue(50)
+        panel.gripper_base_button.click()
+        self.wait_for(lambda: "!HAND_POS 50" in self.port.commands() and self.controller.gamepad._hand is None,
+                      "explicit gripper retry acknowledged")
+        self.assertFalse(self.controller.gamepad.state()["gripper_paused"])
+        self.assertNotIn("!STOP", self.port.commands())
+
+    def test_thirty_hz_shared_poll_claim_motion_and_disable_through_real_workers(self):
+        self.window.poll_hz.setValue(30)
+        self.through_ui_to_ready()
+        self.assertEqual(self.controller._poll_timer.interval(), 34)
+        self.assertEqual(self.store.settings["poll_hz"], 30)
+        self.reader.decoded.update(ly=-1., centered=False)
+        self.wait_for(lambda: any(command.startswith("@") for command in self.port.commands()), "MoveL with 30Hz poll")
+        self.reader.decoded.update(ly=0., centered=True)
+        self.wait_for(lambda: self.controller.gamepad._stream is None, "MoveL accepted with shared polling")
+        self.wait_for(lambda: self.controller.actual_pose[0] > 0, "actual model follows shared JPOS")
+        self.window.poll_enabled.setChecked(False)
+        self.wait_for(lambda: self.controller._position_request is None, "last in-flight poll finishes")
+        before = self.port.commands()
+        QTest.qWait(200)
+        self.assertEqual(self.port.commands().count("#GETJPOS"), before.count("#GETJPOS"))
+        self.assertTrue(self.controller.gamepad.ready)
+        self.assertTrue(self.window.viewer.feedback_paused)
+        self.window.poll_enabled.setChecked(True)
+        self.wait_for(lambda: self.port.commands().count("#GETJPOS") > before.count("#GETJPOS"),
+                      "same polling resumes")
+        self.assertFalse(self.window.viewer.feedback_paused)
+        self.assertNotIn("!STOP", self.port.commands())
+        self.assertNotIn("#GETLPOS", self.port.commands())
+        self.assertNotIn("#MOTION_STATUS", self.port.commands())
 
     def test_close_claimed_session_waits_for_real_stop_then_closes_workers(self):
         self.through_ui_to_ready()

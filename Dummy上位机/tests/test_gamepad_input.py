@@ -21,9 +21,14 @@ class GamepadInputTests(unittest.TestCase):
         self.assertEqual(self.config["robot"]["tool_offset_z"], 114)
         self.assertEqual(self.config["robot"]["init_joints"], [0, 10, 80, 0, 90, 0])
         self.assertEqual(self.config["robot"]["flange_limits"]["z"], [-150, 300])
-        self.assertEqual(self.config["control"]["linear_speed_mm_s"], 50)
+        self.assertEqual(self.config["control"]["linear_speed_mm_s"], 200)
+        self.assertEqual(self.config["control"]["send_interval_s"], .1)
+        self.assertEqual(self.config["control"]["velocity_smoothing_s"], .06)
+        self.assertEqual(self.config["control"]["angular_speed_deg_s"], 50)
+        self.assertEqual(self.config["control"]["gripper_speed_percent_s"], 150)
         self.assertEqual(self.config["robot"]["cmd_speed"], 35)
         self.assertEqual(self.config["robot"]["init_speed"], 10)
+        self.assertEqual(self.config["gamepad"]["buttons"]["initialize"], 0)
         override = {"gamepad": {"device_guid": " ABC ", "deadzone": .25},
                     "robot": {"flange_limits": {"x": (-40, 280)}}}
         result = validate_config(override)
@@ -44,6 +49,8 @@ class GamepadInputTests(unittest.TestCase):
                {"gamepad": {"axes": {"lt": 0}}},
                {"control": {"linear_speed_mm_s": math.nan}},
                {"control": {"send_interval_s": .001}},
+               {"control": {"velocity_smoothing_s": -.01}},
+               {"control": {"velocity_smoothing_s": math.inf}},
                {"control": {"feedback_timeout_s": .2}},
                {"control": {"response_timeout_s": 10 ** 1000}},
                {"robot": {"cmd_speed": 101}},
@@ -61,6 +68,21 @@ class GamepadInputTests(unittest.TestCase):
             # NaN does not compare equal; its input remains untouched by type.
             self.assertEqual(repr(value), repr(original))
 
+    def test_linear_and_angular_rates_have_no_application_ceiling(self):
+        config = validate_config({"control": {"linear_speed_mm_s": 500,
+                                               "angular_speed_deg_s": 360}})
+        self.axes[1] = -1
+        self.buttons[5] = 1
+        pos, att = motion_delta(self.decode(), config["control"], .01)
+        self.assertEqual(pos["x"], 5)
+        self.assertAlmostEqual(att["r"], 3.6)
+        for key in ("linear_speed_mm_s", "angular_speed_deg_s"):
+            with self.subTest(key=key):
+                self.assertEqual(validate_config({"control": {key: 1e100}})["control"][key], 1e100)
+            for value in (0, -1, math.nan, math.inf, -math.inf, True, "500", 10 ** 1000):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    validate_config({"control": {key: value}})
+
     def test_retired_manual_binding_is_ignored_without_losing_custom_profile(self):
         legacy = {"gamepad": {"device_guid": " CUSTOM ", "deadzone": .25,
                               "axes": {"left_x": 2}, "buttons": {"start": 0, "manual": 251}},
@@ -72,6 +94,7 @@ class GamepadInputTests(unittest.TestCase):
         self.assertEqual(normalized["gamepad"]["device_guid"], "custom")
         self.assertEqual(normalized["gamepad"]["axes"]["left_x"], 2)
         self.assertEqual(normalized["gamepad"]["buttons"]["start"], 0)
+        self.assertEqual(normalized["gamepad"]["buttons"]["initialize"], -1)
         self.assertEqual(normalized["control"]["linear_speed_mm_s"], 22)
         self.assertEqual(normalized["robot"]["cmd_speed"], 17)
         self.assertEqual(legacy, before)
@@ -91,6 +114,20 @@ class GamepadInputTests(unittest.TestCase):
         self.config["gamepad"]["buttons"]["unknown_action"] = 1
         with self.assertRaises(ValueError):
             self.decode()
+
+    def test_a_initialization_binding_and_disabled_legacy_mapping(self):
+        self.buttons[0] = 1
+        self.assertTrue(self.decode()["buttons"]["initialize"])
+        self.assertFalse(self.decode()["buttons"]["start"])
+        legacy = {"buttons": {"start": 0}}
+        decoded = decode_gamepad(self.axes, self.buttons, self.hats, legacy)
+        self.assertTrue(decoded["buttons"]["start"])
+        self.assertFalse(decoded["buttons"]["initialize"])
+        self.config["gamepad"]["buttons"]["initialize"] = -1
+        self.buttons[7] = 1
+        self.assertFalse(self.decode()["buttons"]["initialize"])  # -1 must not select the last button.
+        with self.assertRaises(ValueError):
+            validate_config({"gamepad": {"buttons": {"initialize": 7}}})
 
     def test_narrow_joint_limits_validate_preset_poses(self):
         profile = default_config()
@@ -140,6 +177,7 @@ class GamepadInputTests(unittest.TestCase):
     def test_custom_mapping_selects_required_inputs(self):
         self.config["gamepad"]["axes"]["left_x"] = 2
         self.config["gamepad"]["buttons"]["start"] = 0
+        self.config["gamepad"]["buttons"]["initialize"] = 7
         self.config["gamepad"]["hat"] = 1
         self.axes[0], self.axes[2] = -1, 1
         self.buttons[0] = 1
@@ -168,20 +206,20 @@ class GamepadInputTests(unittest.TestCase):
         self.buttons[5] = 1
         self.hats[0] = (1, -1)
         pos, att = motion_delta(self.decode(), self.config["control"], .02)
-        self.assertEqual(pos, {"x": 1., "y": 0., "z": 0.})
-        self.assertEqual(att, {"r": .1, "p": -.1, "y": .1})
+        self.assertEqual(pos, {"x": 4., "y": 0., "z": 0.})
+        self.assertEqual(att, {"r": 1., "p": -1., "y": 1.})
 
     def test_diagonal_translation_never_exceeds_scalar_speed(self):
         self.axes[0], self.axes[1], self.axes[3] = 1, -1, 1
         pos, _ = motion_delta(self.decode(), self.config["control"], .05)
-        self.assertAlmostEqual(math.sqrt(sum(v * v for v in pos.values())), 2.5)
-        self.assertAlmostEqual(pos["x"], 2.5 / math.sqrt(3))
+        self.assertAlmostEqual(math.sqrt(sum(v * v for v in pos.values())), 10)
+        self.assertAlmostEqual(pos["x"], 10 / math.sqrt(3))
         self.assertLess(pos["y"], 0)
         self.assertLess(pos["z"], 0)
 
     def test_dt_clips_stalls_without_accumulated_motion(self):
         self.axes[1] = -1
-        self.assertEqual(motion_delta(self.decode(), self.config["control"], 20)[0]["x"], 2.5)
+        self.assertEqual(motion_delta(self.decode(), self.config["control"], 20)[0]["x"], 10)
         self.assertEqual(motion_delta(self.decode(), self.config["control"], -2)[0]["x"], 0)
         for dt in (math.inf, math.nan, True, "1"):
             with self.subTest(dt=dt), self.assertRaises(ValueError):

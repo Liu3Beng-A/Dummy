@@ -929,17 +929,17 @@ class RobotBusiness:
             return
         self.root.after(3000, self._mode_set_timeout, mode, self._mode_set_token)
 
-    def _warn_drag_mode(self):
-        """拖发开关切换后回调。若不是「连续模式(3)」则弹提示（不自动切换）。"""
-        if (self.movej_drag_enable.get() or self.movel_drag_enable.get()
-                or self.hand_pos_drag_enable.get()) \
-                and self.current_cmdmode != 3:
-            cur = self._MODE_NAME.get(self.current_cmdmode, f"模式{self.current_cmdmode}")
+    def _warn_drag_mode(self, enabled=None):
+        """仅顺序模式下提示拖发使用 INT 或 TRJ，不自动切换模式。"""
+        if enabled is None:
+            enabled = (self.movej_drag_enable.get() or self.movel_drag_enable.get()
+                       or self.hand_pos_drag_enable.get())
+        if enabled and self.current_cmdmode == 1:
             messagebox.showwarning(
                 "模式提示",
-                f"拖发建议使用「连续模式」(模式 3)\n"
-                f"当前是「{cur}」\n\n"
-                f"请在「模式」区域手动点击「3:连续」按钮切换。"
+                "当前为「顺序模式（SEQ，模式 1）」；拖发指令会排队执行。\n\n"
+                "建议切换为「打断模式（INT，模式 2）」或「连续模式（TRJ，模式 3）」。\n"
+                "请在「模式」区域选择模式，再点击「设置模式」。"
             )
 
     def _warn_seqsend_mode(self):

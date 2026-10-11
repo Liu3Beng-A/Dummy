@@ -129,6 +129,49 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(float(c.ent_joints[1].get()), -75)
         self.assertEqual(c.hand_pos.get(), 100)
 
+    def test_readonly_diagnostics_pass_stop_calibration_and_gamepad_gates(self):
+        c = self.controller
+        commands = ["#FW_VERSION 0", "#FW_VERSION 8 65535", "#CAN_DIAG 1", "#CAN_DIAG 8 1",
+                    "#STALL_STATUS 7 LAST", "#CAL_STATUS 8 LAST", "#MOTION_STATUS", "#RGB_STATUS"]
+        c._stop_locked = True
+        c._calibration_busy = True
+        c._control_owner = "gamepad"
+        c._parameter_request = {"command": "#STALL_GET 1"}
+        try:
+            for connection in ("USB", "UART4"):
+                c.connection_type = connection
+                for command in commands:
+                    with self.subTest(connection=connection, command=command):
+                        generation = c._tx_generation
+                        self.assertTrue(c.send_cmd(command))
+                        self.assertEqual(c._tx_generation, generation)
+                        self.assertTrue(c._can_write(generation, command))
+                self.assertEqual(self.commands(), commands)
+        finally:
+            c._parameter_request = None
+
+    def test_diagnostic_permission_does_not_unlock_motion_or_parameter_writes(self):
+        c = self.controller
+        c._stop_locked = True
+        for command in (">0,-75,180,0,0,0,0,35", "#CMDMODE 2", "!RGB_BRIGHT 100",
+                        "#STALL_SET 1 0 1", "#STACK", "#MOTION_STATUS extra",
+                        "#STALL_STATUS 1 LAST extra", "#CAL_STATUS 8 LAST extra"):
+            with self.subTest(command=command):
+                self.assertFalse(c.send_cmd(command))
+                self.assertFalse(c._can_write(c._tx_generation, command))
+        self.assertEqual(self.commands(), [])
+
+    def test_version_and_can_queries_require_valid_single_node_and_request_id(self):
+        c = self.controller
+        for connection in ("USB", "UART4"):
+            c.connection_type = connection
+            for command in ("#FW_VERSION", "#FW_VERSION 9", "#FW_VERSION 0 0", "#FW_VERSION 1 65536",
+                            "#FW_VERSION 1 -1", "#CAN_DIAG 0", "#CAN_DIAG ALL", "#CAN_DIAG 8 1 extra",
+                            "#CAN_DIAG 1 1\n!START"):
+                with self.subTest(connection=connection, command=command):
+                    self.assertFalse(c.send_cmd(command))
+        self.assertEqual(self.commands(), [])
+
     def test_sequence_requires_matching_mode_request_and_motion_id(self):
         c = self.controller
         c.stored_positions = [("A", [0, -75, 180, 0, 0, 0, 0]),
@@ -382,6 +425,27 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(float(c.ent_joints[0].get()), 11)
         self.assertEqual(float(c.ent_j7.get()), 36)
 
+    def test_poll_frequency_bounds_live_update_and_disabled_poll(self):
+        c = self.controller
+        for hz, interval in ((1, 1000), (5, 200), (10, 100), (30, 34)):
+            c.set_polling(True, hz)
+            self.assertEqual(c._poll_hz, hz)
+            self.assertEqual(c._poll_timer.interval(), interval)
+            self.assertTrue(c._poll_timer.isActive())
+        for bad in (0, 31, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                c.set_polling(True, bad)
+        self.assertEqual(c._poll_hz, 30)
+        c.set_polling(False, 30)
+        c._poll_position()
+        self.assertFalse(c._poll_timer.isActive())
+        self.assertEqual(self.commands(), [])
+        c.set_polling(True, 30)
+        c._poll_position()
+        for _ in range(30):
+            c._poll_position()
+        self.assertEqual(self.commands(), ["#GETJPOS"])
+
     def test_stop_cancels_pending_target_sync(self):
         c = self.controller
         c.read_and_sync_from_robot()
@@ -550,12 +614,12 @@ class ControllerTests(unittest.TestCase):
             self.scheduler.run_ready()
             self.assertEqual([field.get() for field in fields], expected)
 
-    def test_poll_frequency_contract_is_one_to_ten_hz(self):
+    def test_poll_frequency_contract_is_one_to_thirty_hz(self):
         c = self.controller
-        for hz in (1, 5, 10):
+        for hz in (1, 5, 10, 20, 30):
             c.set_polling(False, hz)
             self.assertEqual(c.state()["polling_hz"], hz)
-        for hz in (0, 0.5, 10.1, 20, float("nan"), float("inf")):
+        for hz in (0, 0.5, 30.1, 31, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 c.set_polling(False, hz)
 

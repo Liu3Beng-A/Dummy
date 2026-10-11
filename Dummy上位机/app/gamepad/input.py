@@ -43,7 +43,7 @@ def decode_gamepad(axes, buttons, hats, cfg):
     if len(hat) != 2 or any(isinstance(value, bool) or not isinstance(value, Integral)
                             or value not in (-1, 0, 1) for value in hat):
         raise ValueError("方向帽必须是两项 -1/0/1")
-    states = {key: bool(buttons[index]) for key, index in cfg["buttons"].items()}
+    states = {key: index >= 0 and bool(buttons[index]) for key, index in cfg["buttons"].items()}
     deadzone = cfg["deadzone"]
 
     def stick(name):

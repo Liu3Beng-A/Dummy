@@ -48,6 +48,7 @@ class RobotView(QWidget):
         self._actual_pose = list(REST_POSE)
         self._target_gripper = 100.0
         self._actual_gripper = None
+        self._commanded_gripper = None
         self._cartesian = None
         self._display_mode = "preview"
         self._state = {
@@ -145,8 +146,12 @@ class RobotView(QWidget):
         self._state["mode"] = "actual" if actual_only else self._display_mode
         gripper = self._actual_gripper
         if gripper is None:
-            # No gripper telemetry exists: keep a fixed illustration in actual-only mode.
-            gripper = 100.0 if actual_only else self._target_gripper
+            # Gamepad fingers follow written commands without claiming telemetry.
+            if actual_only:
+                gripper = self._commanded_gripper if self._commanded_gripper is not None else 100.0
+            else:
+                gripper = self._target_gripper
+        self._state["commandedGripper"] = self._commanded_gripper if actual_only else None
         self._state["actual"] = firmware_to_urdf(self._actual_pose, gripper)
         self._state["marker"] = (cartesian_marker(self._cartesian, self._target_pose[6])
                                  if self._cartesian is not None and not actual_only else None)
@@ -169,6 +174,17 @@ class RobotView(QWidget):
         """
         firmware_to_urdf(self._target_pose, gripper_pct, preview=True)
         self._target_gripper = float(gripper_pct)
+        self._sync()
+
+    def set_commanded_gripper(self, gripper_pct):
+        """Display the last written gamepad opening in actual-only mode.
+
+        Preserve joint telemetry, its age, and the interface's preview opening.
+        None clears the command illustration when the connection is lost.
+        """
+        if gripper_pct is not None:
+            firmware_to_urdf(self._actual_pose, gripper_pct)
+        self._commanded_gripper = None if gripper_pct is None else float(gripper_pct)
         self._sync()
 
     def set_actual_pose(self, joints, gripper_pct=None):

@@ -46,12 +46,13 @@ class GamepadStoreTests(unittest.TestCase):
         config["gamepad"]["deadzone"] = .8
         data = json.loads((self.path / "settings.json").read_text(encoding="utf-8"))
         self.assertEqual(data["gamepad_config"], expected)
-        self.assertEqual(data["poll_hz"], 10)
+        self.assertEqual(data["poll_hz"], 30)
         self.assertEqual(data["theme"], "dark")
-        self.assertEqual(data["gamepad_defaults_revision"], 4)
+        self.assertEqual(data["gamepad_defaults_revision"], 8)
         self.assertEqual(self.store.settings["gamepad_config"], expected)
         self.reopen()
         self.assertEqual(self.store.settings["gamepad_config"], expected)
+        self.assertEqual(self.store.settings["poll_hz"], 30)
 
     def test_profile_reads_cannot_dirty_store_or_other_instances(self):
         snapshot = self.store.settings["gamepad_config"]
@@ -132,7 +133,7 @@ class GamepadStoreTests(unittest.TestCase):
                 self.assertEqual(migrated["robot"]["cmd_speed"], 23)
                 self.assertEqual(migrated["gamepad"], profile["gamepad"])
                 self.assertEqual(migrated["control"], profile["control"])
-                self.assertEqual(self.store.settings["gamepad_defaults_revision"], 4)
+                self.assertEqual(self.store.settings["gamepad_defaults_revision"], 8)
                 self.assertEqual(path.read_bytes(), before)
                 self.assertEqual(self.store.load_errors, [])
 
@@ -157,7 +158,7 @@ class GamepadStoreTests(unittest.TestCase):
         path.write_text(json.dumps({"gamepad_config": profile}), encoding="utf-8")
         self.reopen()
         self.store.update_settings(theme="dark")
-        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["gamepad_defaults_revision"], 4)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["gamepad_defaults_revision"], 8)
         self.store.update_settings(gamepad_config={"robot": {"tool_offset_z": 160, "init_joints": [0, -45, 90, 0, 0, 0]}})
         self.reopen()
         self.assertEqual(self.store.settings["gamepad_config"]["robot"]["tool_offset_z"], 160)
@@ -182,7 +183,7 @@ class GamepadStoreTests(unittest.TestCase):
 
     def test_old_default_linear_speed_migrates_once_and_custom_speed_is_preserved(self):
         path = self.path / "settings.json"
-        for revision, speed, expected in ((1, 10, 50), (2, 10, 50),
+        for revision, speed, expected in ((1, 10, 200), (2, 10, 200),
                                            (2, 17, 17), (3, 10, 10)):
             with self.subTest(revision=revision, speed=speed):
                 profile = default_config()
@@ -194,11 +195,110 @@ class GamepadStoreTests(unittest.TestCase):
                 self.reopen()
                 self.assertEqual(self.store.settings["gamepad_config"]["control"]["linear_speed_mm_s"], expected)
                 self.assertEqual(self.store.settings["gamepad_config"]["gamepad"]["device_guid"], "retained-device")
-                self.assertEqual(self.store.settings["gamepad_defaults_revision"], 4)
+                self.assertEqual(self.store.settings["gamepad_defaults_revision"], 8)
                 self.assertEqual(path.read_bytes(), before)
         self.store.update_settings(gamepad_config={"control": {"linear_speed_mm_s": 10}})
         self.reopen()
         self.assertEqual(self.store.settings["gamepad_config"]["control"]["linear_speed_mm_s"], 10)
+
+    def test_revision_five_speed_migration_preserves_custom_fields_and_later_overrides(self):
+        path = self.path / "settings.json"
+        for revision, linear, angular, expected in (
+                (4, 50, 5, (200, 50)), (3, 50, 5, (200, 50)),
+                (4, 22, 12, (22, 12)), (4, 22, 5, (22, 50)),
+                (4, 50, 12, (200, 12)), (5, 50, 5, (50, 5))):
+            with self.subTest(revision=revision, linear=linear, angular=angular):
+                profile = default_config()
+                profile["control"].update(linear_speed_mm_s=linear, angular_speed_deg_s=angular)
+                profile["robot"].update(cmd_speed=23, init_speed=9)
+                profile["gamepad"]["device_guid"] = "retained-device"
+                path.write_text(json.dumps({"gamepad_defaults_revision": revision,
+                                           "gamepad_config": profile}), encoding="utf-8")
+                before = path.read_bytes()
+                self.reopen()
+                loaded = self.store.settings["gamepad_config"]
+                self.assertEqual((loaded["control"]["linear_speed_mm_s"],
+                                  loaded["control"]["angular_speed_deg_s"]), expected)
+                self.assertEqual(loaded["robot"], profile["robot"])
+                self.assertEqual(loaded["gamepad"], profile["gamepad"])
+                self.assertEqual(self.store.settings["gamepad_defaults_revision"], 8)
+                self.assertEqual(path.read_bytes(), before)
+        self.store.update_settings(gamepad_config={"control": {"linear_speed_mm_s": 50,
+                                                              "angular_speed_deg_s": 5}})
+        self.reopen()
+        self.assertEqual(self.store.settings["gamepad_config"]["control"]["linear_speed_mm_s"], 50)
+        self.assertEqual(self.store.settings["gamepad_config"]["control"]["angular_speed_deg_s"], 5)
+
+    def test_revision_six_gripper_speed_migration_is_local_and_preserves_custom_values(self):
+        path = self.path / "settings.json"
+        for revision, speed, expected in ((1, 30, 150), (4, 30, 150), (5, 30, 150),
+                                          (5, 45, 45), (6, 30, 30)):
+            with self.subTest(revision=revision, speed=speed):
+                profile = default_config()
+                profile["control"]["gripper_speed_percent_s"] = speed
+                profile["robot"].update(cmd_speed=23, init_speed=9)
+                path.write_text(json.dumps({"gamepad_defaults_revision": revision,
+                                           "gamepad_config": profile}), encoding="utf-8")
+                before = path.read_bytes()
+                self.reopen()
+                loaded = self.store.settings["gamepad_config"]
+                self.assertEqual(loaded["control"]["gripper_speed_percent_s"], expected)
+                self.assertEqual(loaded["robot"], profile["robot"])
+                self.assertEqual(self.store.settings["gamepad_defaults_revision"], 8)
+                self.assertEqual(path.read_bytes(), before)
+        self.store.update_settings(gamepad_config={"control": {"gripper_speed_percent_s": 30}})
+        self.reopen()
+        self.assertEqual(self.store.settings["gamepad_config"]["control"]["gripper_speed_percent_s"], 30)
+
+    def test_revision_seven_gripper_default_migrates_and_uncapped_rates_persist(self):
+        path = self.path / "settings.json"
+        for revision, speed, expected in ((1, 90, 150), (5, 90, 150), (6, 90, 150),
+                                          (6, 75, 75), (7, 90, 90)):
+            with self.subTest(revision=revision, speed=speed):
+                profile = default_config()
+                profile["control"].update(linear_speed_mm_s=500, angular_speed_deg_s=360,
+                                           gripper_speed_percent_s=speed)
+                profile["robot"].update(cmd_speed=23, init_speed=9)
+                profile["gamepad"]["device_guid"] = "retained-device"
+                path.write_text(json.dumps({"gamepad_defaults_revision": revision,
+                                           "gamepad_config": profile}), encoding="utf-8")
+                before = path.read_bytes()
+                self.reopen()
+                expected_profile = deepcopy(profile)
+                expected_profile["control"]["gripper_speed_percent_s"] = expected
+                self.assertEqual(self.store.settings["gamepad_config"], expected_profile)
+                self.assertEqual(self.store.settings["gamepad_defaults_revision"], 8)
+                self.assertEqual(self.store.load_errors, [])
+                self.assertEqual(path.read_bytes(), before)
+        self.store.update_settings(gamepad_config=profile)
+        self.reopen()
+        self.assertEqual(self.store.settings["gamepad_config"], profile)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["gamepad_defaults_revision"], 8)
+
+    def test_revision_eight_full_stick_rate_and_cadence_migrate_without_resetting_custom_profile(self):
+        path = self.path / "settings.json"
+        for revision, linear, interval, expected in (
+                (7, 100, .05, (200, .1)), (6, 100, .05, (200, .1)),
+                (7, 17, .2, (17, .2)), (8, 100, .05, (100, .05))):
+            with self.subTest(revision=revision, linear=linear, interval=interval):
+                profile = default_config()
+                profile["control"].update(linear_speed_mm_s=linear, send_interval_s=interval)
+                profile["control"].pop("velocity_smoothing_s")
+                profile["gamepad"]["device_guid"] = "retained-device"
+                profile["robot"].update(cmd_speed=23, init_speed=9)
+                path.write_text(json.dumps({"gamepad_defaults_revision": revision,
+                                           "gamepad_config": profile}), encoding="utf-8")
+                before = path.read_bytes()
+                self.reopen()
+                loaded = self.store.settings["gamepad_config"]
+                self.assertEqual((loaded["control"]["linear_speed_mm_s"],
+                                  loaded["control"]["send_interval_s"]), expected)
+                self.assertEqual(loaded["control"]["velocity_smoothing_s"], .06)
+                self.assertEqual(loaded["gamepad"], profile["gamepad"])
+                self.assertEqual(loaded["robot"], profile["robot"])
+                self.assertEqual(self.store.settings["gamepad_defaults_revision"], 8)
+                self.assertEqual(self.store.load_errors, [])
+                self.assertEqual(path.read_bytes(), before)
 
     def test_old_default_command_speed_migrates_once_without_changing_init_speed(self):
         path = self.path / "settings.json"
@@ -228,6 +328,7 @@ class GamepadStoreTests(unittest.TestCase):
         profile["gamepad"]["device_guid"] = "custom-device"
         profile["gamepad"]["axes"]["left_x"] = 2
         profile["gamepad"]["buttons"].update(start=0, manual=1)
+        profile["gamepad"]["buttons"].pop("initialize")  # Profile predates the A binding.
         profile["control"]["linear_speed_mm_s"] = 22
         profile["robot"]["tool_offset_z"] = 150
         document = {"gamepad_defaults_revision": 3, "gamepad_config": profile, "theme": "dark"}
@@ -239,12 +340,27 @@ class GamepadStoreTests(unittest.TestCase):
         self.assertEqual(self.store.settings["gamepad_config"], expected)
         self.assertEqual(self.store.settings["theme"], "dark")
         self.assertNotIn("manual", expected["gamepad"]["buttons"])
+        self.assertEqual(expected["gamepad"]["buttons"]["initialize"], -1)
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(profile["gamepad"]["buttons"]["manual"], 1)
         self.store.update_settings(gamepad_config=self.store.settings["gamepad_config"])
         saved = json.loads(path.read_text(encoding="utf-8"))["gamepad_config"]
         self.assertEqual(saved, expected)
         self.assertNotIn("manual", saved["gamepad"]["buttons"])
+
+    def test_legacy_profile_receives_a_binding_without_writing_or_losing_custom_values(self):
+        profile = default_config()
+        profile["gamepad"]["buttons"].pop("initialize")
+        profile["control"]["linear_speed_mm_s"] = 23
+        path = self.path / "settings.json"
+        path.write_text(json.dumps({"gamepad_defaults_revision": 6, "gamepad_config": profile}), encoding="utf-8")
+        before = path.read_bytes()
+        self.reopen()
+        loaded = self.store.settings["gamepad_config"]
+        self.assertEqual(loaded["gamepad"]["buttons"]["initialize"], 0)
+        self.assertEqual(loaded["control"]["linear_speed_mm_s"], 23)
+        self.assertEqual(self.store.load_errors, [])
+        self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == "__main__":

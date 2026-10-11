@@ -24,7 +24,7 @@ class GamepadReader(QObject):
 
     sampled = Signal(dict)
     status_changed = Signal(dict)
-    _ACTIONS = ("start", "stop", "rest")
+    _ACTIONS = ("start", "stop", "initialize", "rest")
 
     def __init__(self, parent=None, *, pygame_module=None, clock=None):
         super().__init__(parent)

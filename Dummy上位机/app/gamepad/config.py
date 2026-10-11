@@ -11,12 +11,14 @@ _DEFAULTS = {
     "gamepad": {
         "device_index": 0, "device_guid": "", "deadzone": .15, "trigger_deadzone": .1,
         "axes": {"left_x": 0, "left_y": 1, "right_y": 3, "lt": 4, "rt": 5},
-        "buttons": {"start": 7, "stop": 6, "rest": 3, "roll_minus": 4, "roll_plus": 5},
+        "buttons": {"start": 7, "stop": 6, "initialize": 0, "rest": 3,
+                    "roll_minus": 4, "roll_plus": 5},
         "hat": 0, "trigger_min": -1., "trigger_max": 1.,
     },
     "control": {
-        "linear_speed_mm_s": 50., "angular_speed_deg_s": 5., "gripper_speed_percent_s": 30.,
-        "send_interval_s": .05, "gripper_interval_s": .1, "feedback_interval_s": .2,
+        "linear_speed_mm_s": 200., "angular_speed_deg_s": 50., "gripper_speed_percent_s": 150.,
+        "send_interval_s": .1, "velocity_smoothing_s": .06,
+        "gripper_interval_s": .1, "feedback_interval_s": .2,
         "feedback_timeout_s": 1.5, "max_position_lead_mm": 5., "max_rotation_lead_deg": 5.,
         "response_timeout_s": 3.,
     },
@@ -55,7 +57,10 @@ def _number(value, label, low, high):
         finite = False
     if not finite:
         raise ValueError(f"{label} 必须为有限数值")
-    if not low <= value <= high:
+    if high is None:
+        if value < low:
+            raise ValueError(f"{label} 必须不小于 {low:g}")
+    elif not low <= value <= high:
         raise ValueError(f"{label} 超出范围 {low:g}～{high:g}")
     return float(value)
 
@@ -75,19 +80,21 @@ def _bounds(value, label, low, high):
     return pair
 
 
-def _without_retired_buttons(value):
-    """Accept the former B/resync binding without retaining an active action."""
+def _compatible_gamepad(value):
+    """Retire B/resync and preserve any existing A assignment in old profiles."""
     if not isinstance(value, Mapping):
         return value
     result = deepcopy(dict(value))
     if isinstance(result.get("buttons"), Mapping):
         result["buttons"] = dict(result["buttons"])
         result["buttons"].pop("manual", None)
+        if "initialize" not in result["buttons"] and 0 in result["buttons"].values():
+            result["buttons"]["initialize"] = -1
     return result
 
 
 def _normalize_gamepad(value):
-    result = _merge(_DEFAULTS["gamepad"], _without_retired_buttons(value), "gamepad")
+    result = _merge(_DEFAULTS["gamepad"], _compatible_gamepad(value), "gamepad")
     for key in ("device_index", "hat"):
         result[key] = _index(result[key], f"gamepad.{key}")
     guid = result["device_guid"]
@@ -98,8 +105,11 @@ def _normalize_gamepad(value):
         result[key] = _number(result[key], f"gamepad.{key}", 0, .95)
     for bank in ("axes", "buttons"):
         for key, index in result[bank].items():
+            if bank == "buttons" and key == "initialize" and type(index) is int and index == -1:
+                continue  # Only the optional initialization binding may be disabled.
             result[bank][key] = _index(index, f"gamepad.{bank}.{key}")
-        if len(set(result[bank].values())) != len(result[bank]):
+        active = [index for index in result[bank].values() if index >= 0]
+        if len(set(active)) != len(active):
             raise ValueError(f"gamepad.{bank} 不能把多个控制功能映射到同一编号")
     for key in ("trigger_min", "trigger_max"):
         result[key] = _number(result[key], f"gamepad.{key}", -1, 1)
@@ -112,20 +122,21 @@ def validate_config(config) -> dict:
     """Normalize partial overrides against defaults and return a deep copy.
 
     Profiles contain only gamepad/control/robot. Local limits may narrow the
-    known firmware joint/rail bounds, never enlarge them. Physical rates and
-    query intervals have bounded application ranges rather than allowing an
-    accidentally unbounded speed or send frequency.
+    known firmware joint/rail bounds, never enlarge them. Linear and angular
+    target rates must be finite and positive, with no application upper limit.
+    Gripper rates, command steps and send/query intervals remain bounded.
     """
     if isinstance(config, Mapping):
         config = dict(config)
         if "gamepad" in config:
-            config["gamepad"] = _without_retired_buttons(config["gamepad"])
+            config["gamepad"] = _compatible_gamepad(config["gamepad"])
     result = _merge(_DEFAULTS, config, "手柄配置")
     result["gamepad"] = _normalize_gamepad(result["gamepad"])
     control = result["control"]
     limits = {
-        "linear_speed_mm_s": (.01, 100), "angular_speed_deg_s": (.01, 90),
-        "gripper_speed_percent_s": (.01, 100), "send_interval_s": (.02, 1),
+        "linear_speed_mm_s": (.01, None), "angular_speed_deg_s": (.01, None),
+        "gripper_speed_percent_s": (.01, 150), "send_interval_s": (.02, 1),
+        "velocity_smoothing_s": (0, .5),
         "gripper_interval_s": (.02, 1), "feedback_interval_s": (.05, 5),
         "feedback_timeout_s": (.1, 30), "response_timeout_s": (.1, 30),
         "max_position_lead_mm": (.1, 50), "max_rotation_lead_deg": (.1, 45),
@@ -152,6 +163,8 @@ def validate_config(config) -> dict:
     robot["rail_limits"] = _bounds(robot["rail_limits"], "robot.rail_limits", -250, 250)
     if not robot["rail_limits"][0] <= 0 <= robot["rail_limits"][1]:
         raise ValueError("手柄地轨目标固定为 0；robot.rail_limits 必须包含 0")
+    # Legacy profile fields remain readable; gamepad MoveL no longer applies
+    # these workspace or minimum-height bounds.
     for key in ("x", "y", "z"):
         robot["flange_limits"][key] = _bounds(robot["flange_limits"][key], f"robot.flange_limits.{key}", -10000, 10000)
     robot["z_min_height"] = _number(robot["z_min_height"], "robot.z_min_height", *robot["flange_limits"]["z"])

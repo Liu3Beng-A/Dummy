@@ -78,8 +78,9 @@ class DialogAppearanceTests(unittest.TestCase):
                     dialog = QMessageBox(self.parent)
                     dialog.setWindowTitle("模式提示")
                     dialog.setIcon(icon)
-                    dialog.setText("拖发建议使用连续模式（模式 3）。\n"
-                                   "当前为打断模式（INT）。\n\n请手动选择模式后继续。")
+                    dialog.setText("当前为顺序模式（SEQ，模式 1）；拖发指令会排队执行。\n\n"
+                                   "建议切换为打断模式（INT，模式 2）或连续模式（TRJ，模式 3）。\n"
+                                   "请在模式区域选择模式，再点击设置模式。")
                     question = name == "question"
                     dialog.setStandardButtons(
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No

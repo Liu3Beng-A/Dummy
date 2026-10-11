@@ -108,6 +108,47 @@ class OfflineResourceTests(unittest.TestCase):
 
 
 class ActualOnlyViewTests(unittest.TestCase):
+    def test_commanded_gripper_changes_fingers_without_refreshing_joint_feedback_or_interface_preview(self):
+        from PySide6.QtWidgets import QApplication
+        application = QApplication.instance() or QApplication([])
+        from app.visualization.robot_view import RobotView
+        with patch('app.visualization.robot_view.AssetServer', side_effect=RuntimeError('offline test')):
+            view = RobotView()
+        try:
+            actual = [2, 9, 78, 3, 87, -2, 0]
+            view.set_target_pose(REST_POSE, 80)
+            target = dict(view._state['target'])
+            view.set_actual_pose(actual)
+            view.set_actual_only(True)
+            view.set_stale(True)
+            view.set_feedback_paused(True)
+            for opening in (100, 40, 0):
+                view.set_commanded_gripper(opening)
+                self.assertEqual(view._state['actual'], firmware_to_urdf(actual, opening))
+                self.assertEqual(view._state['commandedGripper'], opening)
+                self.assertEqual(view._state['target'], target)
+                self.assertTrue(view._state['stale'])
+                self.assertTrue(view._state['feedbackPaused'])
+                self.assertFalse(view._state['actualGripperKnown'])
+            actual[0] = 7
+            view.set_actual_pose(actual)
+            self.assertEqual(view._state['actual'], firmware_to_urdf(actual, 0))
+            with self.assertRaises(ValueError):
+                view.set_commanded_gripper(float('nan'))
+            self.assertEqual(view._state['commandedGripper'], 0)
+            view.set_actual_only(False)
+            self.assertIsNone(view._state['commandedGripper'])
+            self.assertEqual(view._state['actual'], firmware_to_urdf(actual, 80))
+            view.set_actual_only(True)
+            self.assertEqual(view._state['actual'], firmware_to_urdf(actual, 0))
+            view.set_commanded_gripper(None)
+            self.assertEqual(view._state['actual'], firmware_to_urdf(actual, 100))
+            self.assertIsNone(view._state['commandedGripper'])
+        finally:
+            view.close()
+            view.deleteLater()
+            application.processEvents()
+
     def test_actual_only_hides_targets_and_restores_display_preference(self):
         from PySide6.QtCore import QCoreApplication, Qt
         from PySide6.QtWidgets import QApplication
