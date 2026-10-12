@@ -21,6 +21,9 @@ class TeachingPoint:
     target: tuple[float, ...]
     gripper: float
     speed: float
+    frame: str = "base"
+    target_kind: str = "flange"
+    tool: tuple[float, ...] | None = None
 
 
 def _rgb_readback_guard(method):
@@ -343,6 +346,8 @@ class RobotBusiness:
         self._handle_motion_receipt(line)
 
     def _stop_sequence(self, reason):
+        if hasattr(self, "cartesian"):
+            self.cartesian.cancel_remaining()
         self._seq_active = self._seq_running = self._seq_wait_mode = False
         self._seq_motion_id = None
         self._seq_expected_type = None
@@ -1087,23 +1092,39 @@ class RobotBusiness:
         kind = normalized["type"].upper()
         target = normalized["joints" if kind == "MOVEJ" else "pose"]
         return TeachingPoint(normalized["name"], kind, tuple(target),
-                             normalized["gripper"], normalized["speed"])
+                             normalized["gripper"], normalized["speed"],
+                             normalized.get("frame", "base"), normalized.get("target_kind", "flange"),
+                             tuple(normalized["tool"]) if "tool" in normalized else None)
 
     def _teaching_command(self, point, speed):
         speed = self._validated_speed(speed)
+        if point.kind == "MOVEL" and point.frame == "world":
+            from app.core.cartesian_backend import configured_tool, point_tool, world_target, native_command
+            from dummy_motion import Status
+            if self.cartesian.feedback.estimate(self.cartesian.clock())[0] != Status.OK:
+                raise ValueError("世界 TCP 点位需要新关节反馈")
+            rail = self.cartesian.feedback.sample.q[6]
+            tool = point_tool(point, configured_tool(self))
+            return native_command(self.cartesian.model, world_target(self.cartesian.model, point, rail, tool), rail, tool, speed)
         prefix = ">" if point.kind == "MOVEJ" else "@"
         command = prefix + ",".join(f"{value:g}" for value in point.target) + f",{speed:g}"
         self._validate_command(command)
         return command
 
-    def send_typed_position(self, record, speed=None):
+    def send_typed_position(self, record, speed=None, continuous=False):
         """Explicitly send one valid MoveJ/MoveL target; gripper is preview only."""
         try:
             point = self._normalize_teaching_point(record)
-            command = self._teaching_command(point, point.speed if speed is None else speed)
+            value = self._validated_speed(point.speed if speed is None else speed)
+            command = None if point.kind == "MOVEL" and self.cartesian.backend.value == "host" else self._teaching_command(point, value)
         except (ValueError, TypeError, OverflowError) as error:
             self.log(f"点位无效，未发送：{error}", "WARN")
             return False
+        if point.kind == "MOVEL":
+            if continuous and self.cartesian.backend.value == "host" and self.cartesian.active and self.cartesian.kind == "points" and not self.cartesian.sequence:
+                self.cartesian.retarget = (point, speed)
+                return True
+            return self.send_cartesian_point(point, speed)
         return self.send_cmd(command)
 
     def _get_pos_speed(self):
@@ -1146,11 +1167,14 @@ class RobotBusiness:
             return False
         try:
             snapshot = tuple(self._normalize_teaching_point(record) for record in self.stored_positions)
-            for point in snapshot:
-                self._teaching_command(point, speed)
+            if self.cartesian.backend.value != "host":
+                for point in snapshot:
+                    self._teaching_command(point, speed)
         except (ValueError, TypeError, OverflowError) as error:
             self.log(f"顺序点位无效，未查询模式或发送：{error}", "WARN")
             return False
+        if self.cartesian.backend.value == "host":
+            return self.cartesian.start_points(snapshot, speed, sequence=True)
         self._seq_pending = snapshot
         self._seq_idx = 0
         self._seq_speed = speed
@@ -1170,7 +1194,12 @@ class RobotBusiness:
         self._seq_running = True
         self._seq_motion_id = None
         self._seq_expected_type = point.kind
-        if not self.send_cmd(self._teaching_command(point, self._seq_speed), sequence=True):
+        try:
+            command = self._teaching_command(point, self._seq_speed)
+        except ValueError as error:
+            self._stop_sequence(str(error))
+            return
+        if not self.send_cmd(command, sequence=True):
             self._stop_sequence("点位发送失败")
             return
         session, index = self._seq_session, self._seq_idx

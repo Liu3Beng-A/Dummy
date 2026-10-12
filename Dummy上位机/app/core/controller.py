@@ -12,6 +12,8 @@ from app.core.business import RobotBusiness
 from app.core.fields import ValueField, ListField
 from app.core.scheduler import QtScheduler
 from app.core.gamepad_session import GamepadSession
+from app.core.cartesian_session import CartesianSession
+from app.core.cartesian_backend import CartesianBackend, configured_tool, point_tool, world_target, native_command
 from app.protocol import capabilities
 from app.protocol.constants import *
 from app.protocol.parser import finite_numbers
@@ -108,6 +110,7 @@ class RobotController(QObject, RobotBusiness):
         self._rgb_monitor_timer.setInterval(1000)
         self._rgb_monitor_timer.timeout.connect(self._poll_rgb)
         self.gamepad = GamepadSession(self)
+        self.cartesian = CartesianSession(self)
 
     def _default_fields(self):
         for name, value in {
@@ -168,6 +171,9 @@ class RobotController(QObject, RobotBusiness):
         except (AttributeError, TypeError):
             pass
         return {
+            "cartesian_backend": self.cartesian.backend.value if hasattr(self, "cartesian") else "firmware",
+            "cartesian_busy": getattr(getattr(self, "cartesian", None), "busy", False), "cartesian_stage": getattr(getattr(self, "cartesian", None), "stage", "idle"),
+            "cartesian_message": getattr(getattr(self, "cartesian", None), "message", "主控逆解"),
             "connected": self.is_connected, "port": self.port_name,
             "control_owner": self._control_owner,
             "connection_type": self.connection_type,
@@ -335,6 +341,23 @@ class RobotController(QObject, RobotBusiness):
         if now >= self._rgb_next_status_at:
             self.send_cmd("#RGB_STATUS")
 
+    def set_cartesian_backend(self, backend):
+        return self.cartesian.switch(backend)
+
+    def send_cartesian_point(self, point, speed=None):
+        value = point.speed if speed is None else self._validated_speed(speed)
+        if self.cartesian.backend == CartesianBackend.HOST:
+            return self.cartesian.start_points((point,), speed=value)
+        if point.frame == "base" and point.target_kind == "flange":
+            return self.send_cmd(self._teaching_command(point, value))
+        if self.cartesian.feedback.estimate(self.cartesian.clock())[0].value != "OK":
+            self.log("世界 TCP 转主控 MoveL 需要新关节回读", "WARN")
+            return False
+        rail = self.cartesian.feedback.sample.q[6]
+        tool = point_tool(point, configured_tool(self))
+        target = world_target(self.cartesian.model, point, rail, tool)
+        return self.send_cmd(native_command(self.cartesian.model, target, rail, tool, value))
+
     def refresh_ports(self):
         ports = [port.device for port in serial.tools.list_ports.comports()]
         self.ports_changed.emit(ports)
@@ -371,6 +394,8 @@ class RobotController(QObject, RobotBusiness):
         self._wire_admitted = queue.Queue(maxsize=256)
         self.is_connected = True
         self.current_cmdmode = None
+        self.cartesian.feedback.sample = None
+        self.cartesian.feedback.velocity[:] = 0
         self._motor_state_known = self._motor_enabled = False
         self._stop_locked = self._calibration_busy = False
         self._mode_request = self._mode_pending = None
@@ -419,6 +444,7 @@ class RobotController(QObject, RobotBusiness):
         self._publish()
 
     def close(self):
+        self.cartesian.close()
         self.gamepad.close()
         self.set_rgb_monitoring(False)
         if self.is_connected or self._transport is not None:
@@ -451,6 +477,7 @@ class RobotController(QObject, RobotBusiness):
                     self._discard_gamepad_position_request()
                 else:
                     request["written_at"] = time.monotonic()
+            self.cartesian.command_written(command, generation, connection_id)
             self.gamepad.command_written(command, generation, connection_id)
 
     @Slot(str, int)
@@ -475,7 +502,11 @@ class RobotController(QObject, RobotBusiness):
 
     def _can_write(self, generation, command):
         diagnostic = capabilities.diagnostic(command)
+        owned_motion = (self.cartesian.busy and
+                        (command.startswith((">", "&", "@", "#CMDMODE ")) or
+                         (self.cartesian.job and command == self.cartesian.job["command"])))
         allowed = (self.is_connected and generation == self._tx_generation and
+                (not owned_motion or self.cartesian.can_write(generation, command)) and
                 (self._control_owner != "gamepad" or not command.startswith("@") or
                  self.gamepad.can_write_stream(generation, command)) and
                 (self._control_owner != "gamepad" or not self._is_position_command(command) or
@@ -501,9 +532,17 @@ class RobotController(QObject, RobotBusiness):
         if not command.isascii() or len(command.encode()) > 256:
             self.log("指令须为 ASCII 且长度不能超过 256 字节", "WARN")
             return False
-        if source not in ("ui", "gamepad", "telemetry"):
+        if source not in ("ui", "gamepad", "telemetry", "cartesian"):
             self.log("未知指令来源", "WARN")
             return False
+        shared_joint_poll = (source == "telemetry" and
+                             self._is_joint_telemetry_request(self._tx_generation, command))
+        if (self.cartesian.busy and source != "cartesian" and not shared_joint_poll and
+                not capabilities.diagnostic(command) and command not in ("!STOP", "!DISABLE")):
+            # Hand position remains independent during gamepad ownership.
+            if not (source == "gamepad" and command.startswith("!HAND_POS ")):
+                self.log("上位机轨迹或后端切换处理中，请等待完成或 STOP", "WARN")
+                return False
         if self._is_position_command(command) and (source == "gamepad" or
                 (self._control_owner == "gamepad" and not
                  (source == "telemetry" and self._is_joint_telemetry_request(self._tx_generation, command)))):
@@ -570,6 +609,11 @@ class RobotController(QObject, RobotBusiness):
             self._cancel_motion_for_stop()
             self._stop_locked = True
             self._handle_stop_status("Stopping ok" if command == "!STOP" else "Disable pending")
+        if command.startswith("@") and self.cartesian.backend == CartesianBackend.HOST and source != "cartesian":
+            from app.core.business import TeachingPoint
+            values = finite_numbers(command[1:], 7)
+            point = TeachingPoint("笛卡尔目标", "MOVEL", tuple(values[:6]), 100., values[6])
+            return self.cartesian.start_points((point,))
         parameter_spec = self._parameter_spec(command)
         if parameter_spec is not None:
             self._begin_parameter_request(parameter_spec)
@@ -771,6 +815,8 @@ class RobotController(QObject, RobotBusiness):
 
     def _cancel_motion_for_stop(self):
         self._invalidate_system_pose()
+        if hasattr(self, "cartesian"):
+            self.cartesian.cancel()
         super()._cancel_motion_for_stop()
         self._position_request = None
         self._position_token += 1
@@ -847,6 +893,7 @@ class RobotController(QObject, RobotBusiness):
         # A seven-value pose is unambiguously joint+rail in firmware_new.
         nums = finite_numbers(line[2:].strip()) if line.startswith("ok ") else None
         if nums is not None and len(nums) == 7:
+            self.cartesian.update_feedback(nums)
             self.actual_pose = list(nums)
             self.last_actual_at = time.time()
             self.actual_pose_changed.emit(list(nums))
@@ -872,6 +919,7 @@ class RobotController(QObject, RobotBusiness):
                     self.log("实际笛卡尔位姿已同步到编辑目标")
         before_id = self._seq_motion_id
         super()._process_rx_line(line)
+        self.cartesian.handle_line(line)
         self.gamepad.handle_line(line)
         self._handle_system_pose_receipt(line)
         if self._seq_motion_id is not None and self._seq_motion_id != before_id:
@@ -1038,8 +1086,8 @@ class RobotController(QObject, RobotBusiness):
 
     def set_polling(self, enabled, hz=5):
         hz = float(hz)
-        if not math.isfinite(hz) or not 1 <= hz <= 30:
-            raise ValueError("位置回读频率应为 1～30 Hz")
+        if not math.isfinite(hz) or not 1 <= hz <= 50:
+            raise ValueError("位置回读频率应为 1～50 Hz")
         self._poll_enabled, self._poll_hz = bool(enabled), hz
         if self.is_connected and self._poll_enabled:
             self._poll_timer.start(math.ceil(1000 / hz))
@@ -1063,6 +1111,11 @@ class RobotController(QObject, RobotBusiness):
             self._position_request = self._pending_sync = None
 
     def _request_position(self, kind, sync, source="ui"):
+        # Check before merging with an existing request: a UI sync must not
+        # turn the active controller's shared poll into an edit-target read.
+        if self.cartesian.busy and not (source == "telemetry" and kind == "j" and not sync):
+            self.log("上位机轨迹或后端切换中仅使用共享关节轮询，请勿同步编辑目标", "WARN")
+            return False
         if source == "gamepad" or (self.gamepad.claimed and
                 not (source == "telemetry" and kind == "j" and not sync)):
             self.log("手柄控制中仅使用共享关节轮询更新实际模型，请勿手动同步编辑目标", "WARN")

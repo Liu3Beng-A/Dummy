@@ -46,13 +46,13 @@ class GamepadStoreTests(unittest.TestCase):
         config["gamepad"]["deadzone"] = .8
         data = json.loads((self.path / "settings.json").read_text(encoding="utf-8"))
         self.assertEqual(data["gamepad_config"], expected)
-        self.assertEqual(data["poll_hz"], 30)
+        self.assertEqual(data["poll_hz"], 50)
         self.assertEqual(data["theme"], "dark")
         self.assertEqual(data["gamepad_defaults_revision"], 8)
         self.assertEqual(self.store.settings["gamepad_config"], expected)
         self.reopen()
         self.assertEqual(self.store.settings["gamepad_config"], expected)
-        self.assertEqual(self.store.settings["poll_hz"], 30)
+        self.assertEqual(self.store.settings["poll_hz"], 50)
 
     def test_profile_reads_cannot_dirty_store_or_other_instances(self):
         snapshot = self.store.settings["gamepad_config"]

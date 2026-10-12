@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self.store = store
         self.fields = {}
         self._closed = False
+        self._host_close_pending = self._host_close_allowed = False
         self._building = True
         self._gamepad_reader_active = False
         self._gamepad_settings_dialog = None
@@ -120,6 +121,7 @@ class MainWindow(QMainWindow):
         controller.gamepad.target_changed.connect(self._gamepad_target_changed)
         controller.gamepad.gripper_command_written.connect(self._gamepad_gripper_written)
         controller.gamepad.set_config(self._gamepad_config)
+        controller.set_cartesian_backend(store.settings.get("cartesian_backend", "firmware"))
         self._gamepad_state_changed(controller.gamepad.state())
         if hasattr(controller, "position_synced"):
             controller.position_synced.connect(self._position_synced)
@@ -435,6 +437,13 @@ class MainWindow(QMainWindow):
         pose_tab_layout = QVBoxLayout(pose_tab)
         pose_tab_layout.setContentsMargins(10, 8, 10, 8)
         pose_tab_layout.setSpacing(6)
+        self.cartesian_frame = QComboBox()
+        self.cartesian_frame.setObjectName("CartesianFrame")
+        self.cartesian_frame.addItem("基座 / 法兰（兼容已有点位）", "base")
+        self.cartesian_frame.addItem("世界 / TCP（名义夹爪中心）", "world")
+        self.cartesian_frame.currentIndexChanged.connect(lambda *_: self._cartesian_frame_changed())
+        self._point_tool_snapshot = None
+        pose_tab_layout.addWidget(self.cartesian_frame)
         pose_page = QWidget()
         pose_layout = QVBoxLayout(pose_page)
         pose_layout.setContentsMargins(2, 2, 2, 4)
@@ -887,6 +896,11 @@ class MainWindow(QMainWindow):
         editor_layout = QVBoxLayout(editor)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setSpacing(8)
+        self.teaching_frame = QComboBox()
+        self.teaching_frame.addItem("基座 / 法兰（兼容已有点位）", "base")
+        self.teaching_frame.addItem("世界 / TCP（名义夹爪中心）", "world")
+        self.teaching_frame.currentIndexChanged.connect(lambda index: self.cartesian_frame.setCurrentIndex(index))
+        editor_layout.addWidget(self.teaching_frame)
         self.teaching_tabs = QTabWidget()
         self.teaching_tabs.setObjectName("TeachingEditorTabs")
         self.teaching_joint_rows, self.teaching_pose_rows = [], []
@@ -1602,6 +1616,17 @@ class MainWindow(QMainWindow):
 
     def _build_settings_page(self):
         layout = self._page("软件设置", "本地偏好会自动保存；打开或恢复软件配置不会向设备写入参数。")
+        backend_group, backend_box = self._group("笛卡尔运动逆解")
+        self.ik_backend = QComboBox()
+        self.ik_backend.setObjectName("CartesianBackend")
+        self.ik_backend.addItem("主控逆解 · MoveL（默认）", "firmware")
+        self.ik_backend.addItem("上位机七轴逆解 · MoveJ 轨迹", "host")
+        self.ik_backend.currentIndexChanged.connect(self._backend_changed)
+        backend_box.addWidget(self.ik_backend)
+        self.ik_status = hint("主控逆解")
+        backend_box.addWidget(self.ik_status)
+        backend_box.addWidget(hint("上位机模式：地轨与六轴协同，需持续关节回读；发送基线 10 Hz。TCP 暂用现有夹爪中心名义偏移，未标定。主控模式使用当前地轨位置。"))
+        layout.addWidget(backend_group)
         gamepad_group, gamepad_box = self._group("手柄输入")
         gamepad_box.addWidget(hint("映射、死区、速度与设备选择保存在本机。默认不启动手柄采集；检查原始输入不接管机器人。"))
         self.gamepad_settings_button = button("手柄设置与输入诊断", self._open_gamepad_settings)
@@ -1617,7 +1642,7 @@ class MainWindow(QMainWindow):
         self.poll_enabled.toggled.connect(lambda *_: self._save_refresh_settings())
         form.addRow("位置跟随", self.poll_enabled)
         self.poll_hz = QSpinBox()
-        self.poll_hz.setRange(1, 30)
+        self.poll_hz.setRange(1, 50)
         self.poll_hz.setValue(int(self.store.settings.get("poll_hz", 5)))
         self.poll_hz.setSuffix(" Hz")
         self.poll_hz.valueChanged.connect(lambda *_: self._save_refresh_settings())
@@ -1637,7 +1662,7 @@ class MainWindow(QMainWindow):
         self.log_limit_spin.valueChanged.connect(self._log_limit_changed)
         form.addRow("终端保留行数", self.log_limit_spin)
         box.addLayout(form)
-        box.addWidget(hint("界面与手柄控制共用关节位置轮询，范围 1～30 Hz；实际频率受回包耗时限制，不堆积查询。STOP、校准、断连及参数任务期间暂停。夹爪实际开度需要固件回读支持。"))
+        box.addWidget(hint("界面与手柄控制共用关节位置轮询，范围 1～50 Hz（50 Hz 待实机验证）；实际频率受回包耗时限制，不堆积查询。STOP、校准、断连及参数任务期间暂停。夹爪实际开度需要固件回读支持。"))
         layout.addWidget(group)
         group, box = self._group("本地数据与程序资源")
         path_label = hint(str(self.store.base_dir), "muted")
@@ -1656,6 +1681,52 @@ class MainWindow(QMainWindow):
         box.addWidget(hint("UART4 使用 115200 波特率，部分电机设置及夹爪高级配置只支持 USB。操作失败会保留设备回包用于诊断。"))
         layout.addWidget(group)
         layout.addStretch()
+
+    def _backend_changed(self, index):
+        if self._building:
+            return
+        self._cancel_drag()
+        self.controller.set_cartesian_backend(self.ik_backend.itemData(index))
+        self._update_state(self.controller.state())
+
+    def _cartesian_frame_changed(self):
+        if self._building:
+            return
+        self._cancel_drag()
+        self._point_tool_snapshot = None
+        with QSignalBlocker(self.teaching_frame):
+            self.teaching_frame.setCurrentIndex(self.cartesian_frame.currentIndex())
+        self._preview_changed()
+
+    def _with_cartesian_metadata(self, record):
+        if record.get("type") == "MoveL" and self.cartesian_frame.currentData() == "world":
+            tool = self._point_tool_snapshot
+            if tool is None:
+                tool = [0., 0., self.controller.gamepad.robot["tool_offset_z"], 0., 0., 0.]
+            record.update(frame="world", target_kind="tcp", tool=list(tool), tool_version=1)
+        return record
+
+    def _world_cartesian_read(self, teaching=False):
+        from dummy_motion import Status, Tool
+        from dummy_motion.frames import to_xyzabc, from_xyzabc
+        from app.core.cartesian_backend import configured_tool
+        c = self.controller
+        if c.cartesian.feedback.estimate(c.cartesian.clock())[0] != Status.OK:
+            c.log("世界 TCP 读取需要新关节回读，请开启轮询后重试", "WARN")
+            c._poll_position()
+            return False
+        tool = configured_tool(c) if self._point_tool_snapshot is None else Tool(from_xyzabc(self._point_tool_snapshot))
+        values = to_xyzabc(c.cartesian.model.fk(c.cartesian.feedback.sample.q, tool))
+        rows = self.teaching_pose_rows if teaching else self.pose_rows
+        old = c._suppress_drag_send
+        c._suppress_drag_send = True
+        try:
+            for row, value in zip(rows, values):
+                row.set_value(value)
+        finally:
+            c._suppress_drag_send = old
+        self._preview_changed()
+        return True
 
     def _build_log_dock(self):
         self.log_dock = QDockWidget("串口终端", self)
@@ -1914,13 +1985,20 @@ class MainWindow(QMainWindow):
             self._cancel_drag()
             self._teaching_sync = None
         self._state_generation = generation
+        backend = state.get("cartesian_backend", self.controller.cartesian.backend.value)
+        with QSignalBlocker(self.ik_backend):
+            self.ik_backend.setCurrentIndex(1 if backend == "host" else 0)
+        self.ik_backend.setEnabled(not self.controller.cartesian.busy and not self._gamepad_locked())
+        self.ik_status.setText(state.get("cartesian_message", self.controller.cartesian.message))
+        if not self._building and self.store.settings.get("cartesian_backend") != backend:
+            self.store.update_settings(cartesian_backend=backend)
         self.connect_button.setText("断开连接" if connected else "连接设备")
         self.connection_status.setText("● 已连接" if connected else "○ 未连接")
         self._pill(self.connection_status, connected)
         self.connection_combo.setEnabled(not connected)
         self.port_combo.setEnabled(not connected)
         mode = state.get("cmdmode", getattr(self.controller, "current_cmdmode", None))
-        self.mode_status.setText("模式 " + {1: "SEQ", 2: "INT", 3: "TRJ", 4: "TUN", 5: "TRQ", 6: "SRV"}.get(mode, "—"))
+        self.mode_status.setText("模式 " + {1: "SEQ", 2: "INT", 3: "TRJ", 4: "TUN", 5: "TRQ", 6: "SRV"}.get(mode, "—") + (" · PC逆解" if backend == "host" else " · 主控逆解"))
         known = getattr(self.controller, "_motor_state_known", False)
         motor = state.get("motor_enabled", getattr(self.controller, "_motor_enabled", None) if known else None)
         locked = state.get("stop_locked", getattr(self.controller, "_stop_locked", False))
@@ -1993,6 +2071,10 @@ class MainWindow(QMainWindow):
             self.viewer.set_cartesian_target(None)
             return
         teaching = hasattr(self, "teaching_tabs") and self.navigation.currentRow() == 1
+        if self.cartesian_frame.currentData() == "world" and ((teaching and self.teaching_tabs.currentIndex() == 1) or (not teaching and self.motion_tabs.currentIndex() == 1)):
+            values = [spin.value() for spin in (self.teaching_pose_spins if teaching else self.pose_spins)]
+            self.viewer.set_world_cartesian_target(values)
+            return
         if teaching:
             if self.teaching_tabs.currentIndex() == 0:
                 self.viewer.set_target_pose([spin.value() for spin in self.teaching_joint_spins], self.teaching_gripper_spin.value())
@@ -2031,6 +2113,8 @@ class MainWindow(QMainWindow):
                       "gripper": self.hand_row.spin.value(),
                       "speed": self.j_speed.value() if kind == "j" else self.l_speed.value()}
             target["joints" if kind == "j" else "pose"] = [spin.value() for spin in (self.joint_spins if kind == "j" else self.pose_spins)]
+        if kind != "hand":
+            target = self._with_cartesian_metadata(target)
         self._drag_pending[kind] = (self._drag_epoch, getattr(self.controller, "_tx_generation", 0), copy.deepcopy(target))
         elapsed = time.monotonic() - self._last_drag[kind]
         self._drag_timers[kind].start(max(1, round((.1 - elapsed) * 1000)))
@@ -2051,9 +2135,11 @@ class MainWindow(QMainWindow):
         if kind == "hand":
             self.controller.send_cmd(f"!HAND_POS {target}")
         else:
-            self.controller.send_typed_position(target)
+            self.controller.send_typed_position(target, continuous=True)
 
     def _cancel_drag(self, kind=None):
+        if kind in (None, "l"):
+            self.controller.cartesian.retarget = None
         if kind is None:
             self._drag_epoch += 1
             targets = tuple(self._drag_timers)
@@ -2102,11 +2188,16 @@ class MainWindow(QMainWindow):
 
     def _send_motion(self, kind):
         self._cancel_drag(kind)
+        if kind == "l" and self.cartesian_frame.currentData() == "world":
+            record = {"name": "世界 TCP 目标", "type": "MoveL", "pose": [spin.value() for spin in self.pose_spins], "speed": self.l_speed.value()}
+            return self.controller.send_typed_position(self._with_cartesian_metadata(record))
         return (self.controller.send_movej if kind == "j" else self.controller.send_movel)()
 
     def _read_motion(self, kind):
         self._cancel_drag()
         self._teaching_sync = None
+        if kind == "l" and self.cartesian_frame.currentData() == "world":
+            return self._world_cartesian_read()
         return (self.controller.read_and_sync_from_robot if kind == "j" else self.controller.read_pose_from_robot)()
 
     def _system_command(self, command):
@@ -2193,6 +2284,9 @@ class MainWindow(QMainWindow):
     def _read_teaching(self):
         self._cancel_drag()
         kind = "MoveJ" if self.teaching_tabs.currentIndex() == 0 else "MoveL"
+        if kind == "MoveL" and self.cartesian_frame.currentData() == "world":
+            self._teaching_sync = None
+            return self._world_cartesian_read(teaching=True)
         self._teaching_sync = (kind, getattr(self.controller, "_tx_generation", 0))
         method = self.controller.read_and_sync_from_robot if kind == "MoveJ" else self.controller.read_pose_from_robot
         if not method():
@@ -2324,7 +2418,7 @@ class MainWindow(QMainWindow):
                   "speed": self.teaching_speed.value()}
         controls = self.teaching_joint_spins if kind == "MoveJ" else self.teaching_pose_spins
         record["joints" if kind == "MoveJ" else "pose"] = [spin.value() for spin in controls]
-        return record
+        return self._with_cartesian_metadata(record)
 
     def _save_point(self):
         name = self.point_name.text().strip() or f"点位 {len(self.points) + 1}"
@@ -2341,6 +2435,7 @@ class MainWindow(QMainWindow):
                   "speed": (self.j_speed if joint else self.l_speed).value()}
         record["joints" if joint else "pose"] = [
             spin.value() for spin in (self.joint_spins if joint else self.pose_spins)]
+        record = self._with_cartesian_metadata(record)
         name, accepted = QInputDialog.getText(
             self, "保存当前点位",
             f"点位名称（保存当前 {record['type']} 编辑目标、速度和夹爪开度）",
@@ -2391,6 +2486,11 @@ class MainWindow(QMainWindow):
         self.controller._suppress_drag_send = True
         try:
             kind = record.get("type", "MoveJ")
+            with QSignalBlocker(self.cartesian_frame), QSignalBlocker(self.teaching_frame):
+                frame_index = 1 if record.get("frame") == "world" else 0
+                self.cartesian_frame.setCurrentIndex(frame_index)
+                self.teaching_frame.setCurrentIndex(frame_index)
+            self._point_tool_snapshot = copy.deepcopy(record.get("tool"))
             index = 0 if kind == "MoveJ" else 1
             self.teaching_tabs.setCurrentIndex(index)
             self.motion_tabs.setCurrentIndex(index)
@@ -2606,7 +2706,22 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.WindowStateChange:
             self._sync_rgb_preview_activity()
 
+    def _finish_host_close(self):
+        self._host_close_allowed = True
+        self.close()
+
     def closeEvent(self, event):
+        if self._host_close_pending and not self._host_close_allowed:
+            event.ignore()
+            return
+        if not self._closed and self.controller.cartesian.active:
+            event.ignore()
+            self._cancel_drag()
+            self._host_close_pending = True
+            self.controller.send_cmd("!STOP")
+            self.statusBar().showMessage("关闭窗口：已请求停止上位机轨迹，等待串口写出")
+            QTimer.singleShot(1000, self._finish_host_close)
+            return
         if (not self._closed and not self._gamepad_close_allowed and
                 self._gamepad_locked() and self.controller.is_connected):
             event.ignore()

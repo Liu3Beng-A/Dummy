@@ -243,7 +243,7 @@ class QuickPointUiTests(unittest.TestCase):
         self.assert_shortcuts(records)
         saved = json.loads((self.store.base_dir / "points.json").read_text(encoding="utf-8"))
         self.assertEqual(set(saved), {"schema_version", "points"})
-        self.assertEqual(saved["schema_version"], 2)
+        self.assertEqual(saved["schema_version"], 3)
         self.assertEqual(saved["points"], records)
 
         self.window.close()

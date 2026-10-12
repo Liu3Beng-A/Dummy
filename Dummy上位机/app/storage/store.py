@@ -22,11 +22,12 @@ DEFAULT_SETTINGS = {
     "show_axes": True, "auto_poll": True, "poll_enabled": True, "model_path": "",
     "gamepad_config": default_gamepad_config(),
     "gamepad_defaults_revision": 8,
+    "cartesian_backend": "firmware",
 }
 JOINT_LIMITS = [(-175, 175), (-75, 90), (0, 180), (-270, 270),
                 (-100, 100), (-180, 180), (-250, 250)]
 POSE_LIMITS = [(-10000, 10000)] * 3 + [(-3600, 3600)] * 3
-POINT_SCHEMA_VERSION = 2
+POINT_SCHEMA_VERSION = 3
 
 
 class _Settings(dict):
@@ -64,7 +65,7 @@ def _point_number(value, name, field, limits):
 def _file_points(data):
     if isinstance(data, dict):
         version = data.get("schema_version", 1)
-        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2):
+        if isinstance(version, bool) or not isinstance(version, int) or version not in (1, 2, 3):
             raise ValueError("不支持该点位文件版本")
         if "points" not in data:
             raise ValueError("点位文件缺少 points 列表")
@@ -101,8 +102,23 @@ def validate_points(records):
                   for value, label, bounds in zip(coordinates, labels, limits)]
         gripper = _point_number(record.get("gripper", 100), name, "夹爪开度", (0, 100))
         speed = _point_number(record.get("speed", 35), name, "速度", (1, 100))
-        result.append({"name": name, "type": point_type, key: values,
-                       "gripper": gripper, "speed": speed})
+        item = {"name": name, "type": point_type, key: values, "gripper": gripper, "speed": speed}
+        if point_type == "MoveL" and any(field in record for field in ("frame", "target_kind", "tool")):
+            frame, target_kind = record.get("frame", "base"), record.get("target_kind", "flange")
+            if (frame, target_kind) not in (("base", "flange"), ("world", "tcp")):
+                raise ValueError(f"{name}：坐标语义必须为 base/flange 或 world/tcp")
+            item.update(frame=frame, target_kind=target_kind)
+            if frame == "world" and "tool" not in record:
+                raise ValueError(f"{name}：世界 TCP 点位必须保存工具快照")
+            if "tool" in record:
+                if type(record.get("tool_version", 1)) is not int or record.get("tool_version", 1) != 1:
+                    raise ValueError(f"{name}：不支持该工具快照版本")
+                tool = record["tool"]
+                if not isinstance(tool, (list, tuple)) or len(tool) != 6:
+                    raise ValueError(f"{name}：工具偏移需六个 XYZABC 数值")
+                item["tool"] = [_point_number(value, name, "工具偏移", bound) for value, bound in zip(tool, POSE_LIMITS)]
+                item["tool_version"] = 1
+        result.append(item)
     return result
 
 
@@ -214,13 +230,15 @@ class AppStore:
         settings = self.settings if settings is None else settings
         if type(settings["gamepad_defaults_revision"]) is not int or settings["gamepad_defaults_revision"] < 8:
             settings["gamepad_defaults_revision"] = 8
+        if settings["cartesian_backend"] not in ("firmware", "host"):
+            settings["cartesian_backend"] = "firmware"
         if settings["theme"] not in ("light", "dark"):
             settings["theme"] = "light"
         if settings["connection_type"] not in ("USB", "UART4"):
             settings["connection_type"] = "USB"
         if settings["viewer_mode"] not in ("preview", "actual"):
             settings["viewer_mode"] = "preview"
-        for key, low, high, default in (("poll_hz", 1, 30, 5), ("log_limit", 500, 50000, 5000)):
+        for key, low, high, default in (("poll_hz", 1, 50, 5), ("log_limit", 500, 50000, 5000)):
             try:
                 settings[key] = max(low, min(high, int(settings[key])))
             except (TypeError, ValueError, OverflowError):

@@ -171,6 +171,9 @@ class GamepadSession(QObject):
         if self.claimed:
             return not self.release_pending
         c = self.controller
+        if c.cartesian.busy:
+            self._stage("connected", "请先结束上位机轨迹或后端切换")
+            return False
         if not c.is_connected or not self.device_connected:
             self._stage("disconnected", "请连接机械臂并检查有效手柄输入，再接管")
             return False
@@ -328,6 +331,9 @@ class GamepadSession(QObject):
         return self._begin_joint("rest") if self.ready else False
 
     def _begin_joint(self, purpose):
+        if self.controller.cartesian.active:
+            self.stop("请先停止七轴运动，再初始化或休息", source="joint_request")
+            return False
         self._clear_pending()
         self._purpose = purpose
         if purpose == "init":
@@ -758,6 +764,8 @@ class GamepadSession(QObject):
                     tcp[axis] = (tcp[axis] + 180) % 360 - 180
         self.target_tcp = list(tcp)
         self._target_changed()
+        if self.controller.cartesian.backend.value == "host":
+            return self.controller.cartesian.jog(self.target_tcp)
         return True
 
     def set_gripper_base(self, opening):
@@ -829,6 +837,7 @@ class GamepadSession(QObject):
                     else:
                         self._velocity = [0.] * 6
                         if self._motion_input_active:
+                            self.controller.cartesian.jog_idle()
                             reference = self._stream["tcp"] if self._stream else self.written_reference_tcp
                             if reference is not None:
                                 self.target_tcp = list(reference)
@@ -909,7 +918,12 @@ class GamepadSession(QObject):
             self._stage("ready", "INT 已确认；手柄 MoveL 解锁")
         if not self.ready:
             return
-        if self._stream is None and now - self._last_move >= max(.05, self.control["send_interval_s"]):
+        host_ik = self.controller.cartesian.backend.value == "host"
+        if host_ik and self._motion_input_active:
+            if not self.controller.cartesian.jog(self.target_tcp):
+                self.stop("上位机逆解未就绪，请检查关节回读", fault=True)
+                return
+        if not host_ik and self._stream is None and now - self._last_move >= max(.05, self.control["send_interval_s"]):
             try:
                 command = self._move_command()
             except ValueError as error:

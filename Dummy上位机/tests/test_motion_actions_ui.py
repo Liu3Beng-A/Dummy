@@ -123,7 +123,7 @@ class MotionActionUiTests(unittest.TestCase):
         self.assertEqual(w.points[-1], record)
         self.assertEqual(self.store.points, w.points)
         saved = json.loads((self.store.base_dir / "points.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved, {"schema_version": 2, "points": w.points})
+        self.assertEqual(saved, {"schema_version": 3, "points": w.points})
         self.assertEqual(self.target_snapshot(), before)
         self.assertEqual(w.teaching_tabs.currentIndex(), 0 if kind == "MoveJ" else 1)
         teaching = w.teaching_joint_spins if kind == "MoveJ" else w.teaching_pose_spins

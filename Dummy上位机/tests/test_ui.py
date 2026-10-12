@@ -50,6 +50,9 @@ class FakeView(QWidget):
     def set_cartesian_target(self, values):
         self.cartesian = list(values) if values is not None else None
 
+    def set_world_cartesian_target(self, values):
+        self.cartesian = list(values) if values is not None else None
+
     def set_follow_actual(self, follow):
         self.preferred_mode = "actual" if follow else "preview"
         self.mode = "actual" if self.actual_only else self.preferred_mode
@@ -271,7 +274,7 @@ class UiIntegrationTests(unittest.TestCase):
 
     def test_display_and_poll_settings_do_not_dispatch_commands(self):
         self.window.theme_combo.setCurrentIndex(1)
-        self.assertEqual(self.window.poll_hz.maximum(), 30)
+        self.assertEqual(self.window.poll_hz.maximum(), 50)
         self.window.poll_hz.setValue(30)
         self.window.poll_enabled.setChecked(False)
         self.window.grid_check.setChecked(False)

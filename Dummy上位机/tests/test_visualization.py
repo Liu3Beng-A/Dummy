@@ -68,7 +68,8 @@ class OfflineResourceTests(unittest.TestCase):
             count = struct.unpack_from('<I', data, 80)[0]
             self.assertEqual(len(data), 84 + count * 50, path.name)
             triangles += count
-        self.assertEqual(triangles, 192976)
+        # Baseline 2bbf67a contains the user's replacement high-detail meshes.
+        self.assertEqual(triangles, 1934314)
 
     def test_vendor_files_match_locked_digest(self):
         root = ROOT / 'resources/viewer'
@@ -144,6 +145,24 @@ class ActualOnlyViewTests(unittest.TestCase):
             view.set_commanded_gripper(None)
             self.assertEqual(view._state['actual'], firmware_to_urdf(actual, 100))
             self.assertIsNone(view._state['commandedGripper'])
+        finally:
+            view.close()
+            view.deleteLater()
+            application.processEvents()
+
+    def test_world_marker_does_not_move_with_preview_rail(self):
+        from PySide6.QtWidgets import QApplication
+        application = QApplication.instance() or QApplication([])
+        from app.visualization.robot_view import RobotView
+        with patch('app.visualization.robot_view.AssetServer', side_effect=RuntimeError('offline test')):
+            view = RobotView()
+        try:
+            view.set_world_cartesian_target([100, 200, 300, 0, 0, 0])
+            before = view._state['marker']
+            view.set_target_pose([0, 10, 80, 0, 90, 0, 100])
+            self.assertEqual(view._state['marker'], before)
+            view.set_cartesian_target([100, 200, 300, 0, 0, 0])
+            self.assertAlmostEqual(view._state['marker']['position'][1], .3)
         finally:
             view.close()
             view.deleteLater()

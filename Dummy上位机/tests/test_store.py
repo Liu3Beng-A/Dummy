@@ -64,7 +64,7 @@ class StoreTests(unittest.TestCase):
         exported = Path(self.directory.name) / "mixed.json"
         self.store.export_points(exported)
         document = json.loads(exported.read_text(encoding="utf-8"))
-        self.assertEqual(document["schema_version"], 2)
+        self.assertEqual(document["schema_version"], 3)
         self.assertEqual(self.store.import_points(exported), self.store.points)
         self.assertNotIn("joints", self.store.points[1])
         second = AppStore(self.directory.name)

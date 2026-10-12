@@ -427,15 +427,15 @@ class ControllerTests(unittest.TestCase):
 
     def test_poll_frequency_bounds_live_update_and_disabled_poll(self):
         c = self.controller
-        for hz, interval in ((1, 1000), (5, 200), (10, 100), (30, 34)):
+        for hz, interval in ((1, 1000), (5, 200), (10, 100), (30, 34), (50, 20)):
             c.set_polling(True, hz)
             self.assertEqual(c._poll_hz, hz)
             self.assertEqual(c._poll_timer.interval(), interval)
             self.assertTrue(c._poll_timer.isActive())
-        for bad in (0, 31, float("nan"), float("inf")):
+        for bad in (0, 51, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 c.set_polling(True, bad)
-        self.assertEqual(c._poll_hz, 30)
+        self.assertEqual(c._poll_hz, 50)
         c.set_polling(False, 30)
         c._poll_position()
         self.assertFalse(c._poll_timer.isActive())
@@ -614,12 +614,12 @@ class ControllerTests(unittest.TestCase):
             self.scheduler.run_ready()
             self.assertEqual([field.get() for field in fields], expected)
 
-    def test_poll_frequency_contract_is_one_to_thirty_hz(self):
+    def test_poll_frequency_contract_is_one_to_fifty_hz(self):
         c = self.controller
-        for hz in (1, 5, 10, 20, 30):
+        for hz in (1, 5, 10, 20, 30, 50):
             c.set_polling(False, hz)
             self.assertEqual(c.state()["polling_hz"], hz)
-        for hz in (0, 0.5, 30.1, 31, float("nan"), float("inf")):
+        for hz in (0, 0.5, 50.1, 51, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 c.set_polling(False, hz)
 

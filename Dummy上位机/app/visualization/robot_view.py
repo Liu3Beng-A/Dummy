@@ -50,6 +50,7 @@ class RobotView(QWidget):
         self._actual_gripper = None
         self._commanded_gripper = None
         self._cartesian = None
+        self._cartesian_frame = "base"
         self._display_mode = "preview"
         self._state = {
             "mode": "preview", "theme": "light", "stale": True,
@@ -153,7 +154,7 @@ class RobotView(QWidget):
                 gripper = self._target_gripper
         self._state["commandedGripper"] = self._commanded_gripper if actual_only else None
         self._state["actual"] = firmware_to_urdf(self._actual_pose, gripper)
-        self._state["marker"] = (cartesian_marker(self._cartesian, self._target_pose[6])
+        self._state["marker"] = (cartesian_marker(self._cartesian, self._target_pose[6] if self._cartesian_frame == "base" else 0.)
                                  if self._cartesian is not None and not actual_only else None)
         if self._ready:
             self._bridge.state_changed.emit(json.dumps(self._state, ensure_ascii=False, allow_nan=False))
@@ -217,6 +218,14 @@ class RobotView(QWidget):
     def set_target_cartesian(self, pose):
         if pose is not None:
             cartesian_marker(pose)
+        self._cartesian_frame = "base"
+        self._cartesian = list(pose) if pose is not None else None
+        self._sync()
+
+    def set_world_cartesian_target(self, pose):
+        if pose is not None:
+            cartesian_marker(pose)
+        self._cartesian_frame = "world"
         self._cartesian = list(pose) if pose is not None else None
         self._sync()
 
