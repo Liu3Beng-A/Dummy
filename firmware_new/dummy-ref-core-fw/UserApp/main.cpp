@@ -65,6 +65,10 @@ void ThreadControlLoopFixUpdate(void* argument)
 }
 
 
+// Keep the command stack out of the nearly full 64 KiB CCM RTOS heap.
+// Size is bytes in CMSIS; FreeRTOS's StackType_t array uses words.
+alignas(8) static StackType_t commandTaskStack[4096 / sizeof(StackType_t)];
+static StaticTask_t commandTaskControlBlock;
 osThreadId_t ControlLoopUpdateHandle;
 void ThreadControlLoopUpdate(void* argument)
 {
@@ -220,11 +224,15 @@ void Main(void)
 
     const osThreadAttr_t ControlLoopUpdateTask_attributes = {
         .name = "ControlLoopUpdateTask",
-        .stack_size = 2000,
+        .cb_mem = &commandTaskControlBlock,
+        .cb_size = sizeof(commandTaskControlBlock),
+        .stack_mem = commandTaskStack,
+        .stack_size = sizeof(commandTaskStack),
         .priority = (osPriority_t) osPriorityNormal,
     };
     ControlLoopUpdateHandle = osThreadNew(ThreadControlLoopUpdate, nullptr,
                                           &ControlLoopUpdateTask_attributes);
+    configASSERT(ControlLoopUpdateHandle != nullptr);
 
     const osThreadAttr_t oledTask_attributes = {
         .name = "OledTask",
@@ -249,3 +257,17 @@ void Main(void)
     pwm.SetDuty(PWM::CH_A1, 0.5);
 }
 
+
+// Historical minimum unused bytes, sampled only when explicitly queried.
+uint32_t CommandTaskStackFreeBytes(void) {
+    return ControlLoopUpdateHandle ? osThreadGetStackSpace(ControlLoopUpdateHandle) : 0;
+}
+uint32_t RealtimeTaskStackFreeBytes(void) {
+    return controlLoopFixUpdateHandle ? osThreadGetStackSpace(controlLoopFixUpdateHandle) : 0;
+}
+uint32_t OledTaskStackFreeBytes(void) {
+    return oledTaskHandle ? osThreadGetStackSpace(oledTaskHandle) : 0;
+}
+uint32_t RGBTaskStackFreeBytes(void) {
+    return rgbTaskHandle ? osThreadGetStackSpace(rgbTaskHandle) : 0;
+}

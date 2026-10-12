@@ -49,7 +49,7 @@ class CartesianTransportTests(unittest.TestCase):
             APPLICATION.processEvents()
         self.assertTrue(predicate(), (self.c.cartesian.stage, self.port.commands(), self.logs))
 
-    def connect_and_start_path(self, hz, distance=.02, startup_delay=0.):
+    def connect_and_start_path(self, hz, distance=.02, startup_delay=0., speed=100):
         self.c.set_cartesian_backend('host')
         self.c.set_polling(False, hz)
         self.assertTrue(self.c.connect_port('MEMORY_ONLY', 'USB'))
@@ -63,7 +63,7 @@ class CartesianTransportTests(unittest.TestCase):
         target = Pose(flange.position+[0, distance, 0], flange.rotation)
         self.port.delay_next_mode_reply = startup_delay
         self.assertTrue(self.c.send_typed_position({'name': 'polling path', 'type': 'MoveL',
-            'pose': to_xyzabc(target), 'speed': 5}), self.logs)
+            'pose': to_xyzabc(target), 'speed': speed}), self.logs)
 
     def test_30hz_polling_continues_through_host_line_completion(self):
         self._complete_line(30)
@@ -98,6 +98,14 @@ class CartesianTransportTests(unittest.TestCase):
         self.wait_for(lambda: self.c._stop_locked)
         self.assertFalse(self.c.cartesian.active)
         self.assertTrue(any('300 ms' in message for _, message in self.logs))
+
+    def test_low_speed_line_completes_without_repeated_motion_packets(self):
+        self.connect_and_start_path(30,distance=.002,speed=5)
+        self.wait_for(lambda: self.c.cartesian.stage in ('complete','error'),timeout=10.)
+        self.assertEqual(self.c.cartesian.stage,'complete',self.logs)
+        moves=[cmd for cmd in self.port.commands() if cmd.startswith('>')]
+        self.assertGreater(len(moves),2)
+        self.assertTrue(all(a!=b for a,b in zip(moves,moves[1:])))
 
 
 if __name__ == '__main__':

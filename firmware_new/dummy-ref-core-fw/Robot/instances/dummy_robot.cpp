@@ -1,6 +1,7 @@
 #include "communication.hpp"
 #include "dummy_robot.h"
 #include "protection_coordinator.h"
+#include "motion_values.h"
 #include <cstring>
 #include "FreeRTOS.h"
 #include "task.h"
@@ -1363,16 +1364,18 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string& cmd)
     } else if (cmd == "!CALIBRATION") {
         context->CalibrateForGeneration(epoch); return GetSpace(); // ASCII calibration belongs to the protection coordinator.
     } else if (cmd[0] == '>' || cmd[0] == '&') {
-        float j[7], speed = 0; int count;
-        count = sscanf(cmd.c_str() + 1, "%f,%f,%f,%f,%f,%f,%f,%f", &j[0], &j[1], &j[2], &j[3], &j[4], &j[5], &j[6], &speed);
-        if (count >= 7 && IsFiniteCommandValue(speed) && mode <= COMMAND_CONTINUES_TRAJECTORY) {
+        float j[8] = {};
+        const unsigned count = MotionValues::Parse(cmd.data() + 1, cmd.size() - 1, j, 7, 8);
+        const float speed = j[7];
+        if (count && mode <= COMMAND_CONTINUES_TRAJECTORY) {
             planned = context->PlanMoveJ(j[0], j[1], j[2], j[3], j[4], j[5], j[6], speed, epoch, id, kind);
             if (planned && count == 8) context->SetMotionSpeed(speed, epoch);
         }
     } else if (cmd[0] == '@') {
-        float p[6], speed = 0;
-        const int count = sscanf(cmd.c_str() + 1, "%f,%f,%f,%f,%f,%f,%f", &p[0], &p[1], &p[2], &p[3], &p[4], &p[5], &speed);
-        if (count >= 6 && IsFiniteCommandValue(speed) && mode <= COMMAND_CONTINUES_TRAJECTORY) {
+        float p[7] = {};
+        const unsigned count = MotionValues::Parse(cmd.data() + 1, cmd.size() - 1, p, 6, 7);
+        const float speed = p[6];
+        if (count && mode <= COMMAND_CONTINUES_TRAJECTORY) {
             if (count == 7) context->SetMotionSpeed(speed, epoch);
             planned = context->PlanMoveL(p[0], p[1], p[2], p[3], p[4], p[5], epoch, id);
         }

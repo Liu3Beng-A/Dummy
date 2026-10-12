@@ -15,20 +15,26 @@ from PySide6.QtCore import QObject, QTimer, Qt
 from dummy_motion import (RobotModel, LinePlanner, MotionSession, FeedbackSample,
                           MotionLimits, Tool, Pose, Status, Sample)
 from dummy_motion.feedback import FeedbackTracker
+from dummy_motion.correction import correct_sample
+from dummy_motion.execution import segment_timing
 from dummy_motion.frames import (from_xyzabc, from_wire_joints, to_xyzabc, error,
                                   compose, inverse)
 from dummy_motion.validation import movej_command
 from app.core.cartesian_backend import (CartesianBackend, configured_tool,
-                                        point_tool, world_target)
+                                        point_tool, world_target, host_limits)
 
 
 class CartesianSession(QObject):
-    def __init__(self, controller, clock=time.monotonic):
+    def __init__(self, controller, clock=time.perf_counter):
         super().__init__(controller)
         self.controller, self.clock = controller, clock
         self.backend = CartesianBackend.FIRMWARE
         self.model = RobotModel()
         self.feedback = FeedbackTracker(self.model)
+        # Firmware 20261012.01 fallback. Explicit ACC/MOTION replies replace
+        # these values; do not label an assumed value as device-confirmed.
+        self.motor_acceleration = np.full(7,30.)
+        self.acceleration_confirmed = np.zeros(7,dtype=bool)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dummy-motion")
         self.future = None
         self.cancel_event = threading.Event()
@@ -150,6 +156,7 @@ class CartesianSession(QObject):
         self.issued_ids = deque(maxlen=128)
         self.job = None
         self.last_written_q = None
+        self.last_motion_job = None
         self.terminal_id = None
         self.terminal_complete = False
         self.stable_since = None
@@ -159,6 +166,11 @@ class CartesianSession(QObject):
         self.feedback_wait_message = None
         self.plan_waiting_for_feedback = False
         self.last_write_at = self.clock()
+        self.next_due = self.last_write_at + .1
+        self.duration_limit_reported = False
+        self.speed_floor_reported = False
+        self.timing_assumption_reported = False
+        self.wire_velocity = np.zeros(7)
         self.future = None
         self.retarget = None
         self._status_at = 0.
@@ -183,7 +195,9 @@ class CartesianSession(QObject):
             elif now-self.feedback_wait_started >= 3.:
                 self.fail(f"启动前等待新关节回读超时（{age}）；未发送运动，请重新发起", stop=False)
             return False
-        self.fail(f"关节反馈超过 300 ms，停止上位机轨迹（{age}，阶段 {self.stage}）")
+        delay = getattr(self.controller, "feedback_delivery_ms", 0.)
+        reason = self.feedback.rejection_reason or "无"
+        self.fail(f"关节反馈超过 300 ms，停止上位机轨迹（{age}，阶段 {self.stage}；最近RX到处理 {delay:.0f} ms，拒收原因 {reason}）")
         return False
 
     def _launch_plan(self):
@@ -210,12 +224,18 @@ class CartesianSession(QObject):
                     samples = (Sample(0., q, pose),)
                 else:
                     target = world_target(model, point, q[6], current_tool)
-                    plan = LinePlanner(model).plan_line(q, target, tool=current_tool, cancelled=event.is_set)
+                    plan = LinePlanner(model).plan_line(q, target, motion_limits=host_limits(current_speed), tool=current_tool, cancelled=event.is_set)
                     if not plan.ok:
                         raise ValueError(f"{point.name}: {plan.status.value} / {plan.reason}")
                     samples = plan.samples[1:]
                     q = plan.samples[-1].q
-                plans.append((samples, current_tool, current_speed))
+                unique = []
+                for sample in samples:
+                    if unique and np.array_equal(sample.q, unique[-1].q):
+                        unique[-1] = sample
+                    else:
+                        unique.append(sample)
+                plans.append((tuple(unique), current_tool, current_speed))
             return plans
         self.future = self.executor.submit(calculate)
         self._state("planning", "离线预检全部点位与路径；尚未发送运动")
@@ -239,6 +259,13 @@ class CartesianSession(QObject):
         self.samples, self.tool, self.speed_value = self.plans[self.point_index]
         self.sample_index = 0
         self.next_due = self.clock()
+        # The initial sample is from the fresh, fully checked preflight. Later
+        # samples must be solved again from feedback before they can be sent.
+        self.point_candidate = self.samples[0]
+        self.candidate_at = self.clock()
+        self.last_correction_at = -float("inf")
+        self.correction_blocked_since = None
+        self.budget_misses = 0
         self.terminal_id = None
         self.terminal_complete = False
         self.stable_since = None
@@ -268,7 +295,7 @@ class CartesianSession(QObject):
             self.tool = configured_tool(c)
             self.seed = self.feedback.sample.q
             self.jog_base = self.model.base_pose(self.seed[6])
-            self.session = MotionSession(self.model, self.seed, self.tool)
+            self.session = MotionSession(self.model, self.seed, self.tool, host_limits(c.gamepad.robot["cmd_speed"]))
             self.last_plan_at = now
             self.jog_candidate = None
             self.budget_misses = 0
@@ -300,9 +327,14 @@ class CartesianSession(QObject):
 
     def update_feedback(self, values, received_at=None):
         try:
-            sample = FeedbackSample(from_wire_joints(values), self.clock() if received_at is None else received_at)
+            now = self.clock()
+            sample = FeedbackSample(from_wire_joints(values), now if received_at is None else received_at)
+            if sample.received_at > now:
+                self.feedback.rejection_reason = "回读时间戳晚于当前单调时钟"
+                return False
             return self.feedback.update(sample)
-        except ValueError:
+        except ValueError as exc:
+            self.feedback.rejection_reason = f"回读值无效：{exc}"
             return False
 
     def can_write(self, generation, command):
@@ -318,6 +350,23 @@ class CartesianSession(QObject):
                     job["generation"] == generation and
                     job["connection"] == self.controller._connection_id and self.busy)
 
+    def invalidate_acceleration(self, command):
+        """Writes/synchronization may change the cached firmware motor model."""
+        parts = command.split()
+        if not parts:
+            return
+        if parts[0] in ("#SYNC_ACC", "#MOTOR_DEFAULT", "!MOTOR_DEFAULT"):
+            self.motor_acceleration[:] = 30.
+            self.acceleration_confirmed[:] = False
+        elif parts[0] in ("#ACC_J", "#REBOOT") and len(parts) >= 2:
+            if parts[1] == "0":
+                self.motor_acceleration[:] = 30.
+                self.acceleration_confirmed[:] = False
+            elif parts[1] in tuple(str(i) for i in range(1,8)):
+                axis = int(parts[1])-1
+                self.motor_acceleration[axis] = 30.
+                self.acceleration_confirmed[axis] = False
+
     def command_written(self, command, generation, connection):
         job = self.job
         if (job is None or job["written"] or job["command"] != command or
@@ -325,8 +374,12 @@ class CartesianSession(QObject):
             return
         job["written"], job["deadline"] = True, self.clock()+3.
         if job["purpose"] == "motion":
+            previous = self.last_written_q if self.last_written_q is not None else self.seed
+            self.wire_velocity = (job["q"]-previous)/max(.1, self.clock()-self.last_write_at)
             self.last_written_q = job["q"]
+            self.last_motion_job = job
             self.last_write_at = self.clock()
+            self.next_due = self.last_write_at + job["dt"]
             self.job = None
             if self.kind == "jog":
                 tcp = compose(inverse(self.jog_base), self.model.fk(job["q"], self.tool))
@@ -344,6 +397,15 @@ class CartesianSession(QObject):
         return False
 
     def handle_line(self, line):
+        number = r"(\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)"
+        match = re.fullmatch(r"ok ACC \[([1-7])\] = " + number + r" r/s\^2(?: \(rail\))?", line)
+        motion = re.fullmatch(r"MOTION J([1-7]) v=[^ ]+ a=" + number + r" d=[^ ]+", line)
+        if match or motion:
+            record = match or motion
+            value = float(record[2])
+            if np.isfinite(value) and value > 1e-6:
+                self.motor_acceleration[int(record[1])-1] = value
+                self.acceleration_confirmed[int(record[1])-1] = True
         if not self.busy:
             return
         job = self.job
@@ -484,8 +546,26 @@ class CartesianSession(QObject):
             future, self.future = self.future, None
             try:
                 result = future.result()
-                if self.kind == "points":
+                if self.kind == "points" and self.stage == "planning":
                     self._use_plan(result)
+                elif self.kind == "points":
+                    status, sample = result
+                    if status == Status.BUDGET_EXCEEDED:
+                        self.budget_misses += 1
+                        if self.budget_misses >= 3:
+                            self.fail("在线逆解连续三次超时")
+                    elif status == Status.CANCELLED:
+                        return
+                    else:
+                        self.budget_misses = 0
+                        self.point_candidate = sample
+                        self.candidate_at = self.correction_feedback_at
+                        if sample is not None:
+                            self.correction_blocked_since = None
+                        elif self.correction_blocked_since is None:
+                            self.correction_blocked_since = now
+                        elif now-self.correction_blocked_since > 1.:
+                            self.fail(f"反馈纠正持续受限：{status.value}")
                 else:
                     status, sample = result
                     if self._future_revision != getattr(self, "jog_revision", 0):
@@ -508,27 +588,43 @@ class CartesianSession(QObject):
                             self.jog_candidate = sample
             except Exception as exc:
                 self.fail(f"轨迹计算失败：{exc}", stop=self.last_written_q is not None)
-            if not self.active or self.kind == "points":
+            if not self.active:
+                return
+            if self.kind == "points" and self.sample_index == 0:
                 return
         if self.future or self.job or len(self.receipts) >= 32:
             return
         if self.kind == "points" and self.stage == "running":
             if self.sample_index < len(self.samples) and now >= self.next_due:
-                sample = self.samples[self.sample_index]
+                sample = self.point_candidate
+                if sample is None or (self.sample_index > 0 and now-self.candidate_at > .1):
+                    self._correct_point(now)
+                    return
                 speed_scale = self.feedback.speed_scale(self.model.fk(self.last_written_q, self.tool), self.tool, now) if self.last_written_q is not None else 1.
                 if speed_scale <= 0:
                     return  # Bound following error without rewinding the reference.
-                if self._write_sample(sample, terminal=self.sample_index == len(self.samples)-1):
-                    previous_time = self.samples[self.sample_index-1].time if self.sample_index else 0.
-                    self.next_due = now+max(.1, sample.time-previous_time)/max(.1, speed_scale)
+                next_index = self.sample_index + 1
+                # This command executes the incoming segment. Its duration
+                # belongs to current-minus-previous, including merged plateaus;
+                # using next-minus-current advances the speed profile early.
+                previous_time = self.samples[self.sample_index-1].time if self.sample_index else 0.
+                interval = sample.time-previous_time
+                interval = max(.1, interval)/max(.1, speed_scale)
+                if self._write_sample(sample, terminal=next_index == len(self.samples), dt=interval):
+                    # The actual write callback starts the next interval. A
+                    # queued packet must never consume the wire spacing budget.
+                    self.next_due = now+interval if self._sample_skipped else float("inf")
                     self.sample_index += 1
+                    self.point_candidate = None
             elif self.sample_index == len(self.samples):
                 if self.terminal_id is not None and not self.terminal_complete and now-self._status_at >= .2:
                     self._status_at = now
                     self._send_job("#MOTION_STATUS", "status")
                 self._complete_when_stable()
+            if self.active and not self.job and self.sample_index < len(self.samples):
+                self._correct_point(now)
         elif self.kind == "jog":
-            if self.jog_candidate is not None and now-self.last_write_at >= .1:
+            if self.jog_candidate is not None and now >= self.next_due:
                 sample, self.jog_candidate = self.jog_candidate, None
                 self._write_sample(sample, terminal=False, dt=now-self.last_write_at)
                 return
@@ -555,12 +651,65 @@ class CartesianSession(QObject):
             self._future_revision = self.jog_revision
             self.future = self.executor.submit(snapshot.step, dt, target, now, event.is_set)
 
+    def _correct_point(self, now):
+        if self.future or now-self.last_correction_at < .019:
+            return
+        if self.points[self.point_index].kind == "MOVEJ":
+            self.point_candidate = self.samples[self.sample_index]
+            self.candidate_at = now
+            return
+        self.last_correction_at = now
+        snapshot = FeedbackTracker(self.model)
+        snapshot.sample = self.feedback.sample
+        snapshot.velocity = self.feedback.velocity.copy()
+        self.correction_feedback_at = snapshot.sample.received_at
+        previous = self.last_written_q if self.last_written_q is not None else self.seed
+        event = self.cancel_event
+        self.future = self.executor.submit(correct_sample, self.model,
+            self.samples[self.sample_index], self.tool, snapshot, now,
+            previous, self.wire_velocity.copy(), max(.1, now-self.last_write_at),
+            1., event.is_set)
+
     def _write_sample(self, sample, terminal, dt=.1):
+        self._sample_skipped = False
         try:
-            command, q = movej_command(self.model, sample.q, sample.pose, self.tool, self.speed_value)
+            is_cartesian = self.kind == "jog" or self.points[self.point_index].kind == "MOVEL"
+            if is_cartesian:
+                # Quantize first: timing must use the actual transmitted target.
+                _, q = movej_command(self.model, sample.q, sample.pose, self.tool, 1.)
+                status, actual = self.feedback.estimate(self.clock())
+                if status != Status.OK:
+                    self.fail("计算分段执行速度时关节反馈过期")
+                    return False
+                timing = segment_timing(actual,q,dt,self.motor_acceleration)
+                self.last_segment_timing = timing
+                wire_speed = timing.speed_percent
+                # A requested interval below the motor model's fastest time
+                # cannot be recovered by raising UI speed. Slow packet cadence.
+                dt = max(dt, timing.predicted_seconds)
+                if timing.duration_limited and not self.duration_limit_reported:
+                    self.duration_limit_reported = True
+                    self.controller.log(f"分段受电机速度/加速度限制：期望 {timing.requested_seconds*1000:.1f} ms，发送间隔放慢至至少 {dt*1000:.1f} ms", "INFO")
+                if not self.acceleration_confirmed.all() and not self.timing_assumption_reported:
+                    self.timing_assumption_reported = True
+                    self.controller.log("分段速度按七轴位移/时长反算；未回读轴暂用主控默认30 r/s²，可用 #GETJACC 1～7 核对", "INFO")
+                if timing.minimum_speed_limited and not self.speed_floor_reported:
+                    self.speed_floor_reported = True
+                    self.controller.log(f"小段受主控MoveJ最低1档限制：期望 {dt*1000:.1f} ms，模型预测 {timing.predicted_seconds*1000:.1f} ms；可能提前到点等待", "INFO")
+            else:
+                wire_speed = self.speed_value  # Explicit MoveJ point keeps its contract.
+            command, q = movej_command(self.model, sample.q, sample.pose, self.tool, wire_speed)
         except ValueError as exc:
             self.fail(str(exc))
             return False
+        if self.last_written_q is not None and np.array_equal(q, self.last_written_q):
+            self._sample_skipped = True
+            if terminal and self.last_motion_job is not None:
+                # The identical endpoint is already on the wire. Reuse its
+                # real receipt identity instead of manufacturing completion.
+                self.last_motion_job["terminal"] = True
+                self.terminal_id = self.last_motion_job.get("id")
+            return True
         return self._send_job(command, "motion", q=q, terminal=terminal, dt=dt, id=None)
 
     def fail(self, message, stop=True):

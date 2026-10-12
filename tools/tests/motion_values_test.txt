@@ -1,0 +1,4 @@
+Native C++17 regression. From repo root with a native compiler:
+c++ -std=c++17 -O2 -I firmware_new/dummy-ref-core-fw/Robot/instances tools/tests/test_motion_values.cpp firmware_new/dummy-ref-core-fw/Robot/instances/motion_values.cpp -o parser_test
+./parser_test [optional_motion_commands_file]
+Each replay line starts with > or @ and contains a CSV payload. No hardware is used.

@@ -68,7 +68,7 @@ class CartesianSessionTests(unittest.TestCase):
     def test_shared_poll_survives_host_motion_for_more_than_stale_window(self):
         self.start((self.point(.02),))
         actual, motion_id, motions = self.q.copy(), 100, 0
-        for _ in range(20):
+        for _ in range(40):
             self.now += .05
             self.c._poll_position()
             poll = self.take()
@@ -77,6 +77,9 @@ class CartesianSessionTests(unittest.TestCase):
             self.c._process_rx_line("ok " + " ".join(map(str, to_wire_joints(actual))))
             self.assertIsNone(self.c._position_request)
             self.s.tick()
+            if self.s.future:
+                self.s.future.result(timeout=5)
+                self.s.tick()
             for item in self.take():
                 command = self.write(item)
                 self.assertTrue(command.startswith(">"), command)
@@ -262,6 +265,9 @@ class CartesianSessionTests(unittest.TestCase):
             self.now += .05
             self.s.update_feedback(to_wire_joints(actual))
             self.s.tick()
+            if self.s.future:
+                self.s.future.result(timeout=5)
+                self.s.tick()
             for item in self.take():
                 cmd = self.write(item)
                 if cmd.startswith(">"):
@@ -418,6 +424,154 @@ class CartesianSessionTests(unittest.TestCase):
         self.assertFalse(self.s.active)
         self.assertTrue(self.c._stop_locked)
         self.assertFalse(any(cmd == "!STOP" for _, cmd in self.take()))
+
+
+    def test_quantized_plateaus_are_collapsed(self):
+        self.start((self.point(.04),))
+        self.assertGreater(len(self.s.samples), 2)
+        for a, b in zip(self.s.samples, self.s.samples[1:]):
+            self.assertFalse(np.array_equal(a.q, b.q))
+
+    def test_delayed_write_starts_spacing_after_write_not_enqueue(self):
+        self.start((self.point(.02),))
+        self.s.tick()
+        item = self.take()[0]
+        self.now += .25
+        self.s.update_feedback(to_wire_joints(self.q))
+        self.write(item)
+        self.assertGreaterEqual(self.s.next_due, self.now+.1)
+        self.c._process_rx_line("queued MOVEJ id=101 mode=INT")
+        self.c._process_rx_line("accepted MOVEJ id=101")
+        self.s.tick()
+        if self.s.future:
+            self.s.future.result(timeout=5)
+            self.s.tick()
+        self.assertFalse(any(command.startswith(">") for _, command in self.take()))
+
+    def test_late_qt_delivery_does_not_make_old_rx_fresh(self):
+        self.now += .5
+        before = self.c.actual_pose
+        self.c._process_rx_line("ok 0 10 80 0 90 0 20", received_at=self.now-.4)
+        self.assertEqual(self.c.actual_pose, before)
+        from dummy_motion import Status
+        self.assertEqual(self.s.feedback.estimate(self.now)[0], Status.FEEDBACK_STALE)
+        self.assertTrue(any("RX到处理 400 ms" in line for line in self.logs))
+
+    def test_rejected_joints_do_not_update_view_or_sync_target(self):
+        self.now += .01
+        self.c._process_rx_line("ok 0 10 80 0 90 0 20")
+        before = list(self.c.actual_pose)
+        self.now += .01
+        self.c._process_rx_line("ok 200 10 80 0 90 0 20")
+        self.assertEqual(self.c.actual_pose, before)
+        self.assertTrue(any("超出模型限位" in line for line in self.logs))
+
+    def test_speed_setting_changes_preflight_time(self):
+        from app.core.cartesian_backend import host_limits
+        from dummy_motion import LinePlanner
+        tool = Tool(Pose.identity())
+        start = self.s.model.fk(self.q, tool)
+        target = Pose(start.position+[0,.02,0],start.rotation)
+        slow = LinePlanner(self.s.model).plan_line(self.q,target,host_limits(10),tool)
+        fast = LinePlanner(self.s.model).plan_line(self.q,target,host_limits(50),tool)
+        self.assertTrue(slow.ok and fast.ok)
+        self.assertGreater(slow.samples[-1].time, 3*fast.samples[-1].time)
+        self.assertAlmostEqual(host_limits(35).linear_speed, .007)
+
+
+
+    def test_duplicate_terminal_reuses_real_receipt_without_second_movej(self):
+        from dummy_motion import Sample
+        self.start()
+        self.s.tick()
+        self.write(self.take()[0])
+        self.c._process_rx_line("queued MOVEJ id=101 mode=INT")
+        self.c._process_rx_line("accepted MOVEJ id=101")
+        q = self.s.last_written_q
+        self.assertTrue(self.s._write_sample(Sample(.1,q,self.s.model.fk(q,self.s.tool)),True))
+        self.assertEqual(self.s.terminal_id,101)
+        self.assertFalse(self.s.terminal_complete)
+        self.assertEqual(self.take(),[])
+
+    def test_nan_reply_cannot_enter_legacy_sync(self):
+        self.now += .01
+        before = self.s.feedback.sample
+        self.c._pending_sync = "j"
+        self.c._process_rx_line("ok nan 10 80 0 90 0 0")
+        self.assertIs(self.s.feedback.sample,before)
+        self.assertIsNone(self.c.actual_pose)
+        self.assertTrue(any("无效" in line for line in self.logs))
+
+
+
+    def _timed_sample(self, degrees=1.):
+        from dummy_motion import Sample
+        q = self.q.copy(); q[0] += np.deg2rad(degrees)
+        return Sample(.2, q, self.s.model.fk(q,self.s.tool))
+
+    def test_host_speed_not_forwarded_to_movej_for_identical_timed_segment(self):
+        self.start()
+        sample = self._timed_sample()
+        speeds = []
+        for ui_speed in (5.,35.,100.):
+            self.s.speed_value = ui_speed
+            self.assertTrue(self.s._write_sample(sample,False,.2))
+            speeds.append(float(self.take()[0][1].split(',')[-1]))
+        self.assertEqual(speeds,[speeds[0]]*3)
+        self.assertNotIn(speeds[0],(5.,35.,100.))
+        self.assertTrue(self.s._write_sample(sample,False,.4))
+        self.assertLess(float(self.take()[0][1].split(',')[-1]),speeds[0])
+
+    def test_explicit_movej_point_keeps_own_speed(self):
+        p = TeachingPoint("joint","MOVEJ",tuple(to_wire_joints(self.q)),100.,35.)
+        self.start((p,))
+        self.s.tick()
+        self.assertEqual(float(self.take()[0][1].split(',')[-1]),35.)
+
+    def test_host_jog_does_not_forward_cmd_speed(self):
+        self.start()
+        self.s.kind = "jog"
+        sample = self._timed_sample()
+        self.s.speed_value = 100.
+        self.assertTrue(self.s._write_sample(sample,False,.2))
+        self.assertNotEqual(float(self.take()[0][1].split(',')[-1]),100.)
+
+    def test_current_segment_duration_includes_collapsed_time(self):
+        from dataclasses import replace
+        self.start()
+        a = self._timed_sample(.1)
+        b = self._timed_sample(.2)
+        self.s.samples = (replace(a,time=.4),replace(b,time=.5))
+        self.s.point_candidate = self.s.samples[0]
+        self.s.tick()
+        self.assertAlmostEqual(self.s.last_segment_timing.requested_seconds,.4)
+        self.assertAlmostEqual(self.s.job['dt'],.4)
+
+    def test_motor_limit_extends_write_cadence(self):
+        self.start()
+        self.s.motor_acceleration[:] = .1
+        self.assertTrue(self.s._write_sample(self._timed_sample(),False,.1))
+        self.assertTrue(self.s.last_segment_timing.duration_limited)
+        interval = self.s.job['dt']
+        self.assertGreater(interval,.1)
+        self.write(self.take()[0])
+        self.assertAlmostEqual(self.s.next_due-self.now,interval)
+
+    def test_acceleration_readback_validation_and_write_invalidation(self):
+        for line in ('ok ACC [1] = .. r/s^2','ok ACC [1] = nan r/s^2',
+                     'ok ACC [1] = 1e999 r/s^2','ok ACC [1] = 0 r/s^2'):
+            self.s.handle_line(line)
+        self.assertFalse(self.s.acceleration_confirmed.any())
+        self.s.handle_line('ok ACC [7] = 12.50 r/s^2 (rail)')
+        self.s.handle_line('MOTION J2 v=0.010 a=20.000 d=0.004')
+        self.assertEqual(self.s.motor_acceleration[6],12.5)
+        self.assertEqual(self.s.motor_acceleration[1],20.)
+        self.assertTrue(self.c.send_cmd('#ACC_J 7 8'))
+        self.write(self.take()[0])
+        self.assertFalse(self.s.acceleration_confirmed[6])
+        self.assertTrue(self.s.acceleration_confirmed[1])
+        self.s.invalidate_acceleration('#REBOOT 0')
+        self.assertFalse(self.s.acceleration_confirmed.any())
 
 
 if __name__ == '__main__':

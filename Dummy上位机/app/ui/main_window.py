@@ -441,6 +441,7 @@ class MainWindow(QMainWindow):
         self.cartesian_frame.setObjectName("CartesianFrame")
         self.cartesian_frame.addItem("基座 / 法兰（兼容已有点位）", "base")
         self.cartesian_frame.addItem("世界 / TCP（名义夹爪中心）", "world")
+        self._cartesian_frame_value = "base"
         self.cartesian_frame.currentIndexChanged.connect(lambda *_: self._cartesian_frame_changed())
         self._point_tool_snapshot = None
         pose_tab_layout.addWidget(self.cartesian_frame)
@@ -1625,7 +1626,7 @@ class MainWindow(QMainWindow):
         backend_box.addWidget(self.ik_backend)
         self.ik_status = hint("主控逆解")
         backend_box.addWidget(self.ik_status)
-        backend_box.addWidget(hint("上位机模式：地轨与六轴协同，需持续关节回读；发送基线 10 Hz。TCP 暂用现有夹爪中心名义偏移，未标定。主控模式使用当前地轨位置。"))
+        backend_box.addWidget(hint("上位机模式：地轨与六轴协同，需持续关节回读；发送基线 10 Hz。MoveL 档位控制TCP规划速度：100 档最高 20 mm/s、10°/s，35 档 7 mm/s、3.5°/s。每段MoveJ速度单独反算，不透传档位；主控最低速度可能限制慢速小段。TCP 暂用现有夹爪中心名义偏移，未标定。主控模式使用当前地轨位置。"))
         layout.addWidget(backend_group)
         gamepad_group, gamepad_box = self._group("手柄输入")
         gamepad_box.addWidget(hint("映射、死区、速度与设备选择保存在本机。默认不启动手柄采集；检查原始输入不接管机器人。"))
@@ -1692,10 +1693,52 @@ class MainWindow(QMainWindow):
     def _cartesian_frame_changed(self):
         if self._building:
             return
+        from dummy_motion import Status, Tool
+        from dummy_motion.frames import from_xyzabc, to_xyzabc
+        from app.core.cartesian_backend import configured_tool
         self._cancel_drag()
-        self._point_tool_snapshot = None
-        with QSignalBlocker(self.teaching_frame):
-            self.teaching_frame.setCurrentIndex(self.cartesian_frame.currentIndex())
+        c = self.controller
+        old_frame, new_frame = self._cartesian_frame_value, self.cartesian_frame.currentData()
+        if old_frame == new_frame:
+            return
+        try:
+            if c.is_connected:
+                if c.cartesian.feedback.estimate(c.cartesian.clock())[0] != Status.OK:
+                    raise ValueError("坐标转换需要新关节回读，请先读取位置")
+                rail = c.cartesian.feedback.sample.q[6]
+            else:
+                rail = self.joint_spins[6].value()/1000
+            snapshot = self._point_tool_snapshot
+            tool = configured_tool(c) if snapshot is None else Tool(from_xyzabc(snapshot))
+            transform = c.cartesian.model.legacy_target if new_frame == "world" else c.cartesian.model.native_target
+            groups = (self.pose_rows, self.teaching_pose_rows)
+            converted = [to_xyzabc(transform(from_xyzabc([row.spin.value() for row in rows]), rail, tool))
+                         for rows in groups]
+            for rows, values in zip(groups, converted):
+                if any(not row.spin.minimum() <= value <= row.spin.maximum() for row, value in zip(rows, values)):
+                    raise ValueError("转换结果超出输入范围，已保留原坐标")
+        except ValueError as exc:
+            index = 1 if old_frame == "world" else 0
+            with QSignalBlocker(self.cartesian_frame), QSignalBlocker(self.teaching_frame):
+                self.cartesian_frame.setCurrentIndex(index)
+                self.teaching_frame.setCurrentIndex(index)
+            c.log(str(exc), "WARN")
+            return
+        old_suppress = c._suppress_drag_send
+        c._suppress_drag_send = True
+        try:
+            for rows, values in zip(groups, converted):
+                for row, value in zip(rows, values):
+                    row.set_value(value)
+            with QSignalBlocker(self.teaching_frame):
+                self.teaching_frame.setCurrentIndex(self.cartesian_frame.currentIndex())
+            self._cartesian_frame_value = new_frame
+            # Preserve the tool across both directions of the conversion.
+            self._point_tool_snapshot = list(snapshot) if snapshot is not None else to_xyzabc(tool.flange_tcp)
+        finally:
+            c._suppress_drag_send = old_suppress
+        if not c.is_connected:
+            c.log(f"离线坐标转换采用编辑区地轨 {rail*1000:.2f} mm", "INFO")
         self._preview_changed()
 
     def _with_cartesian_metadata(self, record):
@@ -2490,6 +2533,7 @@ class MainWindow(QMainWindow):
                 frame_index = 1 if record.get("frame") == "world" else 0
                 self.cartesian_frame.setCurrentIndex(frame_index)
                 self.teaching_frame.setCurrentIndex(frame_index)
+                self._cartesian_frame_value = "world" if frame_index else "base"
             self._point_tool_snapshot = copy.deepcopy(record.get("tool"))
             index = 0 if kind == "MoveJ" else 1
             self.teaching_tabs.setCurrentIndex(index)

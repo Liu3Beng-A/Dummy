@@ -1,12 +1,14 @@
 """Serial workers with a single writer queue and per-connection identity."""
 import queue
 import threading
+import time
 from PySide6.QtCore import QObject, Signal
 from app.protocol.parser import LineFramer
 
 
 class SerialTransport(QObject):
     line_received = Signal(str, int)
+    line_received_at = Signal(str, int, float)
     command_written = Signal(str, int)
     failed = Signal(str, int)
 
@@ -32,7 +34,10 @@ class SerialTransport(QObject):
             try:
                 waiting = self.port.in_waiting
                 if waiting:
-                    for line in framer.feed(self.port.read(min(waiting, 16384))):
+                    chunk = self.port.read(min(waiting, 16384))
+                    received_at = time.perf_counter()
+                    for line in framer.feed(chunk):
+                        self.line_received_at.emit(line, self.connection_id, received_at)
                         self.line_received.emit(line, self.connection_id)
                 self._stop.wait(0.01)
             except Exception as error:

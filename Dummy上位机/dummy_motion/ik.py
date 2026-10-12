@@ -15,7 +15,7 @@ class IKSolver:
         self.model = model
 
     def solve_pose(self, target, seed, constraints=None, rail_policy=RailPolicy.AUTO,
-                   tool=None, max_iterations=48, budget_ms=None, cancelled=None):
+                   tool=None, max_iterations=48, budget_ms=None, cancelled=None, weight_constraints=None):
         started = time.perf_counter()
         q = vector(seed, 7).copy()
         bounds = constraints or self.model.constraints
@@ -49,7 +49,9 @@ class IKSolver:
             high = np.minimum(bounds.upper - q, step) / scale
             active = np.arange(6 if policy == RailPolicy.LOCKED else 7)
             j = self.model.jacobian(q, tool) * scale[None, :]
-            weights = step_weights(q, bounds, policy)
+            # A dynamic step window constrains motion but must not redefine
+            # the shoulder/elbow's physical travel margins used for rail cost.
+            weights = step_weights(q, weight_constraints or bounds, policy)
             a = np.vstack((task_weight[:, None] * j[:, active], .002 * np.diag(weights[active])))
             b = np.r_[task_weight * e, np.zeros(len(active))]
             result = lsq_linear(a, b, bounds=(low[active], high[active]), method="bvls", tol=1e-9, max_iter=40)

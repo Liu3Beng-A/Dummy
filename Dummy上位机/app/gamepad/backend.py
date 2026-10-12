@@ -29,7 +29,7 @@ class GamepadReader(QObject):
     def __init__(self, parent=None, *, pygame_module=None, clock=None):
         super().__init__(parent)
         self._provided_pg = pygame_module
-        self._clock = clock or time.monotonic
+        self._clock = clock or time.perf_counter
         self._config = default_config()
         self._timer = QTimer(self)
         self._timer.setInterval(17)

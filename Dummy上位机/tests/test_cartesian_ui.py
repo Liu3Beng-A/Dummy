@@ -70,6 +70,35 @@ class CartesianUiTests(unittest.TestCase):
         self.assertEqual(self.w._drag_pending, {})
         self.assertTrue(self.c._tx_queue.empty())
 
+    def test_frame_switch_preserves_world_target_and_tool_without_sending(self):
+        import numpy as np
+        from dummy_motion import Tool
+        from dummy_motion.frames import from_xyzabc, error
+        self.w.joint_rows[6].set_value(40.)
+        values = [146.52, 15., 288.92, 180., 0., 180.]
+        for row,value in zip(self.w.pose_rows,values): row.set_value(value)
+        tool = Tool(from_xyzabc([10,5,125,0,3,0]))
+        self.w._point_tool_snapshot = [10,5,125,0,3,0]
+        expected = self.c.cartesian.model.legacy_target(from_xyzabc(values), .04, tool)
+        self.w.cartesian_frame.setCurrentIndex(1)
+        actual = from_xyzabc([spin.value() for spin in self.w.pose_spins])
+        residual = error(actual,expected)
+        self.assertLess(np.linalg.norm(residual[:3]), .00002)
+        self.assertLess(np.linalg.norm(residual[3:]), .0003)
+        self.w.cartesian_frame.setCurrentIndex(0)
+        np.testing.assert_allclose([spin.value() for spin in self.w.pose_spins],values,atol=.02)
+        self.assertEqual(self.w._point_tool_snapshot,[10,5,125,0,3,0])
+        self.assertTrue(self.c._tx_queue.empty())
+
+    def test_connected_frame_switch_requires_fresh_rail(self):
+        self.c.is_connected = True
+        before = [spin.value() for spin in self.w.pose_spins]
+        self.w.cartesian_frame.setCurrentIndex(1)
+        self.assertEqual(self.w.cartesian_frame.currentData(), 'base')
+        self.assertEqual(self.w.teaching_frame.currentData(), 'base')
+        self.assertEqual([spin.value() for spin in self.w.pose_spins],before)
+        self.c.is_connected = False
+
 
 if __name__ == '__main__':
     unittest.main()

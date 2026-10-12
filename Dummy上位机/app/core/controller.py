@@ -396,6 +396,8 @@ class RobotController(QObject, RobotBusiness):
         self.current_cmdmode = None
         self.cartesian.feedback.sample = None
         self.cartesian.feedback.velocity[:] = 0
+        self.cartesian.motor_acceleration[:] = 30.
+        self.cartesian.acceleration_confirmed[:] = False
         self._motor_state_known = self._motor_enabled = False
         self._stop_locked = self._calibration_busy = False
         self._mode_request = self._mode_pending = None
@@ -408,7 +410,7 @@ class RobotController(QObject, RobotBusiness):
         self._reset_rgb_state(emit=False)
         self._transport = SerialTransport(port_object, self._tx_queue, self._can_write,
                                           self._connection_id, self)
-        self._transport.line_received.connect(self._on_transport_line, Qt.ConnectionType.QueuedConnection)
+        getattr(self._transport, "line_received_at", self._transport.line_received).connect(self._on_transport_line, Qt.ConnectionType.QueuedConnection)
         self._transport.command_written.connect(self._on_written, Qt.ConnectionType.QueuedConnection)
         self._transport.failed.connect(self._on_transport_failure, Qt.ConnectionType.QueuedConnection)
         self._transport.start()
@@ -456,9 +458,10 @@ class RobotController(QObject, RobotBusiness):
             self.root.close()
 
     @Slot(str, int)
-    def _on_transport_line(self, line, connection_id):
+    @Slot(str, int, float)
+    def _on_transport_line(self, line, connection_id, received_at=None):
         if connection_id == self._connection_id and self.is_connected:
-            self._process_rx_line(line)
+            self._process_rx_line(line, received_at)
 
     @Slot(str, int)
     def _on_written(self, command, connection_id):
@@ -477,6 +480,7 @@ class RobotController(QObject, RobotBusiness):
                     self._discard_gamepad_position_request()
                 else:
                     request["written_at"] = time.monotonic()
+            self.cartesian.invalidate_acceleration(command)
             self.cartesian.command_written(command, generation, connection_id)
             self.gamepad.command_written(command, generation, connection_id)
 
@@ -888,14 +892,39 @@ class RobotController(QObject, RobotBusiness):
             values.append(int(text))
         return values
 
-    def _process_rx_line(self, line):
+    def _process_rx_line(self, line, received_at=None):
         self._handle_parameter_task_reply(line)
         # A seven-value pose is unambiguously joint+rail in firmware_new.
         nums = finite_numbers(line[2:].strip()) if line.startswith("ok ") else None
+        if nums is None and line.startswith("ok "):
+            tokens = line[2:].split()
+            if len(tokens) == 7:
+                try:
+                    nums = [float(value) for value in tokens]
+                except ValueError:
+                    pass
         if nums is not None and len(nums) == 7:
-            self.cartesian.update_feedback(nums)
+            now = self.cartesian.clock()
+            stamp = now if received_at is None else received_at
+            age = now-stamp
+            accepted = self.cartesian.update_feedback(nums, stamp)
+            self.feedback_delivery_ms = max(0., age*1000)
+            if not accepted or not 0 <= age <= .3:
+                reason = self.cartesian.feedback.rejection_reason if not accepted else "回读到界面时已超过300ms"
+                if now-getattr(self, "_feedback_warning_at", -float("inf")) >= 1.:
+                    self._feedback_warning_at = now
+                    self.log(f"关节回读未用于实际显示/同步：{reason}；RX到处理 {age*1000:.0f} ms", "WARN")
+                # Do not allow the legacy sync parser or actual display to
+                # consume a sample rejected by the motion feedback contract.
+                self.log(line, "RX")
+                request = self._position_request
+                if request and request["kind"] == "j":
+                    self._position_request = None
+                    self._pending_sync = None
+                self._publish()
+                return
             self.actual_pose = list(nums)
-            self.last_actual_at = time.time()
+            self.last_actual_at = time.time()-age
             self.actual_pose_changed.emit(list(nums))
             request = self._position_request
             if request and request["kind"] == "j":

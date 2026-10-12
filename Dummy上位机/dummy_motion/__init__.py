@@ -6,7 +6,9 @@ from .ik import IKSolver
 from .planner import LinePlanner
 from .session import MotionSession
 from .rail_policy import RailPolicy
+from .correction import correct_sample
+from .execution import SegmentTiming, segment_timing
 
 __all__ = ["Pose", "Tool", "Constraints", "MotionLimits", "Status", "IKResult",
            "Sample", "PlanResult", "FeedbackSample", "RobotModel", "IKSolver",
-           "LinePlanner", "MotionSession", "RailPolicy"]
+           "LinePlanner", "MotionSession", "RailPolicy", "correct_sample", "SegmentTiming", "segment_timing"]

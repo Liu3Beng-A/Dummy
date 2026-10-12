@@ -43,7 +43,7 @@ class GamepadSession(QObject):
     gripper_command_written = Signal(float)  # Sent target opening, never position telemetry.
     initial_pose_completed = Signal(list)
 
-    def __init__(self, controller, config=None, clock=time.monotonic):
+    def __init__(self, controller, config=None, clock=time.perf_counter):
         super().__init__(controller)
         from app.gamepad.config import default_config, validate_config
         self.controller, self.clock = controller, clock

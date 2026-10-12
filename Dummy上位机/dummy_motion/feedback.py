@@ -12,20 +12,24 @@ class FeedbackTracker:
         self.stale_after = stale_after
         self.max_prediction = max_prediction
         self.sample = None
+        self.rejection_reason = ""
         self.velocity = np.zeros(7)
 
     def update(self, sample: FeedbackSample):
         if not self.model.valid(sample.q):
+            self.rejection_reason = "七轴位置超出模型限位"
             return False
         previous = self.sample
         if previous is not None:
             dt = sample.received_at - previous.received_at
             if dt <= 0:
+                self.rejection_reason = "回读时间戳重复或倒序"
                 return False
             raw = (sample.q - previous.q) / dt
             bounds = self.model.constraints.velocity
             self.velocity = .5 * self.velocity + .5 * np.clip(raw, -bounds, bounds)
         self.sample = sample
+        self.rejection_reason = ""
         return True
 
     def estimate(self, now):

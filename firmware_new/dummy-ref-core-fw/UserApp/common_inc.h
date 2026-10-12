@@ -19,6 +19,10 @@ extern "C" {
 #include "time_utils.h"
 
 void Main(void);
+uint32_t CommandTaskStackFreeBytes(void);
+uint32_t RealtimeTaskStackFreeBytes(void);
+uint32_t OledTaskStackFreeBytes(void);
+uint32_t RGBTaskStackFreeBytes(void);
 
 extern uint64_t serialNumber;
 extern char serialNumberStr[13];

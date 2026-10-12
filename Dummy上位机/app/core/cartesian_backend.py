@@ -1,6 +1,6 @@
 """The two backends share frame/tool contracts, but retain their own execution."""
 from enum import Enum
-from dummy_motion import RobotModel, Tool, Pose
+from dummy_motion import RobotModel, Tool, Pose, MotionLimits
 from dummy_motion.frames import from_xyzabc, to_xyzabc, from_wire_joints
 from app.core.gamepad_session import motion_command
 import numpy as np
@@ -33,3 +33,16 @@ def world_target(model, point, rail, tool):
 
 def native_command(model, target, rail, tool, speed):
     return motion_command("@", to_xyzabc(model.native_target(target, rail, tool)) + [speed])
+
+
+def host_limits(speed):
+    """UI MoveL speed controls only Cartesian planning time and rate.
+
+    At 100 the PC envelope is 20 mm/s and 10 deg/s. Each wire MoveJ speed
+    is derived separately from the segment geometry, time and motor model.
+    """
+    speed = float(speed)
+    if not np.isfinite(speed) or not 1 <= speed <= 100:
+        raise ValueError("Speed must be 1..100")
+    return MotionLimits(linear_speed=.02*speed/100,
+                        angular_speed=np.deg2rad(10)*speed/100)

@@ -255,6 +255,13 @@ static void RespondStackStats(StreamSink& responseChannel)
             (unsigned long) UsbServerStackFreeBytes(),
             (unsigned long) UartServerStackFreeBytes(),
             (unsigned long) xPortGetFreeHeapSize());
+    Respond(responseChannel, "ok STACK cmd=%lu size=4096 heap_min=%lu",
+            (unsigned long) CommandTaskStackFreeBytes(),
+            (unsigned long) xPortGetMinimumEverFreeHeapSize());
+    Respond(responseChannel, "ok STACK rt=%lu oled=%lu rgb=%lu",
+            (unsigned long) RealtimeTaskStackFreeBytes(),
+            (unsigned long) OledTaskStackFreeBytes(),
+            (unsigned long) RGBTaskStackFreeBytes());
 }
 
 static bool HandleAccelerationSyncCommand(const char* cmd, size_t len, StreamSink& response)

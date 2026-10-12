@@ -150,7 +150,7 @@ class TimerReader(QObject):
     def sample(self):
         self.sample_count += 1
         pressed, self.pressed = self.pressed, []
-        self.sampled.emit({"connected": self.running, "timestamp": time.monotonic(),
+        self.sampled.emit({"connected": self.running, "timestamp": time.perf_counter(),
                            "decoded": deepcopy(self.decoded), "pressed": pressed, "error": "",
                            "raw": {"name": "60Hz fake reader", "axes": [self.decoded["ly"]],
                                    "buttons": [False] * 6, "hats": [(0, 0)]}})
