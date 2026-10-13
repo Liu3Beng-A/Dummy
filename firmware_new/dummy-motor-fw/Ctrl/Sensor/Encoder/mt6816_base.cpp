@@ -17,13 +17,18 @@ bool MT6816Base::Init()
 }
 
 
-uint16_t MT6816Base::UpdateAngle()
+uint16_t MT6816Base::UpdateAngle(uint8_t maxAttempts)
 {
     angleData.sampleValid = false;
     dataTx[0] = (0x80 | 0x03) << 8;
     dataTx[1] = (0x80 | 0x04) << 8;
 
-    for (uint8_t i = 0; i < 3; i++)
+    // Closed-loop ticks request one bounded attempt (2 x 5us SPI).
+    // A failed sample remains invalid and is retried on the next 50us tick.
+    // Initialization and electrical calibration retain the default three attempts.
+    if (maxAttempts < 1) maxAttempts = 1;
+    if (maxAttempts > 3) maxAttempts = 3;
+    for (uint8_t i = 0; i < maxAttempts; i++)
     {
         dataRx[0] = SpiTransmitAndRead16Bits(dataTx[0]);
         const bool firstReadValid = SpiTransactionValid();
@@ -38,14 +43,11 @@ uint16_t MT6816Base::UpdateAngle()
 
         spiRawData.rawData = ((dataRx[0] & 0x00FF) << 8) | (dataRx[1] & 0x00FF);
 
-        //奇偶校验
-        hCount = 0;
-        for (uint8_t j = 0; j < 16; j++)
-        {
-            if (spiRawData.rawData & (0x0001 << j))
-                hCount++;
-        }
-        if (hCount & 0x01)
+        // Fixed-cost parity fold; equivalent for all 65536 raw words.
+        uint16_t parity=spiRawData.rawData;
+        parity ^= parity >> 8; parity ^= parity >> 4;
+        parity ^= parity >> 2; parity ^= parity >> 1;
+        if (parity & 0x01)
         {
             spiRawData.checksumFlag = false;
         } else

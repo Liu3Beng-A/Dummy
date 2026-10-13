@@ -113,6 +113,7 @@ class MainWindow(QMainWindow):
         controller.fields_changed.connect(self._fields_updated)
         controller.ports_changed.connect(self._ports_updated)
         controller.rgb_changed.connect(self._rgb_device_changed)
+        controller.preset_pose_requested.connect(self._preset_pose_requested)
         controller.preset_pose_completed.connect(self._preset_pose_completed)
         self.gamepad_reader = gamepad_reader if gamepad_reader is not None else GamepadReader(self)
         self.gamepad_reader.sampled.connect(self._gamepad_sampled)
@@ -303,15 +304,16 @@ class MainWindow(QMainWindow):
             control = button(text, callback, role)
             row.addWidget(control)
             self.motion_system_buttons.append(control)
-        self.mode_combo = self._combo(("1 · SEQ 顺序", "2 · INT 打断", "3 · TRJ 连续", "4 · TUN 扫频"), 1)
+        self.mode_combo = self._combo(("1 · SEQ 顺序", "2 · INT 打断", "3 · TRJ 连续", "4 · TUN 扫频", "7 · STREAM 曲线透传"), 1)
         self.mode_combo.setToolTip("TUN 使用固件内置扫频激励；切换前确认各轴运动空间")
         row.addWidget(self.mode_combo)
-        self.mode_set_button = button("设置模式", lambda: self.controller._set_cmdmode(self.mode_combo.currentIndex() + 1))
+        self.mode_set_button = button("设置模式", lambda: self.controller._set_cmdmode((1, 2, 3, 4, 7)[self.mode_combo.currentIndex()]))
         row.addWidget(self.mode_set_button)
         self.mode_query_button = button("查询", self.controller._query_command_mode)
         row.addWidget(self.mode_query_button)
         row.addStretch()
         layout = self._page("运动控制", "编辑目标与设备实际位置分别管理；三维预览不会自动发送运动指令。", False, row)
+        self.motion_page = self.pages.widget(0)
         layout.setContentsMargins(20, 14, 20, 14)
         layout.setSpacing(8)
 
@@ -324,7 +326,6 @@ class MainWindow(QMainWindow):
         self._viewer_mode_preference = 1 if self.store.settings.get("viewer_mode") == "actual" else 0
         self.viewer_mode = self._combo(("目标预览", "实际跟随"), self._viewer_mode_preference)
         self.viewer_mode.currentIndexChanged.connect(self._view_mode_changed)
-        toolbar.addWidget(self.viewer_mode)
         for title, view in (("等轴", "isometric"), ("正面", "front"), ("俯视", "top")):
             toolbar.addWidget(button(title, lambda value=view: self.viewer.set_camera(value)))
         toolbar.addWidget(button("复位视角", lambda: self.viewer.reset_camera()))
@@ -343,6 +344,7 @@ class MainWindow(QMainWindow):
         self.viewer_axes_button.toggled.connect(self._axes_changed)
         toolbar.addWidget(self.viewer_axes_button)
         toolbar.addStretch()
+        toolbar.addWidget(self.viewer_mode)
         scene_layout.addLayout(toolbar)
         self.viewer = RobotView()
         self.viewer.setMinimumSize(320, 260)
@@ -352,8 +354,10 @@ class MainWindow(QMainWindow):
         self.scene_status = QLabel("正在加载本地 URDF…")
         self.scene_status.setProperty("role", "muted")
         self.scene_status.setWordWrap(True)
+        self.scene_status.setAlignment(Qt.AlignmentFlag.AlignRight)
         scene_layout.addWidget(self.scene_status)
         self.actual_status = hint("实际位置未回读 · 夹爪显示目标开度", "muted")
+        self.actual_status.setAlignment(Qt.AlignmentFlag.AlignRight)
         scene_layout.addWidget(self.actual_status)
         self.motion_splitter.addWidget(scene)
 
@@ -1361,9 +1365,13 @@ class MainWindow(QMainWindow):
         title = QLabel("灯环模拟")
         title.setObjectName("RgbPreviewTitle")
         preview.addWidget(title)
-        self.rgb_preview_source = self._combo(("本地编辑预览", "跟随设备配置"))
-        self.rgb_preview_source.setToolTip("本地预览不会发送指令；设备跟随按已回读配置与状态模拟，动画相位独立。")
-        preview.addWidget(self.rgb_preview_source)
+        self.rgb_preview_source = self._combo(("本地编辑预览", "跟随设备配置"), 1)
+        self.rgb_preview_source.setParent(self.rgb_preview_panel)
+        self.rgb_preview_source.hide()
+        self.rgb_preview_source_button = button("切换到本地编辑预览", self._toggle_rgb_preview_source)
+        self.rgb_preview_source_button.setObjectName("RgbPreviewSourceButton")
+        self.rgb_preview_source_button.setToolTip("默认跟随设备配置；点击按钮或编辑参数可本地试看，再点击返回设备跟随。切换预览不发送设置指令。")
+        preview.addWidget(self.rgb_preview_source_button)
         self.rgb_preview_mode = self._combo(RGB_MODES, 3)
         self.rgb_preview_mode.setToolTip("选择仅在电脑灯环中模拟的灯效；应用设备灯效使用左侧按钮。")
         preview.addWidget(self.rgb_preview_mode)
@@ -1408,6 +1416,7 @@ class MainWindow(QMainWindow):
         row.addWidget(button("恢复默认（临时）", lambda: self.controller.send_cmd("!RGB_RESET")))
         row.addWidget(button("保存全部 RGB 配置", self.controller._rgb_save, "primary"))
         layout.addLayout(row)
+        self._rgb_preview_selection_changed()
 
     def _rgb_apply_mode(self, mode):
         if self.rgb_preview_source.currentIndex() == 0:
@@ -1499,10 +1508,14 @@ class MainWindow(QMainWindow):
 
     def _rgb_preview_selection_changed(self, *args):
         local = self.rgb_preview_source.currentIndex() == 0
+        self.rgb_preview_source_button.setText("返回设备跟随" if local else "切换到本地编辑预览")
         self.rgb_preview_mode.setEnabled(local and self.rgb_preview_state.currentIndex() == 0)
         self.rgb_preview_state.setEnabled(local)
         self.rgb_preview_on.setEnabled(local)
         self._render_rgb_preview()
+
+    def _toggle_rgb_preview_source(self):
+        self.rgb_preview_source.setCurrentIndex(1 - self.rgb_preview_source.currentIndex())
 
     def _rgb_preview_source_changed(self, index):
         self._rgb_simulator.reset()
@@ -1558,15 +1571,22 @@ class MainWindow(QMainWindow):
     def _sync_rgb_preview_activity(self):
         if not hasattr(self, "rgb_ring"):
             return
-        active = (not self._closed and self.isVisible() and not self.isMinimized()
-                  and self.pages.currentWidget() is self.rgb_page)
-        self.rgb_ring.set_active(active)
+        visible = not self._closed and self.isVisible() and not self.isMinimized()
+        rgb_active = visible and self.pages.currentWidget() is self.rgb_page
+        motion_active = visible and self.pages.currentWidget() is self.motion_page
+        active = rgb_active or motion_active
+        self.rgb_ring.set_active(rgb_active)
         if active:
             if not self._rgb_render_timer.isActive():
                 self._rgb_render_timer.start()
         else:
             self._rgb_render_timer.stop()
         self.controller.set_rgb_monitoring(active and self.rgb_preview_source.currentIndex() == 1)
+
+    def _set_rgb_preview_frame(self, frame, title, subtitle, *, light_on=None):
+        self.rgb_ring.set_frame(frame)
+        self.rgb_ring.set_caption(title, subtitle)
+        self.viewer.set_rgb_frame(frame, light_on=light_on)
 
     def _render_rgb_preview(self):
         if self._building or not hasattr(self, "rgb_ring") or self._closed:
@@ -1588,8 +1608,7 @@ class MainWindow(QMainWindow):
             if unavailable or age is None or age > 3:
                 self._rgb_follow_seeded = False
                 title = "未连接" if not snapshot["connected"] else "等待回读" if unavailable else "状态已过期"
-                self.rgb_ring.set_frame([(0, 0, 0)] * 24)
-                self.rgb_ring.set_caption(title, "设备配置跟随")
+                self._set_rgb_preview_frame([(0, 0, 0)] * 24, title, "", light_on=False)
                 self.rgb_preview_status.setText("连接并查询全部配置后显示" if unavailable else "等待下一次状态回读")
                 return
             if not self._rgb_follow_seeded:
@@ -1601,7 +1620,12 @@ class MainWindow(QMainWindow):
         self.rgb_ring.set_frame(frame)
         mode = RGB_MODES[self._rgb_simulator.mode].split(" ", 1)[1]
         brightness_label = "亮度" if self.rgb_preview_source.currentIndex() == 0 else "模拟"
-        self.rgb_ring.set_caption(mode, f"{brightness_label} {self._rgb_simulator.current_brightness}%")
+        # A breath/blink trough can quantize to RGB zero while the lamp stays on.
+        # Keep the cover state separate; retain on during an existing fade-out.
+        light_on = bool((config["enabled"] and config["brightness"] > 0)
+                        or self._rgb_simulator.current_brightness > 0)
+        self._set_rgb_preview_frame(frame, mode, f"{brightness_label} {self._rgb_simulator.current_brightness}%",
+                                    light_on=light_on)
         self.rgb_preview_status.setText(status)
 
     def _rgb_tab(self, tabs, title):
@@ -1621,12 +1645,12 @@ class MainWindow(QMainWindow):
         self.ik_backend = QComboBox()
         self.ik_backend.setObjectName("CartesianBackend")
         self.ik_backend.addItem("主控逆解 · MoveL（默认）", "firmware")
-        self.ik_backend.addItem("上位机七轴逆解 · MoveJ 轨迹", "host")
+        self.ik_backend.addItem("上位机离线曲线 · 50 Hz 段 / 模式 7", "stream")
         self.ik_backend.currentIndexChanged.connect(self._backend_changed)
         backend_box.addWidget(self.ik_backend)
         self.ik_status = hint("主控逆解")
         backend_box.addWidget(self.ik_status)
-        backend_box.addWidget(hint("上位机模式：地轨与六轴协同，需持续关节回读；发送基线 10 Hz。MoveL 档位控制TCP规划速度：100 档最高 20 mm/s、10°/s，35 档 7 mm/s、3.5°/s。每段MoveJ速度单独反算，不透传档位；主控最低速度可能限制慢速小段。TCP 暂用现有夹爪中心名义偏移，未标定。主控模式使用当前地轨位置。"))
+        backend_box.addWidget(hint("透传 v2：USB 专用，主控及 J1～J7 必须全部升级。50 Hz 指每 20 ms 一个曲线边界；USB 按缓冲余量发送，电机以 20 kHz 执行。每条有限点位在独立进程预检，用当前电机保持参考作为起点；实际回读用于断流保护、显示与到位核验，不在线重规划。MoveL 档位参与 TCP 规划：100 档最高 20 mm/s、10°/s，35 档 7 mm/s、3.5°/s。地轨与六轴协同；示教点之间停稳再继续。手柄连续运动请使用主控模式。TCP 为名义夹爪中心偏移，标定及固定 TCP 移轨暂未实现。"))
         layout.addWidget(backend_group)
         gamepad_group, gamepad_box = self._group("手柄输入")
         gamepad_box.addWidget(hint("映射、死区、速度与设备选择保存在本机。默认不启动手柄采集；检查原始输入不接管机器人。"))
@@ -1816,7 +1840,6 @@ class MainWindow(QMainWindow):
         self.hide_joint_logs_checkbox.setToolTip("隐藏 #GETJPOS 发送及七轴数值回读，显示和导出均生效；完整缓冲与磁盘日志仍保留。")
         self.hide_joint_logs_checkbox.setChecked(self.store.settings.get("hide_joint_logs", True))
         self.hide_joint_logs_checkbox.toggled.connect(self._hide_joint_logs_changed)
-        filter_row.addWidget(self.hide_joint_logs_checkbox)
         layout.addWidget(filters)
 
         toolbar = QHBoxLayout()
@@ -1828,6 +1851,13 @@ class MainWindow(QMainWindow):
         self.log_search.setMinimumWidth(160)
         self.log_search.textChanged.connect(self._render_logs)
         toolbar.addWidget(self.log_search, 1)
+        toolbar.addWidget(self.hide_joint_logs_checkbox)
+        self.hide_rgb_logs_checkbox = QCheckBox("隐藏 RGB 回读")
+        self.hide_rgb_logs_checkbox.setObjectName("HideRgbLogs")
+        self.hide_rgb_logs_checkbox.setToolTip("隐藏 RGB 查询及结构化状态/配置回读；设置指令、警告、错误和完整诊断日志保留。")
+        self.hide_rgb_logs_checkbox.setChecked(self.store.settings.get("hide_rgb_logs", True))
+        self.hide_rgb_logs_checkbox.toggled.connect(self._hide_rgb_logs_changed)
+        toolbar.addWidget(self.hide_rgb_logs_checkbox)
         self.log_pause = button("暂停显示")
         self.log_pause.setObjectName("LogPause")
         self.log_pause.setCheckable(True)
@@ -1838,6 +1868,11 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(button("清空显示", self._clear_logs))
         layout.addLayout(toolbar)
         self.terminal_diagnostics = TerminalDiagnostics()
+        self.terminal_diagnostics.open_test_requested.connect(self.controller.cartesian.stream.start_open_test)
+        self.terminal_diagnostics.axis_test_requested.connect(self.controller.cartesian.stream.start_axis_test)
+        self.terminal_diagnostics.test_clicked.connect(self.controller.log)
+        self.controller.cartesian.stream.axis_test_changed.connect(self.terminal_diagnostics.show_axis_test)
+        self.controller.cartesian.stream.open_test_changed.connect(self.terminal_diagnostics.show_open_test)
         self.terminal_diagnostics.command_requested.connect(self.controller.send_cmd)
         self.terminal_diagnostics.export_requested.connect(lambda: self._export_logs(complete=True))
         layout.addWidget(self.terminal_diagnostics)
@@ -1868,7 +1903,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.log_dock.setFloating(True)
         self.log_dock.setMinimumSize(720, 480)
-        self.log_dock.resize(900, 640)
+        self.log_dock.resize(900, 700)
         self.log_dock.hide()
 
     def _log_filter_changed(self, index):
@@ -2030,7 +2065,7 @@ class MainWindow(QMainWindow):
         self._state_generation = generation
         backend = state.get("cartesian_backend", self.controller.cartesian.backend.value)
         with QSignalBlocker(self.ik_backend):
-            self.ik_backend.setCurrentIndex(1 if backend == "host" else 0)
+            self.ik_backend.setCurrentIndex({"firmware": 0, "stream": 1}.get(backend, 0))
         self.ik_backend.setEnabled(not self.controller.cartesian.busy and not self._gamepad_locked())
         self.ik_status.setText(state.get("cartesian_message", self.controller.cartesian.message))
         if not self._building and self.store.settings.get("cartesian_backend") != backend:
@@ -2041,14 +2076,19 @@ class MainWindow(QMainWindow):
         self.connection_combo.setEnabled(not connected)
         self.port_combo.setEnabled(not connected)
         mode = state.get("cmdmode", getattr(self.controller, "current_cmdmode", None))
-        self.mode_status.setText("模式 " + {1: "SEQ", 2: "INT", 3: "TRJ", 4: "TUN", 5: "TRQ", 6: "SRV"}.get(mode, "—") + (" · PC逆解" if backend == "host" else " · 主控逆解"))
+        self.mode_status.setText("模式 " + {1: "SEQ", 2: "INT", 3: "TRJ", 4: "TUN", 5: "TRQ", 6: "SRV", 7: "STREAM"}.get(mode, "—") + (" · 50 Hz曲线" if backend == "stream" else " · 主控规划"))
+        selector_mode = mode if connected else self.controller.cartesian.preferred_mode
+        if selector_mode in (1, 2, 3, 4, 7):
+            with QSignalBlocker(self.mode_combo):
+                self.mode_combo.setCurrentIndex((1, 2, 3, 4, 7).index(selector_mode))
         known = getattr(self.controller, "_motor_state_known", False)
         motor = state.get("motor_enabled", getattr(self.controller, "_motor_enabled", None) if known else None)
         locked = state.get("stop_locked", getattr(self.controller, "_stop_locked", False))
         calibrating = state.get("calibration_busy", getattr(self.controller, "_calibration_busy", False))
         self.terminal_diagnostics.set_state(
             connected=connected, locked=locked, calibrating=calibrating,
-            connection_type=self.controller.connection_type, disabled=known and motor is False)
+            connection_type=self.controller.connection_type, disabled=known and motor is False,
+            busy=self.controller.cartesian.busy or self._gamepad_locked() or state.get("sequence_active", False))
         if locked or calibrating or not connected:
             self._cancel_drag()
             self._teaching_sync = None
@@ -2085,9 +2125,8 @@ class MainWindow(QMainWindow):
             self._finish_gamepad_close()
 
     def _actual_pose(self, values):
+        # set_actual_pose atomically marks known/fresh and sends one view update.
         self.viewer.set_actual_pose(values, None)
-        self.viewer.set_actual_known(True)
-        self.viewer.set_stale(False)
         for index, (row, value) in enumerate(zip(self.joint_rows, values)):
             text = f"{value:.2f}"
             if text == "-0.00":
@@ -2257,10 +2296,10 @@ class MainWindow(QMainWindow):
             return False
         return self.controller.send_cmd(command)
 
-    def _preset_pose_completed(self, command, values):
-        """Display a completed preset without manufacturing position telemetry."""
+    def _set_preset_target(self, command, values):
+        """Preview a preset without manufacturing position telemetry or motion."""
         if self._closed or command not in ("HOME", "RESET") or len(values) != 7:
-            return
+            return False
         self._cancel_drag()
         self._teaching_sync = None
         previous = self.controller._suppress_drag_send
@@ -2275,6 +2314,15 @@ class MainWindow(QMainWindow):
             self.controller._suppress_drag_send = previous
         self.viewer_mode.setCurrentIndex(0)
         self._preview_changed()
+        return True
+
+    def _preset_pose_requested(self, command, values):
+        if self._set_preset_target(command, values):
+            self.statusBar().showMessage(f"{command} 目标预览已更新 · 等待设备执行")
+
+    def _preset_pose_completed(self, command, values):
+        if not self._set_preset_target(command, values):
+            return
         self.statusBar().showMessage(f"{command} 已完成 · 模型已同步到{'回零' if command == 'HOME' else '休息'}目标")
 
     def _calibration_command(self):
@@ -2630,20 +2678,55 @@ class MainWindow(QMainWindow):
 
     def _matches_log(self, tag, text):
         selected = self.log_filter.currentText()
-        return (not self._joint_log_hidden(tag, text) and
+        return (not self._telemetry_log_hidden(tag, text) and
                 (selected == "全部" or tag == selected) and
                 self.log_search.text().casefold() in text.casefold())
+
+    @staticmethod
+    def _log_payload(tag, text):
+        prefix, separator, payload = text.partition(f" [{tag}] ")
+        if not separator or re.fullmatch(r"\d{2}:\d{2}:\d{2}\.\d{3}", prefix) is None:
+            payload = text
+        return payload.strip()
 
     def _joint_log_hidden(self, tag, text):
         if not self.hide_joint_logs_checkbox.isChecked():
             return False
-        prefix, separator, payload = text.partition(f" [{tag}] ")
-        if not separator or re.fullmatch(r"\d{2}:\d{2}:\d{2}\.\d{3}", prefix) is None:
-            payload = text
-        payload = payload.strip()
+        payload = self._log_payload(tag, text)
         if tag == "TX":
             return payload == "#GETJPOS"
         return tag == "RX" and payload.startswith("ok ") and finite_numbers(payload[3:], 7) is not None
+
+    def _rgb_log_hidden(self, tag, text):
+        if not self.hide_rgb_logs_checkbox.isChecked():
+            return False
+        payload = self._log_payload(tag, text)
+        if tag == "TX":
+            return payload in ("#RGB_GET", "#RGB_STATUS")
+        if tag != "RX":
+            return False
+        if payload == "RGB_GET end":
+            return True
+        if re.fullmatch(r"RGB_(?:STATUS|STORAGE|DMA|TIMEOUT|CONFIG|TIMING)(?:\s+[a-z_]+=\d+)+", payload):
+            return True
+        if re.fullmatch(r"RGB_RUNTIME state=[A-Z_]+ source=[A-Z_]+", payload):
+            return True
+        fields = payload.split()
+        if not fields:
+            return False
+        count = {"RGB_COLOR": 4, "RGB_AUTO_COLOR": 4, "RGB_EFFECT": 12}.get(fields[0])
+        if count is not None:
+            return len(fields) == count + 1 and all(value.isdecimal() for value in fields[1:])
+        return (fields[0] == "RGB_STATE" and len(fields) == 7
+                and fields[1] in {state for state, _ in RGB_STATES} | {"FAULT"}
+                and all(value.isdecimal() for value in fields[2:]))
+
+    def _telemetry_log_hidden(self, tag, text):
+        return self._joint_log_hidden(tag, text) or self._rgb_log_hidden(tag, text)
+
+    def _hide_rgb_logs_changed(self, hidden):
+        self.store.update_settings(hide_rgb_logs=hidden)
+        self._render_logs()
 
     def _hide_joint_logs_changed(self, hidden):
         self.store.update_settings(hide_joint_logs=hidden)
@@ -2665,10 +2748,11 @@ class MainWindow(QMainWindow):
         if path:
             try:
                 header = (f"Dummy 诊断日志 · 导出时间 {datetime.now():%Y-%m-%d %H:%M:%S}\n"
-                          f"当前缓冲 {len(self._logs)} / {self._logs.maxlen} 条；包含全部保留类型和关节回读。\n"
+                          f"当前缓冲 {len(self._logs)} / {self._logs.maxlen} 条；包含全部保留类型、关节与 RGB 回读。\n"
                           f"更早记录可能已轮转或清空；磁盘日志目录：{self.store.log_dir}\n\n") if complete else ""
+                wire = "\n\n真实串口记录（RX/TX 时戳，不依赖界面刷新）\n" + self.controller.wire_history() if complete else ""
                 Path(path).write_text(header + "\n".join(text for tag, text in self._logs
-                                               if complete or not self._joint_log_hidden(tag, text)) + "\n", encoding="utf-8")
+                                               if complete or not self._telemetry_log_hidden(tag, text)) + "\n" + wire, encoding="utf-8")
                 self.controller.log(f"终端日志已导出：{path}", "INFO")
             except OSError as exc:
                 self.controller.log(f"日志导出失败：{exc}", "ERROR")

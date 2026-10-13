@@ -8,6 +8,7 @@
 /* Component Definitions -----------------------------------------------------*/
 BoardConfig_t boardConfig;
 Motor motor;
+volatile uint32_t motorControlTiming[11];
 TB67H450 tb67H450;
 MT6816 mt6816;
 EncoderCalibrator encoderCalibrator(&motor);
@@ -15,6 +16,7 @@ Button button1(1, 1000), button2(2, 3000);
 void OnButton1Event(Button::Event _event);
 void OnButton2Event(Button::Event _event);
 Led statusLed;
+bool MotorStreamCalibrationBusy() { return encoderCalibrator.isTriggered; }
 bool MotorDefaultsRestoreAllowed()
 {
     return boardConfig.configStatus == CONFIG_OK && !encoderCalibrator.isTriggered;
@@ -116,6 +118,8 @@ void Main()
     motor.config.motionParams.ratedCurrentAcc = 2 * 1000;     // mA/s（与通用一致）
     boardConfig.canNodeId = GRIPPER_FIXED_NODE_ID;
 #endif
+    // MX_CAN_Init runs before EEPROM/DIP node selection. Refresh own-node bank.
+    CAN_UpdateFilters();
     motor.config.motionParams.ratedVelocity = boardConfig.velocityLimit;
     motor.config.motionParams.ratedVelocityAcc = boardConfig.velocityAcc;
     motor.motionPlanner.velocityTracker.SetVelocityAcc(boardConfig.velocityAcc);
@@ -159,7 +163,10 @@ void Main()
     HAL_TIM_Base_Start_IT(&htim4);  // 20kHz
 
     if (!restoreBoot && button1.IsPressed() && button2.IsPressed())
+    {
+        motor.controller->InvalidatePositionEntry();
         encoderCalibrator.isTriggered = true;
+    }
 //    printf("start motor %d\r\n", defaultNodeID);
 
     for (;;)
@@ -167,9 +174,11 @@ void Main()
         CAN_PollTransmit();
         motor.controller->PollDefaultsRestore();
         motor.controller->PollProtectionMain();
+        motor.controller->PollStreamMain();
 //        if ( encoderCalibrator.FlashRun() == 0)
             encoderCalibrator.TickMainLoop();
 
+        if (motor.controller->StreamActive() || motor.controller->IsSoftStopLocked()) continue; // No blocking Flash commit during timed execution.
         if (boardConfig.configStatus == CONFIG_COMMIT)
         {
             boardConfig.configStatus = CONFIG_OK;
@@ -220,23 +229,30 @@ extern "C" void Tim4Callback20kHz()
     const uint32_t began = DWT->CYCCNT;
     const uint32_t gap = began - previousCycle;
     if (previousCycle && gap > motorCanDiagnostic[MC_CONTROL_GAP]) motorCanDiagnostic[MC_CONTROL_GAP] = gap;
+    const bool havePrevious=previousCycle!=0;
     previousCycle = began;
+    const uint8_t phase=encoderCalibrator.isTriggered ? 2 :
+        ((motor.controller->modeRunning==Motor::MODE_STREAM_JOINT || motor.controller->requestMode==Motor::MODE_STREAM_JOINT) ? 1 : 0);
+    if (gap>motorControlTiming[phase+6] && havePrevious) motorControlTiming[phase+6]=gap;
     __HAL_TIM_CLEAR_IT(&htim4, TIM_IT_UPDATE);
 
+    motor.controller->TickStreamClock();
     if (encoderCalibrator.isTriggered)
         encoderCalibrator.Tick20kHz();
     else
         motor.Tick20kHz();
     const uint32_t elapsed = DWT->CYCCNT - began;
     if (elapsed > motorCanDiagnostic[MC_CONTROL_MAX]) motorCanDiagnostic[MC_CONTROL_MAX] = elapsed;
-    if (elapsed >= SystemCoreClock / 20000U || __HAL_TIM_GET_FLAG(&htim4, TIM_FLAG_UPDATE))
-        ++motorCanDiagnostic[MC_CONTROL_LATE];
+    if (elapsed>motorControlTiming[phase]) motorControlTiming[phase]=elapsed;
+    if (elapsed >= SystemCoreClock / 20000U || __HAL_TIM_GET_FLAG(&htim4, TIM_FLAG_UPDATE)) {
+        ++motorCanDiagnostic[MC_CONTROL_LATE]; ++motorControlTiming[phase+3];
+    }
 }
 
 
 void OnButton1Event(Button::Event _event)
 {
-    if (motor.controller->IsSoftStopLocked()) return;
+    if (motor.controller->IsSoftStopLocked() || motor.controller->StreamActive()) return;
     switch (_event)
     {
         case ButtonBase::UP:
@@ -244,6 +260,7 @@ void OnButton1Event(Button::Event _event)
         case ButtonBase::DOWN:
             break;
         case ButtonBase::LONG_PRESS:
+            motor.controller->InvalidatePositionEntry();
             encoderCalibrator.isTriggered = true;
             encoderCalibrator.Tick20kHz();
             encoderCalibrator.TickMainLoop();
@@ -252,9 +269,11 @@ void OnButton1Event(Button::Event _event)
             break;
         case ButtonBase::CLICK:
             printf("KEY1\r\n");
+            motor.controller->InvalidatePositionEntry();
             if (motor.controller->modeRunning != Motor::MODE_STOP)
             {
-                boardConfig.defaultMode = motor.controller->modeRunning;
+                boardConfig.defaultMode = motor.controller->modeRunning == Motor::MODE_STREAM_JOINT ?
+                                          Motor::MODE_COMMAND_POSITION : motor.controller->modeRunning;
                 motor.controller->requestMode = Motor::MODE_STOP;
             } else
             {
@@ -267,7 +286,7 @@ void OnButton1Event(Button::Event _event)
 
 void OnButton2Event(Button::Event _event)
 {
-    if (motor.controller->IsSoftStopLocked()) return;
+    if (motor.controller->IsSoftStopLocked() || motor.controller->StreamActive()) return;
     switch (_event)
     {
         case ButtonBase::UP:

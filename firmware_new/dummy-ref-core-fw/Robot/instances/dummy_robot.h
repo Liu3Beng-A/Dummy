@@ -6,6 +6,7 @@
 #include "string"
 #include <cstring>
 #include "rgb.hpp"
+#include "core_stream.h"
 #define ALL 0
 class ProtectionCoordinator;
 
@@ -130,7 +131,8 @@ public:
         COMMAND_TARGET_POINT_SEQUENTIAL = 1,
         COMMAND_TARGET_POINT_INTERRUPTABLE,
         COMMAND_CONTINUES_TRAJECTORY,
-        COMMAND_MOTOR_TUNING
+        COMMAND_MOTOR_TUNING,
+        COMMAND_STREAM_JOINT = 7 // 5/6 remain reserved; independent timed mode.
     };
 
 
@@ -243,7 +245,7 @@ public:
     enum MotionPhase { MOTION_IDLE, MOTION_DISPATCHING, MOTION_RUNNING,
                        MOTION_COMPLETED, MOTION_CANCELLED, MOTION_FAILED };
     uint32_t GetMotionGeneration() const { return motionCompletionGeneration; }
-    bool IsMotionBusy() const { return motionActive; }
+    bool IsMotionBusy() const { return motionActive || CoreStreamBusy() || (commandMode == COMMAND_MOTOR_TUNING && tuningHelper.IsActive()); }
     bool CanSendMotion(uint32_t epoch, uint32_t generation) const {
         return motionActive && isEnabled && !IsStopLocked() &&
                epoch == motionEpoch && generation == motionCompletionGeneration;

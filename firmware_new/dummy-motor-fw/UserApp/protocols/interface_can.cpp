@@ -18,11 +18,16 @@ CAN_TxHeaderTypeDef txHeader =
     };
 
 
+// Command dispatch only; preserve the 20kHz controller optimization.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
 {
     float tmpF;
     int32_t tmpI;
 
+    if (motor.controller->ProcessStreamCan(_cmd, _data, _len)) return;
     if (motor.controller->ProcessProtectionCan(_cmd, _data, _len)) return;
     if (_len < 4) return;
     motor.controller->OnMasterCommunication();
@@ -32,6 +37,10 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         !(_cmd == 0x01 && _len >= 4 && *(uint32_t*)_data == 0))
         return;
 
+    if (motor.controller->StreamActive() &&
+        ((_cmd >= 0x01 && _cmd <= 0x07) || (_cmd >= 0x11 && _cmd <= 0x1B)) &&
+        !(_cmd == 0x01 && _len >= 4 && *(uint32_t*)_data == 0)) return;
+    if (_cmd == 0x09) motor.controller->CancelStream();
     switch (_cmd)
     {
         case SoftStopProtocol::COMMAND:
@@ -60,6 +69,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
         }
         // 0x00~0x0F No Memory CMDs
         case 0x09:  // Broadcast EStop - Emergency stop all motors
+            motor.controller->InvalidatePositionEntry();
             motor.controller->requestMode = Motor::MODE_STOP;
             motor.controller->SetBrake(true);
             motor.controller->SetCurrentSetPoint(0);
@@ -74,10 +84,12 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
                 break;
             }
             motor.controller->SetDisable(false);
+            motor.controller->InvalidatePositionEntry();
             motor.controller->requestMode = (*(uint32_t*) (RxData) == 1) ?
                                             Motor::MODE_COMMAND_VELOCITY : Motor::MODE_STOP;
             break;
         case 0x02:  // Do Calibration
+            motor.controller->InvalidatePositionEntry();
             encoderCalibrator.isTriggered = true;
             break;
         case 0x03:  // Set Current SetPoint
@@ -162,6 +174,7 @@ void OnCanCmd(uint8_t _cmd, uint8_t* _data, uint32_t _len)
 #else
         case 0x11:  // Set Node-ID and Store to EEPROM
             boardConfig.canNodeId = *(uint32_t*) (RxData);
+            CAN_UpdateFilters();
             if (_data[4])
                 boardConfig.configStatus = CONFIG_COMMIT;
             break;

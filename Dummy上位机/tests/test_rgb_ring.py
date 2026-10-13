@@ -5,6 +5,7 @@ import unittest
 from PySide6.QtCore import QCoreApplication, Qt
 QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QImage
 
 APPLICATION = QApplication.instance() or QApplication([])
 
@@ -80,8 +81,9 @@ class RgbRingTests(unittest.TestCase):
                 self.ring.set_theme(theme)
                 image = self.image()
                 colors = [self.track_color(image, index / 4) for index in range(96)]
-                self.assertTrue(all(min(rgb) >= 200 and max(rgb) <= 230 and
-                                    max(rgb) - min(rgb) <= 12 for rgb in colors), colors)
+                lower, upper = (150, 190) if theme == "light" else (50, 90)
+                self.assertTrue(all(min(rgb) >= lower and max(rgb) <= upper and
+                                    max(rgb) - min(rgb) <= 25 for rgb in colors), colors)
                 self.assertIn("仅表示模拟方向", self.ring.toolTip())
                 self.assertNotIn("顶部标记", self.ring.toolTip())
                 self.assertEqual(self.ring.minimumSizeHint().width(), 180)
@@ -95,6 +97,25 @@ class RgbRingTests(unittest.TestCase):
             self.assertEqual(image.pixelColor(image.width() - 1, image.height() - 1).name(),
                              expected)
 
+    def test_ring_only_has_transparent_center_and_corners_and_no_caption(self):
+        ring = RgbRing(ring_only=True)
+        try:
+            ring.setFixedSize(144, 144)
+            ring.set_caption("这段文字不应绘制", "亮度 100%")
+            for theme in ("light", "dark"):
+                ring.set_theme(theme)
+                for color in ((0, 0, 0), (0, 255, 0)):
+                    ring.set_frame([color] * 24)
+                    image = QImage(144, 144, QImage.Format.Format_ARGB32_Premultiplied)
+                    image.fill(Qt.GlobalColor.transparent)
+                    ring.render(image)
+                    for point in ((0, 0), (143, 143), (72, 72), (55, 65), (90, 83)):
+                        self.assertEqual(image.pixelColor(*point).alpha(), 0)
+                    self.assertGreater(image.pixelColor(72, 20).alpha(), 200)
+        finally:
+            ring.close()
+            ring.deleteLater()
+
     def test_white_light_fades_toward_cover_instead_of_black(self):
         for theme in ("light", "dark"):
             self.ring.set_theme(theme)
@@ -104,7 +125,8 @@ class RgbRingTests(unittest.TestCase):
                 rgb = self.track_color(self.image(), 0)
                 levels.append(sum(rgb))
             self.assertEqual(levels, sorted(set(levels)))
-            self.assertGreater(levels[0], 600)
+            self.assertGreater(levels[0], 450 if theme == "light" else 150)
+            self.assertLess(levels[0], 600 if theme == "light" else 300)
             self.assertGreater(levels[-1] - levels[0], 90)
 
     def test_rainbow_is_blended_without_a_top_seam(self):

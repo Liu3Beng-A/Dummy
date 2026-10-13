@@ -1,5 +1,7 @@
 #include "common_inc.h"
 #include "instances/protection_coordinator.h"
+#include "instances/core_stream.h"
+#include "../../../stream_protocol.h"
 
 
 // Used for response CAN message.
@@ -24,6 +26,10 @@ void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* d
         uint8_t cmd = rxHeader->StdId & 0x7F; // 4Bits ID & 7Bits Msg
 
         /*----------------------- ↓ Add Your CAN1 Packet Protocol Here ↓ ------------------------*/
+        if ((cmd == StreamProtocol::STATUS || cmd == StreamProtocol::CAPS || cmd == StreamProtocol::DIAG) && rxHeader->DLC == 8) {
+            CoreStreamReceive(id, cmd, data);
+            return;
+        }
         switch (cmd)
         {
             case ProtectionProtocol::EVENT:

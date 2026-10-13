@@ -33,6 +33,8 @@
 
 #include "common_inc.h"
 #include "instances/protection_coordinator.h"
+#include "instances/core_stream.h"
+#include "../../../stream_protocol.h"
 #include <stm32f4xx_hal.h>
 #include <cmsis_os.h>
 
@@ -160,19 +162,149 @@ bool StartCanServer(CAN_TypeDef* hcan)
     return true;
 }
 
+namespace {
+// This guard works in tasks and CAN callbacks, and preserves an outer mask.
+struct CanGuard {
+    UBaseType_t mask;
+    CanGuard():mask(portSET_INTERRUPT_MASK_FROM_ISR()) {}
+    ~CanGuard(){portCLEAR_INTERRUPT_MASK_FROM_ISR(mask);}
+};
+constexpr unsigned STREAM_PENDING_CAPACITY=16;
+constexpr uint32_t STREAM_TX_MAX_AGE_MS=30;
+constexpr uint8_t STREAM_TX_MAX_ATTEMPTS=8;
+enum : uint8_t { PENDING_READY=1,PENDING_HARDWARE=2,PENDING_DONE=3 };
+struct StreamPending {
+    CAN_TxHeaderTypeDef header{};
+    uint8_t data[8]{};
+    uint32_t epoch=0,created=0,retryAt=0,timeValue=0;
+    uint16_t session=0;
+    uint8_t attempts=0,state=0;
+};
+StreamPending streamPending[STREAM_PENDING_CAPACITY];
+uint8_t streamHead=0,streamCount=0;
+
+// HAL selects by hardware TME/CODE alone. Explicitly select an unowned mailbox
+// so a completed transmission with a pending RQCP cannot lose its software owner.
+// The register encoding follows HAL_CAN_AddTxMessage; all callers hold CanGuard
+// or a task critical section until their metadata is committed.
+bool QueueHardware(CAN_context* ctx,const CAN_TxHeaderTypeDef* h,const uint8_t* d,bool native) {
+    if(!ctx || !ctx->handle || h->DLC>8 ||
+       (ctx->handle->State!=HAL_CAN_STATE_READY && ctx->handle->State!=HAL_CAN_STATE_LISTENING)) return false;
+    const uint32_t available=((ctx->handle->Instance->TSR>>26)&7U)&~ctx->inFlightMailboxes;
+    if(!available) return false;
+    const unsigned i=(available&1U)?0:(available&2U)?1:2;
+    const uint32_t bit=1U<<i;
+    auto& mailbox=ctx->handle->Instance->sTxMailBox[i];
+    ctx->motionTx[i]={};ctx->streamTx[i]={};ctx->probeTx[i]={};ctx->streamPendingSlot[i]=0;
+    if(native) ctx->nativeTokenMask|=bit; else ctx->nativeTokenMask&=~bit;
+    ctx->inFlightMailboxes|=bit;ctx->last_heartbeat_mailbox=bit;
+    mailbox.TIR=h->IDE==CAN_ID_STD ? (h->StdId<<CAN_TI0R_STID_Pos)|h->RTR :
+        (h->ExtId<<CAN_TI0R_EXID_Pos)|h->IDE|h->RTR;
+    mailbox.TDTR=h->DLC | (h->TransmitGlobalTime==ENABLE ? CAN_TDT0R_TGT:0U);
+    mailbox.TDLR=uint32_t(d[0])|(uint32_t(d[1])<<8)|(uint32_t(d[2])<<16)|(uint32_t(d[3])<<24);
+    mailbox.TDHR=uint32_t(d[4])|(uint32_t(d[5])<<8)|(uint32_t(d[6])<<16)|(uint32_t(d[7])<<24);
+    __DMB();mailbox.TIR|=CAN_TI0R_TXRQ;
+    return true;
+}
+void ReclaimStreamQueue() {
+    while(streamCount && streamPending[streamHead].state==PENDING_DONE) {
+        streamPending[streamHead]={};streamHead=(streamHead+1)%STREAM_PENDING_CAPACITY;--streamCount;
+    }
+}
+bool PendingCurrent(const StreamPending& p) {
+    return p.epoch==dummy.GetMotionEpoch() && !dummy.IsStopLocked() && CoreStreamCanTransmit(p.session);
+}
+void ReportPendingFailure(const StreamPending& p,uint32_t now) {
+    CoreStreamTransportFault(p.session,StreamProtocol::DEADLINE,uint8_t(p.header.StdId>>7),
+        uint8_t(p.header.StdId&127),StreamProtocol::Read16(p.data+2),now-p.created);
+}
+void StreamTransmitResult(unsigned index,bool delivered) {
+    CanGuard guard;
+    auto& p=streamPending[index];
+    if(p.state!=PENDING_HARDWARE) return;
+    const uint32_t now=HAL_GetTick();
+    if(delivered || !PendingCurrent(p)) p.state=PENDING_DONE;
+    else if(p.attempts>=STREAM_TX_MAX_ATTEMPTS || now-p.created>=STREAM_TX_MAX_AGE_MS) {
+        ReportPendingFailure(p,now);p.state=PENDING_DONE;
+    } else {
+        p.state=PENDING_READY;
+        p.retryAt=now+1U+((p.attempts+(p.header.StdId>>7))&1U);
+    }
+    ReclaimStreamQueue();
+}
+}
+
+void PollCanStreamTransmit(CAN_context* ctx) {
+    if(!ctx || ctx->handle!=&hcan1) return;
+    CanGuard guard;
+    const uint32_t now=HAL_GetTick();
+    // Three submissions maximum. Software owners remain occupied until their
+    // hardware result, including abort, has actually been consumed.
+    for(unsigned budget=0;budget<3;++budget) {
+        int candidate=-1;
+        uint16_t blockedNodes=0;
+        for(unsigned k=0;k<streamCount;++k) {
+            const unsigned index=(streamHead+k)%STREAM_PENDING_CAPACITY;
+            auto& p=streamPending[index];
+            if(p.state==PENDING_DONE) continue;
+            const uint16_t bit=1U<<(p.header.StdId>>7);
+            if(!PendingCurrent(p)) {
+                if(p.state==PENDING_READY) p.state=PENDING_DONE;
+                else blockedNodes|=bit;
+                continue;
+            }
+            if(p.state==PENDING_READY && now-p.created>=STREAM_TX_MAX_AGE_MS) {
+                ReportPendingFailure(p,now);p.state=PENDING_DONE;continue;
+            }
+            const bool blocked=(blockedNodes&bit)!=0;blockedNodes|=bit;
+            if(!blocked && p.state==PENDING_READY && int32_t(now-p.retryAt)>=0) {
+                // START/SYNC go before bulk endpoints once their own preceding
+                // broadcast has completed; no endpoint ordering is changed.
+                if(candidate<0 || (p.header.StdId>>7)==0) candidate=int(index);
+                if((p.header.StdId>>7)==0) break;
+            }
+        }
+        if(candidate<0) break;
+        auto& p=streamPending[candidate];
+        uint8_t payload[8];memcpy(payload,p.data,8);
+        const uint8_t command=p.header.StdId&127;
+        if(command==StreamProtocol::START) {
+            const int32_t remaining=int32_t(p.timeValue-now*20U);
+            if(remaining<=StreamProtocol::START_GUARD_TICKS) {
+                ReportPendingFailure(p,now);p.state=PENDING_DONE;continue;
+            }
+            StreamProtocol::Write16(payload+4,uint16_t(remaining));
+        } else if(command==StreamProtocol::SYNC) {
+            StreamProtocol::Write32(payload+4,p.timeValue+(now-p.created)*20U);
+        }
+        if(!QueueHardware(ctx,&p.header,payload,false)) break;
+        const unsigned mailbox=ProbeMailboxIndex(ctx->last_heartbeat_mailbox);
+        ctx->streamTx[mailbox]={p.epoch,now,p.session,command,false};
+        ctx->streamPendingSlot[mailbox]=uint8_t(candidate+1);
+        ++p.attempts;p.state=PENDING_HARDWARE;
+    }
+    ReclaimStreamQueue();
+}
+
 static void FinishCanTransmit(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx, bool delivered)
 {
     CAN_context* ctx = get_can_ctx(hcan);
     if (!ctx || mailbox_idx > 2 || !(ctx->inFlightMailboxes & (1U << mailbox_idx))) return;
+    const uint32_t ownedBit=1U<<mailbox_idx;
+    const bool nativeToken=(ctx->nativeTokenMask&ownedBit)!=0;
+    const uint8_t pendingSlot=ctx->streamPendingSlot[mailbox_idx];
+    ctx->nativeTokenMask &= ~ownedBit;
+    ctx->streamPendingSlot[mailbox_idx]=0;
     const CAN_context::MotionTx target = ctx->motionTx[mailbox_idx];
     ctx->motionTx[mailbox_idx] = {};
+    ctx->streamTx[mailbox_idx] = {};
     ctx->inFlightMailboxes &= ~(1U << mailbox_idx);
     if (delivered) ++ctx->TxMailboxCompleteCallbackCnt;
     if (target.node) dummy.MotionTargetResult(target.node, target.epoch, target.generation, delivered);
-    if (hcan->Instance == CAN1)
-        osSemaphoreRelease(sem_can1_tx);
-    else if (hcan->Instance == CAN2)
-        osSemaphoreRelease(sem_can2_tx);
+    if (nativeToken && hcan->Instance == CAN1) osSemaphoreRelease(sem_can1_tx);
+    else if (nativeToken && hcan->Instance == CAN2) osSemaphoreRelease(sem_can2_tx);
+    if(pendingSlot) StreamTransmitResult(pendingSlot-1,delivered);
+    if(hcan==&hcan1) PollCanStreamTransmit(ctx);
 }
 
 void tx_complete_callback(CAN_HandleTypeDef* hcan, uint8_t mailbox_idx)
@@ -236,13 +368,9 @@ void HAL_CAN_RxFifo0FullCallback(CAN_HandleTypeDef* hcan)
     CAN_context* ctx = get_can_ctx(hcan);
     if (!ctx) return;
     ctx->RxFifo0FullCallbackCnt++;
-    // §8.7 — FIFO 满 = 主控来不及读。释放 1 个槽位让后续帧进来。
-    // HAL_CAN_GetRxMessage 调用后该帧已被消费（不再上 CAN 协议层）。
-    // 不调 OnCanMessage — 这一帧已被放弃，由 HAL_CAN_RxFifo0MsgPendingCallback
-    // 在它自己的入口正常处理后续到达的帧。
-    CAN_RxHeaderTypeDef tmpHeader;
-    uint8_t tmpBuf[8];
-    (void) HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &tmpHeader, tmpBuf);
+    // The HAL IRQ can report FULL and MSG_PENDING together. Every consumed
+    // frame must still reach the protocol, especially the seven-node ACK burst.
+    HAL_CAN_RxFifo0MsgPendingCallback(hcan);
 }
 
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* hcan)
@@ -268,47 +396,16 @@ void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan)
     if (original_error & (HAL_CAN_ERROR_TX_TERR0 | HAL_CAN_ERROR_TX_TERR1 | HAL_CAN_ERROR_TX_TERR2))
         ++ctx->tx_transmission_errors;
 
-    // handle transmit errors in all three mailboxes
-    if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST0)
-    {
-        RecordProbeResult(ctx, 0, ProbeTxResult::ALST);
-        tx_error(ctx, 0);
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_ALST0;
-    } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR0)
-    {
-        RecordProbeResult(ctx, 0, ProbeTxResult::TERR);
-        tx_error(ctx, 0);
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_EWG;
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_ACK;
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_TERR0;
-    }
-
-    if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST1)
-    {
-        RecordProbeResult(ctx, 1, ProbeTxResult::ALST);
-        tx_error(ctx, 1);
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_ALST1;
-    } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR1)
-    {
-        RecordProbeResult(ctx, 1, ProbeTxResult::TERR);
-        tx_error(ctx, 1);
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_EWG;
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_ACK;
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_TERR1;
-    }
-
-    if (hcan->ErrorCode & HAL_CAN_ERROR_TX_ALST2)
-    {
-        RecordProbeResult(ctx, 2, ProbeTxResult::ALST);
-        tx_error(ctx, 2);
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_ALST2;
-    } else if (hcan->ErrorCode & HAL_CAN_ERROR_TX_TERR2)
-    {
-        RecordProbeResult(ctx, 2, ProbeTxResult::TERR);
-        tx_error(ctx, 2);
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_EWG;
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_ACK;
-        hcan->ErrorCode &= ~HAL_CAN_ERROR_TX_TERR2;
+    // Consume each captured result exactly once, before any completion pump
+    // can assign a new owner. ALST/TERR bits must never leak into a later IRQ.
+    const uint32_t alst[3]={HAL_CAN_ERROR_TX_ALST0,HAL_CAN_ERROR_TX_ALST1,HAL_CAN_ERROR_TX_ALST2};
+    const uint32_t terr[3]={HAL_CAN_ERROR_TX_TERR0,HAL_CAN_ERROR_TX_TERR1,HAL_CAN_ERROR_TX_TERR2};
+    const uint32_t txErrors=alst[0]|alst[1]|alst[2]|terr[0]|terr[1]|terr[2];
+    hcan->ErrorCode &= ~txErrors;
+    if(original_error&(terr[0]|terr[1]|terr[2])) hcan->ErrorCode &= ~(HAL_CAN_ERROR_EWG|HAL_CAN_ERROR_ACK);
+    for(uint8_t i=0;i<3;++i) if(original_error&(alst[i]|terr[i])) {
+        RecordProbeResult(ctx,i,(original_error&terr[i]) ? ProbeTxResult::TERR : ProbeTxResult::ALST);
+        tx_error(ctx,i);
     }
 
     if (hcan->ErrorCode)
@@ -320,6 +417,7 @@ bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef
     // Deferred parameter queries must never wait for CAN from the OLED task.
     if (!canCtx) return false;
     const uint8_t command = txHeader->StdId & 0x7F;
+    if (!CoreStreamAllowsCan(txHeader->StdId >> 7, command)) return false;
     const bool protectionTraffic = command == SoftStopProtocol::COMMAND ||
         command == ProtectionProtocol::EVENT_ACK ||
         (command >= ProtectionProtocol::PARAM_SET && command <= ProtectionProtocol::DIAG_REPLY);
@@ -332,8 +430,7 @@ bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef
     if (osSemaphoreAcquire(semaphore, 0) != osOK) return false;
     taskENTER_CRITICAL();
     const bool stale = !protectionTraffic && (dummy.IsStopLocked() || epoch != dummy.GetMotionEpoch());
-    const bool sent = !stale && HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData,
-                            &canCtx->last_heartbeat_mailbox) == HAL_OK;
+    const bool sent = !stale && CoreStreamAllowsCan(txHeader->StdId >> 7,command) && QueueHardware(canCtx,txHeader,txData,true);
     if (sent) {
         RecordProbeAccepted(canCtx, txHeader, txData, canCtx->last_heartbeat_mailbox);
         canCtx->inFlightMailboxes |= canCtx->last_heartbeat_mailbox;
@@ -350,6 +447,7 @@ bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef
 
 void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader)
 {
+    if (!CoreStreamAllowsCan(txHeader->StdId >> 7, txHeader->StdId & 0x7F)) return;
     const uint32_t epoch = dummy.GetMotionEpoch();
     osStatus semaphore_status;
     if (canCtx->handle->Instance == CAN1)
@@ -370,22 +468,23 @@ void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* t
             else osSemaphoreRelease(sem_can2_tx);
             return;
         }
-        // §8.6+ — bxCAN 3 mb 限制：等 mb 出现空位再入
-        // 5ms 控制周期内 6 条 0x07：J1-J3 入 mb0/1/2 立即成功，J4-J6 HAL_BUSY
-        // 等 mb 空后 J4-J6 也能入；总等待 ~340µs（占 5ms 周期 7%）
-        // 1ms 超时兜底，防止总线故障永久阻塞信号量
+        // Native traffic retains its existing bounded wait. Recheck ownership
+        // after any wait/preemption and immediately before committing TXRQ.
         uint32_t start = micros();
         HAL_StatusTypeDef status;
         for (;;)
         {
             taskENTER_CRITICAL();
-            status = HAL_CAN_AddTxMessage(canCtx->handle, txHeader, txData, &canCtx->last_heartbeat_mailbox);
+            const bool current=CoreStreamAllowsCan(txHeader->StdId>>7,command) &&
+                (stopTraffic || (!dummy.IsStopLocked() && epoch==dummy.GetMotionEpoch() &&
+                 !(osThreadGetId()==ControlLoopUpdateHandle && dummy.commandHandler.IsTaskCancelled())));
+            status = current && QueueHardware(canCtx,txHeader,txData,true) ? HAL_OK : HAL_BUSY;
             if (status == HAL_OK) {
                 ClearProbeMailbox(canCtx, canCtx->last_heartbeat_mailbox);
                 canCtx->inFlightMailboxes |= canCtx->last_heartbeat_mailbox;
             }
             taskEXIT_CRITICAL();
-            if (status == HAL_OK) break;
+            if (status == HAL_OK || !current) break;
             if ((micros() - start) > 1000)   // 1ms 超时
             {
                 canCtx->tx_busy_errors++;   // 用于诊断（健康时应 ≈ 0）
@@ -408,7 +507,7 @@ void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* t
 bool CanSendMotionMessage(CAN_context* ctx, uint8_t* data, CAN_TxHeaderTypeDef* header,
                           uint32_t epoch, uint32_t generation)
 {
-    if (!ctx || !dummy.CanSendMotion(epoch, generation)) return false;
+    if (!ctx || !CoreStreamAllowsCan(header->StdId >> 7, header->StdId & 0x7F) || !dummy.CanSendMotion(epoch, generation)) return false;
     osSemaphoreId_t sem;
     if (ctx->handle->Instance == CAN1) sem = sem_can1_tx;
     else if (ctx->handle->Instance == CAN2) sem = sem_can2_tx;
@@ -418,8 +517,8 @@ bool CanSendMotionMessage(CAN_context* ctx, uint8_t* data, CAN_TxHeaderTypeDef* 
     const uint32_t start = micros();
     do {
         taskENTER_CRITICAL();
-        const bool current = dummy.CanSendMotion(epoch, generation);
-        sent = current && HAL_CAN_AddTxMessage(ctx->handle, header, data, &ctx->last_heartbeat_mailbox) == HAL_OK;
+        const bool current = dummy.CanSendMotion(epoch, generation) && CoreStreamAllowsCan(header->StdId>>7,header->StdId&127);
+        sent = current && QueueHardware(ctx,header,data,true);
         if (sent) {
             const uint32_t mailbox = ctx->last_heartbeat_mailbox;
             ClearProbeMailbox(ctx, mailbox);
@@ -443,6 +542,15 @@ void PollCanMotionTransmit(CAN_context* ctx)
     if (!ctx || !ctx->handle) return;
     taskENTER_CRITICAL();
     for (uint8_t index = 0; index < 3; ++index) {
+        auto& stream=ctx->streamTx[index];
+        if(stream.session && !stream.aborting && (ctx->inFlightMailboxes&(1U<<index))) {
+            const bool stale=dummy.GetMotionEpoch()!=stream.epoch || !CoreStreamCanTransmit(stream.session);
+            // Timed frames never sit in hardware indefinitely. An abort keeps
+            // the pending payload and its owner until the result callback.
+            const uint32_t lifetime=(stream.command==StreamProtocol::START || stream.command==StreamProtocol::SYNC)?1U:5U;
+            if(stale || HAL_GetTick()-stream.queuedAt>=lifetime)
+                if(HAL_CAN_AbortTxRequest(ctx->handle,1U<<index)==HAL_OK) stream.aborting=true;
+        }
         CAN_context::MotionTx& target = ctx->motionTx[index];
         if (!target.node || target.aborting || !(ctx->inFlightMailboxes & (1U << index))) continue;
         if (!dummy.CanSendMotion(target.epoch, target.generation) || HAL_GetTick() - target.queuedAt >= 20) {
@@ -452,4 +560,38 @@ void PollCanMotionTransmit(CAN_context* ctx)
         }
     }
     taskEXIT_CRITICAL();
+}
+
+// Admission is bounded queue ownership, not delivery. The pump preserves
+// per-node TXOK ordering; it can fill three independently owned hardware slots.
+bool TryCanSendStreamMessage(CAN_context* ctx,uint8_t* data,
+                             CAN_TxHeaderTypeDef* header,uint16_t session) {
+    if(!ctx || ctx->handle!=&hcan1) return false;
+    const uint8_t command=header->StdId&0x7F;
+    if(command==StreamProtocol::ABORT || command==StreamProtocol::DIAG) {
+        // These queries/stop notices have a caller-owned retry state and are
+        // permitted after a session faults. Preserve native token accounting.
+        if(osSemaphoreAcquire(sem_can1_tx,0)!=osOK) return false;
+        bool sent;
+        { CanGuard guard; sent=QueueHardware(ctx,header,data,true); }
+        if(!sent) osSemaphoreRelease(sem_can1_tx);
+        return sent;
+    }
+    CanGuard guard;
+    if(!CoreStreamCanTransmit(session)||dummy.IsStopLocked()) return false;
+    ReclaimStreamQueue();
+    // A protocol-level retry need not duplicate an already owned CAN frame.
+    for(unsigned k=0;k<streamCount;++k) {
+        const auto& p=streamPending[(streamHead+k)%STREAM_PENDING_CAPACITY];
+        if(p.state!=PENDING_DONE && p.session==session && p.header.StdId==header->StdId &&
+            !memcmp(p.data,data,8)) return true;
+    }
+    if(streamCount==STREAM_PENDING_CAPACITY) return false;
+    auto& p=streamPending[(streamHead+streamCount)%STREAM_PENDING_CAPACITY];
+    p={};p.header=*header;memcpy(p.data,data,8);p.session=session;
+    p.epoch=dummy.GetMotionEpoch();p.created=p.retryAt=HAL_GetTick();p.state=PENDING_READY;
+    // START stores its absolute anchor; SYNC stores elapsed at admission.
+    p.timeValue=command==StreamProtocol::START ? p.created*20U+StreamProtocol::Read16(data+4) : StreamProtocol::Read32(data+4);
+    ++streamCount;
+    return true;
 }

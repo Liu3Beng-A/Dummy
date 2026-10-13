@@ -33,6 +33,10 @@ bool ProtectionSettings::Finite(float v) {
     // Bit test remains valid with the existing -Ofast build configuration.
     return (bits & 0x7F800000u) != 0x7F800000u;
 }
+// Configuration/startup/storage only; no periodic control calls.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void ProtectionSettings::Defaults(uint8_t node, int32_t currentMa) {
     memset(value, 0, sizeof(value));
     const float current = currentMa / 1000.0f;
@@ -65,6 +69,10 @@ void ProtectionSettings::Defaults(uint8_t node, int32_t currentMa) {
     value[CAL_POSITION_TOL_R] = node == 7 ? .005f : node == 8 ? .01f : .001f;
     value[CAL_CONTACT_WINDOW_R] = node == 7 ? 1.0f : 5.0f * 16.0f / 360.0f;
 }
+// Configuration/startup/storage only; no periodic control calls.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 bool ProtectionSettings::Set(uint8_t id, float v, uint8_t node, int32_t currentMa,
                              int32_t velocity, int32_t acceleration) {
     if (id == 0 || id > PARAMETER_COUNT || !Finite(v)) return false;
@@ -128,6 +136,10 @@ bool ProtectionSettings::Validate(uint8_t node, int32_t currentMa, int32_t veloc
     }
     return node == 8 || value[MIN_POSITION_R] < value[MAX_POSITION_R];
 }
+// Configuration/startup/storage only; no periodic control calls.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 bool LoadProtectionSettings(ProtectionSettings& out, uint8_t node, int32_t currentMa,
                             int32_t velocity, int32_t acceleration) {
     EEPROM eeprom; StoredProtection record{}; eeprom.get(STORAGE_OFFSET, record);
@@ -143,6 +155,10 @@ bool ProtectionStorageIsErased() {
         if (eeprom_flash_read_byte(STORAGE_OFFSET + i) != 0xFF) return false;
     return true;
 }
+// Configuration/startup/storage only; no periodic control calls.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 bool SaveProtectionSettings(const ProtectionSettings& settings, uint16_t task,
                             uint8_t coordinateVersion, int32_t runtimeOffset, bool measured) {
     StoredProtection record{};

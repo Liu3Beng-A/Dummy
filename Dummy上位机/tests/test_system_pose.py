@@ -25,6 +25,8 @@ class SystemPoseTests(unittest.TestCase):
         self.c.is_connected = True
         self.c.serial_port = FakePort()
         self.completed = []
+        self.requested = []
+        self.c.preset_pose_requested.connect(lambda kind, pose: self.requested.append((kind, pose)))
         self.c.preset_pose_completed.connect(lambda kind, pose: self.completed.append((kind, pose)))
 
     def tearDown(self):
@@ -77,13 +79,39 @@ class SystemPoseTests(unittest.TestCase):
             setattr(self.c, field, previous)
             self.assertEqual(self.c._system_pose_awaiting, [])
             self.assertEqual(self.c._system_pose_ambiguous, set())
+            self.assertEqual(self.requested, [])
         self.assertFalse(self.c.send_cmd("!HOME\n!RESET"))
         with patch.object(self.c._tx_queue, "put", side_effect=IOError("fake queue failure")):
             self.assertFalse(self.c.send_cmd("!HOME"))
+        self.assertEqual(self.requested, [])
         self.assertEqual(self.commands(), [])
         self.assertTrue(self.c.send_cmd("!HOME"))
         self.feed("queued HOME id=1 mode=SEQ", "ok HOME id=1")
         self.assertEqual(self.completed, [("HOME", HOME)])
+
+    def test_preview_notifies_on_dispatch_before_any_receipt_without_actual_pose_changes(self):
+        actual = [10, -60, 160, 5, 6, 7, 20]
+        self.c.actual_pose = list(actual)
+        self.c.last_actual_at = 123.
+        self.c.hand_pos.set(27)
+        for kind, target in (("HOME", HOME), ("RESET", RESET)):
+            self.assertTrue(self.c.send_cmd("!" + kind))
+            self.assertEqual(self.requested[-1], (kind, target))
+            self.assertEqual(self.completed, [])
+            self.assertEqual(self.c.actual_pose, actual)
+            self.assertEqual(self.c.last_actual_at, 123.)
+            self.assertEqual(self.c.hand_pos.get(), 27)
+        self.assertEqual(self.commands(), ["!HOME", "!RESET"])
+
+    def test_preview_does_not_depend_on_completion_tracking_and_uses_independent_lists(self):
+        self.c._system_pose_ambiguous.add("HOME")
+        self.assertTrue(self.c.send_cmd("!HOME"))
+        self.assertEqual(self.requested, [("HOME", HOME)])
+        self.assertIsNone(self.c._system_pose_active)
+        self.requested[0][1][0] = 999
+        self.assertTrue(self.c.send_cmd("!HOME"))
+        self.assertEqual(self.requested[-1], ("HOME", HOME))
+        self.assertEqual(self.completed, [])
 
     def test_strict_type_id_and_optional_duration_reject_malformed_receipts(self):
         self.c.send_cmd("!HOME")

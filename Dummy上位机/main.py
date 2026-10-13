@@ -31,12 +31,13 @@ def main():
     application = QApplication(sys.argv[:1])
     application.setOrganizationName("DummyRobot")
     application.setApplicationName("Dummy Robot 上位机")
-    application.setApplicationVersion("0.1.0")
+    application.setApplicationVersion("0.3.0")
     application.setWindowIcon(QIcon(str(resource_path("icons", "dummy.svg"))))
     store = AppStore(args.data_dir)
     if args.theme:
         store.update_settings(theme=args.theme)
     controller = RobotController()
+    controller.wire_log_sink = store.log
     controller.log_message.connect(lambda text, tag: store.log(tag, text))
     window = MainWindow(controller, store)
     if args.size:
@@ -108,4 +109,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     sys.exit(main())

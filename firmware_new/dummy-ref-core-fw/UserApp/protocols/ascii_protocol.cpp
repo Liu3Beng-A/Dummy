@@ -1,4 +1,5 @@
 #include "common_inc.h"
+#include "instances/core_stream.h"
 
 extern DummyRobot dummy;
 
@@ -167,6 +168,8 @@ static bool HandleRGBCommand(const char* cmd, size_t length, StreamSink& respons
     return true;
 }
 
+static bool HandleMotionCommand(const char* cmd, size_t len, StreamSink& response);
+
 static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
 {
     std::string command(cmd, len);
@@ -198,6 +201,11 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
         Respond(response, "Stopping ok");
         return true;
     }
+    // A stopped stream may be closed and restored to the native default without
+    // START. TrySetCommandMode restricts this exception and never releases STOP.
+    if (command.rfind("#GET_CMDMODE", 0) == 0 ||
+        (dummy.IsStopLocked() && command.rfind("#CMDMODE", 0) == 0))
+        return HandleMotionCommand(command.c_str(), command.size(), response);
     // Only these read-only diagnostics may pass the protection command lock.
     if (command == "#MOTION_STATUS")
     {
@@ -241,8 +249,8 @@ static bool HandleMotionCommand(const char* cmd, size_t len, StreamSink& respons
     }
     if (command.rfind("#CMDMODE", 0) != 0) return false;
     unsigned long mode; char tail;
-    if (sscanf(command.c_str(), "#CMDMODE %lu %c", &mode, &tail) != 1 || mode < 1 || mode > 4)
-        Respond(response, "error CMDMODE range=1..4");
+    if (sscanf(command.c_str(), "#CMDMODE %lu %c", &mode, &tail) != 1 || (mode != 7 && (mode < 1 || mode > 4)))
+        Respond(response, "error CMDMODE range=1..4,7");
     else if (!dummy.TrySetCommandMode(mode)) Respond(response, "error CMDMODE busy");
     else Respond(response, "ok CMDMODE mode=%u", unsigned(dummy.commandMode));
     return true;
@@ -321,6 +329,8 @@ static bool HandleEncoderCalibrationCommand(const char* cmd, size_t len, StreamS
 
 void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
+    if (HandleCoreStreamCommand(_cmd, _len, _responseChannel)) return;
+    if (!CoreStreamAuxAllowed(_cmd, _len)) { Respond(_responseChannel, "error STREAM busy"); return; }
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
     if (HandleRGBCommand(_cmd, _len, _responseChannel)) return;
     if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;
@@ -749,6 +759,8 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 
 void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
+    if (HandleCoreStreamCommand(_cmd, _len, _responseChannel)) return;
+    if (!CoreStreamAuxAllowed(_cmd, _len)) { Respond(_responseChannel, "error STREAM busy"); return; }
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
     if (HandleRGBCommand(_cmd, _len, _responseChannel)) return;
     if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;

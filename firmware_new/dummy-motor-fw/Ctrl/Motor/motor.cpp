@@ -2,15 +2,24 @@
 #include "motor.h"
 
 #include <cmath>
+#include <can.h>
 
 
 void Motor::Tick20kHz()
 {
     // 1.Encoder data Update
-    encoder->UpdateAngle();
-
+    const uint32_t beforeEncoder=DWT->CYCCNT;
+    // Every closed-loop tick has one bounded acquisition. Retry on the next
+    // 50us tick, preserving the existing 100-invalid-tick protection window.
+    // Electrical calibration has its own explicit three-attempt path.
+    encoder->UpdateAngle(1);
+    const uint32_t beforeControl=DWT->CYCCNT;
+    const uint32_t encoderCycles=beforeControl-beforeEncoder;
+    if (encoderCycles>motorControlTiming[9]) motorControlTiming[9]=encoderCycles;
     // 2.Motor Control Update
     CloseLoopControlTick();
+    const uint32_t controlCycles=DWT->CYCCNT-beforeControl;
+    if (controlCycles>motorControlTiming[10]) motorControlTiming[10]=controlCycles;
 }
 
 
@@ -86,8 +95,10 @@ void Motor::CloseLoopControlTick()
         int32_t candidateDelta = static_cast<int32_t>(encoder->angleData.rectifiedAngle) - controller->realLapPosition;
         if (candidateDelta > MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 2) candidateDelta -= MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
         else if (candidateDelta < -MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 2) candidateDelta += MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
-        const int64_t allowed = static_cast<int64_t>(boardConfig.velocityLimit) *
-                                (controller->transportMissingTicks + 1) / motionPlanner.CONTROL_FREQUENCY + 64;
+        const int64_t allowed = controller->transportMissingTicks == 0 ?
+            boardConfig.velocityLimit / motionPlanner.CONTROL_FREQUENCY + 64 :
+            static_cast<int64_t>(boardConfig.velocityLimit) *
+                (controller->transportMissingTicks + 1) / motionPlanner.CONTROL_FREQUENCY + 64;
         // A parity-valid discontinuity is still not usable feedback. Genuine
         // SPI gaps get their elapsed-motion allowance; repeatedly implausible
         // valid packets do not grow that allowance until a jump is accepted.
@@ -97,6 +108,7 @@ void Motor::CloseLoopControlTick()
     else if (controller->transportMissingTicks < 20000) ++controller->transportMissingTicks;
     if (validSample) controller->invalidFeedbackTicks = 0;
     else if (controller->invalidFeedbackTicks < 20000) ++controller->invalidFeedbackTicks;
+    if (!validSample) controller->InvalidatePositionEntry();
     // Invalid samples never advance the unwrap or the stability window.
     if (validSample)
     {
@@ -166,6 +178,7 @@ void Motor::CloseLoopControlTick()
             case MODE_STOP:
                 driver->Sleep();
                 break;
+            case MODE_STREAM_JOINT:
             case MODE_COMMAND_Trajectory:
                 controller->CalcDceToOutput(controller->softPosition, controller->softVelocity);
                 break;
@@ -197,6 +210,7 @@ void Motor::CloseLoopControlTick()
     /******************************* Mode Change Handle *******************************/
     if (controller->modeRunning != controller->requestMode)
     {
+        if (controller->modeRunning == MODE_STREAM_JOINT && controller->requestMode != MODE_STREAM_JOINT) controller->CancelStream(StreamProtocol::OK);
         controller->modeRunning = controller->requestMode;
         controller->softNewCurve = true;
     }
@@ -262,6 +276,9 @@ void Motor::CloseLoopControlTick()
     /******************************* Update Soft Goal *******************************/
     switch (controller->modeRunning)
     {
+        case MODE_STREAM_JOINT:
+            controller->TickStream();
+            break;
         case MODE_STOP:
             break;
         case MODE_COMMAND_POSITION:
@@ -344,7 +361,7 @@ void Motor::CloseLoopControlTick()
         controller->state = STATE_OVERLOAD;
     else
     {
-        if (controller->modeRunning == MODE_COMMAND_POSITION)
+        if (controller->modeRunning == MODE_COMMAND_POSITION || controller->modeRunning == MODE_STREAM_JOINT)
         {
             if (positionFinished)
                 controller->state = STATE_FINISH;
@@ -448,10 +465,14 @@ void Motor::Controller::CalcDceToOutput(int32_t _location, int32_t _speed)
 }
 
 
+// Cold CAN/query/configuration entry only.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void Motor::Controller::SetCtrlMode(Motor::Mode_t _mode)
 {
     if (IsSoftStopLocked()) return;
-    if (requestMode != _mode) ResetDetection();
+    if (requestMode != _mode) { InvalidatePositionEntry(); ResetDetection(); }
     requestMode = _mode;
 }
 
@@ -462,6 +483,11 @@ __attribute__((optimize("Os")))
 void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
 {
     using namespace SoftStopProtocol;
+    // START/release cannot steal ownership from an active curve or pending fault.
+    if ((action == ENABLE_HOLD || action == RELEASE) && StreamActive()) return;
+    if (action == STOP || action == SoftStopProtocol::DISABLE || action == ProtectionProtocol::STOP_PROTECTION) {
+        InvalidatePositionEntry(); CancelStream();
+    }
     if ((action == ENABLE_HOLD || action == RELEASE) &&
         (defaultsRestoreRequested || saveRequested || parameterSaveRequested || parameterSavingInProgress || coordinateSavingInProgress ||
          (calibrationTask && protectionPhase != ProtectionProtocol::CAL_FAILED) ||
@@ -535,6 +561,8 @@ void Motor::Controller::RequestSoftStop(uint8_t action, uint16_t token)
 
 void Motor::Controller::DisableForStop()
 {
+    InvalidatePositionEntry();
+    CancelStream();
     const bool preserveCalibration = calibrationTask &&
         (protectionPhase == ProtectionProtocol::CAL_DONE || protectionPhase == ProtectionProtocol::SAVED ||
          protectionPhase == ProtectionProtocol::SAVE_PENDING);
@@ -557,6 +585,7 @@ void Motor::Controller::DisableForStop()
 
 void Motor::Controller::CaptureStopPosition()
 {
+    InvalidatePositionEntry();
     softStopPosition = realPosition;
     goalPosition = softPosition = softStopPosition;
     goalVelocity = softVelocity = 0;
@@ -569,6 +598,10 @@ void Motor::Controller::CaptureStopPosition()
     config->dce.outputKi = focCurrent * 1024;
 }
 
+// Cold CAN/query/configuration entry only.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 float Motor::Controller::GetSoftStopPosition()
 {
     if (!IsFeedbackValid()) return NAN;
@@ -733,12 +766,27 @@ void Motor::Controller::SetPositionSetPoint(int32_t _pos)
     __set_PRIMASK(irq);
 }
 
+// Low-frequency setters use a short atomic invalidation; the 20kHz reset
+// function itself retains its original optimization and constant-time work.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
+void Motor::Controller::InvalidatePositionEntry()
+{
+    const uint32_t irq = __get_PRIMASK(); __disable_irq();
+    ResetPositionCompletion();
+    __set_PRIMASK(irq);
+}
+
 void Motor::Controller::ResetPositionCompletion(bool newGoal)
 {
     positionStableTicks = 0;
     positionStableMin = positionStableMax = realPosition;
     positionVelocitySum = 0;
     positionCompletionTarget = goalPosition;
+    positionCompletionHome = context->config.motionParams.encoderHomeOffset;
+    positionCompletionMode = uint8_t(modeRunning);
+    positionEvidenceValid = false;
     positionSettled = false;
     if (newGoal) positionCompleted = false;
 }
@@ -746,8 +794,12 @@ void Motor::Controller::ResetPositionCompletion(bool newGoal)
 bool Motor::Controller::TickPositionCompletion()
 {
     using namespace MotionCompletionProtocol;
-    if (positionCompletionTarget != goalPosition || modeRunning != MODE_COMMAND_POSITION ||
-        requestMode != MODE_COMMAND_POSITION || IsSoftStopLocked() || !IsFeedbackValid() ||
+    const bool streamMode = modeRunning == MODE_STREAM_JOINT && requestMode == MODE_STREAM_JOINT && StreamTerminal();
+    if (positionCompletionTarget != goalPosition ||
+        positionCompletionHome != context->config.motionParams.encoderHomeOffset ||
+        positionCompletionMode != uint8_t(modeRunning) ||
+        protectionPhase != ProtectionProtocol::IDLE || calibrationTask || invalidFeedbackTicks != 0 ||
+        ((!streamMode) && (modeRunning != MODE_COMMAND_POSITION || requestMode != MODE_COMMAND_POSITION)) || IsSoftStopLocked() || !IsFeedbackValid() ||
         goalDisable || softDisable || goalBrake || softBrake || isStalled || overloadFlag)
     {
         ResetPositionCompletion(true);
@@ -776,6 +828,13 @@ bool Motor::Controller::TickPositionCompletion()
             ResetPositionCompletion();
             return boardConfig.canNodeId != 8 && positionCompleted;
         }
+        // Publish only a completed 50ms window. Division belongs to the cold
+        // diagnostic capture, not this 20kHz path. The global clock also advances
+        // while encoder calibration temporarily owns the control callback.
+        positionEvidenceTick = StreamClock();
+        positionEvidenceRange = uint32_t(positionStableMax - positionStableMin);
+        positionEvidenceVelocitySum = positionVelocitySum;
+        positionEvidenceValid = true;
         positionSettled = true;
         positionCompleted = true;
         if (motionIntent)
@@ -796,7 +855,8 @@ bool Motor::Controller::IsOrdinaryPositionArrival(bool referenceFinished) const
 {
     const int64_t error = static_cast<int64_t>(goalPosition) - realPosition;
     const int32_t tolerance = MotionCompletionProtocol::PositionToleranceSteps(boardConfig.canNodeId);
-    if (modeRunning != MODE_COMMAND_POSITION || requestMode != MODE_COMMAND_POSITION ||
+    const bool streamMode = modeRunning == MODE_STREAM_JOINT && requestMode == MODE_STREAM_JOINT && StreamTerminal();
+    if ((!streamMode && (modeRunning != MODE_COMMAND_POSITION || requestMode != MODE_COMMAND_POSITION)) ||
         error < -tolerance || error > tolerance) return false;
     if (referenceFinished) return softPosition == goalPosition && softVelocity == 0;
     // Detection can suppress tolerated endpoint correction slightly before
@@ -839,6 +899,10 @@ uint8_t Motor::Controller::GetPositionCompletionStatus(float expectedMotorR) con
 }
 
 
+// Cold CAN/query/configuration entry only.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 bool Motor::Controller::SetPositionSetPointWithTime(int32_t _pos, float _time)
 {
     if (IsSoftStopLocked()) return false;
@@ -868,6 +932,10 @@ bool Motor::Controller::SetPositionSetPointWithTime(int32_t _pos, float _time)
 }
 
 
+// Cold CAN/query/configuration entry only.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void Motor::Controller::SetVelocitySetPoint(int32_t _vel)
 {
     if (IsSoftStopLocked()) return;
@@ -881,6 +949,10 @@ void Motor::Controller::SetVelocitySetPoint(int32_t _vel)
 }
 
 
+// Cold CAN/query/configuration entry only.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 float Motor::Controller::GetPosition(bool _isLap)
 {
     if (!IsFeedbackValid()) return NAN;
@@ -905,6 +977,10 @@ float Motor::Controller::GetFocCurrent()
 }
 
 
+// Cold CAN/query/configuration entry only.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void Motor::Controller::SetCurrentSetPoint(int32_t _cur)
 {
     if (IsSoftStopLocked()) return;
@@ -919,12 +995,14 @@ void Motor::Controller::SetCurrentSetPoint(int32_t _cur)
 
 void Motor::Controller::SetDisable(bool _disable)
 {
+    if (goalDisable != _disable) InvalidatePositionEntry();
     goalDisable = _disable;
 }
 
 
 void Motor::Controller::SetBrake(bool _brake)
 {
+    if (goalBrake != _brake) InvalidatePositionEntry();
     goalBrake = _brake;
 
 }
@@ -967,9 +1045,14 @@ int32_t Motor::Controller::CompensateAdvancedAngle(int32_t _vel)
 }
 
 
+// Startup-only setup; preserve the periodic controller's build options.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void Motor::Controller::Init()
 {
     requestMode = boardConfig.enableMotorOnBoot ? static_cast<Mode_t>(boardConfig.defaultMode) : MODE_STOP;
+    if (requestMode == MODE_STREAM_JOINT) requestMode = MODE_COMMAND_POSITION; // Stream always requires a fresh session.
 
     modeRunning = MODE_STOP;
     state = STATE_STOP;
@@ -1028,8 +1111,13 @@ void Motor::Controller::Init()
 }
 
 
+// Cold CAN/query/configuration entry only.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void Motor::Controller::ApplyPosAsHomeOffset()
 {
+    InvalidatePositionEntry();
     // 计算新的 home offset（realPosition 单圈内余数）
     context->config.motionParams.encoderHomeOffset = realPosition %
                                                      Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;

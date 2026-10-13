@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/three/OrbitControls.js';
 import URDFLoader from './vendor/urdf-loader/URDFLoader.js';
+import { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, DIFFUSER_SAMPLES,
+  normalizeRgbFrame, patchDiffuserShader, sameRgbFrame, writeDiffuserTexture } from './model_rgb.js';
 
 const root = document.getElementById('canvas');
 const scene = new THREE.Scene();
@@ -55,6 +57,23 @@ let previousCameraSeq = -1;
 let previousVisibilitySeq = -1;
 let disposed = false;
 const meshMaterials = new Map();
+const diffuserMeshes = [];
+const diffuserKernel = createDiffuserKernel();
+// The split STL is registered to the existing base_link coordinate frame (m).
+// Source zero points along +Y; increasing angles turn toward +X. This is the
+// 2D ring's simulated clockwise order, not a claim about physical LED wiring.
+const DIFFUSER_CENTER = [0, 0, 0.18996717780828476];
+const DIFFUSER_U = [0, 1, 0];
+const DIFFUSER_V = [1, 0, 0];
+let rgbFrame = Array.from({ length: 24 }, () => [0, 0, 0]);
+let rgbFrameUpdates = 0;
+let displayedRgbFrame = null;
+let rgbLightOn = false;
+let rgbLightOnUpdates = 0;
+const RGB_SMOOTHING_SECONDS = 0.06;
+const rgbCoverReflection = { value: 1 };
+let diffuserTexture = null;
+let diffuserPixels = null;
 let cameraName = 'isometric';
 // Display-only damping. Keep currentState.actual as the unmodified feedback.
 const ACTUAL_SMOOTHING_SECONDS = 0.05;
@@ -166,6 +185,108 @@ function prepareRobot(robot) {
   });
 }
 
+function isDiffuserMesh(object) {
+  let node = object;
+  while (node && !node.isURDFLink) {
+    if (node.isURDFVisual && node.name === 'rgb_diffuser') return true;
+    node = node.parent;
+  }
+  return false;
+}
+
+function prepareDiffuser(robot) {
+  const pixels = new Uint16Array(DIFFUSER_SAMPLES * 4);
+  diffuserPixels = new Float32Array(DIFFUSER_SAMPLES * 4);
+  diffuserTexture = new THREE.DataTexture(pixels, DIFFUSER_SAMPLES, 1,
+    THREE.RGBAFormat, THREE.HalfFloatType);
+  // RGB stores bounded display emission in linear output space; alpha stores
+  // PWM activity for diagnostics only. RGBA16F preserves low-light interpolation
+  // and supports linear filtering in WebGL2 without float32 filter extensions.
+  diffuserTexture.colorSpace = THREE.LinearSRGBColorSpace;
+  diffuserTexture.wrapS = THREE.RepeatWrapping;
+  diffuserTexture.wrapT = THREE.ClampToEdgeWrapping;
+  diffuserTexture.minFilter = THREE.LinearFilter;
+  diffuserTexture.magFilter = THREE.LinearFilter;
+  diffuserTexture.generateMipmaps = false;
+  robot.traverse(object => {
+    if (!object.isMesh || !isDiffuserMesh(object)) return;
+    // The ghost keeps the original geometry and its own cloned translucent material.
+    const geometry = object.geometry.index ? object.geometry.toNonIndexed()
+      : object.geometry.clone();
+    geometry.setAttribute('uv', new THREE.BufferAttribute(createAngularUv(
+      geometry.getAttribute('position').array, DIFFUSER_CENTER, DIFFUSER_U, DIFFUSER_V), 2));
+    object.geometry = geometry;
+    object.userData.rgbDiffuser = true;
+    diffuserMeshes.push(object);
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      // The unlit opal cover is pale gray-white. Only overall light_on metadata
+      // changes its reflection; an animation's low/zero PWM never switches it.
+      material.color.setRGB(0.85, 0.85, 0.85);
+      material.specular?.setHex(0x20252a);
+      material.shininess = 24;
+      material.emissive.setRGB(1, 1, 1);
+      material.emissiveIntensity = 1;
+      material.emissiveMap = diffuserTexture;
+      material.onBeforeCompile = shader => {
+        shader.uniforms.rgbCoverReflection = rgbCoverReflection;
+        shader.fragmentShader = patchDiffuserShader(shader.fragmentShader);
+      };
+      material.customProgramCacheKey = () => 'rgb-opal-cover-v3';
+      material.userData.rgbCoverReflection = true;
+      material.needsUpdate = true;
+    }
+  });
+  updateDiffuserTexture();
+}
+
+function updateDiffuserTexture() {
+  if (!diffuserTexture || !diffuserPixels) return;
+  writeDiffuserTexture(displayedRgbFrame || rgbFrame, diffuserKernel, diffuserPixels);
+  const halfPixels = diffuserTexture.image.data;
+  for (let index = 0; index < diffuserPixels.length; index++) {
+    halfPixels[index] = THREE.DataUtils.toHalfFloat(diffuserPixels[index]);
+  }
+  diffuserTexture.needsUpdate = true;
+}
+
+function setRgbFrame(frame, lightOn = undefined) {
+  if (disposed) return false;
+  const normalized = normalizeRgbFrame(frame);
+  if (!normalized || (lightOn !== undefined && typeof lightOn !== 'boolean')) return false;
+  const first = displayedRgbFrame === null;
+  // Legacy arrays preserve the last known power state. Their first frame
+  // defaults to powered; zero PWM alone cannot identify an overall switch-off.
+  const nextLightOn = lightOn === undefined ? (first ? true : rgbLightOn) : lightOn;
+  if (rgbLightOn !== nextLightOn) rgbLightOnUpdates++;
+  rgbLightOn = nextLightOn;
+  if (!sameRgbFrame(rgbFrame, normalized)) {
+    rgbFrame = normalized;
+    rgbFrameUpdates++;
+  }
+  if (first || document.hidden) {
+    displayedRgbFrame = rgbFrame.map(color => color.slice());
+    rgbCoverReflection.value = rgbLightOn ? 0.002 : 1;
+    updateDiffuserTexture();
+  }
+  return true;
+}
+
+function animateRgb(dt) {
+  if (!displayedRgbFrame) return;
+  // Only an actual rendering pause snaps. A long interval between deduplicated
+  // input messages is normal during a breathing trough and never resets damping.
+  const snap = document.hidden || dt > 0.25;
+  const changed = advanceRgbDisplayFrame(displayedRgbFrame, rgbFrame,
+    snap ? 0.26 : dt, RGB_SMOOTHING_SECONDS);
+  const goal = rgbLightOn ? 0.002 : 1;
+  const previous = rgbCoverReflection.value;
+  const reflection = snap ? goal : THREE.MathUtils.damp(previous, goal,
+    1 / RGB_SMOOTHING_SECONDS, dt);
+  rgbCoverReflection.value = Math.abs(goal - reflection) <= 1e-6 ? goal : reflection;
+  if (changed) updateDiffuserTexture();
+}
+
 function styleRobot(robot, ghost, highlight) {
   const highlightedLinks = {
     Joint1: 'Link1', Joint2: 'Link2', Joint3: 'Link3', Joint4: 'Link4',
@@ -173,6 +294,10 @@ function styleRobot(robot, ghost, highlight) {
   };
   robot.traverse(object => {
     if (!object.isMesh) return;
+    const diffuser = isDiffuserMesh(object);
+    // Preserve the actual ring's continuously updated emission even when a
+    // joint/state/highlight update restyles the remainder of the robot.
+    if (!ghost && diffuser) return;
     let link = object;
     while (link.parent && !link.isURDFLink) link = link.parent;
     const selected = link.name === highlightedLinks[highlight]
@@ -182,13 +307,14 @@ function styleRobot(robot, ghost, highlight) {
       const base = meshMaterials.get(material);
       if (base?.color) material.color.copy(base.color);
       if (base?.emissive) material.emissive.copy(base.emissive);
-      material.opacity = ghost ? (selected ? 0.42 : 0.28) : 1;
+      material.opacity = ghost ? (selected ? 0.22 : 0.12) : 1;
       material.transparent = ghost;
       material.depthWrite = !ghost;
-      if (ghost && material.color) material.color.setHex(0x4389ff);
-      if (selected) {
+      if (ghost && material.color) material.color.setHex(0xe8edf3);
+      if (ghost && diffuser) material.emissive?.setRGB(0, 0, 0);
+      if (selected && !diffuser) {
         if (!ghost) material.color?.lerp(new THREE.Color(0x4389ff), 0.55);
-        material.emissive?.setHex(0x16386d);
+        material.emissive?.setHex(ghost ? 0x454545 : 0x16386d);
       }
     }
     object.renderOrder = ghost ? 2 : 0;
@@ -252,7 +378,7 @@ function setState(state) {
 }
 
 window.robotViewer = {
-  loaded: false, setState, setCamera,
+  loaded: false, setState, setCamera, setRgbFrame,
   diagnostics: () => ({
     loaded: Boolean(actual && target), state: currentState,
     joints: actual ? Object.keys(actual.joints) : [],
@@ -263,8 +389,53 @@ window.robotViewer = {
     markerVisible: marker.visible,
     actualJointValues: actual ? Object.fromEntries(Object.entries(actual.joints)
       .map(([name, joint]) => [name, joint.jointValue])) : {},
+    rgb: diffuserDiagnostics(),
   }),
 };
+
+function diffuserDiagnostics() {
+  actual?.updateMatrixWorld(true);
+  const bounds = new THREE.Box3();
+  diffuserMeshes.forEach(mesh => bounds.union(new THREE.Box3().setFromObject(mesh)));
+  const summarize = material => ({
+    emissive: material.emissive?.toArray(), emissiveIntensity: material.emissiveIntensity,
+    hasEmissiveMap: Boolean(material.emissiveMap), opacity: material.opacity,
+    color: material.color?.toArray(), adaptiveCover: material.userData.rgbCoverReflection === true,
+  });
+  const actualMaterials = diffuserMeshes.flatMap(object =>
+    (Array.isArray(object.material) ? object.material : [object.material]).map(summarize));
+  const targetMaterials = [];
+  target?.traverse(object => {
+    if (!object.isMesh || !isDiffuserMesh(object)) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.forEach(material => targetMaterials.push(summarize(material)));
+  });
+  const linearSample = index => diffuserTexture ? Array.from(
+    diffuserTexture.image.data.slice(index * 4, index * 4 + 3),
+    value => THREE.DataUtils.fromHalfFloat(value)) : null;
+  const sample = index => linearSample(index)?.map(value => Math.round(value * 255)) || null;
+  const activity = index => diffuserTexture
+    ? THREE.DataUtils.fromHalfFloat(diffuserTexture.image.data[index * 4 + 3]) : null;
+  return {
+    meshCount: diffuserMeshes.length,
+    frame: rgbFrame.map(color => color.slice()), frameUpdates: rgbFrameUpdates,
+    displayFrame: displayedRgbFrame?.map(color => color.slice()) || null,
+    lightOn: rgbLightOn, lightOnUpdates: rgbLightOnUpdates,
+    coverReflection: rgbCoverReflection.value, coverReflectionTarget: rgbLightOn ? 0.002 : 1,
+    textureFormat: 'rgba16f',
+    localCenter: DIFFUSER_CENTER.slice(), sourceZeroDirection: DIFFUSER_U.slice(),
+    worldBounds: bounds.isEmpty() ? null : { min: bounds.min.toArray(), max: bounds.max.toArray() },
+    worldCenter: bounds.isEmpty() ? null : bounds.getCenter(new THREE.Vector3()).toArray(),
+    textureSamples: { source0: sample(0), source6: sample(72), source12: sample(144), source18: sample(216) },
+    textureLinearSamples: { source0: linearSample(0), source6: linearSample(72),
+      source12: linearSample(144), source18: linearSample(216) },
+    textureActivitySamples: { source0: activity(0), source6: activity(72),
+      source12: activity(144), source18: activity(216) },
+    textureLit: Boolean(diffuserTexture && diffuserTexture.image.data.some(
+      (value, index) => index % 4 !== 3 && value > 0)),
+    actualMaterials, targetMaterials,
+  };
+}
 
 function countMeshes(object) {
   let count = 0;
@@ -280,15 +451,20 @@ manager.onError = url => {
   window.reportRobotError('模型资源无法读取：' + url.split('/').pop());
 };
 manager.onLoad = () => {
-  if (failedAsset || !sourceRobot) return;
-  if (countMeshes(sourceRobot) !== 10) {
-    window.reportRobotError('模型网格不完整，预期 10 个可视网格。');
+  if (disposed || failedAsset || !sourceRobot) return;
+  if (countMeshes(sourceRobot) !== 11) {
+    window.reportRobotError('模型网格不完整，预期 11 个可视网格。');
     return;
   }
   actual = sourceRobot;
   target = sourceRobot.clone(true);
   prepareRobot(actual);
   prepareRobot(target);
+  prepareDiffuser(actual);
+  if (diffuserMeshes.length !== 1) {
+    window.reportRobotError('RGB 散光罩模型不完整，预期 1 个灯环网格。');
+    return;
+  }
   styleRobot(actual, false, null);
   styleRobot(target, true, null);
   scene.add(actual, target);
@@ -297,6 +473,11 @@ manager.onLoad = () => {
   document.getElementById('error').hidden = true;
   window.robotViewer.loaded = true;
   if (window.pendingRobotState) setState(window.pendingRobotState);
+  if (window.pendingRgbFrame) {
+    const pending = window.pendingRgbFrame;
+    if (Array.isArray(pending)) setRgbFrame(pending);
+    else setRgbFrame(pending.colors, pending.light_on);
+  }
   window.robotBridge?.viewerReady();
 };
 const loader = new URDFLoader(manager);
@@ -327,6 +508,7 @@ function animate(time = performance.now()) {
   const dt = previousFrameTime == null ? 0 : Math.max(0, (time - previousFrameTime) / 1000);
   previousFrameTime = time;
   animateActual(dt);
+  animateRgb(dt);
   controls.update();
   // An obscured/tabbed view can skip expensive GL drawing while preserving state.
   if (!document.hidden) renderer.render(scene, camera);
@@ -343,5 +525,10 @@ window.addEventListener('pagehide', () => {
     materials.filter(Boolean).forEach(material => material.dispose());
   });
   geometries.forEach(geometry => geometry.dispose());
+  diffuserTexture?.dispose();
+  diffuserTexture = null;
+  diffuserPixels = null;
+  meshMaterials.clear();
+  diffuserMeshes.length = 0;
   renderer.dispose();
 });

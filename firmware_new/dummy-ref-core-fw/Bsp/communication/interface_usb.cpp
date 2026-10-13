@@ -12,7 +12,10 @@ USBStats_t usb_stats_ = {0};
 // Full newlib float sscanf needs more than the old 2000-byte task stack.
 // Static RAM storage leaves room in the 64 KiB CCM FreeRTOS heap for the
 // 45 KiB protocol initialization task and other tasks created at startup.
-alignas(8) static StackType_t usbServerStack[4096 / sizeof(StackType_t)];
+// Full nested protection-command + newlib float parsing is budgeted at
+// 5 KiB including task context. Keep 1 KiB margin in static SRAM;
+// this is a static audit allowance, not a measured runtime watermark.
+alignas(8) static StackType_t usbServerStack[6144 / sizeof(StackType_t)];
 static StaticTask_t usbServerTaskControlBlock;
 
 class USBSender : public PacketSink
@@ -154,7 +157,7 @@ static void UsbServerTask(void *ctx)
             if (ODrive_interface.data_pending)
             {
                 ODrive_interface.data_pending = false;
-                if (!dummy.IsStopLocked() && !ODrive_interface.rx_stop_locked &&
+                if (!CoreStreamActive() && !dummy.IsStopLocked() && !ODrive_interface.rx_stop_locked &&
                     ODrive_interface.rx_motion_epoch == dummy.GetMotionEpoch())
                     usb_channel.process_packet(ODrive_interface.rx_buf, ODrive_interface.rx_len);
                 USBD_CDC_ReceivePacket(&hUsbDeviceFS, ODrive_interface.out_ep);  // Allow next packet

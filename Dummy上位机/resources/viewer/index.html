@@ -15,16 +15,18 @@
 </head>
 <body>
   <div id="canvas"></div>
-  <div class="topline" role="status" aria-live="polite">
-    <div class="badge" id="mode">目标预览</div>
-    <div class="badge muted" id="telemetry">尚无位置回读</div>
+  <div class="viewer-info">
+    <div class="topline" role="status" aria-live="polite">
+      <div class="badge" id="mode">目标预览</div>
+      <div class="badge muted" id="telemetry">尚无位置回读</div>
+    </div>
+    <div class="legend">
+      <span id="solid-label" hidden><i class="silver"></i><span>实际回读 · 实体</span></span>
+      <span id="ghost-label"><i class="ghost"></i>目标位置 · 虚体</span>
+      <span id="marker-label" hidden><i class="orange"></i>MoveL 目标标记</span>
+    </div>
   </div>
   <div id="error" class="error" role="alert">正在加载模型与本地网格…</div>
-  <div class="legend">
-    <span id="solid-label" hidden><i class="silver"></i><span>实际回读 · 实体</span></span>
-    <span id="ghost-label"><i class="blue"></i>目标位置 · 虚体</span>
-    <span id="marker-label" hidden><i class="orange"></i>MoveL 目标标记</span>
-  </div>
   <div class="footer">
     <span>左键旋转 · 右键平移 · 滚轮缩放</span>
     <span id="gripper-status">夹爪：目标开度</span>
@@ -33,6 +35,25 @@
   <script>
     window.robotBridge = null;
     window.pendingRobotState = null;
+    window.pendingRgbFrame = null;
+    window.receiveRobotRgbPayload = payload => {
+      const legacy = Array.isArray(payload);
+      if (!legacy && (payload === null || typeof payload !== 'object'
+        || typeof payload.light_on !== 'boolean')) return false;
+      const frame = legacy ? payload : payload.colors;
+      if (!Array.isArray(frame) || frame.length !== 24) return false;
+      for (const color of frame) {
+        if (!Array.isArray(color) || color.length !== 3) return false;
+        for (const value of color) {
+          if (!Number.isInteger(value) || value < 0 || value > 255) return false;
+        }
+      }
+      const lightOn = legacy ? undefined : payload.light_on;
+      if (window.robotViewer && !window.robotViewer.setRgbFrame(frame, lightOn)) return false;
+      const colors = frame.map(color => color.slice());
+      window.pendingRgbFrame = legacy ? colors : { colors, light_on: lightOn };
+      return true;
+    };
     if (window.qt && window.QWebChannel) {
       new QWebChannel(qt.webChannelTransport, channel => {
         window.robotBridge = channel.objects.robotBridge;
@@ -40,6 +61,11 @@
           const state = JSON.parse(json);
           window.pendingRobotState = state;
           if (window.robotViewer) window.robotViewer.setState(state);
+        });
+        window.robotBridge.rgb_changed.connect(json => {
+          let payload;
+          try { payload = JSON.parse(json); } catch { return; }
+          window.receiveRobotRgbPayload(payload);
         });
         if (window.robotViewer?.loaded) window.robotBridge.viewerReady();
         if (window.robotViewerError) window.robotBridge.viewerError(window.robotViewerError);

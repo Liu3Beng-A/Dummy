@@ -45,11 +45,18 @@ extern CAN_HandleTypeDef hcan;
 /* USER CODE END Private defines */
 
 void MX_CAN_Init(void);
+void CAN_UpdateFilters(void);
 
 /* USER CODE BEGIN Prototypes */
 void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data);
 bool CAN_TrySend(CAN_TxHeaderTypeDef* pHeader, const uint8_t* data);
 void CAN_PollTransmit(void);
+bool CAN_QueueStreamReply(CAN_TxHeaderTypeDef* header,const uint8_t* data);
+void CAN_CancelStreamReplies(void);
+bool CAN_StreamReplyFault(void);
+uint32_t CAN_StreamReplyDiagnostic(uint8_t field);
+// max[normal,stream,cal], late[...], gap[...], encoder max, control max.
+extern volatile uint32_t motorControlTiming[11];
 // RAM-only diagnostics. The numbering mirrors ProtectionProtocol::CD_*;
 // this C header is shared by the interrupt/main code and the C++ transport.
 enum MotorCanDiagnosticIndex {

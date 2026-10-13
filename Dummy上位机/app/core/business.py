@@ -1116,12 +1116,12 @@ class RobotBusiness:
         try:
             point = self._normalize_teaching_point(record)
             value = self._validated_speed(point.speed if speed is None else speed)
-            command = None if point.kind == "MOVEL" and self.cartesian.backend.value == "host" else self._teaching_command(point, value)
+            command = None if point.kind == "MOVEL" and self.cartesian.backend.value == "stream" else self._teaching_command(point, value)
         except (ValueError, TypeError, OverflowError) as error:
             self.log(f"点位无效，未发送：{error}", "WARN")
             return False
         if point.kind == "MOVEL":
-            if continuous and self.cartesian.backend.value == "host" and self.cartesian.active and self.cartesian.kind == "points" and not self.cartesian.sequence:
+            if continuous and self.cartesian.backend.value == "stream" and self.cartesian.active and self.cartesian.kind in ("points", "stream") and not self.cartesian.sequence:
                 self.cartesian.retarget = (point, speed)
                 return True
             return self.send_cartesian_point(point, speed)
@@ -1167,13 +1167,13 @@ class RobotBusiness:
             return False
         try:
             snapshot = tuple(self._normalize_teaching_point(record) for record in self.stored_positions)
-            if self.cartesian.backend.value != "host":
+            if self.cartesian.backend.value != "stream":
                 for point in snapshot:
                     self._teaching_command(point, speed)
         except (ValueError, TypeError, OverflowError) as error:
             self.log(f"顺序点位无效，未查询模式或发送：{error}", "WARN")
             return False
-        if self.cartesian.backend.value == "host":
+        if self.cartesian.backend.value == "stream":
             return self.cartesian.start_points(snapshot, speed, sequence=True)
         self._seq_pending = snapshot
         self._seq_idx = 0

@@ -46,9 +46,52 @@ class RGBPreviewUiTests(unittest.TestCase):
     def receive_config(self):
         self.controller.is_connected = True
         self.controller.serial_port = FakePort()
+        self.controller.send_cmd("#RGB_GET")
         for line in READBACK:
             self.controller._process_rx_line(line)
         self.assertTrue(self.controller.rgb_snapshot()["complete"])
+        self.commands()  # This helper models the initial read-only config fetch.
+
+    def test_default_follow_button_local_edit_and_model_light_share_frames(self):
+        w = self.window
+        self.assertEqual(w.rgb_preview_source.currentIndex(), 1)
+        self.assertFalse(w.rgb_preview_source.isVisible())
+        self.assertTrue(w.rgb_preview_source_button.isVisible())
+        self.assertFalse(w.rgb_preview_mode.isEnabled())
+        self.assertIn("未连接", w.rgb_ring.toolTip())
+        self.assertFalse(hasattr(w, "motion_rgb_ring"))
+        self.assertFalse(hasattr(w, "motion_rgb_overlay"))
+        w.rgb_preview_source_button.click()
+        self.assertEqual(w.rgb_preview_source.currentIndex(), 0)
+        self.assertTrue(w.rgb_preview_mode.isEnabled())
+        self.assertIn("返回设备", w.rgb_preview_source_button.text())
+        self.assertEqual(w.viewer.rgb_frame, w.rgb_ring._colors)
+        w.rgb_preview_source_button.click()
+        self.assertEqual(w.rgb_preview_source.currentIndex(), 1)
+        w.fields["_rgb_bright"].widget.setValue(70)
+        self.assertEqual(w.rgb_preview_source.currentIndex(), 0)
+        self.assertEqual(self.commands(), [])
+
+    def test_zero_breath_frames_keep_power_on_and_fade_out_keeps_cover_active(self):
+        w = self.window
+        w.rgb_preview_source.setCurrentIndex(0)
+        w.rgb_preview_state.setCurrentIndex(w.rgb_preview_state.findData("DISABLED"))
+        w._rgb_draft["brightness"] = 1
+        w._rgb_simulator.reset(initial_brightness=0)
+        zero = [(0, 0, 0)] * 24
+        with patch.object(w._rgb_simulator, "frame", return_value=zero):
+            w._render_rgb_preview()
+            self.assertEqual(w.viewer.rgb_frame, tuple(zero))
+            self.assertIs(w.viewer.rgb_light_on, True)
+            # Turning the switch off must preserve an already running fade-out.
+            w._rgb_simulator.reset(initial_brightness=30)
+            w.rgb_preview_on.setChecked(False)
+            w._render_rgb_preview()
+            self.assertIs(w.viewer.rgb_light_on, True)
+            w._rgb_simulator.reset(initial_brightness=0)
+            w._render_rgb_preview()
+            self.assertIs(w.viewer.rgb_light_on, False)
+        self.assertEqual(self.commands(), [])
 
     def test_local_edit_and_state_preview_never_send_commands(self):
         w = self.window
@@ -126,6 +169,11 @@ class RGBPreviewUiTests(unittest.TestCase):
         w.rgb_preview_source.setCurrentIndex(1)
         self.assertTrue(w._rgb_render_timer.isActive())
         w.navigation.setCurrentRow(0)
+        self.assertTrue(w._rgb_render_timer.isActive())
+        self.assertFalse(hasattr(w, "motion_rgb_ring"))
+        self.assertEqual(w.viewer.rgb_frame, w.rgb_ring._colors)
+        self.assertTrue(self.controller._rgb_monitoring)
+        w.navigation.setCurrentRow(1)
         self.assertFalse(w._rgb_render_timer.isActive())
         self.commands()
         self.controller._poll_rgb()
@@ -157,6 +205,7 @@ class RGBPreviewUiTests(unittest.TestCase):
             w._render_rgb_preview()
         self.assertIn("状态已过期", w.rgb_ring.toolTip())
         self.assertFalse(w._rgb_follow_seeded)
+        self.assertIs(w.viewer.rgb_light_on, False)
         for line in READBACK[:5]:
             self.controller._process_rx_line(line)
         self.assertTrue(w._rgb_follow_seeded)

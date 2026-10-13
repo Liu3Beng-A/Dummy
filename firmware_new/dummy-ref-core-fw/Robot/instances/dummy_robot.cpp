@@ -828,6 +828,7 @@ void DummyRobot::ResetStopDiagnostics()
 
 void DummyRobot::RequestSoftStop()
 {
+    CoreStreamCancel();
     const bool cancelCalibration = IsCalibrationBusy();
     if (protection) protection->Cancel(false);
     taskENTER_CRITICAL();
@@ -882,6 +883,7 @@ bool DummyRobot::RequestStart()
 
 void DummyRobot::RequestDisable()
 {
+    CoreStreamCancel();
     if (protection) protection->Cancel(true);
     taskENTER_CRITICAL();
     rgb.EndBoot();
@@ -1233,7 +1235,8 @@ RGB::State DummyRobot::GetRGBState() const
     else {
         const unsigned mode = unsigned(commandMode);
         const bool moving = mode == COMMAND_MOTOR_TUNING ? tuningHelper.IsActive() : motionActive;
-        state = mode >= 1 && mode <= 4 ? RGB::State((moving ? RGB::RUN_SEQ : RGB::READY_SEQ) + mode - 1) : RGB::FAULT;
+        state = mode == COMMAND_STREAM_JOINT ? (CoreStreamBusy() ? RGB::RUN_TRJ : RGB::READY_TRJ) :
+            mode >= 1 && mode <= 4 ? RGB::State((moving ? RGB::RUN_SEQ : RGB::READY_SEQ) + mode - 1) : RGB::FAULT;
     }
     taskEXIT_CRITICAL();
     return state;
@@ -1266,6 +1269,7 @@ bool DummyRobot::IsMoving()
 {
     if (stopState == STOPPING) return true;
     if (stopState != NORMAL) return false;
+    if (commandMode == COMMAND_STREAM_JOINT) return CoreStreamBusy();
     if (commandMode <= COMMAND_CONTINUES_TRAJECTORY) return motionActive;
     return (jointsStateFlag & 0xFE) != 0xFE;
 }
@@ -1565,8 +1569,13 @@ bool DummyRobot::WaitMotionCompletion(uint32_t id, uint32_t epoch)
 bool DummyRobot::TrySetCommandMode(uint32_t mode)
 {
     taskENTER_CRITICAL();
-    const bool allowed = !IsStopLocked() && !motionActive && !commandHandler.IsBusy() &&
-        mode >= COMMAND_TARGET_POINT_SEQUENTIAL && mode <= COMMAND_MOTOR_TUNING;
+    // Configuration-only cleanup after confirmed STOP. No enable, reference or
+    // lock state is changed, and no other mode transition gains this exception.
+    const bool stoppedStreamRestore = stopState == STOPPED && !startPending &&
+        commandMode == COMMAND_STREAM_JOINT && mode == DEFAULT_COMMAND_MODE &&
+        !IsCalibrationBusy() && !IsProtectionParameterBusy();
+    const bool allowed = (!IsStopLocked() || stoppedStreamRestore) && !motionActive && !commandHandler.IsBusy() && !tuningHelper.IsActive() && !CoreStreamActive() &&
+        ((mode >= COMMAND_TARGET_POINT_SEQUENTIAL && mode <= COMMAND_MOTOR_TUNING) || mode == COMMAND_STREAM_JOINT);
     if (allowed) commandMode = static_cast<CommandMode>(mode);
     taskEXIT_CRITICAL();
     return allowed;

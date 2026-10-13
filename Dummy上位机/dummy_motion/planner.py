@@ -15,7 +15,7 @@ class LinePlanner:
         self.solver = IKSolver(model)
 
     def plan_line(self, start_state, target, motion_limits=None, tool=None,
-                  rail_policy=RailPolicy.AUTO, cancelled=None):
+                  rail_policy=RailPolicy.AUTO, cancelled=None, quantize=True):
         limits, tool = motion_limits or MotionLimits(), tool or Tool()
         q = vector(start_state, 7)
         if not self.model.valid(q):
@@ -75,7 +75,7 @@ class LinePlanner:
             if cancelled is not None and cancelled():
                 return PlanResult(Status.CANCELLED)
             try:
-                _, quantized = movej_command(self.model, q, pose, tool)
+                _, quantized = movej_command(self.model, q, pose, tool) if quantize else (None, q) if quantize else (None, q)
             except ValueError as exc:
                 return PlanResult(Status.NO_LOCAL_SOLUTION, reason=str(exc))
             samples.append(Sample(i * dt, quantized, pose))

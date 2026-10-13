@@ -63,7 +63,7 @@ def default_config() -> dict:
             "READY_TRJ": (12, 0, 0, 0, 0), "READY_TUN": (2, 1, 160, 0, 255),
             "RUN_SEQ": (8, 2, 0, 0, 0), "RUN_INT": (8, 3, 0, 0, 0),
             "RUN_TRJ": (8, 4, 0, 0, 0), "RUN_TUN": (5, 1, 160, 0, 255),
-            "CALIBRATION": (8, 1, 255, 180, 0), "STOP": (9, 1, 255, 180, 0),
+            "CALIBRATION": (8, 1, 255, 180, 0), "STOP": (7, 1, 255, 180, 0),
             "STARTING": (4, 1, 0, 255, 255), "FAULT": (7, 1, 255, 0, 0),
         },
     }
@@ -211,6 +211,9 @@ def _select_scene(c: _Config, state: str, source: str | None) -> _Scene:
     scale = 0.15 if selected == "DISABLED" else 0.25 if selected.startswith("READY_") else 1.0
     if state == "FAULT":
         mode, solid = 7, (255, 0, 0)
+        effect = _Effect(first=solid, period=1800)
+    elif state == "STOP" and mode == 7:
+        # Firmware fixes STOP heartbeat timing, preserving the binding color.
         effect = _Effect(first=solid, period=1800)
     return _Scene(mode, selected, solid, effect, scale)
 

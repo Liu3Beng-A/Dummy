@@ -1,3 +1,52 @@
+## 已完成：模型灯环明暗压缩、低亮度保色与呼吸平滑（2026-10-13，待用户复测）
+
+- **当前问题 / 授权**：用户认可此前模型/配色/浅白虚体/删除左上圆环等修改，并授权推荐的抬暗、压亮、保色方案。用户初测认为效果还行，继续要求修复失能呼吸跳变和低亮度饱和度异常；本节为完成后的最新状态，保留此前全部已认可功能。
+- **已确认事实**：最初3D通道将PWM当sRGB图片解码、8位线性量化，4%运动底光压至1/255且被白罩反射盖住。首次修改后，raw1～5又驱动白反射由90%降到0.314%，导致失能WHITE_BREATH（满亮PWM1～38）出现亮度反转和颜色突变。单位中性反射的离线计算例白光236→229→205→142→96、绿PWM4→5饱和度21%→99%；这些是显示模型计算，不是实机测光。常规10Hz状态回读不会重置相位；输入帧全零不能区分呼吸低谷、闪烁与全局关灯。
+- **最新改动 / 显示**：resources/viewer/model_rgb.js先散射原PWM，再用toe=0.003、指数0.45、上限0.7的连续峰值曲线同比缩放RGB；在0附近采用有限斜率。viewer.js将发光与Phong反射分离，仅反射走原ACES，发光在输出sRGB转换前加回，倍率1。对显示PWM用60ms时间常数缓动，采用RGBA16F保留分数低亮度；原整数目标不变，隐藏/实际长绘制暂停后直接跟上最新值，去重消息间隔不触发跳步。
+- **最新改动 / 灯罩状态**：robot_view.py::set_rgb_frame增加可选严格布尔light_on，与帧原子缓存/去重并独立发送，仍不刷新姿态或回读年龄。main_window.py从配置开关、设定亮度及正在进行的渐关获取整体开灯状态，不从当前RGB0判断关灯；不可用明确False。index.html接受新对象{colors,light_on}及旧数组并保持加载次序/错误帧原子隔离。开灯期间白反射稳定0.2%，零值呼吸/闪烁低谷不变罩体；真正关灯后平滑恢复灰白，渐关RGB不被强清。纹理alpha仅诊断，不参与opacity/白反射。目标虚体、主体材质、关节平滑、坐标和既有配色保留。
+- **验证结果**：最终Python模型/桥/RGB UI 23项、基础UI 27项、Node显示曲线/阻尼/保色/纹理/真实STL UV/真实Phong契约13项通过，共63项。离线真实Qt/WebGL验证RGBA16F、两主题各10种状态、同帧on/off、低白/绿PWM0～38单调输出、整段3800ms失能周期、虚体隔离/地轨变换/关闭清理；白反射全周期稳定，没有原瞬时亮度反转。日志、截图与原始帧/显示帧记录在Dummy上位机/build/qa/model_light_smooth_20261013/，前一轮记录另保留在model_light_response_20261013/。语法与作用域diff检查通过，未连接串口或发送实机指令。
+- **文件 / 边界**：修改app/ui/main_window.py、app/visualization/robot_view.py、resources/viewer/{model_rgb.js,viewer.js,index.html}，相关测试、两个README和本节；没有修改固件、controller、transport、RGB模拟器波形、10Hz读取或RGB页面绘制算法。没有打包或提交。用户重启源码版后复测实际观察到的呼吸与低亮颜色；软件验证不等于实物亮度标定。
+- **并行协调**：按用户最新要求停止常规任务间联系，只有共享文件/最终源认证发生实际重叠时同步。对方已完成并冻结运动scope，563项历史结果明确为本次视觉迭代前版本，不冒充当前合并源。本任务新增本独立段，保留对方13.05段；最终SHA清单在model_light_smooth_20261013/final-source-sha256.json，后续共享回归须读当前合并源。
+
+---
+
+## 已完成：13.05恒定原地曲线供给与轮询修复（2026-10-13，待实机）
+
+- 范围与协调：用户授权三项修复，仅stream_curve.cpp、core_stream_engine.cpp及controller.py轮询条件、独立测试/协议/构建默认。视觉任务继续独立迭代，独占模型/灯环/UI/README/test_ui；本包只发冻结运动部分，共享状态只替换本节，其他记录保留。不提交/设备。
+- 实机依据：新J4 OPEN16/16、新J1更新后9/9；6轮曲线source1运行缺前瞻，主控积压15～16、PC补点4～6ms。新轴提交采样28～37/s，旧J2约50/s。准备15.451/7.800ms含抢占；两轴20k峰值均超50us，平均成本分解未测。
+- 实施：恒定段完整Bernstein后精确零差分，热Tick不变；全COMMIT ACK先发布但保留60/500ms时限、部分ACK/STOP/Poll/真实欠载保护，fault填真实now；axis_test暂停GUI重复GETJPOS，worker50Hz/RGB/transport不变。
+- 验证：PC focused63及独立5验证冻结motion源；Python563项全部通过的执行记录结束时3视觉JS源变化，只存为历史，不认证当前视觉新源；motor oracle12179925/curve1227269/protocol473/feedback197253/entry691；core2522/parser135/geometry19/adapter967；真实七轴CAN1083255/理想3649，显式准备压力9组8完成1正确停止。所有软件模型不能替代ARM时间与实际机械跟随。
+- 构建：release=2026101305 batch=77ABFEDED8E44D32 source=9f4d84ae4f80342adee6059b1d6e01ac9754ca7ac55415f515eb2d7d2ed950a5，5目标/500源/HEX/身份/分区通过。CoreFlash482316/RAM56700/linked74112，motor35/42Flash96908余372，57余380/grip余588，静态10964/link15576余4904/MSP4096不变。Build frame+8至264，CorePoll64，40热函数规范化指令/帧保持，Guard无64div，优化与分区不变。
+- 交付：firmware_artifacts/CURRENT_RELEASE与underrun-notes-2026101305.txt/verification/SHA256SUMS统一索引，本聊天包包含冻结运动controller/补丁及相关FW/测试，不含视觉未定版本。先主控+J4M35，源码重启3轮握手+5轮原地，逐轴→65→127；参与轴必须对应新motor。默认主控，无新位移/IK/标定/固定TCP，保留J7物理校准方向。
+- 待板验：本轮恒定段准备/实际提交吞吐、完整20k周期超时增量及栈水位；通用非零曲线准备和MoveL平滑性仍下一阶段。未烧录，不宣称UNDERRUN实机已消失；当前只交付可验收修复。
+
+---
+
+## 已完成：独立模型灯环、黑灰配色与浅白虚体（2026-10-13；灯环明暗方案待讨论）
+
+- **当前问题 / 授权**：用户授权将新base/light网格加载到上位机，依次调整配色、虚体与界面灯环；最新明确“其他改动我测试认同了，可以保留”。这部分完成并保留。用户另要求先解释light暗光过暗、高光过亮，再提供方案；本轮只分析新的亮度/保色需求，尚未实施新的显示曲线。
+- **已确认事实 / 坐标**：只处理Dummy上位机显示模块，不改固件和串口运动逻辑。新base/light与旧正确模型比对证明导出坐标已一致，使用单位变换；127907个共享基座顶点刚性拟合RMS为3.525e-17m，新灯环全部15430个独立顶点、30860个三角面精确匹配旧基座。没有为用户描述的坐标问题盲目添加旋转/偏移。根目录原始导出保留，旧完整基座与URDF备份在Dummy上位机/build/qa/model_light_20261013/reference_snapshots/。
+- **最新改动 / 模型**：内置base_link.STL拆出light.stl，URDF以base_link第二visual rgb_diffuser加载灯罩，原9个关节定义及其余9份网格不变。11个网格共1934324个三角面；灯环中心本地Z=0.189967m、径向34.400～44.304mm，随基座地轨变换。最终配色base_link及Link1～5为0.035黑色，Link6和两夹爪手指为0.10深灰，light为0.85浅灰白，地轨保持原色。
+- **最新改动 / 显示**：robot_view独立rgb_changed/set_rgb_frame通道，24×3整数帧严格验证、缓存及去重，不借姿态更新发送灯帧。viewer使用288点环向散光纹理；实际灯罩发光强度2.8，亮起处压低白罩反射；虚体不带发光纹理。目标虚体浅白0xe8edf3、普通透明度0.12/选中0.22。运动页左上2D灯环已删除，RGB页预览、实际3D灯、共用动画与10Hz设备监控保留。README与viewer说明同步。
+- **验证结果**：最终源码模型/RGB UI/手柄UI/笛卡尔UI共52项通过，Node灯纹理/UV/材质契约8项通过，语法与作用域diff检查通过；Qt/WebGL软件渲染验证11网格/9关节、实际灯随地轨100mm平移、虚体隔离、熄灯/绿光/彩虹/旋转及浅深主题，最后无左上圆环。资产审计确认其他网格/关节未变。日志、截图、注册报告、final-source-sha256.json均在Dummy上位机/build/qa/model_light_20261013/。本任务未连接串口或操作硬件、未打包、未提交；全量合并suite由并行任务在双方源稳定后另行执行。
+- **最新分析 / 已排除方向**：用户实物照片暗部保持绿色、模型却偏白。rgb_simulator.py与firmware_new rgb.cpp的GREEN_SPIN暗底均4%，满亮背景G=10；model_rgb.js先做sRGB解码再写8位线性纹理，将背景压至1/255，同时shader保留约76%白罩反射。散光后的旋转亮头/暗底发光比约165；READY绿G64对应纹理13/255、白反射仍约20%。所以白罩盖住暗绿，高光又受2.8增益和ACES色彩压缩影响。动画帧未丢，不是查询频率或固件基底算法不一致；单纯继续提高全局增益不能同时修复暗圈与高光。
+- **未完成 / 方案**：建议仅给3D灯罩用保色的峰值显示曲线抬暗压亮，亮起区域减少白色反射，发光保色映射与机器人主体材质分离；输入0仍不发光、保留灰白罩。也可先只修弱光换算和白罩反射作较保守方案；不改固件、实际亮度、动画时序与查询频率。具体显示曲线仍待用户决定，数值证据brightness-analysis.json。
+- **并行协调**：已与“设计含地轨的MoveJ逆解方案”任务互通范围。对方仅改stream_curve.cpp、core_stream_engine.cpp及controller.py::_position_polling_paused一行等独立运动测试/说明；本任务不进入其controller/transport工作。旧整文件快照安装器禁用。最终视觉源MainWindow SHA256=3e8f83c523d9e6cb92302ffdb58791b24d0b38d4e4084edf957ae299b81a1842，viewer.js=3a4245358f90ac2077bb18db04256de04bb235523908ae255bc9d5859d17c2e5；本节落盘后通知对方读最新SESSION再追加独立段，并基于当前合并源重新验证。
+
+---
+
+## 已完成：新鲜稳态准入与独立START现场（2026-10-13，13.04待实机）
+
+- 范围：用户授权三项修复；OPEN/START共用新鲜50ms证据，goal/home/mode/保护/反馈等变化立即失效并重新积完整窗；保持硬保护、精确SEED与OPEN锁存home。独立START快照、旧token归属清理、原始fault与阶段、真实START确认、明确测试目标及STOP关闭尾窗均处理。
+- 协议：v2/mode7/92字节/50Hz不变，真实CAPS bit2才输出本会话STREAM_FEATURES steady/start轴位图；新DIAG34..50按能力探测。旧电机按旧bit12解释，不查询新field；新固件bit12=证据不足/过期，STARTbit19=goal/home锁存绑定。
+- 验证：最终合并host完整555项；电机真实窗口691、协议473、反馈197253、曲线1227269；真实CAN联合1083255、理想3649；core1569/parser135/geometry19/adapter967，保护/地轨校准1851均通过。软件模拟不是噪声来源或真机测时证据。
+- 构建：五种ARM统一release=2026101304 batch=E54E6BD535CD448B source=4a50e6b10b66fa86f21aa91c714700ba51ef693972ccc144f12c7a5bb1a6a6c6，500份源/身份/HEX/分区核验通过；主控Flash482140/linkRAM74112，motor35/42Flash96836余444、57余452、gripper余660，电机静态10964/link15576/20KiB，MSP4096、地址堆5416。热路径优化与分区不变，低频局部Os回收Flash、Guard均速用有界32位除法。
+- 合并：根代理旧快照安装器曾覆盖并行RGB MainWindow，已停用并由RGB任务局部恢复，最终对合并源重新回归；不再恢复旧产品快照，保留RGB/controller/store/viewer与其他授权修改。
+- 交付：统一firmware_artifacts/CURRENT_RELEASE、steady-entry-notes-2026101304.txt及本聊天交付包；先新主控+J4对应新motor、源码重启，上方J4OPEN十轮（CLOSE后2秒），通过后下方J4原地曲线，再扩轴。默认主控，无新位移/标定/固定TCP移轨；保留J7已授权物理校准方向。
+- 待验收：真实J4准入/嗡鸣来源、完整20kHz WCET/IRQ延迟和栈水位；普通有限MoveL晚数字fault被旧STOP生命周期取消时的同等完整恢复报告尚属下一阶段，不据原地测试宣称IK/真实位移平滑性通过。未操作设备、未提交。
+
+---
+
 ## 已完成：STOP黄色双心跳，与堵转节奏一致（2026-10-13，13.04待实机）
 
 - **当前问题/授权**：用户要求了解firmware_new RGB并把STOP改成堵转同样的双闪、保持黄色；已确认三文件修改方案并回复“执行”。
@@ -6,6 +55,52 @@
 - **已排除方向**：只改Defaults无法覆盖已保存旧配置；直接改7号主色会破坏红色报警；每次加载v2均识别旧默认会覆盖以后用户主动保存的相同绑定，故用v3区分迁移边界。未改运动/STOP控制、电机固件源码和其他待确认修复。
 - **验证结果**：直接编译当前生产RGB.cpp，31439项原生断言通过，覆盖三周期逐灯曲线与颜色、双峰、手动参数隔离、v1/v2/v3及用户自定义保存恢复、CRC/未来版本拒绝、实际PWM/亮度0/关灯；日志 `firmware_artifacts/test-rgb-stop.log`。两工程Release/Ninja全五目标成功，统一身份/源码摘要、BIN/HEX、链接分区及映像校验通过；主控Flash481764B、链接RAM74112B，电机源码未改且资源预算保持原值。沿用链接器RWX段警告，无新编译错误。
 - **交付/待确认**：`firmware_artifacts/`全五套ELF/MAP/BIN/HEX/manifest、构建日志与verification.json已更新；release=2026101304，buildset=B0D129E6310444E0，source_sha256=17a9ffa8b432b3f41a160a5bcddf9ac7f826e2cdadae0b245034da85a47ef884。说明 `rgb-stop-notes-2026101304.txt`，CURRENT_RELEASE/SHA256SUMS同步。此次灯效只需更新主控；默认及旧默认绑定直接生效，无需RGB_RESET，RGB_GET中STOP应mode7、颜色来源1、255/180/0。迁移后dirty=1属预期，实际失能后可显式RGB_SAVE保存。灯环物理表现待用户验证；未烧录或操作设备。用户另行授权单独提交本轮RGB源码与两份文档；SESSION_STATUS只提交本节新增记录，其他已有改动保留在工作区。J4静止准入等既有待确认问题本轮未处理。
+
+---
+
+## 已确认：J4纯握手13轮10通过3拒；节点选择疑问已解决（2026-10-13）
+
+- 用户明确确认此前上方诊断节点未改J4；路由疑问解决，现有独立选择器绑定无须以错误发送为由修正。
+- 新增真实J4 OPEN-only13次：前5速度0通过；后8速度155/438/603拒/322/45/267/553拒/612拒。合计10通过3拒，尾批8中3拒。
+- 全13 goal=soft=actual=-8461、home=-8458、参考v0、settled1、关闭确认；3拒仅bit12。实际WIRE核验本组没有曲线/START/全机STOP，纯握手已足够证实瞬时速度门槛的间歇准入拒绝；不再要求重复同类补测。
+- 拟最小修复：OPEN/START共享新鲜目标/home/模式有效的50ms稳态资格并保留硬保护，补独立START拒绝快照；host保留原始fault主因、START确认前等待、测试目标明确显示。不能只改OPEN/raise512/clear估速/只信settled。
+- F103资源前置：motor35/42现Flash97132/97280余148B、57余156B；需复用低频重复代码并核算新资格/快照，保留分区和20kHz优化。现固件2026101303不变；本轮只记录，未改产品/构建/烧录/操作设备/提交。
+- 证据work/user_j4_confirmed_retest.json；本聊天outputs/J4静态补测结论_20261013.txt。物理波动来源仍未实测，START28545具体分支仍待新增现场，不能拿OPEN时刻速度代替。
+
+---
+
+## 当前分析：用户报告选J4但OPEN发送J1，当前源码贯通未复现（2026-10-13）
+
+- 用户14:10～14:16附件五轮OPEN-only实际命令末参数全1（60111/13514/60992/49571/61429），均J1通过，不能记成J4十轮样本。两次曲线真正J4：18515完整通过，10991仅OPEN bit12估速857拒绝，参考v0/目标=参考=实际/settled1。
+- 当前UI两独立combo：self.node控制诊断及OPEN，axis_test_selector控制曲线；MainWindow只创建一次并直接绑定，set_state不重置。真实MainWindow+controller+RX/TX线程+假串口19组贯通全部正确，包括上4下1发4、上1下4发1；另7项UI专项通过。证据work/diagnostic_selector_runtime_trace.json。
+- 不能从缺少点击时UI状态的日志断言用户误选或运行源码一致；已异步询问是哪一个选择框，尚待答复。建议先上框从J3切J4只做一轮，确认!STREAM_TEST新token4；仍发1保留完整界面和运行版本/路径。可手工!STREAM_TEST60004 4绕过选择，只确认节点和关闭。
+- 三次STALL_STATUS4 LIVE确是新原子采样（req37584～86，at_ms345091/348371/351691）、真实estVelocity0；NO_MOTION不清estVelocity。首份在失败12.8s之后且已START，不能排除此前毫秒级峰值。
+- 本轮仅分析、假串口验证及状态文档记录；未改产品/构建/烧录/操作硬件/提交。后续UI建议动态显示测试目标、标明两个框用途、记录点击选择；未实施。原静止准入修复仍待确认；详细核对在本聊天outputs/诊断节点选择核对_20261013.txt。
+
+---
+
+## 当前分析：静止OPEN/START瞬时速度门槛间歇拒绝，J1/J4/J6均出现（2026-10-13）
+
+- **请求/范围**：用户13:37～13:41测试失败要求分析、给补测；本轮只读日志/WIRE和代码，离线数学复现，未改产品/编译/操作设备/提交。用户确认无末端额外负载、可闻嗡鸣。
+- **已确认**：J4 37931/18338/40766仅OPEN bit12=0x1000，估速526/-1312/760超过±512，参考v0、goal=soft、实际差0或3、settled1；47619完整曲线通过，13005握手通过速度427。七轴32453首先J1速度822拒绝，23238由J6速度-1207拒绝，非J4独有。J2/J3/J5/J6和J1+J7亦完整通过；RX间隔20～33ms，清理和恢复2确认。
+- **START问题**：28545 WIRE25条seq0..24全部CRC正确/qva全0；主控ARMED、prep08/commit08/start00，电机BAD_SEED15拒START。OPEN=-215快照不能代表START；具体速度/误差/参考/种子分支缺START快照，未断言。src9是SOURCE_MOTOR，st4是ARMED，cmd47是STATUS0x47。
+- **代码原因**：stream_controller.cpp:84及:333采用瞬时估速±512；motor.cpp:133估速20kHz差分/32，仅1细分跳动即625。普通到位和STOP则50ms有符号均速+位置范围。1～4细分有界波动模型能通过稳态却被瞬时门槛拒；实际来源（编码器量化/噪声、闭环微振或时序）尚待静态样本。此前理想保持通信测试未覆盖此波动。
+- **上位机显示缺陷**：error STOP_LOCKED先设axis_error，后到原始fault只用old or message，标题被STOP覆盖；数值/上下文仍有15/9。发送START后过早显示执行，即使还未START确认。拟修，尚未改。
+- **补测/下一步**：固定pose静止3s，J4 OPEN-only10次间隔2s，J1/J6各5次对照；逐次#STALL_STATUS4三次等end记录LIVE；可选CAN_DIAG和DIAG8/11/14前后对比。OPEN-only拒绝不全机STOP。无需先烧录、不调PID/电流、不HOME/RESET改姿态，不继续七轴曲线。
+- **建议修复待确认**：先补START同token快照，OPEN/START用新鲜目标/模式有效的50ms稳定证据且保留全部硬门槛；不简单raise512/清估速/只信settled。现固件仍2026101303，产物不变。详细说明在本聊天outputs/J4静止准入失败分析与补测_20261013.txt；证据work/user_j4_28545_wire_analysis.json和open_velocity_gate_analysis/result.json。
+
+---
+
+## 已完成：扩展七轴原地曲线通信入口（2026-10-13，13.03待实机）
+
+- **用户通过证据**：J1会话921、J7会话32472、双轴会话1667三组均101条/接受100/执行100/CLOSE及恢复2确认；RX间隔22.1/31.6/32.5ms。附件只有结果；证据user-axis-hold-three-passes.json，不宣称真实位移/IK已验证。
+- **本轮范围与修改**：沿用“成功后覆盖所有关节”授权；axis_communication_test.py扩7单轴/65/127，terminal_diagnostics.py九项选择，core_stream.cpp仅能力127；旧mask65兼容旧三选项，新项在MODE/OPEN前拒绝。始终锁存目标、100个20ms零v/a段，不自动使能、不接IK/位移，默认主控后端保留。
+- **公平健康修复**：单在途DIAG7、RX时间+nonce逐轴匹配、所有selected600ms检查；已接受请求不再每50ms重发占邮箱，仅明确busy重试；按发出时间调度。18ms/单邮箱压力模型发现并修复等待累积和重复查询BUSY链。最终核对保持参考期间仍检查actual300ms，CLOSE前再检查。
+- **启动RX修复**：axis字段及公共worker字段全部初始化后才发布active、emit和启动线程，修复首次JPOS/BUSY/STOP回包访问未初始化状态的窗口；确定性用例与完整回归覆盖。共享stream_session.py初始化顺序同步调整。
+- **退出通知修复**：GUI终态/模式结果在旧worker确实退出后才发布，保留线程并发门禁和epoch过滤，消除显示complete后立即切回主控被尚存线程拒绝的微窗；确定性barrier及回归验证。
+- **验证**：host完整525项、专项61项、UI/OPEN/门禁22项通过；核心1361/135/19/708，实际生产CAN联合33场景1083255检查通过，七轴锚点0tick仅模型。五ARM/身份/摘要/HEX/分区通过；主控Flash481524B/链接RAM74112B，motor最紧148B Flash余量/5000B链接RAM余量，栈预留不变。板上水位和完整20kHzWCET未测。
+- **交付**：release=2026101303，buildset=711EA1F653D8456D，source_sha256=3494de2271d0b771a4df2da00b1ab38a28a0df34c6f09eb2b2fbd53de45860ed；统一firmware_artifacts，axis-communication-notes-2026101303.txt和CURRENT_RELEASE。当前源同时含已授权地轨物理触碰校准方向修正，不能称motor仅56B身份差异；通信透传代码未改、老13.01/02motor可用于原地通信。
+- **下一步**：用户烧新主控/重启源码上位机，依次J2..6原地，再同姿态七轴。各单轴/全组实机仍待验收；真实位移、加载姿态OPEN/START门槛、IK和平滑性另一步。全127预START无1s自动清理，断连未知且重连拒残留接管，明确STOP/CLOSE处理。TCP标定、固定TCP移轨不做；代理未操作设备、未提交。
 
 ---
 
@@ -18,6 +113,107 @@
 - **验证**：在 `firmware_artifacts/.build/rail_calibration_test/` 使用当前实际 motor.cpp/stall_protection.cpp/motion_planner.cpp/protection_config.cpp，硬件与未启用 STREAM 接口桩替代；1851断言通过。覆盖 J7 距端点0/250/500mm全流程及+50圈标定/回0、保存后再次校准、端点正常触碰与途中 EARLY_CONTACT、四个校准阶段 DISABLE 取消、J8及原保护/退让/坐标保存回归。结果在 result.txt，源码摘要在 motor_source_manifest.json；属于离线模型，不是实机测量。
 - **构建 / 产物**：统一脚本五目标 Release 成功，唯一目录 `firmware_artifacts/`。并发工作更新主控 core_stream.cpp 后已重新构建；另一批构建随后覆盖同名产物，但源码摘要一致，最终再次核验五目标同组且与当前500份源码一致，ELF/清单/BIN/HEX/分区检查通过。核验时 release=2026101303，buildset=711EA1F653D8456D，source_sha256=3494de2271d0b771a4df2da00b1ab38a28a0df34c6f09eb2b2fbd53de45860ed，以当前 manifest/verification.json 为准。既有RWX链接警告仍存在。
 - **未完成 / 待实机**：地轨必须烧录包含本改动的 motor-57，随后由用户确认首次运动朝主控负向端、触碰/退开/复触/回0、再次校准及断电后的零点保持。本代理未烧录、未连接串口/STLink、未执行硬件运动。
+
+---
+
+## 已完成：双页RGB灯环、默认设备跟随与日志隐藏（2026-10-13，待实机）
+
+- **当前请求 / 授权**：用户要求终端像关节回读一样隐藏RGB查询/回报，在运动页三维左上角增加灯环、提示移右；默认跟随系统，用按钮切换本地编辑预览，编辑时自动切本地，并同步固件修改的STOP内置灯效。最新修正：首页只保留圆环、透明背景和中心、无文字/亮度，尺寸为原80%；读取从1Hz改10Hz，亮度0罩体调暗。最后这次视觉调整用户要求不再通知另一个agent，已遵守。
+- **已确认事实**：原RGB动画/监控仅RGB页可见时启用、默认本地源；监控本身1Hz但GET/STATUS有分别的预算。当前固件rgb.cpp STOP默认为模式7、橙黄255/180/0；STOP用心跳模式时周期固定1800ms且保留绑定颜色，原内置仍模式9闪烁。
+- **最新改动**：主窗复用单模拟器、单33ms渲染定时器和单10Hz监控；GET/STATUS共享100ms自动发送预算，完整配置等待与5秒重试间隔保留，参数/加速度任务及原有发送门禁不放宽。运动三维左上覆144×144散光圆环，新增RgbRing ring_only透明绘制、无背景盘/文字/亮度；罩体按主题降低明度，白光亮度逐步增加仍连续变亮。视图模式选择/状态/图例移右，鼠标穿透灯环。RGB页默认跟随，改为显式切换按钮；编辑参数自动本地，两个灯环共用帧。RGB隐藏开关默认启用并保存，显示/普通导出过滤查询和结构化回报，WARN/ERROR、设置指令、完整缓冲/磁盘/完整诊断保留。内置STOP同步固定1800ms黄色双心跳，其他设备绑定不覆盖。
+- **覆盖问题 / 已排除方向**：用户授权联系“设计含地轨的MoveJ逆解方案”任务后，对方确认子agent的install_host_stability.py从早期快照整文件回写MainWindow，连带删除本轮RGB块；对方已停用安装器，禁止旧快照恢复。本任务基于最新文件局部补回，保留test_clicked/TerminalDiagnostics/axis/stream接口；steady_host_source_snapshot.py仅哈希读取，不是覆盖源头。之后源码与哈希保持稳定。测试中的空拖发结果来自模拟连接未完成离线延迟回调；夹具先处理初始回调再发布连接，与真实connect路径一致，不改生产拖发逻辑。运动专项显式选择本地RGB源隔离自动查询，未放宽运动断言。
+- **验证结果**：最终RGB/UI/存储/STOP 68项、完整基础UI 27项、运动动作10项全部通过，共105个不同用例；另验证熄灯/25%/100%的两主题透明圆环。真实Qt/WebGL软件渲染加载本地URDF及10网格，浅深主题×1120×690/1440×900四组布局通过，灯环位于(12,12)、144×144，不与右侧状态/图例重叠，终端双隐藏开关可读。语法与作用域diff检查通过。截图/日志/metrics/最终15文件SHA在Dummy上位机/build/qa/rgb_ui_20261013；MainWindow SHA256=066a18bbb2c5a4a1bc5080692fae8d314af1e7c9be7aa55bcf9996fe7880eab2。
+- **合并回归补验**：另一个任务的完整回归发现快捷点位旧断言将返回首页后的正常#RGB_GET算作多余指令。仅调整tests/test_quick_points.py夹具：常规点位测试显式选择本地RGB源，保持commands()==[]严格断言；导航测试显式设备跟随，单独断言返回首页只发一次#RGB_GET，随后点击空槽仍无任何命令。没有修改产品门禁/查询逻辑。快捷点位6项及RGB UI/监控共27项通过（quick-points-rgb-final.log）；本任务累计111个不同用例通过。QuickPoint文件SHA256=e2325f1f4e4347d4f23915b4b1e134c19b0dd521e0f490a95b4b99dcb71a623f；最终SHA文件增补此测试。完整554套件及另一条stream时序失败由原任务负责，不据此宣称整个仓库全套通过。
+- **文件 / 待确认**：修改app/ui/main_window.py及rgb_ring.py、core/controller.py、core/rgb_simulator.py、storage/store.py、viewer/index.html及viewer.css、测试和README/本记录；实物串口10Hz回读及灯效由用户测试。没有连接或操作设备、修改固件、打包或提交，保留其他会话工作。
+
+---
+
+## 已完成：HOME / RESET发送时立即更新目标虚体（2026-10-13，待实机）
+
+- **当前请求 / 授权**：用户要求发送HOME和RESET时先将虚体改为对应位置。本轮修改上位机controller、main_window、相关测试、README及本记录；保留其他会话在途改动。
+- **已确认事实**：主控`dummy_robot.cpp::HomingForGeneration`目标为0/0/90/0/0/0、地轨0；RestingForGeneration为REST_POSE（0/-75/180/0/0/0）、地轨0。原上位机仅在匹配编号完成OK后发preset_pose_completed，之前虚体停留在编辑目标。
+- **最新改动**：controller成功入队HOME/RESET后发独立preset_pose_requested，不依赖queued/OK；main_window与完成处理共用目标预览更新，取消待拖发、同步两个关节编辑器并显示对应虚体，保持夹爪/速度和实际模型/回读。按钮及终端/自定义发送共用入口。本地拒绝或入队失败不改虚体；编号完成校验保持，不将预览当作到位。
+- **验证结果**：24项预设/Qt操作专项及92项基础通信、完整基础UI、手柄UI和快捷点位回归，共116项不同测试通过。覆盖按钮/终端直接发令立即显示、从MoveL/实际视图切回关节虚体、无回执不冒充完成、完成编号匹配、拒绝/入队失败不改预览、取消旧拖发和不额外发送MoveJ/HAND_POS；实际模型、回读标签、速度与夹爪保持。Python语法、实际布局源码复读及差异空白检查通过。
+- **未完成 / 使用**：用户重启源码版确认发送瞬间的虚体姿态。未连接或操作实机、未打包或提交；预览表示请求目标，完成仍需设备匹配OK，实体继续按实际回读更新。
+
+---
+
+## 当前阶段：J1原地曲线实机通过，J7和双轴待测（2026-10-13）
+
+- 用户要求先测单关节与主控/上位机通信，选J1/J7两种结构，再覆盖其他轴；根代理新增独立2秒原地曲线入口，不接IK、不发普通MoveJ、不下发目标位移。默认主控模式2，临时曲线模式7，关闭确认后恢复。
+- 用户实机J1会话23460通过：101条记录，接受/执行序号100、DONE/CLOSE及恢复2确认、RX最大间隔31.7ms、显示偏差0°。只读WIRE核查全部q1=0、v/a0；J1不移动正是设计目标。证据work/j1_hold_real_23460.json和用户10:46附件。
+- 当前固件release=2026101302，组F9B9EA0C12BA474A，源码128b14420ea0e65929ce2e4d4de09080cf1d4a972a54c808e8ae1ebc30e91abe；统一产物firmware_artifacts，说明axis-communication-notes-2026101302.txt。电机运行程序与13.01除56B身份记录外完全一致，可沿用已烧电机。
+- 核心增加65(J1+J7)掩码、#STREAM_AXES定向能力；partial OPEN onebit，START/SYNC/CLOSE定向，重发缺ACK节点，首个START入队即启执行deadline。partial预启动1s心跳超时后全机STOP保留token；127旧合同不变。
+- host新axis_communication_test.py独立int32种子、101段、选轴rawRX/诊断健康、DONE后150ms实际稳定；故障自动快照，用户STOP/DISABLE即时废弃尾包，CLOSE确认再恢复2，断连结果未知。UI在终端选J1/J7/J1+J7。
+- 测试：完整host495项、最终43专项、UI/只读门禁22项、独立竞态3项通过；核心1361/135/19/708，真实CAN联合633436检查通过。渲染深浅主题通过。主控Flash481524B，链接RAM74112B；电机/栈分配未增，完整MCU20kHzWCET未实测。
+- 已确认主控默认MoveL(@)内在求IK后PlanMoveJ；hostSTREAM逆解后~S q/v/a，普通MoveJ模拟执行后端已移除。修正README和cartesian_backend旧速度说明。
+- 未完成：用户先测J7原地，再J1+J7；通过后另做小幅位移和再扩其他轴。J2/J4全组OPEN拒绝、全模型限位显示、实际运动平滑性/IK限位问题尚未由原地通过解决。标定、固定TCP移轨继续暂不做。
+- 代理未连接/操作硬件，J1板上结论来自用户操作/日志；未新增提交，原有工作区保留。
+
+---
+
+## 已完成：实际七轴回读超限仍按原值更新实体（2026-10-13，待实机）
+
+- **当前问题 / 授权**：用户反馈连接后存在GETJPOS回读但实体不出现，随后明确要求“把超出限位丢弃的逻辑去掉，实际是什么就同步成什么”。本轮修改上位机实际显示处理、相关测试、README及本记录，不改固件、模型资源或其他会话的透传/诊断功能。
+- **已确认事实**：本机`C:/Users/Liu3Beng/AppData/Local/DummyRobot/logs/`在取证时的`dummyrobot.log.1:37493`对应10:46:24.305原始回包`ok 0.00 -75.00 180.62 0.00 0.59 0.00 -0.00`，J3超出模型上限180°；日志仍在写入并轮转，后续文件编号与行号可能变化。`dummy_motion/feedback.py`规划限位拒收后，`app/core/controller.py::_process_rx_line`此前直接返回，未发actual_pose_changed；实际模型映射/JS本身允许超限姿态。内存复现180.62°时显示为空、180°可正常更新，无设备连接或发令。
+- **最新改动**：controller实际显示与运动反馈分离，有限且及时的七轴读数原样写入actual_pose并发实际显示信号；独立记录实际RX时间，仍拒绝倒序/过期/非有限数据。串口合并所有有限七轴读数，超限不会绕过有界最新回读槽。规划限位保持独立，显式同步输入遇到规划不接受时只更新实际模型并提示、保留编辑目标。重连清除显示时间顺序基准。
+- **验证结果**：174项通信、完整基础UI、笛卡尔/透传会话与收发线程、手柄通信、预设姿态、纯运动算法、显示映射及离线资源回归通过。新增覆盖原日志J3=180.62°、全部轴超限、重连、同批时间戳、倒序/过期、未使能先更新实体、真实收发线程最新回包合并及编辑目标不被裁剪覆盖。按原RX时间戳顺序回放10:46:24～10:46:32的254包原始七轴回读，每包actual信号与URDF映射均保持原值，终态J3=180.65°；模拟消费延迟20ms，未发运动。初轮配置迁移测试在沙箱系统临时目录os.replace权限失败，将测试TMP/TEMP限定在工作区后通过，未修改产品存储行为。
+- **未完成 / 使用**：相关Python语法编译与差异空白检查通过。用户重启源码版后验收；未连接或操作实机、未打包或提交。实际显示不受限位约束，规划与目标编辑仍各自保留限制；非有限值、超过300ms或倒序的数据仍不刷新实体。仓库其他会话的透传/固件/模型改动保持。
+
+---
+
+## 当前阶段：单电机 OPEN→CLOSE 诊断入口完成，等用户单轴实测（2026-10-13）
+
+- 范围按用户最新要求收缩：独立无运动握手，默认主控模式、不自动切7、不调用IK、不发曲线/START；未连接串口/STLink、未烧录、未新增提交。
+- 已确认旧日志实际有OPEN后立即BLOCKED，零曲线/START；J4具体拒绝项尚无实机证据。瞬时估计速度±512门槛与到位窗口不同，仅离线复现，不能把假设当实机结论。
+- 新增主控 `!STREAM_TEST session node` / `#STREAM_TEST`，单节点CAPS→OPEN→自动CLOSE；无主机心跳也负责关闭。CLOSE未确认保留占用。主控拒绝具体gate；禁止Submit/Start和普通控制抢占。文件：firmware_new/dummy-ref-core-fw/Robot/instances/core_stream*.cpp/.h。
+- 电机同一临界区锁存实际准入位图和状态，新增DIAG23..33及CAP_OPEN_SNAPSHOT；首次同会话拒绝不覆盖，关闭后保留。原准入门槛不变。文件：firmware_new/stream_protocol.h、dummy-motor-fw/Ctrl/Motor/stream_controller.cpp、motor.h。
+- Qt终端新增单电机测试按钮/只读结果区，J1..J7/USB，工作线程独立于IK与反馈新鲜度；显示实际TX、主控gate、OPEN/CLOSE状态和拒绝快照。文件：Dummy上位机/app/core/open_test.py、stream_session.py、ui/terminal_diagnostics.py、main_window.py、protocol/capabilities.py、dummy_motion/stream_protocol.py、两主题QSS。
+- 当前构建2026101301，组F82D5DD606B743C9，源码dd951bdbfb55aaf674f426b2017c516c359644c6b9d48a403494e784ba69f39d；产物统一firmware_artifacts。新说明open-close-notes-2026101301.txt / CURRENT_RELEASE.txt。
+- 五种固件编译/身份/分区/BIN-HEX检查通过。Flash最紧132B剩余，电机RAM链接剩5000B，MSP仍4KiB；主控串口6KiB栈不变。快照44B，main栈帧72B，不加入每tick；实际水位/WCET仍未测。
+- 离线：上位机完整465项，新增入口专项与主题后续回归；电机适配473、核心608/135/19/703，真实CAN联合4654断言（含6项OPEN-only）通过。深浅主题、900×640与1200×800渲染检查通过。
+- 未完成：用户烧本批主控+一个被测电机，终端选J4点测试，提供结果框与完整日志。只确认握手，不继续运动。旧上位机规划延迟、实际BLOCKED根因、完整透传平滑性仍待后续阶段，标定和固定TCP移轨仍不做。
+
+---
+
+## 当前阶段：透传v2可靠性修复完成、待用户实机验收（2026-10-12）
+
+- 用户已明确授权执行修复；未连接串口/STLink、未烧录、未新增提交。历史快照7343f49保留，当前工作区包含原实施和此次修复。
+- 当前固件release=2026101203，buildset=FE3FA2E435134A26，source_sha256=277e449b09ed467f5e783ac8b705db41a32d855bfaea11fc79ce19f4b257cd3d。唯一权威目录firmware_artifacts，五目标BIN/HEX/ELF/MAP/manifest及全部审计证据集中存放。
+- 主控实际CAN邮箱所有权/16槽有界重试、动态START/SYNC时间、FIFO FULL接收、错误/epoch取消修复；STOP确认后允许CLOSE→模式2且保持锁定。路径：firmware_new/dummy-ref-core-fw/Bsp/communication/interface_can.cpp、Robot/instances/core_stream*.cpp、dummy_robot.cpp、UserApp/protocols/ascii_protocol.cpp。
+- 电机可靠STATUS/CAPS/DIAG、ALST与TERR分开、硬件过滤和最终节点更新；旧正常仲裁在16次上限触发17已离线复现并修复。路径：dummy-motor-fw/Core/Src/can.c、Ctrl/Motor/stream_controller.cpp、UserApp/main.cpp。
+- v2精确SEED以DIAG7保持参考为起点，实际到位仍原容差，禁混v1。模式仍7；5/6为旧参考预留。PC纯规划独立spawn进程，串口健康不依赖GUI、同批最新回读和WIRE日志；删旧MoveJ执行后端，默认firmware。重连actualmode7拒普通运动，两级门禁覆盖最终writer。
+- 内存核算引出USB/UART深newlib解析路径4KiB不足可信余量，各增至6144B静态SRAM；command4096、MSP2048，最终主控Flash478360/917504，链接RAM74104/131072（另CCM64KiB RTOS池）。电机Flash最紧96852/97280余428B；链接RAM15440/20480含4KiBMSP。
+- 编码器正常闭环1轮，保留标定重试和100tick断反馈保护；健康除法等价32位优化。20kHz新增阶段DWT诊断，不宣称离线证明整回调<50us。静态任务/中断栈预算见产物stack-budget-core.txt和repair-notes。
+- 最终上位机452测试、真实CAN七轴综合4005断言、全部协议/电机/核心回归及五目标构建/身份/HEX验证通过，详见repair-tests.json与同目录日志。旧理想CAN3649单独标识，不当真实驱动证据。
+- 已排除：仅调大发送频率/300ms阈值、直接把反馈残差当精确SEED、把ALST等同真实发送错误；不恢复旧普通MoveJ执行，不变更Flash分区。
+- 未完成/需要实机：用户烧录后原生/透传小运动、STOP恢复、连续点、完整TIM4 DWT/late/gap与#STACK低水位，确认物理平滑性。无连续手柄透传、运行中反馈重规划、跨点不停顿、标定或固定TCP移轨，未打包EXE。
+- 协议文档docs/STREAM_JOINT_V1.txt已更新为当前v2（文件名保留）；AGENTS模式表/产物说明同步。详细报告firmware_artifacts/repair-notes-2026101203.txt。
+
+---
+
+## 编译产物统一到仓库根目录（2026-10-12）
+
+- 用户要求全部产物集中、不再按透传隔离；当前权威位置为 `E:\Dummy-code\firmware_artifacts`。
+- 五种固件ELF/MAP/BIN/HEX/版本清单/日志集中在该目录，CMake缓存、对象与.su在其`.build`下按两个CMake工程存放。
+- 两份CMake共用`firmware_new/cmake/firmware_artifacts.cmake`，模块纳入固件身份；新增`tools/build_firmware.ps1`统一Release编译，AGENTS 4.2.1已规定路径与使用方法。
+- 本次全量重新编译通过：release=2026101202、buildset=61F6B094B2AB479A、source_sha256=72e321e4b0e9f15ec65b6724365063ed24be19160f2a5054dabd4d5eaa3b7cbc。五个BIN与上一版相比仅56字节版本身份记录变化，运行代码字节一致，Flash/RAM占用不变。
+- 全套版本组/源码哈希一致、HEX校验与BIN映像匹配；缺失HEX自动补生及两工程重复构建no-work均通过。验证记录就在产物目录verification.json。
+- 未烧录或连接设备，未提交；历史发布包维持当时版本记录，不作为当前最新产物来源。
+
+---
+
+## 当前阶段：50 Hz 轨迹透传 v1 已实现并交付离线构建（2026-10-12）
+
+- 改动前快照提交 `7343f49`；本轮实现保留工作区，未另作提交。默认主控模式不变；未连接/操作/烧录硬件。
+- 独立模式7，PC七轴q/v/a全路径预检，USB会话/序号/CRC，主控16记录缓冲与全轴prepare/commit/start，电机8槽含在执行段、20kHz定点曲线+DCE。协议见 `STREAM_JOINT_V1.txt`。
+- 已处理晚包/会话复活、信用误增、部分确认重试、STOP权被关闭覆盖、重复STOP中断竞态、模式抢占、ASCII端口混包、停止后恢复和切回主控。
+- 公共协议121699断言；电机数值1227269、CAN适配241、编码器28；主控461；PC最终针对性84；实际主控+七份实际电机12场景3649断言通过。此前旧实时墙钟测试仍有失败记录，未放宽旧保护阈值。
+- 统一固件release2026101202，buildset20ADF9905A6849DD，source_sha256=f4e540c9326d506d4671672826ced6263c797eb7c6320f8ea68c4e980ceba9f1。499输入文件校验一致；主控及35/42/57/夹爪五种固件ARM编译通过。
+- 主控Flash471588/917504B，静态SRAM51728B，MSP2048B，CCM64KiB是RTOS池；USB指定状态回复链约2152/4096B含任务上下文。电机Flash最大95756/97280B，静态10776B+最低堆512B+栈4096B=15384/20480B。
+- 20k新增参考执行约10us为离线预算；编码器透传每tick一次尝试、SPI轮询窗口10us但不含全部开销。完整ISR和实际栈水位需#CAN_DIAG/#STACK/#STREAM_DIAG实测，不宣称板上WCET已验证。
+- 有限MoveL/MoveJ/序列/鼠标目标可用；点间独立到位，连续手柄/跨点圆滑/未来FIFO反馈重规划/标定/固定TCP移轨未做。
+- 交付在本聊天outputs：轨迹透传_v1_20261012.02.zip、实现与烧录说明、源码改动归档、dummy_motion0.2.0 wheel、离线参考曲线。用户自行烧录，按说明逐步测试。
 
 ---
 

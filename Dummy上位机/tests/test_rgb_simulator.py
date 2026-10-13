@@ -139,7 +139,7 @@ class SceneSelectionTests(unittest.TestCase):
         self.config["automatic"] = False
         self.config["effects"][7] = (0, 255, 255, 0, 0, 0, 30000, 1, 12, 20, 20)
         for state, mode, color in (("CALIBRATION", 8, (255, 180, 0)),
-                                   ("STOP", 9, (255, 180, 0)),
+                                   ("STOP", 7, (10, 7, 0)),
                                    ("STARTING", 4, (0, 153, 153)),
                                    ("FAULT", 7, (10, 0, 0))):
             with self.subTest(state=state):
@@ -150,6 +150,21 @@ class SceneSelectionTests(unittest.TestCase):
         self.assertEqual(self.simulator.frame(self.config, "FAULT", 144,
                                              source="MANUAL")[0], (255, 0, 0))
 
+    def test_stop_heartbeat_matches_fixed_fault_timing_with_binding_color(self):
+        self.config["effects"][7] = (0, 255, 255, 0, 0, 0, 30000, 1, 12, 20, 20)
+        self.assertEqual(self.simulator.frame(self.config, "STOP", 0)[0], (10, 7, 0))
+        self.assertEqual(self.simulator.frame(self.config, "STOP", 144)[0], (255, 180, 0))
+        self.assertEqual(self.simulator.frame(self.config, "STOP", 504)[0], (199, 140, 0))
+        self.assertEqual(self.simulator.frame(self.config, "STOP", 1800)[0], (10, 7, 0))
+        self.config["states"]["STOP"] = (7, 1, 60, 200, 20)
+        self.simulator.frame(self.config, "STOP", 1801)
+        self.assertEqual(self.simulator.frame(self.config, "STOP", 1945)[0], (60, 200, 20))
+
+    def test_device_stop_binding_can_keep_another_effect(self):
+        self.config["states"]["STOP"] = (9, 1, 60, 200, 20)
+        self.assertEqual(self.simulator.frame(self.config, "STOP", 0)[0], (60, 200, 20))
+        self.assertEqual(self.simulator.frame(self.config, "STOP", 250)[0], (0, 0, 0))
+
     def test_scene_blends_from_previous_sample_but_stop_fault_are_immediate(self):
         self.config.update(automatic=False, manual_mode=0, transition_ms=300)
         self.simulator.frame(self.config, "DISABLED", 0)
@@ -157,7 +172,7 @@ class SceneSelectionTests(unittest.TestCase):
         self.assertEqual(self.simulator.frame(self.config, "DISABLED", 100)[0], (0, 0, 255))
         self.assertEqual(self.simulator.frame(self.config, "DISABLED", 250)[0], (0, 128, 128))
         self.assertEqual(self.simulator.frame(self.config, "DISABLED", 400)[0], (0, 255, 0))
-        self.assertEqual(self.simulator.frame(self.config, "STOP", 401)[0], (255, 180, 0))
+        self.assertEqual(self.simulator.frame(self.config, "STOP", 401)[0], (10, 7, 0))
         self.assertEqual(self.simulator.frame(self.config, "FAULT", 402)[0], (10, 0, 0))
 
     def test_effect_edit_restarts_scene_even_for_unused_effect_field(self):

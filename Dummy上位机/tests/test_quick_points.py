@@ -45,6 +45,9 @@ class QuickPointUiTests(unittest.TestCase):
         self.scheduler = ManualScheduler()
         self.controller = RobotController(scheduler=self.scheduler)
         self.window = MainWindow(self.controller, self.store)
+        # Keep motion/no-send assertions independent of automatic RGB telemetry.
+        # The navigation test below explicitly enables device follow to cover it.
+        self.window.rgb_preview_source.setCurrentIndex(0)
         self.window.show()
         APPLICATION.processEvents()
 
@@ -260,6 +263,7 @@ class QuickPointUiTests(unittest.TestCase):
 
     def test_empty_slots_and_clear_are_disabled_and_management_only_navigates(self):
         w = self.window
+        w.rgb_preview_source.setCurrentIndex(1)
         self.connect_fake()
         before = [spin.value() for spin in w.joint_spins]
         self.assert_shortcuts([])
@@ -278,6 +282,11 @@ class QuickPointUiTests(unittest.TestCase):
         self.assertEqual(self.store.points, [])
         self.assert_shortcuts([])
         w.navigation.setCurrentRow(0)
+        # Returning to the motion page resumes the default device-follow ring.
+        # Account for that one configuration query before checking empty slots;
+        # clicking them must still enqueue no command of any kind.
+        self.assertEqual(w.rgb_preview_source.currentIndex(), 1)
+        self.assertEqual(self.commands(), ["#RGB_GET"])
         for control in w.quick_point_buttons:
             control.click()
         QTest.qWait(150)

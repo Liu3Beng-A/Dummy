@@ -1,0 +1,38 @@
+{
+  "session": 1234,
+  "hz": 50,
+  "duration": 6.94,
+  "start_q": [
+    0.0,
+    0.17453292519943295,
+    1.3962634015954636,
+    0.0,
+    1.5707963267948966,
+    0.0,
+    0.0
+  ],
+  "final_q": [
+    0.15583526746435683,
+    0.18659260491532237,
+    1.3810539479951156,
+    0.0,
+    1.573945282556268,
+    0.1558360855874437,
+    0.0019802734375
+  ],
+  "count": 348,
+  "motor_acceleration": [
+    30,
+    30,
+    30,
+    30,
+    30,
+    30,
+    30
+  ],
+  "velocity_ratio": 0.9680389111161308,
+  "acceleration_ratio": 0.05180846676011771,
+  "jerk_ratio": 0.6714019775390546,
+  "protocol_version": 2,
+  "seed_contract": "OPEN-latched held motor reference; same stationary ideal fixture start"
+}

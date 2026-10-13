@@ -58,7 +58,7 @@ class OfflineResourceTests(unittest.TestCase):
         joints = {joint.attrib['name'] for joint in urdf.findall('joint')}
         self.assertEqual(joints, {'rail', *(f'Joint{i}' for i in range(1, 7)), 'Hand_R', 'Hand_L'})
         meshes = urdf.findall('link/visual/geometry/mesh')
-        self.assertEqual(len(meshes), 10)
+        self.assertEqual(len(meshes), 11)
         triangles = 0
         for mesh in meshes:
             prefix = 'package://DummyRobot_URDF/'
@@ -68,8 +68,30 @@ class OfflineResourceTests(unittest.TestCase):
             count = struct.unpack_from('<I', data, 80)[0]
             self.assertEqual(len(data), 84 + count * 50, path.name)
             triangles += count
-        # Baseline 2bbf67a contains the user's replacement high-detail meshes.
-        self.assertEqual(triangles, 1934314)
+        # The split base/diffuser export adds ten interface facets; retain detail.
+        self.assertEqual(triangles, 1934324)
+
+    def test_diffuser_is_in_base_coordinates_and_requested_colors_are_applied(self):
+        import numpy as np
+        base = ROOT / 'resources/models/DummyRobot_URDF'
+        urdf = ET.parse(base / 'urdf/DummyRobot_URDF.urdf').getroot()
+        links = {link.get('name'): link for link in urdf.findall('link')}
+        color = lambda name: tuple(float(value) for value in links[name].find('visual/material/color').get('rgba').split())
+        for name in ('base_link', 'Link1', 'Link2', 'Link3', 'Link4', 'Link5'):
+            self.assertEqual(color(name), (.035, .035, .035, 1.))
+        for name in ('Link6', 'Hand_R', 'Hand_L'):
+            self.assertEqual(color(name), (.10, .10, .10, 1.))
+        diffuser = links['base_link'].find("visual[@name='rgb_diffuser']")
+        self.assertIsNotNone(diffuser)
+        self.assertEqual(tuple(map(float, diffuser.find('material/color').get('rgba').split())), (.85, .85, .85, 1.))
+        self.assertEqual(diffuser.find('origin').attrib, {'xyz': '0 0 0', 'rpy': '0 0 0'})
+        self.assertEqual(diffuser.find('geometry/mesh').get('filename'), 'package://DummyRobot_URDF/meshes/light.stl')
+        data = (base / 'meshes/light.stl').read_bytes()
+        dtype = np.dtype([('normal', '<f4', 3), ('vertices', '<f4', (3, 3)), ('attribute', '<u2')])
+        vertices = np.frombuffer(data, dtype=dtype, offset=84)['vertices'].reshape(-1, 3)
+        self.assertTrue(np.isfinite(vertices).all())
+        np.testing.assert_allclose(vertices.min(axis=0), [-.0443023667, -.0442976765, .1868000031], atol=1e-8)
+        np.testing.assert_allclose(vertices.max(axis=0), [.0443039276, .0443039276, .1931343526], atol=1e-8)
 
     def test_vendor_files_match_locked_digest(self):
         root = ROOT / 'resources/viewer'
@@ -212,6 +234,88 @@ class ActualOnlyViewTests(unittest.TestCase):
             view.close()
             view.deleteLater()
             application.processEvents()
+
+
+class ModelLightBridgeTests(unittest.TestCase):
+    def setUp(self):
+        from tests.test_ui import APPLICATION
+        from app.visualization.robot_view import RobotView
+        self.application = APPLICATION
+        with patch('app.visualization.robot_view.AssetServer', side_effect=RuntimeError('offline test')):
+            self.view = RobotView()
+        self.frames, self.poses = [], []
+        self.view._bridge.rgb_changed.connect(lambda text: self.frames.append(json.loads(text)))
+        self.view._bridge.state_changed.connect(lambda text: self.poses.append(json.loads(text)))
+
+    def tearDown(self):
+        self.view.cleanup()
+        self.view.close()
+        self.view.deleteLater()
+        self.application.processEvents()
+
+    def test_latest_rgb_frame_is_delivered_at_ready_and_separate_from_poses(self):
+        from copy import deepcopy
+        view = self.view
+        view.set_actual_pose([10, 20, 30, 40, 50, 60, 70], 40)
+        view.set_stale(True)
+        before = deepcopy(view._state)
+        frame = [[index, 100, 200] for index in range(24)]
+        view.set_rgb_frame(frame)
+        self.assertEqual(self.frames, [])
+        self.assertEqual(self.poses, [])
+        frame[0][0] = 250
+        self.assertEqual(view._rgb_frame[0], (0, 100, 200))
+        view._on_ready()
+        self.assertEqual(self.frames, [[[index, 100, 200] for index in range(24)]])
+        self.assertEqual(len(self.poses), 1)
+        self.assertEqual(view._state, before)
+        self.poses.clear()
+        view.set_rgb_frame([(0, 0, 0)] * 24)
+        self.assertEqual(self.frames[-1], [[0, 0, 0]] * 24)
+        self.assertEqual(self.poses, [])
+        self.assertEqual(view._state, before)
+        view.set_rgb_frame([(0, 0, 0)] * 24)
+        self.assertEqual(len(self.frames), 2)
+        view.cleanup()
+        view.set_rgb_frame([(255, 0, 0)] * 24)
+        self.assertEqual(len(self.frames), 2)
+
+    def test_invalid_rgb_frames_are_atomic(self):
+        view = self.view
+        view._on_ready()
+        view.set_rgb_frame([(255, 0, 0)] * 24)
+        before = view._rgb_frame
+        signal_count = len(self.frames)
+        for invalid in (None, [], [(0, 0, 0)] * 23, [(0, 0)] * 24,
+                        [(256, 0, 0)] * 24, [(-1, 0, 0)] * 24,
+                        [(True, 0, 0)] * 24, [(1.5, 0, 0)] * 24,
+                        [(float('nan'), 0, 0)] * 24):
+            with self.subTest(frame=invalid):
+                with self.assertRaises(ValueError):
+                    view.set_rgb_frame(invalid)
+                self.assertEqual(view._rgb_frame, before)
+                self.assertEqual(len(self.frames), signal_count)
+
+    def test_light_power_is_cached_and_changes_even_when_a_breath_frame_is_zero(self):
+        view = self.view
+        zero = [(0, 0, 0)] * 24
+        view.set_rgb_frame(zero, light_on=True)
+        view._on_ready()
+        self.assertEqual(self.frames[-1], {"colors": [[0, 0, 0]] * 24, "light_on": True})
+        self.poses.clear()
+        count = len(self.frames)
+        view.set_rgb_frame(zero, light_on=True)
+        self.assertEqual(len(self.frames), count)
+        view.set_rgb_frame(zero, light_on=False)
+        self.assertEqual(self.frames[-1]["light_on"], False)
+        self.assertEqual(len(self.frames), count + 1)
+        self.assertEqual(self.poses, [])
+        for invalid in (0, 1, "true", [], float('nan')):
+            with self.assertRaises(ValueError):
+                view.set_rgb_frame([(255, 0, 0)] * 24, light_on=invalid)
+            self.assertEqual(view._rgb_frame, tuple(zero))
+            self.assertIs(view._rgb_light_on, False)
+            self.assertEqual(len(self.frames), count + 1)
 
 
 if __name__ == '__main__':

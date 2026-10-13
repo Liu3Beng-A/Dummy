@@ -33,7 +33,8 @@ def identity_query(command):
 
 
 def diagnostic(command):
-    return (command in ("#RGB_STATUS", "#RGB_GET", "!RGB_BRIGHT", "#MOTION_STATUS") or
+    return (command in ("#STREAM", "#STREAM_TEST", "#STREAM_AXES", "#RGB_STATUS", "#RGB_GET", "!RGB_BRIGHT", "#MOTION_STATUS") or
+            re.fullmatch(r"#STREAM_DIAG [1-7] (?:[0-9]|[1-4][0-9]|50)", command) is not None or
             identity_query(command) or
             re.fullmatch(r"#STALL_STATUS\s+[1-7](?:\s+LAST)?", command) is not None or
             re.fullmatch(r"#CAL_STATUS\s+[78](?:\s+LAST)?", command) is not None)

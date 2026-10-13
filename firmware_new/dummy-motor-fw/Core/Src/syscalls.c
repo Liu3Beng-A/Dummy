@@ -48,6 +48,7 @@
 
 /* Includes */
 #include <sys/stat.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <stdio.h>
@@ -124,7 +125,12 @@ caddr_t _sbrk(int incr)
         heap_end = &end;
 
     prev_heap_end = heap_end;
-    if (heap_end + incr > stack_ptr)
+    // Keep the declared 4KiB motor MSP reserve intact even while main is idle.
+    // The stream executor uses no heap. Legacy libc allocations stay below it.
+    extern char _estack;
+    const int64_t next = (int64_t)(uintptr_t)heap_end + incr;
+    if (next < (int64_t)(uintptr_t)&end || next > (int64_t)((uintptr_t)&_estack - 4096U) ||
+        next > (int64_t)(uintptr_t)stack_ptr)
     {
 //		write(1, "Heap and stack collision\n", 25);
 //		abort();

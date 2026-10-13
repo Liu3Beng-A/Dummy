@@ -55,6 +55,8 @@ class FakeTransport(QObject):
     def __init__(self, port, commands, validator, identity, parent):
         super().__init__(parent)
         self.port = port
+        from types import SimpleNamespace
+        self.wire_log = SimpleNamespace(sink=None, snapshot=lambda: 'fake transport audit')
 
     def start(self):
         pass
@@ -222,6 +224,28 @@ class RGBControllerTests(unittest.TestCase):
             self.c._poll_rgb()
             self.assertEqual(self.commands(), [])
         self.assertFalse(self.c._rgb_monitor_timer.isActive())
+
+    def test_auto_get_and_status_share_100ms_budget(self):
+        self.feed()
+        with patch("app.core.controller.time.monotonic", return_value=100.):
+            self.c.set_rgb_monitoring(True)
+            self.assertEqual(self.commands(), ["#RGB_STATUS"])
+            self.c._rgb_complete = False
+            self.c._rgb_get_retry_at = 0.
+        with patch("app.core.controller.time.monotonic", return_value=100.099):
+            self.c._poll_rgb()
+            self.assertEqual(self.commands(), [])
+        with patch("app.core.controller.time.monotonic", return_value=100.1):
+            self.c._poll_rgb()
+            self.assertEqual(self.commands(), ["#RGB_GET"])
+            self.feed()
+        with patch("app.core.controller.time.monotonic", return_value=100.199):
+            self.c._poll_rgb()
+            self.assertEqual(self.commands(), [])
+        with patch("app.core.controller.time.monotonic", return_value=100.201):
+            self.c._poll_rgb()
+            self.assertEqual(self.commands(), ["#RGB_STATUS"])
+        self.assertEqual(self.c._rgb_monitor_timer.interval(), 100)
 
     def test_repeated_monitor_activation_does_not_restart_timer_or_poll(self):
         self.feed()

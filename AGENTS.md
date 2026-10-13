@@ -61,10 +61,13 @@
 | 2 | INT (INTERRUPTABLE) | 新指令直接清队列并覆盖 |
 | 3 | TRJ (CONTINUES TRAJECTORY) | 连续轨迹，不减速衔接 |
 | 4 | TUN (MOTOR_TUNING) | 扫频正弦激励 |
-| 5 | TRQ (TORQUE_CONTROL) | 力矩透传模式 |
-| 6 | SRV (SERVO_J) | 高频伺服随动 |
+| 5 | TRQ (TORQUE_CONTROL) | 参考固件预留语义；当前 firmware_new 未开放 |
+| 6 | SRV (SERVO_J) | 参考固件预留语义；当前 firmware_new 未开放 |
+| 7 | STREAM_JOINT | 七轴50Hz q/v/a曲线段；当前协议v2，电机本地20kHz执行 |
 
 ---
+
+模式编号与协议版本独立：模式7继续使用，v2表示起点/能力契约升级。默认仍主控模式；旧上位机普通MoveJ执行后端已移除，纯算法保留。
 
 ## 4. 工作时行为指引
 
@@ -80,8 +83,18 @@
 ### 4.2 系统环境
 
 - **Windows + PowerShell**：版本 5.1，`&&` 不支持，命令串接用分号 `;`
-- **Ninja 构建**：所有固件均用 Ninja，在 `build/` 目录下运行 `ninja`
+- **Ninja 构建**：当前固件统一运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build_firmware.ps1`，产物与缓存统一放在根目录 `firmware_artifacts/`，详见下节。
 - **Python**：版本 3.x，用于调试工具（仓库根目录 `串口助手.py`）
+
+### 4.2.1 固件编译与统一产物目录（2026-10-12）
+
+- **唯一当前产物目录**：仓库根目录 `firmware_artifacts/`（本机 `E:\Dummy-code\firmware_artifacts`）。所有模式共用这一目录，禁止为透传或某次交付另设独立产物目录。
+- 五种目标统一在该目录直接生成 `.elf`、`.map`、`.bin`、`.hex`、`.manifest.txt`：`Core-STM32F4-fw`、`motor-35`、`motor-42`、`motor-57`、`motor-gripper`。不限 BIN/HEX，版本清单和构建日志也放一起；不要把最新固件只放到聊天附件或外部输出目录。
+- 两工程的 CMake/Ninja 缓存、对象文件和 `.su` 位于同一目录下的 `.build/dummy-ref-core-fw/`、`.build/dummy-motor-fw/`。这是分离两个独立CMake工程的内部缓存，不是按功能或模式隔离产物。ELF/MAP/HEX/BIN均在上层统一存放。
+- 推荐从根目录执行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build_firmware.ps1`；可用 `-ReleaseId YYYYMMDDrr` 指定版本。脚本为主控及全部电机生成同一个全新 `FW_BUILDSET`、UTC时间并依次Release构建。
+- 两工程引用 `firmware_new/cmake/firmware_artifacts.cmake` 固定输出位置，该模块纳入源码身份摘要。不要复用旧批次标识编译已改源码；不要并行运行多套不同配置/批次覆盖同名产物。单独重复构建现有批次可用 `cmake --build firmware_artifacts/.build/<工程名>`。
+- `.hex/.bin/.map/.manifest.txt` 是Ninja声明的副产物，缺失时构建应重新生成；ELF、MAP和版本清单必须来自同次构建。两项目均成功且版本组一致，才视为全套产物更新完成。目录已由根 `.gitignore` 排除，源配置与构建脚本仍需纳入源码管理。
+- 旧 `build/`、`build-stream/`、历史发布包只作历史记录，不作为最新烧录来源。默认主控/透传等功能不会因输出目录变化而改变；编译不授权自动烧录或操作设备。
 
 ### 4.3 修改代码前的习惯
 

@@ -8,7 +8,7 @@ import numpy as np
 
 class CartesianBackend(str, Enum):
     FIRMWARE = "firmware"
-    HOST = "host"
+    STREAM = "stream"
 
 
 def configured_tool(controller):
@@ -38,8 +38,8 @@ def native_command(model, target, rail, tool, speed):
 def host_limits(speed):
     """UI MoveL speed controls only Cartesian planning time and rate.
 
-    At 100 the PC envelope is 20 mm/s and 10 deg/s. Each wire MoveJ speed
-    is derived separately from the segment geometry, time and motor model.
+    At 100 the PC envelope is 20 mm/s and 10 deg/s. STREAM_JOINT sends
+    time-parameterized q/v/a boundaries, with no ordinary wire MoveJ speed.
     """
     speed = float(speed)
     if not np.isfinite(speed) or not 1 <= speed <= 100:

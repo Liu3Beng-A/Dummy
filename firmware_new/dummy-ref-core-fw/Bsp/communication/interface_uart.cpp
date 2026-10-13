@@ -19,7 +19,10 @@ static uint32_t dma_last_rcv_idx[2];
 osThreadId_t uartServerTaskHandle;
 
 // UART ASCII commands use the same newlib float parser/formatter as USB.
-alignas(8) static StackType_t uartServerStack[4096 / sizeof(StackType_t)];
+// Full nested protection-command + newlib float parsing is budgeted at
+// 5 KiB including task context. Keep 1 KiB margin in static SRAM;
+// this is a static audit allowance, not a measured runtime watermark.
+alignas(8) static StackType_t uartServerStack[6144 / sizeof(StackType_t)];
 static StaticTask_t uartServerTaskControlBlock;
 
 

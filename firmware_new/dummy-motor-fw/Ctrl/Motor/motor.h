@@ -7,6 +7,7 @@
 #include "../../../stop_protocol.h"
 #include "../../../motion_completion_protocol.h"
 #include "protection_config.h"
+#include "../../../stream_protocol.h"
 
 class Motor
 {
@@ -60,6 +61,7 @@ public:
         MODE_PWM_VELOCITY,
         MODE_PWM_CURRENT,
         MODE_STEP_DIR,
+        MODE_STREAM_JOINT, // Appended: preserve stored legacy mode values.
     } Mode_t;
 
     typedef enum
@@ -146,12 +148,22 @@ public:
         uint16_t GetSoftStopToken() const { return softStopToken; }
         float GetSoftStopPosition();
         bool IsFeedbackValid() const;
+        uint32_t CaptureStreamOpen(uint16_t session, bool start = false);
+        // Cold mutation entry: invalidate the certificate and restart its full window.
+        void InvalidatePositionEntry();
         bool IsActuallyDisabled() const { return goalDisable && softDisable && modeRunning == MODE_STOP; }
         bool IsCalibrationContext() const { return calibrationTask; }
         bool ProcessProtectionCan(uint8_t command, const uint8_t* data, uint32_t length);
         void OnMasterCommunication();
         void OnPeerProtection(uint8_t node, uint32_t event, uint8_t phase, uint8_t flags);
         void PollProtectionMain();
+        bool ProcessStreamCan(uint8_t command, const uint8_t* data, uint32_t length);
+        void PollStreamMain();
+        void TickStreamClock();
+        void TickStream();
+        void CancelStream(uint8_t reason = StreamProtocol::ABORTED);
+        bool StreamActive() const;
+        bool StreamTerminal() const;
         void InitProtection();
         void PollDefaultsRestore();
         void OnMotionLimitChange();
@@ -167,10 +179,16 @@ public:
         void ResetPositionCompletion(bool newGoal = false);
         bool TickPositionCompletion();
         bool IsOrdinaryPositionArrival(bool referenceFinished = true) const;
+        uint32_t StreamClock() const;
+        uint32_t PositionEntryEvidenceAge() const;
         uint16_t positionStableTicks = 0;
         int32_t positionStableMin = 0, positionStableMax = 0;
         int64_t positionVelocitySum = 0;
-        int32_t positionCompletionTarget = 0;
+        int32_t positionCompletionTarget = 0, positionCompletionHome = 0;
+        uint8_t positionCompletionMode = 0;
+        bool positionEvidenceValid = false;
+        uint32_t positionEvidenceTick = 0, positionEvidenceRange = 0;
+        int64_t positionEvidenceVelocitySum = 0;
         bool positionSettled = false;
         bool positionCompleted = false; // Result of this local goal, separate from live settlement.
         volatile bool softStopLocked = false;

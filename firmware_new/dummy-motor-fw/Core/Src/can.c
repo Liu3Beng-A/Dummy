@@ -47,6 +47,7 @@ typedef struct {
     MotorCanPending frame;
     uint32_t createdMs, retryAtMs;
     uint8_t attempts;
+    uint16_t streamEpoch;
 } MotorCanProtectionPending;
 static MotorCanProtectionPending motorCanProtectionQueue[MOTOR_CAN_PROTECTION_SLOTS];
 static volatile uint8_t motorCanProtectionRead, motorCanProtectionWrite;
@@ -55,6 +56,20 @@ static volatile uint32_t motorCanProtectionMailbox;
 // previous RQCP interrupt has not yet been handled (normal or protected frame).
 static volatile uint32_t motorCanTransmitMailbox;
 static volatile bool motorCanProtectionAborting;
+static volatile uint16_t motorCanStreamEpoch;
+static volatile bool motorCanStreamFailed;
+static uint32_t motorCanStreamRetries, motorCanStreamDrops;
+
+static bool MotorCanIsStream(uint32_t id) {
+    const uint8_t c=(uint8_t)(id & 0x7F);
+    return c==0x47 || c==0x4A || c==0x4B;
+}
+static bool MotorCanStreamStale(const MotorCanProtectionPending* p) {
+    return MotorCanIsStream(p->frame.header.StdId) && p->streamEpoch!=motorCanStreamEpoch;
+}
+static uint32_t MotorCanMaxAge(const MotorCanProtectionPending* p) {
+    return MotorCanIsStream(p->frame.header.StdId) ? 40U : MOTOR_CAN_PROTECTION_MAX_AGE_MS;
+}
 
 static bool MotorCanIsProtection(uint32_t id)
 {
@@ -74,6 +89,16 @@ static bool MotorCanSameReply(const MotorCanPending* frame, CAN_TxHeaderTypeDef*
 {
     if (frame->header.StdId != header->StdId) return false;
     const uint8_t command = (uint8_t)(header->StdId & 0x7F);
+    if (command == 0x47) {
+        if (frame->data[0]!=data[0] || frame->data[1]!=data[1] || frame->data[4]!=data[4]) return false;
+        // Only RUNNING is replaceable telemetry. Transaction phases must each
+        // retain their own sequence and state until actual TXOK.
+        if (data[4]==5) return true;
+        return frame->data[2]==data[2] && frame->data[3]==data[3] && frame->data[6]==data[6];
+    }
+    if (command == 0x4A || command == 0x4B)
+        return frame->data[0]==data[0] && frame->data[1]==data[1] &&
+               (command==0x4A || frame->data[2]==data[2]);
     if (command == 0x32) {
         // Keep distinct parameters/transactions and BEGIN/COMMIT/SAVE replies.
         return frame->data[0] == data[0] && frame->data[2] == data[2] &&
@@ -122,15 +147,30 @@ static __attribute__((noinline)) void MotorCanProtectionResult(CAN_HandleTypeDef
                 if (handle->ErrorCode & (HAL_CAN_ERROR_TX_TERR0 << shift)) ++motorCanDiagnostic[MC_PROBE_TERR];
             }
         }
-        if (success || motorCanProtectionAborting ||
+        // Arbitration loss is normal CAN scheduling, not a failed bus transfer.
+        // STREAM retries it on the next main-loop poll, with the same 40ms age
+        // bound. Counting it as one of 16 bus errors starves high-node STARTED.
+        const uint32_t shift = mailbox * 2U;
+        const bool streamArbitration = !success && MotorCanIsStream(pending->frame.header.StdId) &&
+            (handle->ErrorCode & (HAL_CAN_ERROR_TX_ALST0 << shift)) &&
+            !(handle->ErrorCode & (HAL_CAN_ERROR_TX_TERR0 << shift));
+        if (streamArbitration && pending->attempts) --pending->attempts;
+        if (success || motorCanProtectionAborting || MotorCanStreamStale(pending) ||
             pending->attempts >= MOTOR_CAN_PROTECTION_MAX_ATTEMPTS ||
-            now - pending->createdMs >= MOTOR_CAN_PROTECTION_MAX_AGE_MS) {
-            if (!success) MotorCanProbeDrop(pending, now);
+            now - pending->createdMs >= MotorCanMaxAge(pending)) {
+            if (!success) {
+                MotorCanProbeDrop(pending, now);
+                if (MotorCanIsStream(pending->frame.header.StdId) && !MotorCanStreamStale(pending)) {
+                    ++motorCanStreamDrops;
+                    if ((pending->frame.header.StdId & 0x7F)==0x47) motorCanStreamFailed=true;
+                }
+            }
             MotorCanPopProtection();
         } else {
             motorCanProtectionMailbox = 0;
-            // 1..4ms backoff breaks the fixed phase of 5ms motion bursts.
-            pending->retryAtMs = now + 1U + ((pending->attempts + boardConfig.canNodeId) & 3U);
+            // Genuine errors retain bounded 1..4ms backoff; arbitration can retry now.
+            pending->retryAtMs = streamArbitration ? now : now + 1U + ((pending->attempts + boardConfig.canNodeId) & 3U);
+            if (MotorCanIsStream(pending->frame.header.StdId)) ++motorCanStreamRetries;
         }
     }
     __set_PRIMASK(irq);
@@ -139,6 +179,23 @@ static __attribute__((noinline)) void MotorCanProtectionResult(CAN_HandleTypeDef
 /* USER CODE END 0 */
 
 CAN_HandleTypeDef hcan;
+
+// Preserve exactly the software receive routing: own-node commands,
+// broadcast commands, and peer 0x0B protection events. Reject unrelated traffic
+// in hardware before it can overflow FIFO0 while TIM4 has CPU priority.
+void CAN_UpdateFilters(void) {
+    CAN_FilterTypeDef f={0};
+    f.FilterMode=CAN_FILTERMODE_IDMASK; f.FilterScale=CAN_FILTERSCALE_32BIT;
+    f.FilterFIFOAssignment=CAN_RX_FIFO0; f.FilterActivation=ENABLE;
+    f.FilterMaskIdLow=6U; // Standard data only (IDE/RTR).
+    f.SlaveStartFilterBank=14;
+    for (uint32_t bank=0;bank<3;++bank) {
+        f.FilterBank=bank;
+        f.FilterIdHigh=bank==0 ? ((boardConfig.canNodeId & 15U)<<12) : bank==1 ? 0 : (0x0BU<<5);
+        f.FilterMaskIdHigh=bank==2 ? (0x7FU<<5) : (0x0FU<<12);
+        if (HAL_CAN_ConfigFilter(&hcan,&f)!=HAL_OK) Error_Handler();
+    }
+}
 
 /* CAN init function */
 void MX_CAN_Init(void)
@@ -168,23 +225,7 @@ void MX_CAN_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN CAN_Init 2 */
-    CAN_FilterTypeDef sFilterConfig;
-    //filter one (stack light blink)
-    sFilterConfig.FilterBank = 0;
-    sFilterConfig.FilterMode = CAN_FILTERMODE_IDMASK;
-    sFilterConfig.FilterScale = CAN_FILTERSCALE_32BIT;
-    sFilterConfig.FilterIdHigh = 0x0000;
-    sFilterConfig.FilterIdLow = 0x0000;
-    sFilterConfig.FilterMaskIdHigh = 0x0000;
-    sFilterConfig.FilterMaskIdLow = 0x0000;
-    sFilterConfig.FilterFIFOAssignment = CAN_RX_FIFO0;
-    sFilterConfig.FilterActivation = ENABLE;
-    sFilterConfig.SlaveStartFilterBank = 14;
-    if (HAL_CAN_ConfigFilter(&hcan, &sFilterConfig) != HAL_OK)
-    {
-        /* Filter configuration Error */
-        Error_Handler();
-    }
+    CAN_UpdateFilters();
 
     HAL_CAN_Start(&hcan); //start CAN
 
@@ -284,6 +325,58 @@ void HAL_CAN_MspDeInit(CAN_HandleTypeDef* canHandle)
 }
 
 /* USER CODE BEGIN 1 */
+// Caller owns PRIMASK. No waiting and no unbounded allocation.
+static bool MotorCanEnqueueReliable(CAN_TxHeaderTypeDef* pHeader,const uint8_t* data) {
+        uint8_t index = motorCanProtectionRead;
+        while (index != motorCanProtectionWrite) {
+            // Never overwrite the frame whose hardware completion is pending.
+            if (!(index == motorCanProtectionRead && motorCanProtectionMailbox) &&
+                !MotorCanStreamStale(&motorCanProtectionQueue[index]) &&
+                MotorCanSameReply(&motorCanProtectionQueue[index].frame, pHeader, data)) {
+                MotorCanCopy(&motorCanProtectionQueue[index].frame, pHeader, data);
+                if ((pHeader->StdId & 0x7F) == 0x36) ++motorCanDiagnostic[MC_PROBE_MERGED];
+                return true;
+            }
+            index = (uint8_t)((index + 1U) % MOTOR_CAN_PROTECTION_SLOTS);
+        }
+        const uint8_t depthNow=(motorCanProtectionWrite+MOTOR_CAN_PROTECTION_SLOTS-motorCanProtectionRead)%MOTOR_CAN_PROTECTION_SLOTS;
+        if (MotorCanIsStream(pHeader->StdId) && depthNow>=MOTOR_CAN_PROTECTION_SLOTS-4U) return false;
+        const uint8_t next = (uint8_t)((motorCanProtectionWrite + 1U) % MOTOR_CAN_PROTECTION_SLOTS);
+        if (next != motorCanProtectionRead) {
+            MotorCanProtectionPending* pending = &motorCanProtectionQueue[motorCanProtectionWrite];
+            MotorCanCopy(&pending->frame, pHeader, data);
+            pending->createdMs = pending->retryAtMs = HAL_GetTick(); pending->attempts = 0;
+            pending->streamEpoch=motorCanStreamEpoch;
+            motorCanProtectionWrite = next;
+            if ((pHeader->StdId & 0x7F) == 0x36) ++motorCanDiagnostic[MC_PROBE_QUEUED];
+            const uint32_t depth = (next + MOTOR_CAN_PROTECTION_SLOTS - motorCanProtectionRead) % MOTOR_CAN_PROTECTION_SLOTS;
+            if (depth > (motorCanDiagnostic[MC_QUEUE] >> 8)) motorCanDiagnostic[MC_QUEUE] = depth << 8;
+            return true;
+        } else if ((pHeader->StdId & 0x7F) == 0x36) {
+            ++motorCanDiagnostic[MC_PROBE_FULL];
+        }
+    return false;
+}
+
+bool CAN_QueueStreamReply(CAN_TxHeaderTypeDef* header,const uint8_t* data) {
+    const uint32_t irq=__get_PRIMASK();__disable_irq();
+    // Keep three slots available for STOP/protection even during stream retries.
+    const bool ok=MotorCanEnqueueReliable(header,data);
+    if (!ok) { ++motorCanStreamDrops; if ((header->StdId & 0x7F)==0x47) motorCanStreamFailed=true; }
+    __set_PRIMASK(irq);return ok;
+}
+void CAN_CancelStreamReplies(void) {
+    const uint32_t irq=__get_PRIMASK();__disable_irq();
+    ++motorCanStreamEpoch; motorCanStreamFailed=false;
+    if (motorCanProtectionMailbox && MotorCanStreamStale(&motorCanProtectionQueue[motorCanProtectionRead])) {
+        motorCanProtectionAborting=true;
+        HAL_CAN_AbortTxRequest(&hcan,motorCanProtectionMailbox);
+    }
+    __set_PRIMASK(irq);
+}
+bool CAN_StreamReplyFault(void) { return motorCanStreamFailed; }
+uint32_t CAN_StreamReplyDiagnostic(uint8_t field) { return field==0 ? motorCanStreamRetries : motorCanStreamDrops; }
+
 void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data)
 {
     uint32_t irq = __get_PRIMASK();
@@ -292,29 +385,7 @@ void CAN_Send(CAN_TxHeaderTypeDef* pHeader, uint8_t* data)
     // by legacy position samples. Reuse the bounded TXOK/retry path.
     if (MotorCanIsProtection(pHeader->StdId) ||
         ((pHeader->StdId & 0x7F) == 0x23 && (data[4] & 0x80))) {
-        uint8_t index = motorCanProtectionRead;
-        while (index != motorCanProtectionWrite) {
-            // Never overwrite the frame whose hardware completion is pending.
-            if (!(index == motorCanProtectionRead && motorCanProtectionMailbox) &&
-                MotorCanSameReply(&motorCanProtectionQueue[index].frame, pHeader, data)) {
-                MotorCanCopy(&motorCanProtectionQueue[index].frame, pHeader, data);
-                if ((pHeader->StdId & 0x7F) == 0x36) ++motorCanDiagnostic[MC_PROBE_MERGED];
-                __set_PRIMASK(irq); return;
-            }
-            index = (uint8_t)((index + 1U) % MOTOR_CAN_PROTECTION_SLOTS);
-        }
-        const uint8_t next = (uint8_t)((motorCanProtectionWrite + 1U) % MOTOR_CAN_PROTECTION_SLOTS);
-        if (next != motorCanProtectionRead) {
-            MotorCanProtectionPending* pending = &motorCanProtectionQueue[motorCanProtectionWrite];
-            MotorCanCopy(&pending->frame, pHeader, data);
-            pending->createdMs = pending->retryAtMs = HAL_GetTick(); pending->attempts = 0;
-            motorCanProtectionWrite = next;
-            if ((pHeader->StdId & 0x7F) == 0x36) ++motorCanDiagnostic[MC_PROBE_QUEUED];
-            const uint32_t depth = (next + MOTOR_CAN_PROTECTION_SLOTS - motorCanProtectionRead) % MOTOR_CAN_PROTECTION_SLOTS;
-            if (depth > (motorCanDiagnostic[MC_QUEUE] >> 8)) motorCanDiagnostic[MC_QUEUE] = depth << 8;
-        } else if ((pHeader->StdId & 0x7F) == 0x36) {
-            ++motorCanDiagnostic[MC_PROBE_FULL];
-        }
+        MotorCanEnqueueReliable(pHeader,data);
         __set_PRIMASK(irq); return;
     }
     // Periodic 0x23 samples supersede unsent older samples instead of filling
@@ -349,6 +420,23 @@ bool CAN_TrySend(CAN_TxHeaderTypeDef* pHeader, const uint8_t* data)
     __set_PRIMASK(irq); return sent;
 }
 
+// Safety acknowledgements must not wait behind telemetry retry backoff.
+static void MotorCanPrioritizeSafety(void) {
+    if (motorCanProtectionMailbox) return;
+    for (uint8_t i=motorCanProtectionRead;i!=motorCanProtectionWrite;i=(uint8_t)((i+1U)%MOTOR_CAN_PROTECTION_SLOTS)) {
+        const MotorCanPending* f=&motorCanProtectionQueue[i].frame;
+        const uint8_t command=(uint8_t)(f->header.StdId&0x7F);
+        if (command==0x0A || (command==0x0B && f->data[4]!=0)) {
+            if (i!=motorCanProtectionRead) {
+                const MotorCanProtectionPending saved=motorCanProtectionQueue[motorCanProtectionRead];
+                motorCanProtectionQueue[motorCanProtectionRead]=motorCanProtectionQueue[i];
+                motorCanProtectionQueue[i]=saved;
+            }
+            break;
+        }
+    }
+}
+
 void CAN_PollTransmit(void)
 {
     static uint32_t previousCycle;
@@ -359,19 +447,24 @@ void CAN_PollTransmit(void)
     uint32_t irq = __get_PRIMASK();
     __disable_irq();
     const uint32_t now = HAL_GetTick();
+    MotorCanPrioritizeSafety();
     while (motorCanProtectionRead != motorCanProtectionWrite) {
         MotorCanProtectionPending* pending = &motorCanProtectionQueue[motorCanProtectionRead];
         if (motorCanProtectionMailbox) {
-            if (!motorCanProtectionAborting && now - pending->createdMs >= MOTOR_CAN_PROTECTION_MAX_AGE_MS) {
+            if (!motorCanProtectionAborting && (MotorCanStreamStale(pending) || now - pending->createdMs >= MotorCanMaxAge(pending))) {
                 // An absent bus cannot retain a stale proof indefinitely.
                 motorCanProtectionAborting = true;
                 HAL_CAN_AbortTxRequest(&hcan, motorCanProtectionMailbox);
             }
             __set_PRIMASK(irq); return;
         }
-        if (now - pending->createdMs >= MOTOR_CAN_PROTECTION_MAX_AGE_MS ||
+        if (MotorCanStreamStale(pending) || now - pending->createdMs >= MotorCanMaxAge(pending) ||
             pending->attempts >= MOTOR_CAN_PROTECTION_MAX_ATTEMPTS) {
             MotorCanProbeDrop(pending, now);
+            if (MotorCanIsStream(pending->frame.header.StdId) && !MotorCanStreamStale(pending)) {
+                ++motorCanStreamDrops;
+                if ((pending->frame.header.StdId & 0x7F)==0x47) motorCanStreamFailed=true;
+            }
             MotorCanPopProtection(); continue;
         }
         if ((int32_t)(now - pending->retryAtMs) >= 0) {

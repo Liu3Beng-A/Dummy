@@ -32,6 +32,7 @@ class RobotController(QObject, RobotBusiness):
     actual_pose_changed = Signal(list)  # J1..J6 in degrees, rail in millimetres
     actual_cartesian_changed = Signal(list)  # Device flange XYZABC; never an edit target.
     position_synced = Signal(str, list)  # Explicit successful target sync: MoveJ / MoveL.
+    preset_pose_requested = Signal(str, list)  # HOME / RESET dispatched; preview only.
     preset_pose_completed = Signal(str, list)  # Matched HOME / RESET completion; target only.
     rgb_changed = Signal(dict)
     fields_changed = Signal()
@@ -55,7 +56,7 @@ class RobotController(QObject, RobotBusiness):
         self.port_name = ""
         self.connection_type = "USB"
         self.current_cmdmode = None
-        self._MODE_NAME = {1: "顺序(SEQ)", 2: "打断(INT)", 3: "连续(TRJ)", 4: "调试(TUN)"}
+        self._MODE_NAME = {1: "顺序(SEQ)", 2: "打断(INT)", 3: "连续(TRJ)", 4: "调试(TUN)", 7: "曲线透传(STREAM)"}
         self._motor_enabled = False
         self._motor_state_known = False
         self._stop_locked = False
@@ -70,6 +71,7 @@ class RobotController(QObject, RobotBusiness):
         self._last_position_warning = 0.0
         self.actual_pose = None
         self.last_actual_at = None
+        self._actual_received_at = None
         self.actual_cartesian_pose = None
         self.last_actual_cartesian_at = None
         self.stored_positions = []
@@ -107,7 +109,8 @@ class RobotController(QObject, RobotBusiness):
         self._stale_timer.timeout.connect(self._emit_state)
         self._stale_timer.start()
         self._rgb_monitor_timer = QTimer(self)
-        self._rgb_monitor_timer.setInterval(1000)
+        self._rgb_monitor_timer.setInterval(100)
+        self._rgb_monitor_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._rgb_monitor_timer.timeout.connect(self._poll_rgb)
         self.gamepad = GamepadSession(self)
         self.cartesian = CartesianSession(self)
@@ -163,6 +166,10 @@ class RobotController(QObject, RobotBusiness):
     def log(self, message, tag="INFO"):
         self.log_message.emit(str(message), tag)
 
+    def wire_history(self):
+        transport = getattr(self, '_transport', None)
+        return transport.wire_log.snapshot() if transport else getattr(self, '_last_wire_history', '')
+
     def state(self):
         now = time.time()
         status = ""
@@ -195,7 +202,12 @@ class RobotController(QObject, RobotBusiness):
         }
 
     def _emit_state(self):
-        self.state_changed.emit(self.state())
+        state = self.state()
+        visual = {key: value for key, value in state.items()
+                  if key not in ('last_actual_at', 'actual_pose', 'actual_cartesian_pose')}
+        if visual != getattr(self, '_last_visual_state', None):
+            self._last_visual_state = deepcopy(visual)
+            self.state_changed.emit(state)
 
     def _publish(self):
         self.fields_changed.emit()
@@ -245,6 +257,7 @@ class RobotController(QObject, RobotBusiness):
         now = time.monotonic()
         self._rgb_get_pending_until = now + 2.0
         self._rgb_get_retry_at = now + 5.0
+        self._rgb_next_status_at = max(self._rgb_next_status_at, now + 0.1)
         self._rgb_runtime_ready_for_config = False
         self._start_rgb_config_response()
         self._emit_rgb()
@@ -313,7 +326,7 @@ class RobotController(QObject, RobotBusiness):
         self._emit_rgb()
 
     def set_rgb_monitoring(self, enabled):
-        """The visible RGB page explicitly opts into read-only 1 Hz monitoring."""
+        """Visible ring previews share one read-only 10 Hz monitor."""
         self._rgb_monitoring = bool(enabled)
         if self._rgb_monitoring and self.is_connected:
             if not self._rgb_monitor_timer.isActive():
@@ -335,6 +348,8 @@ class RobotController(QObject, RobotBusiness):
             self._rgb_full_invalid = True
             self._rgb_complete = False
             self._emit_rgb()
+        if now < self._rgb_next_status_at:
+            return  # GET and STATUS share the same automatic 100 ms budget.
         if not self._rgb_complete and now >= self._rgb_get_retry_at:
             self.send_cmd("#RGB_GET")
             return
@@ -346,7 +361,7 @@ class RobotController(QObject, RobotBusiness):
 
     def send_cartesian_point(self, point, speed=None):
         value = point.speed if speed is None else self._validated_speed(speed)
-        if self.cartesian.backend == CartesianBackend.HOST:
+        if self.cartesian.backend == CartesianBackend.STREAM:
             return self.cartesian.start_points((point,), speed=value)
         if point.frame == "base" and point.target_kind == "flange":
             return self.send_cmd(self._teaching_command(point, value))
@@ -404,6 +419,7 @@ class RobotController(QObject, RobotBusiness):
         self._update_motor_state(None)
         self.actual_pose = None
         self.last_actual_at = None
+        self._actual_received_at = None
         self.actual_cartesian_pose = self.last_actual_cartesian_at = None
         # The default GET below publishes only after its in-flight ledger is
         # established; UI monitoring listeners cannot enqueue a second GET.
@@ -413,6 +429,12 @@ class RobotController(QObject, RobotBusiness):
         getattr(self._transport, "line_received_at", self._transport.line_received).connect(self._on_transport_line, Qt.ConnectionType.QueuedConnection)
         self._transport.command_written.connect(self._on_written, Qt.ConnectionType.QueuedConnection)
         self._transport.failed.connect(self._on_transport_failure, Qt.ConnectionType.QueuedConnection)
+        self._transport.wire_log.sink = getattr(self, 'wire_log_sink', None)
+        # Coalesce every finite seven-axis readback for display, including
+        # measured positions outside planning limits. Planning validates its
+        # own feedback independently from the actual model.
+        self._transport.line_observer = self.cartesian.stream.receive
+        self._transport.written_observer = self.cartesian.stream.written
         self._transport.start()
         self.log(f"已连接 {port} @ {BAUDRATE} ({self.connection_type})")
         self.send_cmd("#RGB_GET")
@@ -434,6 +456,7 @@ class RobotController(QObject, RobotBusiness):
         transport, self._transport = self._transport, None
         if transport:
             transport.close()
+            self._last_wire_history = transport.wire_log.snapshot()
             transport.deleteLater()
         self.serial_port = None
         self.actual_cartesian_pose = self.last_actual_cartesian_at = None
@@ -505,6 +528,12 @@ class RobotController(QObject, RobotBusiness):
                     request["generation"] == generation)
 
     def _can_write(self, generation, command):
+        owned_stream = self.cartesian.stream.owns_command(generation, command)
+        if owned_stream is not None:
+            return bool(owned_stream and self.is_connected and generation == self._tx_generation and
+                        (not self._stop_locked or self.cartesian.stream._locked_command(command)) and not self._calibration_busy)
+        if self._reject_plain_motion_in_stream_mode(command):
+            return False
         diagnostic = capabilities.diagnostic(command)
         owned_motion = (self.cartesian.busy and
                         (command.startswith((">", "&", "@", "#CMDMODE ")) or
@@ -523,6 +552,15 @@ class RobotController(QObject, RobotBusiness):
             except queue.Full:
                 return False
         return allowed
+
+    def _reject_plain_motion_in_stream_mode(self, command):
+        # Check again at actual writer admission: a native command may have
+        # waited in the queue while a reconnect/mode receipt confirmed mode 7.
+        # StreamSession-owned packets are admitted before this ordinary path.
+        if self.current_cmdmode == 7 and command.startswith(("@", ">", "&")):
+            self.log("主控实际处于模式 7，普通运动指令未发送；请选择并确认曲线透传后端，或切换回主控模式后重试", "WARN")
+            return True
+        return False
 
     def send_cmd(self, command, sequence=False, source="ui"):
         """Only command dispatch path; STOP invalidates every pending generation."""
@@ -585,6 +623,17 @@ class RobotController(QObject, RobotBusiness):
         if self._calibration_busy and not diagnostic and command not in ("!STOP", "!DISABLE"):
             self.log("校准及保存中，只接受 STOP、DISABLE 和保护快照查询", "WARN")
             return False
+        if command.startswith('#CMDMODE ') and source != 'cartesian':
+            try:
+                mode = int(command.split()[1])
+            except (ValueError, IndexError):
+                self.log('无效的主控模式', 'WARN')
+                return False
+            if mode == 7 or self.current_cmdmode == 7 or self.cartesian.backend == CartesianBackend.STREAM:
+                return self.cartesian.select_mode(mode)
+            if mode not in (1, 2, 3, 4):
+                self.log('模式 5/6 保留；请选择 1～4 或 7', 'WARN')
+                return False
         if self._stop_locked and not diagnostic and command not in ("!STOP", "!START", "!DISABLE"):
             self.log("保护锁定中，请 START 或 DISABLE；STOP 可中断保护动作", "WARN")
             return False
@@ -613,11 +662,21 @@ class RobotController(QObject, RobotBusiness):
             self._cancel_motion_for_stop()
             self._stop_locked = True
             self._handle_stop_status("Stopping ok" if command == "!STOP" else "Disable pending")
-        if command.startswith("@") and self.cartesian.backend == CartesianBackend.HOST and source != "cartesian":
+        if command.startswith("@") and self.cartesian.backend == CartesianBackend.STREAM and source != "cartesian":
             from app.core.business import TeachingPoint
             values = finite_numbers(command[1:], 7)
             point = TeachingPoint("笛卡尔目标", "MOVEL", tuple(values[:6]), 100., values[6])
             return self.cartesian.start_points((point,))
+        if command.startswith((">", "&")) and self.cartesian.backend == CartesianBackend.STREAM and source != "cartesian":
+            from app.core.business import TeachingPoint
+            values = finite_numbers(command[1:], 8)
+            point = TeachingPoint("关节目标", "MOVEJ", tuple(values[:7]), 100., values[7])
+            return self.cartesian.start_points((point,))
+        if self._reject_plain_motion_in_stream_mode(command):
+            return False
+        if command.startswith(("~S", "!STREAM_")) and source != "cartesian":
+            self.log("透传数据与会话由 50 Hz 透传后端管理，请使用点位发送", "WARN")
+            return False
         parameter_spec = self._parameter_spec(command)
         if parameter_spec is not None:
             self._begin_parameter_request(parameter_spec)
@@ -629,10 +688,13 @@ class RobotController(QObject, RobotBusiness):
             self.log(f"指令入队失败：{error}", "ERROR")
             return False
         self._track_system_pose_command(command)
+        if command in ("!HOME", "!RESET"):
+            kind = command[1:]
+            self.preset_pose_requested.emit(kind, list(_SYSTEM_JOINT_POSES[kind]))
         if command == "#RGB_GET":
             self._begin_rgb_get()
         elif command == "#RGB_STATUS":
-            self._rgb_next_status_at = time.monotonic() + 1.0
+            self._rgb_next_status_at = time.monotonic() + 0.1
         self._publish()
         return True
 
@@ -669,7 +731,7 @@ class RobotController(QObject, RobotBusiness):
         for request in requests:
             self._discard_system_pose_request(request)
         if kind not in self._system_pose_ambiguous:
-            self.log(f"{kind} 回执无法对应（{reason}）；本连接暂不自动同步该预设，重新连接可恢复", "WARN")
+            self.log(f"{kind} 回执无法对应（{reason}）；本连接暂不按完成回执同步该预设，重新连接可恢复", "WARN")
         self._system_pose_ambiguous.add(kind)
 
     def _track_system_pose_command(self, command):
@@ -819,9 +881,17 @@ class RobotController(QObject, RobotBusiness):
 
     def _cancel_motion_for_stop(self):
         self._invalidate_system_pose()
-        if hasattr(self, "cartesian"):
-            self.cartesian.cancel()
-        super()._cancel_motion_for_stop()
+        stream = getattr(getattr(self, 'cartesian', None), 'stream', None)
+        axis_cleanup = bool(stream is not None and stream.active and self.cartesian.kind == 'axis_test' and self.is_connected)
+        if axis_cleanup:
+            with stream.lock:
+                stream.request_axis_stop()
+                super()._cancel_motion_for_stop()
+                stream.adopt_axis_generation()
+        else:
+            if hasattr(self, 'cartesian'):
+                self.cartesian.cancel()
+            super()._cancel_motion_for_stop()
         self._position_request = None
         self._position_token += 1
         self._finish_parameter_request(False, "参数任务已被停止或断连取消")
@@ -832,17 +902,40 @@ class RobotController(QObject, RobotBusiness):
         self._mode_request_counter = (self._mode_request_counter + 1) & 0xFFFFFFFF or 1
         return self._mode_request_counter
 
+    def _set_cmdmode(self, mode):
+        if mode == 7 or self.current_cmdmode == 7 or self.cartesian.backend == CartesianBackend.STREAM:
+            return self.cartesian.select_mode(mode)
+        if mode not in (1, 2, 3, 4):
+            self.log('模式 5/6 保留；请选择 1～4 或 7', 'WARN')
+            return False
+        return super()._set_cmdmode(mode)
+
     def _query_command_mode(self):
         if self._control_owner != "gamepad":
             super()._query_command_mode()
 
     def _handle_stop_status(self, line):
+        if line in ('STOP locked', 'STOP locked disabled', 'Disabled ok'):
+            self._stop_confirmed = True
+        elif line in ('Stopping ok', 'Start pending', 'Started ok', 'Disable pending'):
+            self._stop_confirmed = False
         if (line == "Start pending" and self.gamepad.claimed and self.gamepad.stage == "starting" and
                 self.gamepad._system is not None and self.gamepad._system["command"] == "!START"):
             # Claim already invalidated UI motion. This is the acknowledgement
             # of our own START, so do not cancel that transaction's generation.
             self._stop_locked = True
             self.lbl_motor_state.config(text="● 等待停稳并解锁")
+            return
+        stream = self.cartesian.stream
+        if (stream.active and self.cartesian.kind == 'axis_test' and stream.recovering and
+                line in ('Stopping ok', 'STOP locked', 'STOP locked disabled', 'Disabled ok', 'error STOP_LOCKED')):
+            # The test has retired its curve writer. Keep only bounded read,
+            # CLOSE and mode-2 recovery ownership through the STOP receipts.
+            self._stop_locked = line != 'Disabled ok'
+            if line == 'Disabled ok':
+                self._update_motor_state(False)
+            else:
+                self.lbl_motor_state.config(text='● 通信测试停止 / 等待会话关闭')
             return
         super()._handle_stop_status(line)
 
@@ -907,23 +1000,37 @@ class RobotController(QObject, RobotBusiness):
             now = self.cartesian.clock()
             stamp = now if received_at is None else received_at
             age = now-stamp
-            accepted = self.cartesian.update_feedback(nums, stamp)
             self.feedback_delivery_ms = max(0., age*1000)
-            if not accepted or not 0 <= age <= .3:
-                reason = self.cartesian.feedback.rejection_reason if not accepted else "回读到界面时已超过300ms"
+            reason = None
+            if not all(math.isfinite(value) for value in nums):
+                reason = "七轴回读包含非有限数值"
+            elif not math.isfinite(stamp):
+                reason = "回读时间戳无效"
+            elif age < 0:
+                reason = "回读时间戳晚于当前单调时钟"
+            elif age > .3:
+                reason = "回读到界面时已超过300ms"
+            elif self._actual_received_at is not None and stamp < self._actual_received_at:
+                reason = "回读时间戳倒序"
+            if reason is not None:
+                self.cartesian.feedback.rejection_reason = reason
                 if now-getattr(self, "_feedback_warning_at", -float("inf")) >= 1.:
                     self._feedback_warning_at = now
-                    self.log(f"关节回读未用于实际显示/同步：{reason}；RX到处理 {age*1000:.0f} ms", "WARN")
-                # Do not allow the legacy sync parser or actual display to
-                # consume a sample rejected by the motion feedback contract.
+                    self.log(f"界面关节显示未更新：{reason}；RX到界面 {age*1000:.0f} ms", "WARN")
+                # Invalid or old data cannot refresh either display or edits.
                 self.log(line, "RX")
                 request = self._position_request
                 if request and request["kind"] == "j":
                     self._position_request = None
                     self._pending_sync = None
-                self._publish()
+                self._emit_state()
                 return
+            # Actual telemetry is a measured state, not a proposed motion.
+            # Preserve raw degrees/mm in the display even when planning
+            # rejects it; never clip it to make a valid planning seed.
+            accepted = self.cartesian.update_feedback(nums, stamp)
             self.actual_pose = list(nums)
+            self._actual_received_at = stamp
             self.last_actual_at = time.time()-age
             self.actual_pose_changed.emit(list(nums))
             request = self._position_request
@@ -931,9 +1038,16 @@ class RobotController(QObject, RobotBusiness):
                 self._position_request = None
                 self._pending_sync = None
                 if request["sync"] and request["generation"] == self._tx_generation:
-                    self._fill_joints(nums)
-                    self.position_synced.emit("MoveJ", list(nums))
-                    self.log("实际位置已同步到编辑目标")
+                    if accepted:
+                        self._fill_joints(nums)
+                        self.position_synced.emit("MoveJ", list(nums))
+                        self.log("实际位置已同步到编辑目标")
+                        self.fields_changed.emit()
+                    else:
+                        self.log("实际位置已显示原始回读；不符合运动模型限位，未同步到编辑目标", "WARN")
+            self.log(line, "RX")
+            self._emit_state()
+            return
         elif nums is not None and len(nums) == 6:
             self.actual_cartesian_pose = list(nums)
             self.last_actual_cartesian_at = time.monotonic()
@@ -1125,7 +1239,7 @@ class RobotController(QObject, RobotBusiness):
         self._emit_state()
 
     def _position_polling_paused(self):
-        return (not self._poll_enabled or not self.is_connected or self._stop_locked or
+        return ((self.cartesian.active and self.cartesian.kind in ("stream", "axis_test")) or not self._poll_enabled or not self.is_connected or self._stop_locked or
                 self._calibration_busy or self._acc_sync_waiting or self._parameter_request is not None or
                 (self.connection_type == "UART4" and self._motor_state_known and not self._motor_enabled))
 

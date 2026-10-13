@@ -168,6 +168,9 @@ class GamepadSession(QObject):
         return True
 
     def claim(self):
+        if self.controller.cartesian.backend.value == "stream":
+            self.controller.log("50 Hz 曲线透传 v2 支持有限点位与顺序轨迹；手柄控制请先选择并确认主控模式", "WARN")
+            return False
         if self.claimed:
             return not self.release_pending
         c = self.controller
@@ -764,8 +767,6 @@ class GamepadSession(QObject):
                     tcp[axis] = (tcp[axis] + 180) % 360 - 180
         self.target_tcp = list(tcp)
         self._target_changed()
-        if self.controller.cartesian.backend.value == "host":
-            return self.controller.cartesian.jog(self.target_tcp)
         return True
 
     def set_gripper_base(self, opening):
@@ -837,7 +838,6 @@ class GamepadSession(QObject):
                     else:
                         self._velocity = [0.] * 6
                         if self._motion_input_active:
-                            self.controller.cartesian.jog_idle()
                             reference = self._stream["tcp"] if self._stream else self.written_reference_tcp
                             if reference is not None:
                                 self.target_tcp = list(reference)
@@ -918,12 +918,7 @@ class GamepadSession(QObject):
             self._stage("ready", "INT 已确认；手柄 MoveL 解锁")
         if not self.ready:
             return
-        host_ik = self.controller.cartesian.backend.value == "host"
-        if host_ik and self._motion_input_active:
-            if not self.controller.cartesian.jog(self.target_tcp):
-                self.stop("上位机逆解未就绪，请检查关节回读", fault=True)
-                return
-        if not host_ik and self._stream is None and now - self._last_move >= max(.05, self.control["send_interval_s"]):
+        if self._stream is None and now - self._last_move >= max(.05, self.control["send_interval_s"]):
             try:
                 command = self._move_command()
             except ValueError as error:

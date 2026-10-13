@@ -26,7 +26,7 @@ public:
     virtual bool Init() = 0;
 
     // Get current rawAngle
-    virtual uint16_t UpdateAngle() = 0;
+    virtual uint16_t UpdateAngle(uint8_t maxAttempts = 3) = 0;
 
     virtual bool IsCalibrated() = 0;
     virtual bool IsSampleValid() const { return angleData.sampleValid; }

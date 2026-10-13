@@ -94,7 +94,7 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
 
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/STM32F405RGTx_FLASH.ld)
 
-add_link_options(-Wl,-gc-sections,--print-memory-usage,-Map=${PROJECT_BINARY_DIR}/${PROJECT_NAME}.map)
+add_link_options(-Wl,-gc-sections,--print-memory-usage)
 add_link_options(-mcpu=cortex-m4 -mthumb -mthumb-interwork)
 add_link_options(-T ${LINKER_SCRIPT})
 
@@ -107,15 +107,8 @@ set_property(TARGET ${PROJECT_NAME}.elf APPEND PROPERTY LINK_DEPENDS
         "${LINKER_SCRIPT}"
         "${CMAKE_SOURCE_DIR}/Drivers/CMSIS/Lib/libarm_cortexM4lf_math.a")
 
+include("${CMAKE_SOURCE_DIR}/../cmake/firmware_artifacts.cmake")
+firmware_export_artifacts(${PROJECT_NAME}.elf)
+
 include("${CMAKE_SOURCE_DIR}/../cmake/firmware_identity.cmake")
 firmware_configure_identity(TARGETS ${PROJECT_NAME}.elf)
-
-set(HEX_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.hex)
-set(BIN_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.bin)
-
-add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
-        BYPRODUCTS ${HEX_FILE} ${BIN_FILE}
-        COMMAND ${CMAKE_OBJCOPY} -Oihex $<TARGET_FILE:${PROJECT_NAME}.elf> ${HEX_FILE}
-        COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${PROJECT_NAME}.elf> ${BIN_FILE}
-        COMMENT "Building ${HEX_FILE}
-Building ${BIN_FILE}")

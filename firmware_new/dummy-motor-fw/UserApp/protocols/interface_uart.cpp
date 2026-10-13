@@ -5,9 +5,13 @@
 
 extern Motor motor;
 
+// Command dispatch only; preserve the 20kHz controller optimization.
+#if defined(__GNUC__)
+__attribute__((optimize("Os")))
+#endif
 void OnUartCmd(uint8_t* _data, uint16_t _len)
 {
-    if (motor.controller->IsSoftStopLocked()) return;
+    if (motor.controller->IsSoftStopLocked() || motor.controller->StreamActive()) return;
     float cur, pos, vel, time;
     char *token = NULL;
     switch (_data[0])
@@ -34,7 +38,10 @@ void OnUartCmd(uint8_t* _data, uint16_t _len)
             token = strtok((char*) _data, "p");
             pos = atof(token);
             if (motor.controller->modeRunning != Motor::MODE_COMMAND_POSITION)
+            {
+                motor.controller->InvalidatePositionEntry();
                 motor.controller->requestMode = Motor::MODE_COMMAND_POSITION;
+            }
 
             motor.controller->SetPositionSetPoint(
                 (int32_t) (pos * (float) Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS));

@@ -47,9 +47,20 @@ void ASCII_protocol_process_line(const uint8_t* buffer, size_t len, StreamSink &
 
 void ASCII_protocol_parse_stream(const uint8_t* buffer, size_t len, StreamSink &response_channel)
 {
-    static uint8_t parse_buffer[MAX_LINE_LENGTH];
-    static bool read_active = true;
-    static uint32_t parse_buffer_idx = 0;
+    // USB and the two UARTs run on independent tasks. Keep fragmented lines
+    // isolated, especially the 186-byte timed records spanning USB packets.
+    struct ParseState {
+        uint8_t buffer[MAX_LINE_LENGTH]{};
+        bool active = true;
+        uint32_t index = 0;
+    };
+    static ParseState channels[3];
+    const unsigned channel = unsigned(response_channel.channelType);
+    if (channel >= 3) return;
+    auto& state = channels[channel];
+    auto& parse_buffer = state.buffer;
+    auto& read_active = state.active;
+    auto& parse_buffer_idx = state.index;
 
     while (len--)
     {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from numbers import Integral
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from .mapping import REST_POSE, cartesian_marker, firmware_to_urdf, normalize_po
 
 class _Bridge(QObject):
     state_changed = Signal(str)
+    rgb_changed = Signal(str)
     def __init__(self, view):
         super().__init__(view)
         self.view = view
@@ -51,6 +53,8 @@ class RobotView(QWidget):
         self._commanded_gripper = None
         self._cartesian = None
         self._cartesian_frame = "base"
+        self._rgb_frame = ((0, 0, 0),) * 24
+        self._rgb_light_on = None
         self._display_mode = "preview"
         self._state = {
             "mode": "preview", "theme": "light", "stale": True,
@@ -128,8 +132,9 @@ class RobotView(QWidget):
         self._ready = True
         self._message.hide()
         self._sync()
+        self._emit_rgb_frame()
         self.ready.emit()
-        self.status_changed.emit("本地 URDF 与 10 个网格加载完成")
+        self.status_changed.emit("本地 URDF 与 11 个网格加载完成")
 
     def _show_error(self, message):
         if self._closed:
@@ -166,6 +171,33 @@ class RobotView(QWidget):
         self._target_pose = pose
         self._target_gripper = float(gripper_pct)
         self._sync()
+
+    def set_rgb_frame(self, colors, *, light_on=None):
+        """Update the model's diffuser without touching poses or telemetry age."""
+        if self._closed:
+            return
+        if light_on is not None and not isinstance(light_on, bool):
+            raise ValueError("灯环开灯状态须为布尔值")
+        try:
+            frame = tuple(tuple(color) for color in colors)
+        except TypeError as error:
+            raise ValueError("灯环帧须包含 24 组 RGB 整数") from error
+        if len(frame) != 24 or any(len(color) != 3 or any(
+                isinstance(channel, bool) or not isinstance(channel, Integral)
+                or not 0 <= channel <= 255 for channel in color) for color in frame):
+            raise ValueError("灯环帧须包含 24 组 0..255 的 RGB 整数")
+        frame = tuple(tuple(int(channel) for channel in color) for color in frame)
+        if frame != self._rgb_frame or light_on != self._rgb_light_on:
+            self._rgb_frame = frame
+            self._rgb_light_on = light_on
+            self._emit_rgb_frame()
+
+    def _emit_rgb_frame(self):
+        if self._ready and not self._closed:
+            payload = self._rgb_frame if self._rgb_light_on is None else {
+                "colors": self._rgb_frame, "light_on": self._rgb_light_on,
+            }
+            self._bridge.rgb_changed.emit(json.dumps(payload, allow_nan=False))
 
     def set_target_gripper(self, gripper_pct):
         """Update the display opening while preserving the last joint target.

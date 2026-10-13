@@ -1,4 +1,4 @@
-"""Real Qt actions for local target saving and acknowledged preset previews."""
+"""Real Qt actions for local saving, immediate presets and numbered completion."""
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -39,6 +39,8 @@ class MotionActionUiTests(unittest.TestCase):
                                    return_value=QMessageBox.StandardButton.Ok)
         self.warnings = self.warning_patch.start()
         self.window = MainWindow(self.controller, self.store)
+        # Isolate motion command assertions from the independent RGB monitor.
+        self.window.rgb_preview_source.setCurrentIndex(0)
         self.window.resize(1366, 768)
         self.window.show()
         APPLICATION.processEvents()
@@ -265,7 +267,48 @@ class MotionActionUiTests(unittest.TestCase):
         self.assertEqual([button.accessibleName() for button in self.window.quick_point_buttons], names)
         self.assertIn("前 4", save_notice)
 
-    def test_matching_home_reset_completion_updates_both_editors_without_fake_telemetry(self):
+    def test_terminal_home_reset_preview_immediately_and_cancel_old_drag(self):
+        self.connect_fake()
+        w, c = self.window, self.controller
+        c._process_rx_line("ok " + " ".join(map(str, ACTUAL)))
+        for kind, target in (("HOME", [0, 0, 90, 0, 0, 0, 0]),
+                             ("RESET", [0, -75, 180, 0, 0, 0, 0])):
+            with self.subTest(kind=kind):
+                self.edit_motion("MoveL", viewer_mode=1)
+                c.movej_drag_enable.set(True)
+                w._last_drag["j"] = time.monotonic()
+                w.joint_spins[0].setValue(44)
+                self.assertIn("j", w._drag_pending)
+                w._teaching_sync = ("MoveJ", c._tx_generation)
+                # Terminal/custom commands use controller dispatch directly.
+                self.assertTrue(c.send_cmd("!" + kind))
+                self.assertEqual(self.commands(), ["!" + kind])
+                self.assertEqual(w.viewer.target[0], target)
+                self.assertEqual(w.viewer.actual, (ACTUAL, None))
+                self.assertEqual(w.viewer_mode.currentIndex(), 0)
+                self.assertEqual(w._drag_pending, {})
+                self.assertIsNone(w._teaching_sync)
+                self.assertFalse(c._suppress_drag_send)
+                self.assertNotIn("已完成", w.statusBar().currentMessage())
+                self.settle()
+                self.assertEqual(self.commands(), [])
+                c.movej_drag_enable.set(False)
+
+    def test_locally_rejected_presets_do_not_change_the_preview(self):
+        self.connect_fake()
+        self.edit_motion("MoveL", viewer_mode=1)
+        before = self.target_snapshot()
+        for kind in ("HOME", "RESET"):
+            self.controller._stop_locked = True
+            self.assertFalse(self.controller.send_cmd("!" + kind))
+            self.controller._stop_locked = False
+            self.assertEqual(self.target_snapshot(), before)
+            with patch.object(self.controller._tx_queue, "put", side_effect=IOError("fake queue failure")):
+                self.assertFalse(self.controller.send_cmd("!" + kind))
+            self.assertEqual(self.target_snapshot(), before)
+            self.assertEqual(self.commands(), [])
+
+    def test_home_reset_dispatch_and_completion_update_both_editors_without_fake_telemetry(self):
         self.connect_fake()
         w, c = self.window, self.controller
         c._process_rx_line("ok " + " ".join(map(str, ACTUAL)))
@@ -290,24 +333,32 @@ class MotionActionUiTests(unittest.TestCase):
                 w.teaching_gripper_spin.setValue(88)
                 w.navigation.setCurrentRow(page)
                 w.viewer_mode.setCurrentIndex(1)
-                old_joints = [spin.value() for spin in w.joint_spins]
                 self.assertIsNotNone(w.viewer.cartesian)
                 system_button = next(button for button in w.findChildren(QPushButton)
                                      if button.text() == ("回零 HOME" if command == "HOME" else "休息 REST"))
                 QTest.mouseClick(system_button, Qt.MouseButton.LeftButton)
                 self.assertEqual(self.commands(), [f"!{command}"])
-                self.assertEqual([spin.value() for spin in w.joint_spins], old_joints)
+                self.assertEqual([spin.value() for spin in w.joint_spins], target)
+                self.assertEqual([spin.value() for spin in w.teaching_joint_spins], target)
+                self.assertEqual(w.viewer.target[0], target)
+                self.assertEqual(w.viewer_mode.currentIndex(), 0)
+                self.assertIsNone(w.viewer.cartesian)
+                self.assertIn("等待设备执行", w.statusBar().currentMessage())
+                self.assertEqual(w.viewer.actual, viewer_actual_before)
+                self.assertEqual([row.readback.text() for row in w.joint_rows], readbacks_before)
                 c._process_rx_line(f"queued {command} id={receipt_id} mode=TRJ")
                 c._process_rx_line("Home pending" if command == "HOME" else "Reset pending")
                 c._process_rx_line("ok")
                 c._process_rx_line(f"ok {command} id={receipt_id - 1} ms=400")
                 wrong_type = "RESET" if command == "HOME" else "HOME"
                 c._process_rx_line(f"ok {wrong_type} id={receipt_id} ms=400")
-                self.assertEqual([spin.value() for spin in w.joint_spins], old_joints)
-                self.assertEqual(w.viewer_mode.currentIndex(), 1)
+                self.assertEqual([spin.value() for spin in w.joint_spins], target)
+                self.assertEqual(w.viewer_mode.currentIndex(), 0)
 
                 # Local edits queued while waiting must be cancelled when the
                 # acknowledged preset becomes the display target.
+                w.motion_tabs.setCurrentIndex(1)
+                w.teaching_tabs.setCurrentIndex(1)
                 c.movej_drag_enable.set(True)
                 c.movel_drag_enable.set(True)
                 c.hand_pos_drag_enable.set(True)

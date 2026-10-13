@@ -15,7 +15,7 @@ public:
 
 
     bool Init() override;
-    uint16_t UpdateAngle() override;  // Get current rawAngle (rad)
+    uint16_t UpdateAngle(uint8_t maxAttempts = 3) override;  // Get current rawAngle (rad)
     bool IsCalibrated() override;
 
 
@@ -39,7 +39,7 @@ private:
     /***** Port Specified Implements *****/
     virtual void SpiInit() {};
 
-    virtual uint16_t SpiTransmitAndRead16Bits(uint16_t _dataTx) {};
+    virtual uint16_t SpiTransmitAndRead16Bits(uint16_t _dataTx) = 0;
     virtual bool SpiTransactionValid() const { return true; }
 
 };

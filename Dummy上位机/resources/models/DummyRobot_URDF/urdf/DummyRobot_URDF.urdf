@@ -71,7 +71,16 @@
       <material
         name="">
         <color
-          rgba="0.309803921568627 0.309803921568627 0.309803921568627 1" />
+          rgba="0.035 0.035 0.035 1" />
+      </material>
+    </visual>
+    <visual name="rgb_diffuser">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://DummyRobot_URDF/meshes/light.stl" />
+      </geometry>
+      <material name="rgb_diffuser">
+        <color rgba="0.85 0.85 0.85 1" />
       </material>
     </visual>
     <collision>
@@ -129,7 +138,7 @@
       <material
         name="">
         <color
-          rgba="1 1 1 1" />
+          rgba="0.035 0.035 0.035 1" />
       </material>
     </visual>
     <collision>
@@ -187,7 +196,7 @@
       <material
         name="">
         <color
-          rgba="0.180392156862745 0.180392156862745 0.180392156862745 1" />
+          rgba="0.035 0.035 0.035 1" />
       </material>
     </visual>
     <collision>
@@ -245,7 +254,7 @@
       <material
         name="">
         <color
-          rgba="1 1 1 1" />
+          rgba="0.035 0.035 0.035 1" />
       </material>
     </visual>
     <collision>
@@ -303,7 +312,7 @@
       <material
         name="">
         <color
-          rgba="0.309803921568627 0.309803921568627 0.309803921568627 1" />
+          rgba="0.035 0.035 0.035 1" />
       </material>
     </visual>
     <collision>
@@ -361,7 +370,7 @@
       <material
         name="">
         <color
-          rgba="1 1 1 1" />
+          rgba="0.035 0.035 0.035 1" />
       </material>
     </visual>
     <collision>
@@ -419,7 +428,7 @@
       <material
         name="">
         <color
-          rgba="0.803921568627451 0.803921568627451 0.803921568627451 1" />
+          rgba="0.10 0.10 0.10 1" />
       </material>
     </visual>
     <collision>
@@ -477,7 +486,7 @@
       <material
         name="">
         <color
-          rgba="1 1 1 1" />
+          rgba="0.10 0.10 0.10 1" />
       </material>
     </visual>
     <collision>
@@ -535,7 +544,7 @@
       <material
         name="">
         <color
-          rgba="1 1 1 1" />
+          rgba="0.10 0.10 0.10 1" />
       </material>
     </visual>
     <collision>

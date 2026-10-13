@@ -714,6 +714,31 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(transport._threads, [])
         self.assertFalse(c.is_connected)
 
+    def test_real_receive_workers_display_latest_outside_limit_pose_after_connect(self):
+        self.controller.close()
+        port = FakePort()
+        c = self.controller = RobotController(serial_factory=lambda *_args, **_kwargs: port)
+        c.set_polling(False)
+        actual = []
+        c.actual_pose_changed.connect(actual.append)
+        self.assertTrue(c.connect_port("FAKE", "USB"))
+        port.inject(b"ok 0 -75 180.62 0 .59 0 0\nok 0 -75 180.65 0 .58 0 0\n")
+        time.sleep(.08)  # RX continues while GUI delivery is intentionally paused.
+        self.assertEqual(actual, [])
+        limit = time.perf_counter() + 1.
+        while not actual and time.perf_counter() < limit:
+            self.app.processEvents()
+            time.sleep(.01)
+        expected = [0., -75., 180.65, 0., .58, 0., 0.]
+        self.assertEqual(actual, [expected])
+        self.assertEqual(c.actual_pose, expected)
+        self.assertIsNone(c.cartesian.feedback.sample)
+        self.assertFalse(c._motor_enabled)
+        self.assertTrue(all(data.startswith(b"#") for data in port.written))
+        audit = c._transport.wire_log.snapshot()
+        self.assertIn("ok 0 -75 180.62 0 .59 0 0", audit)
+        self.assertIn("ok 0 -75 180.65 0 .58 0 0", audit)
+
 
 if __name__ == "__main__":
     unittest.main()

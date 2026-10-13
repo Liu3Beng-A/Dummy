@@ -46,6 +46,8 @@ function(firmware_configure_identity)
             "${_root}/stop_protocol.h"
             "${_root}/protection_protocol.h"
             "${_root}/motion_completion_protocol.h"
+            "${_root}/stream_protocol.h"
+            "${_root}/cmake/firmware_artifacts.cmake"
             "${CMAKE_CURRENT_FUNCTION_LIST_FILE}")
     list(REMOVE_DUPLICATES _inputs)
     list(SORT _inputs)

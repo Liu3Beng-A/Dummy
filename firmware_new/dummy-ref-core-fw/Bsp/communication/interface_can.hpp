@@ -16,6 +16,10 @@ struct CAN_context
 
     uint32_t last_heartbeat_mailbox = 0;
     volatile uint32_t inFlightMailboxes = 0;
+    // A native caller owns a semaphore reservation; streamed entries instead
+    // own a bounded pending slot. Neither may reuse an undelivered RQCP owner.
+    uint8_t nativeTokenMask = 0;
+    uint8_t streamPendingSlot[3]{}; // index + 1, zero means non-stream owner.
     // Only ordinary 0x07 targets carry a task identity. Keep it until the
     // hardware result is consumed, including cancellation/abort completion.
     struct MotionTx {
@@ -24,6 +28,12 @@ struct CAN_context
         bool aborting = false;
     } motionTx[3];
     // Read-only QUERY diagnostics. Independent of ordinary motion ownership.
+    struct StreamTx {
+        uint32_t epoch = 0, queuedAt = 0;
+        uint16_t session = 0;
+        uint8_t command = 0;
+        bool aborting = false;
+    } streamTx[3];
     struct ProbeTxCounters {
         uint32_t accepted = 0, txok = 0, alst = 0, terr = 0, aborted = 0;
         uint16_t lastTxOk = 0;
@@ -63,6 +73,8 @@ void CanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* t
 bool TryCanSendMessage(CAN_context* canCtx, uint8_t* txData, CAN_TxHeaderTypeDef* txHeader);
 bool CanSendMotionMessage(CAN_context* ctx, uint8_t* data, CAN_TxHeaderTypeDef* header, uint32_t epoch, uint32_t generation);
 void PollCanMotionTransmit(CAN_context* ctx);
+bool TryCanSendStreamMessage(CAN_context* ctx, uint8_t* data, CAN_TxHeaderTypeDef* header, uint16_t session);
+void PollCanStreamTransmit(CAN_context* ctx);
 void OnCanMessage(CAN_context* canCtx, CAN_RxHeaderTypeDef* rxHeader, uint8_t* data);
 
 #endif // __INTERFACE_CAN_HPP

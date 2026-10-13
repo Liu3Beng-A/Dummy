@@ -33,11 +33,24 @@ class CartesianUiTests(unittest.TestCase):
         self.assertEqual(self.w.ik_backend.currentData(), 'firmware')
         before = [spin.value() for spin in self.w.pose_spins]
         self.w.ik_backend.setCurrentIndex(1)
-        self.assertEqual(self.c.cartesian.backend.value, 'host')
-        self.assertEqual(self.store.settings['cartesian_backend'], 'host')
+        self.assertEqual(self.c.cartesian.backend.value, 'stream')
+        self.assertEqual(self.store.settings['cartesian_backend'], 'stream')
         self.assertEqual([spin.value() for spin in self.w.pose_spins], before)
         self.assertTrue(self.c._tx_queue.empty())
+        self.assertEqual(self.w.ik_backend.count(), 2)
+        self.assertEqual(self.w.mode_combo.currentIndex(), 4)
         self.assertEqual(self.w.poll_hz.maximum(), 50)
+
+    def test_stream_selection_is_explicit_persisted_and_no_hardware_command(self):
+        self.w.ik_backend.setCurrentIndex(1)
+        self.assertEqual(self.w.ik_backend.currentData(), 'stream')
+        self.assertEqual(self.c.cartesian.backend.value, 'stream')
+        self.assertEqual(self.store.settings['cartesian_backend'], 'stream')
+        self.assertTrue(self.c._tx_queue.empty())
+        self.assertIn('50 Hz', self.w.ik_status.text())
+        self.w.ik_backend.setCurrentIndex(0)
+        self.assertEqual(self.c.cartesian.backend.value, 'firmware')
+        self.assertTrue(self.c._tx_queue.empty())
 
     def test_world_point_roundtrip_retains_tool_and_legacy_point_resets_frame(self):
         self.w.teaching_tabs.setCurrentIndex(1)

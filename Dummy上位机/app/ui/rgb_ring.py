@@ -60,17 +60,25 @@ class RgbRing(QWidget):
             "plate": "#edf2f7", "plate_border": "#cedbe7",
             "track": "#dce6ee", "center": "#f9fbfd",
             "bezel": "#61798e", "title": "#243c54", "muted": "#587087",
+            "cover_shadow": (132, 142, 153), "cover_peak": (170, 179, 189),
+            "cover_mid": (158, 168, 179), "cover_edge": (122, 133, 145),
         },
         "dark": {
             "canvas": "#142031", "canvas_border": "#2a3d53",
             "plate": "#1c2d41", "plate_border": "#3b536a",
             "track": "#101b2a", "center": "#172538",
             "bezel": "#58718b", "title": "#e0edf9", "muted": "#a6bfd5",
+            "cover_shadow": (48, 58, 69), "cover_peak": (67, 78, 90),
+            "cover_mid": (59, 70, 82), "cover_edge": (39, 49, 60),
         },
     }
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, ring_only=False):
         super().__init__(parent)
+        self._ring_only = bool(ring_only)
+        if self._ring_only:
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.setAutoFillBackground(False)
         self._colors = ((0, 0, 0),) * self.PIXEL_COUNT
         self._theme = "light"
         self._title = "RGB 圆环"
@@ -78,7 +86,7 @@ class RgbRing(QWidget):
         self._active = True
         self._light_cache_key = None
         self._light_image = None
-        self.setMinimumSize(180, 180)
+        self.setMinimumSize(144 if self._ring_only else 180, 144 if self._ring_only else 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAccessibleName("RGB 连续扩散灯环预览")
         self._update_description()
@@ -141,28 +149,32 @@ class RgbRing(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         # Own the complete background, including the rounded border's corners;
         # native Window palettes must not leak white into a dark preview.
-        painter.fillRect(self.rect(), QColor(palette["canvas"]))
-        painter.setPen(QPen(QColor(palette["canvas_border"]), 1))
-        painter.setBrush(QColor(palette["canvas"]))
-        painter.drawRoundedRect(QRectF(self.rect()).adjusted(.5, .5, -.5, -.5), 12, 12)
+        if not self._ring_only:
+            painter.fillRect(self.rect(), QColor(palette["canvas"]))
+            painter.setPen(QPen(QColor(palette["canvas_border"]), 1))
+            painter.setBrush(QColor(palette["canvas"]))
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(.5, .5, -.5, -.5), 12, 12)
 
-        diameter = min(520., max(0., min(self.width(), self.height()) - 20.))
+        margin = 16. if self._ring_only else 20.
+        diameter = min(520., max(0., min(self.width(), self.height()) - margin))
         if diameter <= 0:
             return
         center = QPointF(self.width() / 2., self.height() / 2.)
-        radius = diameter / 2.
-        plate = QRectF(center.x() - radius, center.y() - radius, diameter, diameter)
-        painter.setPen(QPen(QColor(palette["plate_border"]), 1))
-        painter.setBrush(QColor(palette["plate"]))
-        painter.drawEllipse(plate)
+        if not self._ring_only:
+            radius = diameter / 2.
+            plate = QRectF(center.x() - radius, center.y() - radius, diameter, diameter)
+            painter.setPen(QPen(QColor(palette["plate_border"]), 1))
+            painter.setBrush(QColor(palette["plate"]))
+            painter.drawEllipse(plate)
 
-        inner_radius = diameter * .295
-        painter.setPen(QPen(QColor(palette["plate_border"]), 1))
-        painter.setBrush(QColor(palette["center"]))
-        painter.drawEllipse(center, inner_radius, inner_radius)
+            inner_radius = diameter * .295
+            painter.setPen(QPen(QColor(palette["plate_border"]), 1))
+            painter.setBrush(QColor(palette["center"]))
+            painter.drawEllipse(center, inner_radius, inner_radius)
 
         self._paint_diffuser(painter, center, diameter)
-        self._paint_caption(painter, center, diameter, palette)
+        if not self._ring_only:
+            self._paint_caption(painter, center, diameter, palette)
 
     def _paint_diffuser(self, painter, center, diameter):
         outer = diameter * .471
@@ -171,13 +183,14 @@ class RgbRing(QWidget):
         # Neutral cover remains visible with a black frame in both themes.
         # Radial shading and soft edges describe one continuous moulded ring.
         cover = QRadialGradient(center, outer)
-        cover.setColorAt(0., QColor(193, 201, 209, 0))
-        cover.setColorAt(inner_stop, QColor(193, 201, 209, 0))
-        cover.setColorAt(inner_stop + .018, QColor(193, 201, 209))
-        cover.setColorAt(.855, QColor(220, 224, 228))
-        cover.setColorAt(.9, QColor(211, 216, 221))
-        cover.setColorAt(.983, QColor(187, 197, 207))
-        cover.setColorAt(1., QColor(187, 197, 207, 0))
+        palette = self._PALETTES[self._theme]
+        cover.setColorAt(0., QColor(*palette["cover_shadow"], 0))
+        cover.setColorAt(inner_stop, QColor(*palette["cover_shadow"], 0))
+        cover.setColorAt(inner_stop + .018, QColor(*palette["cover_shadow"]))
+        cover.setColorAt(.855, QColor(*palette["cover_peak"]))
+        cover.setColorAt(.9, QColor(*palette["cover_mid"]))
+        cover.setColorAt(.983, QColor(*palette["cover_edge"]))
+        cover.setColorAt(1., QColor(*palette["cover_edge"], 0))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(cover)
         painter.drawEllipse(center, outer, outer)

@@ -49,24 +49,17 @@ for sample in plan.samples[1:]:
 
 软件设置的“笛卡尔运动逆解”选择主控或上位机，顶部状态同步显示。新配置/旧配置迁移默认主控；用户主动选择后保存在本机。已连接时先核对空闲状态，切换不会发送运动，也不会因求解失败自动换后端。
 
-上位机模式通过 INT 和多条七轴 MoveJ 执行，点位反馈纠正与手柄规划定时器目标 50 Hz、起始串口发送上限 10 Hz，二者独立。普通 MoveL 先做整线预检，首段采用预检结果，后续段用最新反馈（最多预测40 ms）作为种子重新逆解，并检查相对实际已写参考的速度/加速度、量化与段内几何误差。重复量化目标合并；终点复用真实回执编号，绝不虚构完成。相邻发送间隔从成功写出回调开始计时，排队延迟不会引起补发突发。单个未写槽与编号回执账本分离；`accepted` 不是到位。有限点位必须得到末条编号的 `MOTION_STATUS phase=3`，并等待新关节反馈满足位置误差和至少 150 ms 稳定条件。跟随误差增大时降速/暂停，不用滞后回读重置累计目标；失去反馈、重复超时、STOP 或断连会取消本代轨迹。
+旧版普通 MoveJ 模拟执行器已经从上位机移除。`LinePlanner`、`IKSolver`、`MotionSession` 等纯算法 API 保留，供离线分析和算法调用；它们不再是应用内可选择的运动执行后端。原生主控 MoveJ/MoveL 仍保留原语义。
 
-混合示教序列在上位机模式由上位机管理，并保持 INT；主控模式保留原 SEQ 流程。普通手动 MoveJ 保留原行为。鼠标拖发期间只保留最新待执行目标，当前有限路径完成后再预检执行；手柄采用增量规划。实际模型仍只显示真实 GETJPOS 数据。
+## STREAM_JOINT v2 / 0.3.0
 
-上位机 MoveL 的速度档位1–100 **仅参与笛卡尔规划**：100档最高20 mm/s、10°/s，35档7 mm/s、3.5°/s；线速度与角速度共用轨迹进度，速度/加速度约束和反馈降速仍可放慢轨迹。档位不再透传到生成的 MoveJ。
+`StreamPlanner(model, motor_acceleration=[30]*7, motor_velocity=[30]*7).plan_line(q, target, limits, tool)` returns immutable `StreamPlan` knots at exactly 20 ms. `plan_joint(q, target, speed)` supports finite joint moves. Each `StreamKnot.encode(session)` returns the 186-character `~S` ASCII hexadecimal record, with CRC-16/CCITT-FALSE, seven signed int32 motor q/v/a triples, seed and final END. No Qt, serial port, or device is imported or opened by this package.
 
-每段通过 `segment_timing(actual_q, quantized_target, duration, motor_acceleration)` 单独求协议速度：六轴角差乘减速比转电机圈数，地轨按5 mm/圈换算；按主控对称梯形模型反求达到该段时长所需的统一速度上限，再量化到协议0.01档。时长取当前采样时间减上一采样时间（包括合并的重复点），并应用反馈降速。模型最短时间仍大于期望时长时，延长该段的发令间隔。主控最终再求七轴各自的同步速度。
+The planner uses high-resolution local IK, a quintic joint spline with zero velocity/acceleration at finite endpoints, global time scaling, quantized-boundary reconstruction, joint extrema, velocity/acceleration/jerk limits, firmware-equivalent Bernstein bounds and Cartesian path checks. Both motor velocity and acceleration arguments must come from fresh device readback in an executing application. The defaults of 30 rev/s and 30 rev/s² are for offline examples only. UI speed affects Cartesian timing, never an ordinary MoveJ speed field.
 
-加速度默认暂用主控20261012.01的30 r/s²，并在每次任务首条指令前提示未确认状态；收到 `#GETJACC 1`～`7` 的读回或 `MOTION Jn ... a=...` 时更新对应轴。重连、修改加速度、重启电机或同步加速度后作废有关缓存；需要重新读回才标记确认。零值/非法回包不算有效模型参数。本程序不能感知外部客户端修改。
+This API preflights complete finite trajectories before execution. It does not implement future-window feedback correction, interactive continuous jog replanning, calibration, collision avoidance, mechanical identification, or real-device validation. The UI uses live joint feedback for communication watchdogs, actual-position display, and final settling checks; it does not rewrite already planned stream knots during execution. Multi-point callers must preserve endpoint completion semantics. A transport must separately enforce capability/session matching, FIFO credits, authoritative STOP, live feedback, and completion; encoding a packet does not authorize its execution.
 
-当前主控把MoveJ钳在1–100档。反算小于1档时只能用1档，并在日志报告“期望时长/模型预测时长”，可能提前到点等待。上述预测复现主控规划模型，不保证运动中覆盖目标时的真实到达时刻，也没有解决逐段速度连续问题；提高频率不能自动消除这项限制。普通手动MoveJ、示教MOVEJ点以及主控后端的原生MoveL保留原速度语义。
 
-串口接收线程在读到数据时使用高分辨率单调时钟记录时间，Qt处理时不会把旧数据重新标记为新数据。关节限位、非有限值、时间戳倒序的拒收会记日志并阻止其同步到显示/编辑目标；日志同时包含RX到处理延迟。手柄采样和消费也使用相同类型的高分辨率时钟。
+Application v2 seeds every finite plan from fresh DIAG7 held-reference integers, not from rounded measured position or an assumed previous endpoint. The actual position is checked against ordinary motor settling tolerance; motors recheck readiness and latch the held reference for exact SEED matching. Each new point rereads this contract before planning and confirms the reference again afterward. The packet layout is unchanged, but VERSION=2 rejects older semantics.
 
-运动及示教坐标可选“基座/法兰”或“世界/TCP”。切换时转换两组编辑值并保留工具快照；连接时使用新鲜反馈地轨，离线时使用运动编辑区地轨并提示。转换超出输入范围会拒绝切换。旧点位、原始终端 `@` 均保留基座/法兰语义；执行时用入口地轨位置转换为世界 TCP。新世界 TCP 点位保存工具快照及版本，主控后端会把同一目标转换回基座法兰，保持地轨。主控原生 MoveL 仍是主控现有终点逆解行为，不承诺七轴直线插补。
-
-## 验证与后续
-
-运行 `python -m unittest tests.test_dummy_motion tests.test_motion_execution tests.test_motion_correction tests.test_cartesian_session -v` 验证纯计算和假串口执行；界面测试可独立运行 `python -m unittest tests.test_cartesian_ui -v`。`python tools/benchmark_motion.py --output benchmark.json` 测量完整 IK、20 ms 在线起步以及完整直线预检的 CPU 耗时，结果不包含 USB/CAN/电机延迟。
-
-本版没有 TCP 标定、固定 TCP 移轨、碰撞检测或在线全局换解。工具实际中心、地轨正方向/零点、连续 MoveJ 跟随误差、30/50 Hz 回读与提高发令频率仍需低速实机验收。软件定时器和 Windows 线程不提供硬实时保证。
+Offline planning executes in a disposable Windows spawn process with no Qt or device access. The application still owns capability checks, actual limits, session cleanup, FIFO credits, STOP and actual-settling checks. Fifty hertz means a 20ms curve interval, not periodic USB writes or online feedback replanning. Feedback at 30–50Hz is PC receive time, not a device encoder measurement timestamp.

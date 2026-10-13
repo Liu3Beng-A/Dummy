@@ -115,6 +115,7 @@ PROTECTION_CAN_SIZE void Motor::Controller::UpdateProtectionLimits() {
     ClearDetectionTimer(DR_PARAMETERS); filteredCurrentQ = filteredVelocityQ = 0;
 }
 PROTECTION_CAN_SIZE void Motor::Controller::OnMotionLimitChange() {
+    InvalidatePositionEntry();
     const float maxCurrent = boardConfig.currentLimit / 1000.0f;
     const float maxSpeed = boardConfig.velocityLimit / static_cast<float>(STEPS);
     const float maxAcceleration = boardConfig.velocityAcc / static_cast<float>(STEPS);
@@ -258,6 +259,7 @@ PROTECTION_CAN_SIZE void Motor::Controller::PollStallDiagnostic() {
 }
 void Motor::Controller::SetProtectionPhase(uint8_t phase, uint8_t reason) {
     if (protectionPhase == phase && protectionReason == reason) return;
+    InvalidatePositionEntry();
     protectionPhase = phase; protectionReason = reason; phaseTicks = 0;
     eventAcknowledged = false;
 }
@@ -642,7 +644,7 @@ void Motor::Controller::TickProtection() {
     else if (goalDisable || softDisable) detectionGate = DG_DISABLED;
     else if (!IsFeedbackValid()) detectionGate = DG_BAD_FEEDBACK;
     if (detectionGate != DG_ELIGIBLE) { ClearDetectionTimer(DR_GATE, detectionGate); return; }
-    const bool positionMode = modeRunning == MODE_COMMAND_POSITION || modeRunning == MODE_COMMAND_Trajectory ||
+    const bool positionMode = modeRunning == MODE_COMMAND_POSITION || modeRunning == MODE_COMMAND_Trajectory || modeRunning == MODE_STREAM_JOINT ||
                               modeRunning == MODE_PWM_POSITION || modeRunning == MODE_STEP_DIR;
     if (!positionMode || !motionIntent) {
         detectionGate = positionMode ? DG_NO_MOTION : DG_MODE;
@@ -687,6 +689,7 @@ void Motor::Controller::TickProtection() {
 PROTECTION_CAN_SIZE void Motor::Controller::SetCaptureCoordinate(float motorR) {
     const int64_t offset = static_cast<int64_t>(realPosition) - Steps(motorR);
     if (offset < INT32_MIN || offset > INT32_MAX) { FailProtection(BAD_VALUE); return; }
+    InvalidatePositionEntry();
     context->config.motionParams.encoderHomeOffset = static_cast<int32_t>(offset);
     if (++coordinateVersion == 0) ++coordinateVersion;
     assumedBoot = false; coordinateDirty = true; profileValid = false;

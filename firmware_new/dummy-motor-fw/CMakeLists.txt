@@ -27,7 +27,7 @@ set(CMAKE_C_STANDARD 11)
 #add_compile_options(-mfloat-abi=soft)
 
 add_compile_options(-mcpu=cortex-m3 -mthumb -mthumb-interwork)
-add_compile_options(-ffunction-sections -fdata-sections -fno-common -fmessage-length=0)
+add_compile_options(-ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -fstack-usage)
 
 # uncomment to mitigate c++17 absolute addresses warnings
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-register")
@@ -81,6 +81,24 @@ set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/STM32F103CBTx_FLASH.ld)
 set_source_files_properties(Ctrl/Motor/stall_protection.cpp PROPERTIES
         COMPILE_OPTIONS "-fno-exceptions;-fno-rtti")
 
+# Stream preparation/protocol run outside 20kHz. These nonthrowing sources use
+# size optimization so the immutable 95KiB application/config boundary is kept.
+# Preserve motor.cpp, motion_planner.cpp and protection hot-path optimization.
+set_source_files_properties(
+        Ctrl/Motor/stream_curve.cpp Ctrl/Motor/stream_runtime.cpp Ctrl/Motor/stream_controller.cpp
+        UserApp/protocols/interface_can.cpp UserApp/main.cpp
+        PROPERTIES COMPILE_OPTIONS "-Os;-fno-exceptions;-fno-rtti")
+
+# Audited 2026-10-12: Ctrl/UserApp/Port contain no throw/catch, dynamic allocation,
+# typeid or dynamic_cast. Their static C++ device objects cannot unwind. Removing
+# the exception personality tables recovers application Flash without changing
+# the Ofast optimization of the 20kHz control functions.
+add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>" "$<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>")
+set_source_files_properties(Core/Src/can.c Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_can.c
+        PROPERTIES COMPILE_OPTIONS "-Os")
+
+include("${CMAKE_SOURCE_DIR}/../cmake/firmware_artifacts.cmake")
+
 # Define motor types and their corresponding MOTOR_TYPE values
 set(MOTOR_TARGETS motor-35 motor-42 motor-57 motor-gripper)
 set(MOTOR_TYPES 35 42 57 8)
@@ -92,10 +110,6 @@ foreach(i RANGE 0 ${NUM_TARGETS})
     list(GET MOTOR_TARGETS ${i} TARGET_NAME)
     list(GET MOTOR_TYPES ${i} MOTOR_TYPE_VAL)
     
-    set(TARGET_ELF ${PROJECT_BINARY_DIR}/${TARGET_NAME}.elf)
-    set(TARGET_HEX ${PROJECT_BINARY_DIR}/${TARGET_NAME}.hex)
-    set(TARGET_BIN ${PROJECT_BINARY_DIR}/${TARGET_NAME}.bin)
-    set(TARGET_MAP ${PROJECT_BINARY_DIR}/${TARGET_NAME}.map)
 
     # Create target-specific compile options
     set(TARGET_COMPILE_DEFS -DMOTOR_TYPE=${MOTOR_TYPE_VAL})
@@ -111,14 +125,9 @@ foreach(i RANGE 0 ${NUM_TARGETS})
     target_link_options(${TARGET_NAME}.elf PRIVATE
         -mcpu=cortex-m3 -mthumb -mthumb-interwork
         -T ${LINKER_SCRIPT}
-        -Wl,-gc-sections,--print-memory-usage,-Map=${TARGET_MAP})
+        -Wl,-gc-sections,--print-memory-usage)
 
-    add_custom_command(TARGET ${TARGET_NAME}.elf POST_BUILD
-            BYPRODUCTS ${TARGET_HEX} ${TARGET_BIN}
-            COMMAND ${CMAKE_OBJCOPY} -Oihex $<TARGET_FILE:${TARGET_NAME}.elf> ${TARGET_HEX}
-            COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${TARGET_NAME}.elf> ${TARGET_BIN}
-            COMMENT "Building ${TARGET_HEX}
-Building ${TARGET_BIN}")
+    firmware_export_artifacts(${TARGET_NAME}.elf)
 endforeach()
 
 include("${CMAKE_SOURCE_DIR}/../cmake/firmware_identity.cmake")

@@ -22,9 +22,15 @@ class FeedbackTracker:
         previous = self.sample
         if previous is not None:
             dt = sample.received_at - previous.received_at
-            if dt <= 0:
+            if dt < 0:
                 self.rejection_reason = "回读时间戳重复或倒序"
                 return False
+            if dt == 0:
+                # One serial read may contain several ordered valid poses.
+                # Keep its last pose without inventing measurement time/speed.
+                self.sample = sample
+                self.rejection_reason = ""
+                return True
             raw = (sample.q - previous.q) / dt
             bounds = self.model.constraints.velocity
             self.velocity = .5 * self.velocity + .5 * np.clip(raw, -bounds, bounds)

@@ -17,6 +17,17 @@ class StoreTests(unittest.TestCase):
         self.store.close()
         self.directory.cleanup()
 
+    def test_rgb_log_hiding_defaults_on_and_persists_only_valid_booleans(self):
+        self.assertTrue(self.store.settings["hide_rgb_logs"])
+        self.store.update_settings(hide_rgb_logs=False)
+        other = AppStore(self.directory.name)
+        try:
+            self.assertFalse(other.settings["hide_rgb_logs"])
+            other.update_settings(hide_rgb_logs="invalid")
+            self.assertTrue(other.settings["hide_rgb_logs"])
+        finally:
+            other.close()
+
     def test_roundtrip_chinese_points_and_preferences(self):
         points = [{"name": "休息点位", "joints": [0, -75, 180, 0, 0, 0, 12.5],
                    "gripper": 100, "speed": 35}]

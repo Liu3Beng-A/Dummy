@@ -88,6 +88,7 @@ QLabel#LogRefreshStatus[paused='true'] { background: #4a3920; color: #ffcf84; }
 QPushButton#LogPause:checked { background: #665022; color: #ffe0a5; border-color: #a27b32; }
 QLineEdit#LogSearch, QLineEdit#CustomCommand { background: #0f1b2c; color: #e2edf8; font-size: 15px; }
 QPlainTextEdit#LogView { background: #0d1929; color: #dce8f5; border: 1px solid #344b63; border-radius: 6px; font-family: Consolas, 'Microsoft YaHei UI'; font-size: 16px; padding: 8px; selection-background-color: #287bba; selection-color: white; }
+QPlainTextEdit#OpenTestResult { background: #0d1929; color: #dce8f5; border: 1px solid #344b63; border-radius: 6px; font-family: 'Microsoft YaHei UI'; font-size: 14px; padding: 6px; selection-background-color: #287bba; selection-color: white; }
 QScrollArea { border: none; background: transparent; }
 QScrollArea > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }

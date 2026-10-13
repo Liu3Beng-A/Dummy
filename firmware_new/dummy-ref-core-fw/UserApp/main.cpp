@@ -6,7 +6,7 @@ SSD1306 oled(&hi2c0);
 // On-board Sensor, used hi2c1
 MPU6050 mpu6050(&hi2c1);
 // 5 User-Timers, can choose from htim7/htim10/htim11/htim13/htim14
-Timer timerCtrlLoop(&htim7, 200);
+Timer timerCtrlLoop(&htim7, 1000); // Stream mailbox pump; ordinary loop remains 200 Hz.
 // 2x2-channel PWMs, used htim9 & htim12, each has 2-channel outputs
 PWM pwm(21000, 21000);
 
@@ -22,11 +22,16 @@ void ThreadControlLoopFixUpdate(void* argument)
     // §8.2 + §8.8 — 5ms 节奏累加，每 4 次（即 20ms / 50Hz）触发一次角度查询。
     // 使能态、失能态、TUN 模式共享同一个 tick，相位一致。
     static uint32_t queryTick = 0;
+    static uint32_t ordinaryTick = 0;
 
     for (;;)
     {
         // Suspended here until got Notification.
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        CoreStreamPoll();
+        PollCanMotionTransmit(get_can_ctx(&hcan1));
+        if (++ordinaryTick < 5) continue;
+        ordinaryTick = 0;
         queryTick++;
         dummy.PollSoftStop();
         dummy.PollProtection();
@@ -44,6 +49,10 @@ void ThreadControlLoopFixUpdate(void* argument)
                     dummy.UpdateJointPose6D();
                     if (dummy.IsMotionBusy() || (queryTick & 0x03) == 0)
                         dummy.UpdateJointAngles();
+                    break;
+                case DummyRobot::COMMAND_STREAM_JOINT:
+                    dummy.UpdateJointPose6D();
+                    dummy.UpdateJointAngles();
                     break;
                 case DummyRobot::COMMAND_MOTOR_TUNING:
                     dummy.tuningHelper.Tick(10);
@@ -90,7 +99,7 @@ void ThreadOledUpdate(void* argument)
 
     uint32_t t = micros();
     char buf[16];
-    char cmdModeNames[4][4] = {"SEQ", "INT", "TRJ", "TUN"};
+    const char cmdModeNames[7][4] = {"SEQ", "INT", "TRJ", "TUN", "---", "---", "STR"};
 
     for (;;)
     {
@@ -105,6 +114,7 @@ void ThreadOledUpdate(void* argument)
         dummy.commandHandler.PollCancelled();
         dummy.PollProtectionPrint();
         dummy.PollMotorAccelerationSync();
+        CoreStreamPrint();
 
         oled.clearBuffer();
         oled.setFont(u8g2_font_5x8_tr);

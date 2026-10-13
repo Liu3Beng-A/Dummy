@@ -17,6 +17,7 @@ from app.gamepad.config import validate_config as validate_gamepad_config
 
 DEFAULT_SETTINGS = {
     "theme": "light", "poll_hz": 5, "log_limit": 5000, "hide_joint_logs": True,
+    "hide_rgb_logs": True,
     "port": "", "connection_type": "USB", "geometry": "",
     "window_state": "", "viewer_mode": "preview", "show_grid": True,
     "show_axes": True, "auto_poll": True, "poll_enabled": True, "model_path": "",
@@ -230,7 +231,7 @@ class AppStore:
         settings = self.settings if settings is None else settings
         if type(settings["gamepad_defaults_revision"]) is not int or settings["gamepad_defaults_revision"] < 8:
             settings["gamepad_defaults_revision"] = 8
-        if settings["cartesian_backend"] not in ("firmware", "host"):
+        if settings["cartesian_backend"] not in ("firmware", "stream"):
             settings["cartesian_backend"] = "firmware"
         if settings["theme"] not in ("light", "dark"):
             settings["theme"] = "light"
@@ -246,7 +247,7 @@ class AppStore:
         for key in ("port", "geometry", "window_state", "model_path"):
             if not isinstance(settings[key], str):
                 settings[key] = ""
-        for key in ("show_grid", "show_axes", "auto_poll", "poll_enabled", "hide_joint_logs"):
+        for key in ("show_grid", "show_axes", "auto_poll", "poll_enabled", "hide_joint_logs", "hide_rgb_logs"):
             if not isinstance(settings[key], bool):
                 settings[key] = DEFAULT_SETTINGS[key]
 

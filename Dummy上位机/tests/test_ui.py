@@ -33,6 +33,8 @@ class FakeView(QWidget):
         self.actual_only = False
         self.feedback_paused = False
         self.commanded_gripper = None
+        self.rgb_frame = ((0, 0, 0),) * 24
+        self.rgb_light_on = None
         self.closed = False
 
     def set_target_pose(self, values, gripper=100):
@@ -46,6 +48,8 @@ class FakeView(QWidget):
 
     def set_actual_pose(self, values, gripper=None):
         self.actual = (list(values), gripper)
+        self.actual_known = True
+        self.stale = False
 
     def set_cartesian_target(self, values):
         self.cartesian = list(values) if values is not None else None
@@ -66,6 +70,10 @@ class FakeView(QWidget):
 
     def set_theme(self, theme):
         self.theme = theme
+
+    def set_rgb_frame(self, frame, *, light_on=None):
+        self.rgb_frame = tuple(tuple(color) for color in frame)
+        self.rgb_light_on = light_on
 
     def set_stale(self, value):
         self.stale = value
@@ -112,8 +120,13 @@ class UiIntegrationTests(unittest.TestCase):
         self.directory.cleanup()
 
     def connect_fake(self):
+        # Finish deferred offline setup before publishing the simulated connection,
+        # matching the real connect path rather than leaving stale UI callbacks.
+        self.scheduler.run_ready()
         self.controller.is_connected = True
         self.controller.serial_port = FakePort()
+        self.controller._publish()
+        APPLICATION.processEvents()
 
     def commands(self):
         commands = []
@@ -174,6 +187,36 @@ class UiIntegrationTests(unittest.TestCase):
         self.controller._process_rx_line("ok " + " ".join(map(str, actual)))
         self.scheduler.run_ready()
         self.assertEqual([spin.value() for spin in self.window.joint_spins], actual)
+        self.assertEqual(self.commands(), [])
+
+    def test_connected_readback_above_joint_limit_updates_actual_model_before_enable(self):
+        self.connect_fake()
+        original = [spin.value() for spin in self.window.joint_spins]
+        actual = [0., -75., 180.62, 0., .59, 0., 0.]
+        self.controller._process_rx_line("ok 0.00 -75.00 180.62 0.00 0.59 0.00 -0.00")
+        self.assertEqual(self.window.viewer.actual, (actual, None))
+        self.assertTrue(self.window.viewer.actual_known)
+        self.assertFalse(self.window.viewer.stale)
+        self.assertEqual(self.window.joint_rows[2].readback.text(), "180.62")
+        self.assertIn("实际七轴已更新", self.window.actual_status.text())
+        self.assertFalse(self.controller._motor_enabled)
+        self.assertEqual([spin.value() for spin in self.window.joint_spins], original)
+        self.assertEqual(self.commands(), [])
+
+    def test_outside_limit_display_does_not_silently_clip_an_explicit_target_sync(self):
+        self.connect_fake()
+        original = [spin.value() for spin in self.window.joint_spins]
+        synced = []
+        self.controller.position_synced.connect(lambda kind, values: synced.append((kind, values)))
+        self.assertTrue(self.controller.read_and_sync_from_robot())
+        self.assertEqual(self.commands(), ["#GETJPOS"])
+        actual = [0., -75., 180.62, 0., .59, 0., 0.]
+        self.controller._process_rx_line("ok 0 -75 180.62 0 .59 0 0")
+        self.scheduler.run_ready()
+        self.assertEqual(self.window.viewer.actual, (actual, None))
+        self.assertEqual([spin.value() for spin in self.window.joint_spins], original)
+        self.assertEqual(synced, [])
+        self.assertIsNone(self.controller._position_request)
         self.assertEqual(self.commands(), [])
 
     def test_uint32_pid_readback_and_all_node_write_disable(self):
@@ -395,29 +438,50 @@ class UiIntegrationTests(unittest.TestCase):
         self.assertEqual(self.commands(), ["@500,-400,700,200,-190,250,42"])
 
     def test_teaching_drag_uses_active_type_and_disabling_cancels_tail(self):
+        from PySide6.QtCore import QElapsedTimer
+
+        def wait_for_drag_command(prefix):
+            def queued():
+                with self.controller._tx_queue.mutex:
+                    return any(item is not None and item[1].startswith(prefix)
+                               for item in self.controller._tx_queue.queue)
+            elapsed = QElapsedTimer()
+            elapsed.start()
+            # Keep the original 150 ms observation bound; require the real
+            # command, rather than assuming qWait delivered its timer callback.
+            while not queued() and elapsed.elapsed() < 150:
+                QTest.qWait(5)
+                APPLICATION.processEvents()
+                self.scheduler.run_ready()
+            self.assertTrue(queued(), dict(prefix=prefix,
+                pending=dict(self.window._drag_pending),
+                timer_active=self.window._drag_timers["teaching"].isActive(),
+                timer_remaining=self.window._drag_timers["teaching"].remainingTime(),
+                stop_locked=self.controller._stop_locked,
+                calibration_busy=self.controller._calibration_busy,
+                logs=list(self.window._logs)[-3:]))
+            return self.commands()
+
         self.connect_fake()
         self.controller.current_cmdmode = 3
         self.window.navigation.setCurrentRow(1)
         self.window.teaching_drag.setChecked(True)
         self.window.teaching_joint_spins[0].setValue(12)
         self.window.teaching_joint_spins[0].setValue(24)
-        QTest.qWait(150)
-        self.scheduler.run_ready()
-        commands = self.commands()
-        self.assertTrue(commands)
+        commands = wait_for_drag_command(">24,")
         self.assertTrue(commands[-1].startswith(">24,"))
         self.assertFalse(any(command.startswith("@") for command in commands))
         self.window.teaching_tabs.setCurrentIndex(1)
         self.window.teaching_pose_spins[0].setValue(245)
-        QTest.qWait(150)
-        self.scheduler.run_ready()
-        commands = self.commands()
-        self.assertTrue(commands)
+        commands = wait_for_drag_command("@245,")
         self.assertTrue(commands[-1].startswith("@245,"))
         self.assertFalse(any(command.startswith(">") for command in commands))
         self.window.teaching_pose_spins[0].setValue(260)
         self.window.teaching_drag.setChecked(False)
+        self.assertNotIn("teaching", self.window._drag_pending)
+        self.assertFalse(self.window._drag_timers["teaching"].isActive())
         QTest.qWait(150)
+        APPLICATION.processEvents()
         self.scheduler.run_ready()
         self.assertEqual(self.commands(), [])
 
@@ -545,6 +609,60 @@ class UiIntegrationTests(unittest.TestCase):
                 patch("app.ui.main_window.Path.write_text", side_effect=OSError("denied")):
             self.window.terminal_diagnostics.export_button.click()
         self.assertTrue(any("日志导出失败" in text for tag, text in self.window._logs if tag == "ERROR"))
+
+    def test_rgb_log_hiding_preserves_processing_buffer_disk_and_controls(self):
+        from tests.test_rgb_controller import READBACK
+        self.connect_fake()
+        self.controller.send_cmd("#RGB_GET")
+        self.commands()
+        self.controller.log_message.connect(lambda message, tag: self.store.log(tag, message))
+        self.assertTrue(self.window.hide_rgb_logs_checkbox.isChecked())
+        self.controller.log("#RGB_GET", "TX")
+        self.controller.log("#RGB_STATUS", "TX")
+        for line in READBACK:
+            self.controller._process_rx_line(line)
+        self.scheduler.run_ready()
+        self.assertTrue(self.controller.rgb_snapshot()["complete"])
+        for line in READBACK:
+            self.assertNotIn(line, self.window.log_view.toPlainText())
+        self.controller.log("!RGB_MODE 7", "TX")
+        self.controller.log("error RGB invalid mode", "RX")
+        self.controller.log("RGB_STATUS broken", "RX")
+        self.controller.log("RGB DMA warning", "WARN")
+        self.controller.log("RGB write failed", "ERROR")
+        for text in ("!RGB_MODE 7", "error RGB invalid mode", "RGB_STATUS broken", "RGB DMA warning", "RGB write failed"):
+            self.assertIn(text, self.window.log_view.toPlainText())
+        before = list(self.window._logs)
+        disk = (self.store.log_dir / "dummyrobot.log").read_text(encoding="utf-8")
+        self.assertIn("#RGB_GET", disk)
+        self.assertIn(READBACK[0], disk)
+        self.window.hide_rgb_logs_checkbox.setChecked(False)
+        self.assertIn(READBACK[0], self.window.log_view.toPlainText())
+        self.assertIn("#RGB_STATUS", self.window.log_view.toPlainText())
+        self.assertEqual(list(self.window._logs), before)
+        reloaded = AppStore(self.directory.name)
+        try:
+            self.assertFalse(reloaded.settings["hide_rgb_logs"])
+        finally:
+            reloaded.close()
+
+    def test_rgb_export_hides_reads_but_complete_diagnostics_keeps_them(self):
+        self.controller.log("#RGB_STATUS", "TX")
+        runtime = "RGB_RUNTIME state=STOP source=STOP"
+        self.controller.log(runtime, "RX")
+        self.controller.log("!RGB_OFF", "TX")
+        filtered = Path(self.directory.name) / "rgb-filtered.txt"
+        with patch("app.ui.main_window.QFileDialog.getSaveFileName", return_value=(str(filtered), "")):
+            self.window._export_logs()
+        exported = filtered.read_text(encoding="utf-8")
+        self.assertNotIn("#RGB_STATUS", exported)
+        self.assertNotIn(runtime, exported)
+        self.assertIn("!RGB_OFF", exported)
+        complete = Path(self.directory.name) / "rgb-complete.txt"
+        with patch("app.ui.main_window.QFileDialog.getSaveFileName", return_value=(str(complete), "")):
+            self.window._export_logs(complete=True)
+        self.assertIn("#RGB_STATUS", complete.read_text(encoding="utf-8"))
+        self.assertIn(runtime, complete.read_text(encoding="utf-8"))
 
     def test_joint_log_filter_requires_exact_command_and_seven_finite_values(self):
         hidden = [("TX", "#GETJPOS"), ("RX", "ok 1 2 3 4 5 6 7"),

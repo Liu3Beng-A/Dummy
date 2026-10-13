@@ -1,0 +1,284 @@
+STREAM_JOINT v2 协议与实施记录（2026-10-12，文件名沿用 V1）
+
+状态：v2 修复、离线验证和统一构建；硬件验证由用户烧录后进行。v1 为历史版本，不能混用 v1 上位机/主控/电机。改动前全部跟踪/未忽略新增文件已提交7343f49。
+本次新增独立模式7；1~4原行为保留，5/6留给旧参考固件的TRQ/SRV语义，默认仍为主控模式。
+参考firmware仅用于模式组织，不复制其运动实现。标定、固定TCP移轨不在此次范围。
+
+1. 时间与曲线
+USB每条记录表示七轴一个共同边界，n对应n*20ms。seq0为零速度/零加速度初始边界，不是一段运动。
+后续相邻q/v/a边界定义唯一20ms五次Hermite曲线，电机以20kHz、400次/段取样。
+位置单位为51200细分/电机圈，速度为细分/秒，加速度为细分/秒²；均有符号int32。
+q是相对电机home的协议位置；电机只在进入控制参考时添加home偏移，不重复变换。
+主控不对该模式调用PlanMoveJ/ComputeSyncSpeeds，不应用MoveJ速度档位。
+上位机速度档位只参与TCP路径时间规划；上位机需验证连续曲线的限位、v/a/jerk及TCP几何误差。
+
+2. USB ASCII封装（不用于物理115200 UART）
+每条“~S”加184个十六进制字符再换行，共187字节LF或188字节CRLF；有效内容186字符。
+解码为92字节小端记录：version:u8=2，flags:u8，session:u16，sequence:u16，7*(q:i32,v:i32,a:i32)，CRC:u16。
+CRC为CRC16-CCITT-FALSE(poly0x1021,init0xFFFF,无反射,xorout0)，覆盖前90字节，CRC自身小端。
+SEED=1只用于seq0；普通flags0；END=2最后一个边界必须v=a=0；不接受其他标志或组合。
+session1..65535，每次重新打开选择新值；sequence0..65534，禁止回绕。旧会话、乱序不得成为新轨迹。
+同一序号重试须验证完全一致；ACK只是主控环形缓存接收，不是电机已执行或已经到位。
+!STREAM_OPEN <session> <mask>；正常mask127，单电机测试可用1/2/4/8/16/32/64。
+#STREAM；!STREAM_START <session>；!STREAM_CLOSE <session>（未启动/已完成/故障停止后关闭，须等全轴IDLE）；!STOP保留最高权限。
+核心响应：STREAM_CAP v=2 hz=50 mode=7 mask=...；STREAM_STATE s=... st=... next=... free=...；
+STREAM_ACK s=... n=... free=...；STREAM_FAULT s=... code=...；STREAM_DONE s=... n=...。
+#STREAM另返回 STREAM_DIAG c=... e=... gap=... us=...，分别是提交序号、执行序号、Poll最大间隔ms和Poll最大耗时us。
+#STREAM_DIAG <node1..7> <field0..22>逐条查询，回复 STREAM_NODE node=... n=... field=... value=...；一次只允许一条未完成查询，超时1s。
+队列credit应来自当前会话，必须扣除已发送尚未ACK的记录，不能反复使用旧credit。
+理论50Hz数据单向9350B/s；USB CDC不按115200波特率限速，真实UART另有带宽/延迟约束，本版拒绝该路径。
+
+3. CAN（StdID=node<<7|command，0为广播，经典CAN8字节）
+0x40 OPEN: session:u16,version:u8,mask:u8,reserved:u32。
+0x41 Q / 0x42 V / 0x43 A: session:u16,sequence:u16,value:i32。
+0x44 PREPARE: session:u16,sequence:u16,endpointCRC:u16,flags:u8,reserved:u8。
+endpointCRC覆盖17字节session:u16,sequence:u16,flags:u8,q:i32,v:i32,a:i32。
+0x45 COMMIT与PREPARE同布局。仅完整准备并经电机验证的同会话同序号同CRC可提交。
+0x47 STATUS: session:u16,sequence:u16,state:u8,free:u8,reason:u8,version:u8。
+state:CAPS0,OPEN1,PREPARED2,COMMITTED3,STARTED4,RUNNING5,COMPLETED6,FAULT7,IDLE8。
+0x48 START: session:u16,startsequence:u16=1,delayticks:u16=400..2000（首次2000，重发取到同一启动时刻的剩余延迟）,flags:u8=0,reserved:u8=0。
+同START重复必须幂等，不能重设起点。收齐所有START确认后仍需距离起点至少400ticks(20ms)，否则撤销软停。
+0x46 SYNC: session:u16,counter:u16,elapsedticks:u32；20kHz时间基准，启动前为0。
+v2监测相位，不突然跳变位置参考；初始相位误差阈值100ticks(5ms)。本地时钟漂移超过阈值触发停止。
+0x49 ABORT: session:u16,reason:u8,reserved[5]。reason0为无运动关闭：仅未启动/已完成/已安全停止时成立；运行中仍触发停止。非0撤销队列并受控制动，主控同时走原有协调STOP。
+关闭须等全体已打开节点IDLE确认，主控才释放session；故障待执行STOP权不能被关闭/切模式清除。
+0x4A CAPS请求nonce:u16,version:u8,reserved[5]；响应nonce:u16,version:u8,features:u8,ticks:u16,capacity:u8,motortype:u8。
+features bit0表示支持本协议；gripper(type8)不作为七轴透传执行器。
+0x4B DIAG请求nonce:u16,field:u8,reserved[5]；回复nonce:u16,field:u8,reserved:u8,value:u32。
+field0=相位误差有符号ticks，1=Runtime/Curve取样峰值cycles，2=主循环准备峰值cycles，3=采样MSP栈余量bytes，4=RX溢出累计，5=实际速度上限steps/s，6=实际加速度上限steps/s²。
+DIAG1不含整个控制中断；DIAG2含抢占；DIAG3为采样最低余量，不是完整填色水位。PC执行前必须新回读全部七轴field5/6；每条点位另读field7保持参考。
+reason:OK0,BAD_SESSION1,BAD_SEQUENCE2,BAD_CRC3,BAD_LIMIT4,BUSY5,UNDERRUN6,SYNC_TIMEOUT7,
+SYNC_DRIFT8,BLOCKED9,INCOMPLETE10,BAD_STATE11,ABORTED12,BAD_VERSION13,BAD_FLAGS14,BAD_SEED15,BAD_TYPE16,DEADLINE17,RX_OVERFLOW18。
+
+4. 缓冲与协调
+主控静态16记录，电机静态8曲线槽（包含正在执行的一段，总计最多160ms）；只有全轴PREPARED才发COMMIT，全轴COMMITTED后才移向下一记录。
+START前至少5未来段准备完毕；短路径有完整END时可少于5。起动等待100ms为确认/补充缓冲留出时间。
+预备缺片、确认超时、拒绝、断流、节点复位、保护、STOP均取消后续曲线；不得部分轴静默继续。
+CAN硬件ACK不代表7轴应用确认。广播启动与本地时钟仅提供有界同步设计，绝对同步仍需实测。
+在任意报文都可能丢失的总线上，软件协议不能承诺数学上的原子启动；实际异常由确认、截止时间、重发和保护兜底。
+正常END只表示参考终止；DONE需要全部参与轴编码器位置/速度持续稳定（电机50ms），PC另确认实际终点稳定150ms。
+电机保存最近8个退休session防迟到OPEN复活；PC避开最近32次会话。这是有界晚包防护，不是认证机制。
+过期进度与确认不能增加credit或刷新健康时间；旧Q/V/A/COMMIT不能破坏新序号staging。
+
+5. 带宽与时序核算
+每轴每段Q/V/A/PREPARE/COMMIT共5发送帧，PREPARED/COMMITTED共2响应帧；7轴共49帧。
+50Hz*49*保守140bit/帧=343kbit/s，即1Mbit/s总线34.3%；另加SYNC、状态、反馈、重试与保护。
+加入每段7个进度回包、每次SYNC的7个回包及1个SYNC，共64帧/20ms，保守44.8%。
+原有200Hz位置查询+回复另约5.6%，合计约50.4%，尚未计其他业务/重试/错误帧。应检查实际CAN诊断，不能把34.3%称为总占用。
+硬件目标：20kHz周期50us，72MHz F103单周期3600cycles；新增取样ISR不得包含浮点、多项式求根或动态内存。
+Flash按链接器95KiB应用区核算，保留编码器表与EEPROM；主控按896KiB应用区，保留末扇区配置。
+静态map/.su/反汇编只是离线预算；烧录后必须查看DWT MC_CONTROL_MAX/GAP/LATE和任务栈最低余量。
+
+
+6. 本版上位机边界
+默认主控后端；独立新增“上位机七轴曲线 · 50 Hz 透传（模式7）”，旧普通MoveJ逐点执行后端已删除，纯IK/规划算法继续保留。
+有限MoveL/MoveJ/示教序列/鼠标离散目标可用，整条有限路径预检后才OPEN。速度档位用于路径时间，非普通MoveJ速度。
+每个示教点起止v/a=0，点间到位后重新会话；未实现跨点不停顿圆滑过渡。
+串口唯一写线程，纯数值规划使用独立spawn进程；后台工作线程管理credit和实际RX，Qt不负责运动节拍；执行中GETJPOS频率为界面设置限制到30..50Hz，#STREAM为20Hz。
+300ms无有效实际RX会STOP；主控/电机另有会话/同步/缺段/进度保护。主控GETJPOS返回缓存，不是七轴同步采样编码器数据。
+本版无连续手柄透传、无运行中未来FIFO反馈重规划；电机原DCE反馈闭环保留。标定和固定TCP移轨后续实现。
+启动失败不会自动降级发送旧MoveJ。正常关闭、STOP后重启和切回主控均须清理旧session。
+
+7. 可复现离线验证
+tools/tests/test_stream_protocol.cpp：公共二进制/CRC/损坏拒收。
+tools/tests/motor_stream_test.py：实际Curve/Runtime/CAN适配/编码器逻辑，无硬件。
+tools/tests/core_stream_native_tests.py：实际协调器、实际ASCII解析器、实际几何验证体，无硬件。
+tools/tests/stream_system_test.py：实际协调器与七份电机适配的旧理想CAN逻辑回放（IDEAL_CAN_NOT_DRIVER_VALIDATION），不验证驱动失败重试。
+tools/tests/stream_link_test.py：主控实际CAN邮箱/16槽队列 + 七份电机实际可靠回包队列 + 实际协调器/曲线适配；348条v2轨迹，12场景，另测0.5/1ms电机main间隔。
+tools/tests/core_can_reliability_test.py、motor_stream_can_test.py：分别验证两端实际CAN驱动、所有权、仲裁/错误、取消、保护优先和硬件过滤。
+跨端回放的机械跟随为理想模型、CAN为150us/帧优先级仲裁模型，不代表实机时序或真实同步精度。
+Dummy上位机/tests/test_stream_motion.py 与 test_stream_transport.py：算法、实际限值、CRC、信用、故障与恢复、界面停刷。
+MSVC本机测试或ARM构建不连接串口/STLink。修复固件release=2026101203；原生仿真与离线预算不能替代板上验收。
+
+
+8. v2修复约束与实际启动流程
+v2保留92字节布局，但改变起点契约。旧版本必须被能力查询拒绝，不能静默回退。
+2026101304起，CAPS bit2有效的电机OPEN/START采用新鲜50ms稳态证据；旧电机仍用瞬时estVelocity±512门槛。
+共同要求实际位置原容差、softPosition==goalPosition、softVelocity==0及全部硬保护；新契约见第13节。
+OPEN锁存goalPosition-home；SEED必须与锁存值逐细分一致，SEED_TOLERANCE=0。
+DIAG7返回有符号保持参考(goal-home)，避免PC将有量化误差/跟随残差的GETJPOS误当精确控制参考。
+主控对实际位置仍使用既有运动到位容差，不将SEED的精确相等错误地用作实际编码器到位门槛。
+
+上位机有限轨迹：
+  用户目标 → 查询v2能力/实际模式/忙状态 → 清理已完成或已停稳的旧会话 → 读取七轴真实v/a上限
+  → 每点读取DIAG7并检查新鲜实际位置已靠近保持参考 → 独立进程整条预检 → 再读DIAG7确认未变化
+  → 显式进入模式7 → OPEN确认七轴版本/类型/就绪 → 按credit发送20ms q/v/a边界
+  → 主控全轴PREPARE/COMMIT，预填后START → 电机20kHz本地取样并使用原闭环驱动
+  → 全轴参考完成且实际稳定 → PC实际终点稳定150ms → CLOSE全轴确认 → 后续点重新读取保持参考。
+USB不是靠50Hz定时逐点写入：50Hz定义轨迹边界；发送受主控credit限制，最多4条未确认。
+GUI只合并显示；实际串口RX线程更新反馈健康时间，同一批次可替换为最后一条合法位置，不能伪造时间。
+线缆审计日志独立有界异步落盘，保留真实时间、~S和STREAM消息，队列丢失显式记录。
+300ms保护仍保留，针对实际RX的新鲜有效反馈；300ms GUI停刷不能冒充实际断流。
+运行中不基于GETJPOS重写已规划曲线；GETJPOS用于断流/显示/到位核对，主控返回位置缓存且非七轴同步采样。
+恢复：STOP并等待停稳 → CLOSE释放会话 → 切回主控模式2；全程保持停止锁，之后是否START由用户决定。
+重连仅查询真实模式，不隐式写设备；实际mode7时拒绝未经透传会话授权的普通运动命令，需先同步后端/模式。
+
+9. CAN可靠性与诊断
+主控发送成功表示进入有界软件队列；TXOK才推进同节点下一帧。所有原生/透传发送共享硬件邮箱所有权。
+主控最多8次实际尝试/30ms总龄；START每次真正提交邮箱时重算剩余延迟，SYNC重算elapsed。
+STOP/epoch取消保留旧邮箱所有权至完成/撤销回调，不让旧完成事件归到新发送。
+电机STATUS/CAPS/DIAG保留到TXOK，STREAM排队总龄40ms。ALST是正常仲裁失败，下一main重试，不耗16次真实发送错误预算；TERR仍退避且限制次数。
+离线旧逻辑在正常七轴竞争下复现J6/J7 STARTED在第16次仲裁失败、年龄36/37ms被丢弃，误报17；修复后同回放完成并CLOSE。
+这解释一种已证实故障17原因，不宣称仅凭旧日志能唯一还原实机所有故障17。
+电机硬件只接收自身节点、广播和同伴保护0x0B；启动确定最终node后及运行期改号后刷新过滤器。
+主控故障报告额外分行打印AT/MASK/CAN/T现场：来源、状态、phase、节点、命令、序号、确认掩码、年龄及Poll间隔等。
+
+DIAG扩展（0..6保持原意）：
+7=有符号保持参考细分；8/9/10=原生/透传/标定完整TIM4回调最大cycles；
+11/12/13=对应超过3600cycles次数；14/15/16=对应回调入口最大间隔cycles；
+17=可靠STREAM回包重试次数；18=回包丢弃次数；
+19=CAN接收到main处理最大年龄ticks；20=START接收到main处理最大年龄ticks；
+21=编码器处理最大cycles；22=闭环处理最大cycles。
+峰值/次数自开机累积，查询不会清零；DIAG3只是有限采样MSP余量，不能当作完整栈填色水位。
+正常闭环SPI采样由最多3轮改成1轮，标定保持重试；每轮最多两次5us DWT轮询，函数/寄存器开销另计。
+连续100个无效反馈tick触发保护的门槛保留。静态汇编显示正常连续反馈路径用32位除法，缺反馈累计路径保留64位。
+完整20kHz回调是否低于50us必须由用户板上DWT核对，离线不承诺硬实时达标。
+
+10. 单电机无运动握手诊断（2026101301）
+!STREAM_TEST <session:1..65535> <node:1..7>：USB，只测选中节点；不切主控模式、不使能、不提交轨迹。
+#STREAM_TEST：读取当前/最近一次测试，返回：
+STREAM_TEST s=55 node=4 st=DONE open=0 closed=1 code=9
+st=IDLE/CAPS/OPENING/CLOSING/DONE/FAULT；DONE表示清理已完成，不代表OPEN通过。
+open=1表示OPEN曾接受；closed=1表示所联系节点的CLOSE确认，或尚未发OPEN时无需关闭。
+主控准入错误：error STREAM_TEST code=N gate=DISABLED/STOP_LOCKED/CALIBRATION/PARAMETER/COMMAND_BUSY/MOVING/SESSION_BUSY/BEGIN。
+CAPS/OPEN截止3秒；主控自行启动CLOSE，截止1秒；未确认则FAULT且继续占用会话，不能开放后续运动。
+测试只用所选节点CAPS/OPEN/ABORT(reason=0)；绝不发广播START/Q/V/A/PREPARE/COMMIT/SYNC。
+CAPS features bit1=CAP_OPEN_SNAPSHOT；本测试要求bit0、bit1均有效，旧电机拒绝于OPEN之前。
+DIAG23=session，24=OPEN拒绝位图，25=mode | requestMode<<8 | protectionPhase<<16。
+DIAG26=瞬时估计速度、27=softVelocity、28=goalPosition、29=softPosition、30=realPosition、31=encoderHomeOffset（均有符号int32）。
+DIAG32=OPEN时20kHz tick（u32回绕），33=positionSettled标志。23..33只在首次新会话OPEN准入决策时写入。
+拒绝位：0活动stream，1待soft-stop，2软停锁定，3反馈无效，4/5目标/当前失能，6/7目标/当前制动，
+8堵转，9控制器校准，10校准任务忙，11保护非IDLE，12瞬时速度超±512，13softVelocity非零，
+14请求/运行模式不同，15softPosition!=goalPosition，16目标−实际超原容差，17goal-home超int32，18运行模式不支持。
+同会话OPEN重试保留首次拒绝快照，CLOSE/STOP不清空；断电不保存。PC前后读取DIAG23，必须与本次session一致。
+此扩展不修改92字节曲线ABI或协议版本2；不放宽原有准入门槛。
+
+11. J1/J7 局部曲线通信测试（2026101302）
+此阶段验证上位机→主控→选中电机的完整曲线通信与确认，不调用逆解，不生成关节位移。
+测试使用电机DIAG7保持参考作为q，全部v/a=0；seq0为SEED，seq1..100为100个20ms边界，seq100带END，共101条~S，参考持续2秒。
+q不强制为0，而是当前已保持的goal-home；原闭环和实际到位保护仍执行，可能补偿原有位置误差。
+本阶段入口只提供J1、J7、J1+J7，分别对应mask=1、64、65；先逐个测试，再测试双轴。
+核心仍接受原有单轴mask=2/4/8/16/32，以及正常七轴mask=127；除单轴、65、127外的组合拒绝BAD_FLAGS。
+
+能力探测：USB只读命令 #STREAM_AXES，回复：
+STREAM_AXES v=1 hz=50 mask=65 targeted=1
+这里v=1是局部测试能力契约版本，曲线记录仍使用STREAM_JOINT v2，不改变92字节ABI。
+mask=65表示此测试入口覆盖J1与J7，targeted=1表示部分组的控制报文按选中节点定向发送。
+新上位机在切模式或发OPEN之前核对能力；旧主控没有本查询时拒绝继续，不能假定旧广播实现也具备相同隔离行为。
+普通 #STREAM 的STREAM_CAP响应格式不变。
+
+正常会话接口沿用 !STREAM_OPEN <session> <mask>、#STREAM、~S、!STREAM_START <session>、!STREAM_CLOSE <session>，没有另设曲线命令。
+部分组OPEN由主控逐节点下发：J1的CAN OPEN mask=1，J7的CAN OPEN mask=64；核心会话selected仍保留mask=65。
+电机只需要判断自己是否被OPEN选中，后续按本机session/缓冲执行；因此电机生产代码没有此次改动，与2026101301电机固件兼容。
+2026101302主控必须更新以获得能力查询和定向控制；不得把“电机兼容”理解为旧主控也具备新测试入口的控制契约。
+每条USB记录仍包含七轴q/v/a，主控只对selected发送Q/V/A/PREPARE/COMMIT，未选字段不用于电机下发。
+
+部分组START、SYNC、ABORT及正常CLOSE不使用node=0广播，只向selected节点发送。
+即使未选电机残留相同session号的旧已准备会话，也不得由此组START启动或由此组CLOSE关闭。
+START和CLOSE根据确认位图，仅向尚未确认的选中节点重发，避免已确认J1的重复报文使J7长期得不到发送机会。
+全部选中节点共用一个绝对START时刻；重发携带到该时刻的剩余延迟，电机重复START保持原anchor。
+只要任一START成功入队，核心立即启用原执行阶段Poll/传输截止保护，不等待第二节点成功入队。
+SYNC保留共同counter和elapsed时基；一节点入队失败时重试，成功后再推进counter，电机仍检查原相位误差门槛。
+
+局部会话启动前看门狗：部分组尚未START时，距最近主机心跳/成功Submit达到1000ms，进入SYNC_TIMEOUT故障。
+这个1000ms约束涵盖PROBING/OPEN/BUFFERING/ARMED；#STREAM更新心跳，成功接收~S也更新心跳；独立OPEN→CLOSE诊断不受此项约束。
+局部测试工作线程从OPEN起持续以20Hz查询#STREAM，包括准备和确认等待，不能把Qt界面刷新当成会话心跳。
+故障保留active session，阻止重连后新OPEN覆盖；必须读取现场并按原STOP停稳→CLOSE确认→恢复模式2顺序清理。
+这里定向ABORT并不改变最终保护权限：故障仍调用既有全机协调软停，未选轴也可能进入STOP锁定；不能声称故障只停被测轴。
+断连或关闭确认缺失必须显示关闭未知/会话占用，不得自动START恢复或直接开始下一测试。
+
+mask=127保持原七轴合同：全轴OPEN mask、广播START/SYNC/ABORT、原预填/确认/执行保护及默认主控模式不变；不新增1000ms启动前心跳约束。
+START之后仍执行原300ms主机心跳和节点进度/同步保护；局部测试没有调宽OPEN/START准入速度、位置或保护门槛。
+这项入口正常结束需依次确认START、DONE n=100、CLOSE释放session，并恢复主控模式2；仅看到STREAM_ACK不能判定已经执行通过。
+实际机械跟随、20kHz完整控制回调耗时、栈水位和双轴同步误差仍以板上读回为准，离线CAN模型不能替代实测。
+
+12. 原地通信入口覆盖七轴（2026101303）
+在J1、J7及双轴原地测试通过后，入口增加J2、J3、J4、J5、J6及J1~J7七轴组。
+轴覆盖扩展仍保持DIAG7参考q不变、v/a=0、SEED+100个20ms边界/共101条~S；不增加位移，不调用逆解。
+各轴的电机类型、使能/静止准入、home位置、模型限位及实际闭环到位检查沿用原规则。
+
+当前能力查询 #STREAM_AXES 返回：
+STREAM_AXES v=1 hz=50 mask=127 targeted=1
+mask=127是此入口可用轴的集合：bit0~6分别为J1~J7，不表示127所有子组合均允许建立会话。
+实际合法会话掩码仍仅为各单轴1/2/4/8/16/32/64、J1+J7的65、七轴127；其他多轴组合继续拒绝BAD_FLAGS。
+局部测试能力v=1及曲线ABI v2不变；上位机须同时校验欲测轴在可用集合内、所选组合属于明确支持列表。
+仅支持mask=65能力集合的2026101302主控，不应被新上位机当作已经开放J2~J6的入口。
+
+此次主控生产改动只有能力回复65改为127，核心Begin/Transfer/START/SYNC/CLOSE运行逻辑没有改变。
+所有单轴会话仍对本节点发送onebit OPEN及定向START/SYNC/ABORT/CLOSE，未选电机不会接收目标点位或该局部组控制。
+七轴mask127使用既有全轴OPEN mask与广播START/SYNC/ABORT，按七轴准备/提交/启动/结束确认完成，不改原带宽及时基合同。
+双轴65保留第11节定向控制和缺确认节点重试方式；其他单轴也使用同一实现。
+本通信扩展未改电机透传实现，2026101301及2026101302电机固件与本入口兼容。当前2026101303统一批同时包含另一工作已授权的地轨物理触碰校准方向修正（stall_protection.cpp）：J7朝主控-250mm端触碰、标定并返回0mm。
+因此当前整份电机映像不能称为仅版本身份变化；新motor-57包含该方向变化，本原地通信测试不触发校准。透传/正常周期控制相关ARM指令核对不变，报告见firmware_artifacts/motor-compatibility.json。
+
+上位机CAN诊断一次仅一个在途DIAG7，按实际RX时间和nonce推进参与轴，逐轴检查600ms健康；按查询发出时刻安排下一节点，避免七轴等待累积。
+已接受查询交给主控20ms CAN重试，上位机仅明确mailbox busy时有界重发，不每50ms重复查询占用下一轴邮箱。结束前串行核对仍检查actual300ms，CLOSE前再核对回读新鲜。
+
+启动前断连边界：单轴及65保留1000ms主机心跳保护；七轴127保持原运行合同，没有新增启动前超时自动关闭。
+因此127在OPEN/BUFFERING/ARMED但尚未START时，如果上位机消失，可以保留占用会话；不能将“没有运动”误判为会话已释放。
+新上位机重连必须先读主控真实STREAM会话/模式，遇到残留session或关闭未知状态要明确拒绝下一次测试，不能新OPEN覆盖或自动START。
+清理仍按明确停止/停稳、CLOSE全部确认、恢复模式2处理；没有CLOSE确认时不能把清理标为成功。
+START之后保留原300ms主机心跳及进度/同步/执行保护；故障的最终全机软停权限不因选择单轴而缩小。
+
+离线真实CAN联合回放已覆盖J1~J7每个单轴、65与127原地pipeline；单轴在未选电机预建同session已准备会话，检查其未被启动或关闭。
+这些回放执行生产核心和电机CAN/曲线代码，但物理跟随仍是理想模型；七轴实机通过与同步/栈/DWT指标须另行测试，不能用模型结果替代。
+
+
+13. 新鲜50ms稳态准入与独立START快照（2026101304）
+协议版本2、mode7、92字节q/v/a记录、50Hz边界及精确SEED不变。
+CAPS flags bit2=CAP_STABLE_ENTRY(0x04)确认本电机使用新鲜稳态规则，并支持下列START/证据字段。
+主控仅根据选中节点真实CAPS生成独立行，保持原STREAM_CAP及STREAM_TEST行格式：
+STREAM_FEATURES s=21885 steady=8 start=8
+s必须与当前测试会话一致，steady/start为十进制轴位图(bit0..6=J1..J7)。无此行/无本轴bit的旧电机不查询新增字段。
+能力不是主控编译版本推断；混合固件按节点显示。CLOSE保留同会话证据供诊断，开始新会话清零；不使用session0作为能力确认。
+
+OPEN/START共用最近完成50ms窗口的资格：位置范围在既有稳定范围内、有符号平均估速±512微步/s、实际在原到位容差内。
+资格必须新鲜且绑定当前goal/home/mode；目标、坐标、模式、保护、禁用/制动、校准、反馈异常等变化立即失效。
+积累新合格窗口前不能复用positionSettled=true或旧窗口。当前参考速度、参考/目标位置和硬保护仍即时核对。
+瞬时估速仍真实记录用于诊断，不清零估速、不增加阈值、不把目标改成actual来掩盖误差。
+新OPEN/START拒绝位12表示新鲜稳态资格缺失/过期；旧电机位12仍表示瞬时速度超过±512。
+START额外bit19表示当前goal不等于OPEN锁存q+home，或当前home不等于OPEN锁存home；
+即使坐标改变后重新积满合格50ms，也不能沿用旧OPEN/SEED；SEED逐微步完全一致，不能重新锚定。
+已经armed的重复START仍幂等，保持第一次绝对anchor；未armed首次决策快照保留至下一会话，不被CLOSE/STOP覆盖。
+
+DIAG23..33布局不变，为OPEN首次决策现场；新电机新增：
+34=START session，35=START拒绝位，36=START modes，37=瞬时速度，38=参考速度，
+39=目标，40=参考位置，41=实际位置，42=home，43=tick，44=settled。
+45=OPEN稳态证据年龄tick，46=OPEN窗口位置范围微步，47=OPEN窗口有符号平均速度微步/s；
+48=START证据年龄tick，49=START范围，50=START平均速度。
+tick为20kHz，1000tick=50ms；u32回绕用差值计算；无有效证据按失效状态解释，不单凭显示的settled通过。
+有符号字段为0、7、26..31、37..42、47、50；PC按session前后匹配确保现场属于本次会话。
+START快照只回答START瞬间，不拿OPEN估速代替；START未到达电机时没有本会话快照是正常诊断结果。
+
+PC发送START后显示“等待同步START确认”，仅fresh RUNNING/DRAINING确认后显示执行。
+原始STREAM_FAULT数字和首次故障阶段保留为主因；随后STOP_LOCKED/软停/清理反馈单独显示。
+人工STOP/DISABLE仍作为用户中断并即时撤销未发送曲线，不被迟到故障覆盖；generation/串口writer屏障保持。
+上方选择器用于单节点诊断和OPEN→CLOSE，下方用于原地曲线通信；按钮显示实际目标，点击日志记选择label与payload。
+本轮不加位移/逆解/标定入口；先J4同姿态OPEN十轮，再J4原地曲线，通过后才扩大轴组。
+
+
+14. 恒定原地段准备与提交确认顺序修复（2026101305）
+本轮仍使用协议v2、mode7、92字节记录、50Hz、8槽电机曲线缓冲和16槽主控记录缓冲；CAPS flags及诊断编号不变。
+主控和参与原地曲线的电机需配套更新13.05；不能仅凭CAP_STABLE_ENTRY确认恒定段准备优化，13.04也有该能力，须核对节点版本与buildset。
+
+电机Curve.Build先执行原速度/加速度参数范围、Bernstein整段边界及q+home绝对范围检查。
+若from.q==to.q，且两端v/a均0，则直接生成精确零差分、保留base/to与400tick合同，省去软件double准备。
+其余曲线仍走原计算路径；Curve.Tick和20kHz控制代码不变。失败Build仍保留原曲线状态，不因快路径绕过限位或初始化失败状态。
+此优化减少原地通信测试的准备工作，不能据此宣称一般非零曲线持续50Hz预算或实际位移平滑性已经通过。
+
+主控RUNNING前瞻检查之前，仅当count>0、正在COMMIT阶段且所有selected的COMMITTED ACK已齐时，先发布TransferFinished。
+仍先核对原传输60ms执行/500ms预启动时限；部分ACK、不完整准备、STOP、Allowed门禁、11ms Poll等原保护不放宽。
+这消除已确认提交但group committed尚未更新时的误杀；真实准备/提交吞吐不足仍应触发原UNDERRUN。
+UNDERRUN保留source1/code6，并写入真实Poll now到故障现场；STREAM_FAULT_T的t是主控ms时基，不是电机tick或机器动作时间。
+
+上位机axis_test期间由独立worker按原50Hz查询GETJPOS，暂停重复GUI轮询；结束/失败退出后按原门禁恢复GUI轮询。
+普通stream暂停机制、RGB监控、真实RX与CAN诊断保护、人工STOP/DISABLE屏障均保持。
+背景视觉任务的三维灯环/模型/配色代码不由本轮修改，完整PC回归须基于双方最终合并源码重新冻结摘要。
+
+先前真实记录表明：新J4 OPEN16/16、新J1烧录后OPEN9/9通过，6轮曲线在运行阶段缺前瞻。
+已接受记录不等于已提交电机段：例accepted40/head25/group committed24/observed executed22，至少16条在主控等待组提交，仅2条已提交但尚未观察执行。
+故障后free16可能来自主控清理，不能用作故障前缓存空的证据；FAULT snapshot与真正时序WIRE应合看。
+软件CAN时序模型的mainPeriod以20kHz tick为单位，20tick=1ms；需要显式建模曲线准备占用，不能把host/native运行时间当MCU成本。
+
+实机诊断fields2/9/12/15/19为boot以来累计最大值或次数。field2包含20kHz抢占，field9为控制回调内部计时，未包含完整HAL进出开销。
+两轴旧/新版均有20kHz超期记录，完整周期余量仍需单独优化与实测。本轮不调整周期或保护阈值；代理不操作设备。
