@@ -734,7 +734,8 @@ PROTECTION_CAN_SIZE void Motor::Controller::BeginSearch(bool retouch) {
     contactWindow = Steps(protectionSettings.Get(CAL_CONTACT_WINDOW_R));
     repeatTolerance = Steps(protectionSettings.Get(CAL_REPEAT_TOL_R));
     searchTimeoutTicks = Ticks(protectionSettings.Get(retouch ? CAL_RETOUCH_TIMEOUT_MS : CAL_SEEK_TIMEOUT_MS));
-    searchDirection = boardConfig.canNodeId == 7 ? -1 : 1;
+    // J7 is inverted by the master: positive motor travel seeks rail -250mm.
+    searchDirection = 1;
     searchStart = realPosition;
     const int64_t target = static_cast<int64_t>(realPosition) + static_cast<int64_t>(searchDirection) *
                            (retouch ? Steps(protectionSettings.Get(CAL_BACKOFF_R)) + 2 * contactError : searchMaxTravel);
@@ -839,7 +840,7 @@ bool Motor::Controller::TickInternalProtection() {
             BeginInternalMove(static_cast<int32_t>(target), Steps(protectionSettings.Get(CAL_RETURN_RPS)), Steps(protectionSettings.Get(CAL_ACCEL)), calibrationCurrent, CAL_BACKOFF);
         } else if (protectionPhase == CAL_RETOUCH) {
             if (abs(realPosition - firstContact) > repeatTolerance) { FailProtection(CONTACT_UNSTABLE); return false; }
-            SetCaptureCoordinate(boardConfig.canNodeId == 7 ? -50.0f : 0.0f);
+            SetCaptureCoordinate(boardConfig.canNodeId == 7 ? 50.0f : 0.0f);
             if (boardConfig.canNodeId == 7) {
                 protectionSettings.value[MIN_POSITION_R] = -50;
                 protectionSettings.value[MAX_POSITION_R] = 50;
@@ -897,7 +898,7 @@ bool Motor::Controller::TickInternalProtection() {
                 // An assumed single-turn boot coordinate cannot prove end
                 // location. Only a measured coordinate uses the prior window.
                 if (!assumedBoot && protectionPhase == CAL_SEEK) {
-                    const int32_t expected = context->config.motionParams.encoderHomeOffset + (boardConfig.canNodeId == 7 ? -50 * STEPS : 0);
+                    const int32_t expected = context->config.motionParams.encoderHomeOffset + (boardConfig.canNodeId == 7 ? 50 * STEPS : 0);
                     if (abs(realPosition - expected) > contactWindow) {
                         if (boardConfig.canNodeId == 7) {
                             motionDirection = static_cast<int8_t>(searchDirection); directionTicks = 100;

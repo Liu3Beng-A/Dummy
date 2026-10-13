@@ -1,3 +1,15 @@
+## 已完成：地轨向主控 -250mm 端触碰校准，返回 0mm（2026-10-13，待实机）
+
+- **当前问题 / 授权**：用户要求先分析地轨物理触碰方向反转方案，随后明确同意“向主控 -250mm 端触碰标定，然后返回 0mm”。本轮只修改电机驱动 `firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp` 和本记录；不修改主控方向映射、不操作设备、不提交。
+- **已确认事实**：主控 `Robot/instances/dummy_robot.cpp:130` 的 J7 inverseDirection=true，5mm/圈；主控位置=-电机圈数×5mm。主控 `protection_coordinator.cpp` 发 CAL_RUN，由电机执行 seek/backoff/retouch/capture/return，再由主控失能、保存、结束校准。原电机负向寻限位、触碰标定 -50圈，实际对应主控 +250mm。
+- **最新改动**：BeginSearch 使用正向寻限位（J8 原先也为正向，行为不变）；J7 二次触碰标定改为 +50圈；已有有效坐标时首次触碰预期端点同步改为 homeOffset+50圈。退开/再次触碰沿 searchDirection 自动反转；正常运动方向、±250mm 范围、夹爪及校准返回 0mm 保持原实现。
+- **已排除方向**：仅改主控 inverseDirection 会改变正常运动与回读定义，不能改变电机本地 CAL_RUN 方向；仅改寻限位方向会留下错误标定和 EARLY_CONTACT 端点检查，三处必须一致。
+- **验证**：在 `firmware_artifacts/.build/rail_calibration_test/` 使用当前实际 motor.cpp/stall_protection.cpp/motion_planner.cpp/protection_config.cpp，硬件与未启用 STREAM 接口桩替代；1851断言通过。覆盖 J7 距端点0/250/500mm全流程及+50圈标定/回0、保存后再次校准、端点正常触碰与途中 EARLY_CONTACT、四个校准阶段 DISABLE 取消、J8及原保护/退让/坐标保存回归。结果在 result.txt，源码摘要在 motor_source_manifest.json；属于离线模型，不是实机测量。
+- **构建 / 产物**：统一脚本五目标 Release 成功，唯一目录 `firmware_artifacts/`。并发工作更新主控 core_stream.cpp 后已重新构建；另一批构建随后覆盖同名产物，但源码摘要一致，最终再次核验五目标同组且与当前500份源码一致，ELF/清单/BIN/HEX/分区检查通过。核验时 release=2026101303，buildset=711EA1F653D8456D，source_sha256=3494de2271d0b771a4df2da00b1ab38a28a0df34c6f09eb2b2fbd53de45860ed，以当前 manifest/verification.json 为准。既有RWX链接警告仍存在。
+- **未完成 / 待实机**：地轨必须烧录包含本改动的 motor-57，随后由用户确认首次运动朝主控负向端、触碰/退开/复触/回0、再次校准及断电后的零点保持。本代理未烧录、未连接串口/STLink、未执行硬件运动。
+
+---
+
 # SESSION STATUS（2026-10-12）
 
 ## 暂停旧MoveJ链路修补，转入轨迹透传方案讨论（2026-10-12）
