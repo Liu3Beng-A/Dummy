@@ -7,7 +7,7 @@
 namespace {
 constexpr float PI_F = 3.14159265358979323846f;
 constexpr uint32_t RGB_MAGIC = 0x52474231UL;
-constexpr uint16_t RGB_VERSION = 2;
+constexpr uint16_t RGB_VERSION = 3;
 const char* const names[RGB::STATE_COUNT] = {
     "BOOT", "DISABLED", "READY_SEQ", "READY_INT", "READY_TRJ", "READY_TUN",
     "RUN_SEQ", "RUN_INT", "RUN_TRJ", "RUN_TUN", "CALIBRATION", "STOP", "STARTING", "FAULT"
@@ -20,6 +20,12 @@ float Gain(float brightness) {
     if (index >= 100) return 1;
     unsigned lo = unsigned(index);
     return (gammaPercent[lo] + (gammaPercent[lo+1] - gammaPercent[lo]) * (index-lo)) / 255.0f;
+}
+void MigrateStopBinding(RGB::Config& c) {
+    auto& b = c.bindings[RGB::STOP];
+    if (b.mode == RGB::BLINK && b.customColor == 1 &&
+        b.color.r == 255 && b.color.g == 180 && b.color.b == 0)
+        b.mode = RGB::RED_HEARTBEAT;
 }
 }
 RGB::RGB(uint8_t) { config = Defaults(); status.state = DISABLED; }
@@ -48,7 +54,7 @@ RGB::Config RGB::Defaults() {
         bind(State(RUN_SEQ+i), GREEN_SPIN, {0,0,0}, 2+i);
     }
     bind(READY_TUN, 2, {160,0,255}); bind(RUN_TUN, WHITE_BREATH, {160,0,255});
-    bind(CALIBRATION, GREEN_SPIN, {255,180,0}); bind(STOP, BLINK, {255,180,0});
+    bind(CALIBRATION, GREEN_SPIN, {255,180,0}); bind(STOP, RED_HEARTBEAT, {255,180,0});
     bind(STARTING, BLUE_TIDE, {0,255,255}); bind(FAULT, RED_HEARTBEAT, {255,0,0});
     return c;
 }
@@ -81,9 +87,13 @@ void RGB::LoadConfig() {
     static_assert(offsetof(Config, autoColors) == sizeof(LegacyConfig), "RGB v1 prefix layout");
     FlashRecord record{};
     std::memcpy(&record, reinterpret_cast<const void*>(FLASH_ADDRESS), sizeof(record));
-    if (record.magic == RGB_MAGIC && record.version == RGB_VERSION && record.size == sizeof(Config) &&
+    if (record.magic == RGB_MAGIC && (record.version == RGB_VERSION || record.version == 2) && record.size == sizeof(Config) &&
         record.crc == Crc(&record, offsetof(FlashRecord, crc)) && Valid(record.config)) {
         config = savedConfig = record.config; savedValid = true; storage = 1;
+        if (record.version == 2) {
+            MigrateStopBinding(config);
+            savedValid = false; // Upgrade in RAM; explicit save writes v3 without repeated migration.
+        }
         return;
     }
     if (record.magic == RGB_MAGIC && record.version == 1 && record.size == sizeof(LegacyConfig)) {
@@ -102,8 +112,9 @@ void RGB::LoadConfig() {
                 migrated.bindings[READY_SEQ+i] = {uint8_t(AUTO_SEQ_COLOR+i), 0, {0,0,0}};
                 migrated.bindings[RUN_SEQ+i] = {GREEN_SPIN, uint8_t(2+i), {0,0,0}};
             }
+            MigrateStopBinding(migrated);
             config = savedConfig = migrated; storage = 1;
-            savedValid = false; // Valid legacy data, but the v2 migration still needs an explicit save.
+            savedValid = false; // Valid legacy data, but the v3 migration still needs an explicit save.
             return;
         }
     }
@@ -198,6 +209,9 @@ RGB::Scene RGB::SelectScene(const Config& c, State state) {
     s.scale = s.source==DISABLED ? 0.15f : s.source>=READY_SEQ && s.source<=READY_TUN ? 0.25f : 1;
     if (state==FAULT) {
         s.mode = RED_HEARTBEAT; s.solid = {255,0,0}; s.effect = Defaults().effects[RED_HEARTBEAT];
+    } else if (state==STOP && s.mode==RED_HEARTBEAT) {
+        // Match the fault heartbeat timing while retaining the STOP binding's color.
+        s.effect = Defaults().effects[RED_HEARTBEAT]; s.effect.first = s.solid;
     }
     return s;
 }

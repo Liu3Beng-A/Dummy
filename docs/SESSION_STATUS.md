@@ -1,3 +1,14 @@
+## 已完成：STOP黄色双心跳，与堵转节奏一致（2026-10-13，13.04待实机）
+
+- **当前问题/授权**：用户要求了解firmware_new RGB并把STOP改成堵转同样的双闪、保持黄色；已确认三文件修改方案并回复“执行”。
+- **已确认事实**：主控 `firmware_new/dummy-ref-core-fw/Bsp/gpio/rgb.cpp` 原STOP为BLINK/黄色(255,180,0)，FAULT为固定1800ms RED_HEARTBEAT；`Robot/instances/dummy_robot.cpp:GetRGBState`故障优先于STOP，状态判定无需改变。
+- **最新改动**：仅RGB默认STOP绑定改7号；STOP绑定7号时复用FAULT固定1800ms双心跳参数、保留独立颜色；v1/v2旧默认黄色9号绑定在RAM迁移，保存记录升v3但保持v2结构，后续显式自定义绑定不重复迁移。同步本文与 `docs/RGB灯环复刻方案与测试.md`，协议和串口助手无需改动。
+- **已排除方向**：只改Defaults无法覆盖已保存旧配置；直接改7号主色会破坏红色报警；每次加载v2均识别旧默认会覆盖以后用户主动保存的相同绑定，故用v3区分迁移边界。未改运动/STOP控制、电机固件源码和其他待确认修复。
+- **验证结果**：直接编译当前生产RGB.cpp，31439项原生断言通过，覆盖三周期逐灯曲线与颜色、双峰、手动参数隔离、v1/v2/v3及用户自定义保存恢复、CRC/未来版本拒绝、实际PWM/亮度0/关灯；日志 `firmware_artifacts/test-rgb-stop.log`。两工程Release/Ninja全五目标成功，统一身份/源码摘要、BIN/HEX、链接分区及映像校验通过；主控Flash481764B、链接RAM74112B，电机源码未改且资源预算保持原值。沿用链接器RWX段警告，无新编译错误。
+- **交付/待确认**：`firmware_artifacts/`全五套ELF/MAP/BIN/HEX/manifest、构建日志与verification.json已更新；release=2026101304，buildset=B0D129E6310444E0，source_sha256=17a9ffa8b432b3f41a160a5bcddf9ac7f826e2cdadae0b245034da85a47ef884。说明 `rgb-stop-notes-2026101304.txt`，CURRENT_RELEASE/SHA256SUMS同步。此次灯效只需更新主控；默认及旧默认绑定直接生效，无需RGB_RESET，RGB_GET中STOP应mode7、颜色来源1、255/180/0。迁移后dirty=1属预期，实际失能后可显式RGB_SAVE保存。灯环物理表现待用户验证；未烧录或操作设备。用户另行授权单独提交本轮RGB源码与两份文档；SESSION_STATUS只提交本节新增记录，其他已有改动保留在工作区。J4静止准入等既有待确认问题本轮未处理。
+
+---
+
 ## 已完成：地轨向主控 -250mm 端触碰校准，返回 0mm（2026-10-13，待实机）
 
 - **当前问题 / 授权**：用户要求先分析地轨物理触碰方向反转方案，随后明确同意“向主控 -250mm 端触碰标定，然后返回 0mm”。本轮只修改电机驱动 `firmware_new/dummy-motor-fw/Ctrl/Motor/stall_protection.cpp` 和本记录；不修改主控方向映射、不操作设备、不提交。
