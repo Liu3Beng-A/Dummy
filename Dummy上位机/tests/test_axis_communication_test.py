@@ -10,7 +10,7 @@ from app.core.controller import RobotController
 from app.core.axis_communication_test import held_test_knots, format_axis_test
 from dummy_motion.stream_protocol import decode_knot, parse_stream_line, robot_coordinates
 from dummy_motion.frames import to_wire_joints
-from tests.test_stream_transport import StreamMemoryPort
+from tests.stream_memory_port import StreamMemoryPort
 from tests.test_ui import APPLICATION
 
 
@@ -133,7 +133,7 @@ class AxisCommunicationTests(unittest.TestCase):
         self.c = RobotController(serial_factory=lambda *a, **kw: self.port)
         self.events = []
         self.c.cartesian.stream.axis_test_changed.connect(self.events.append)
-        self.guard = patch('app.core.stream_session.PlanningProcess', side_effect=AssertionError('IK forbidden'))
+        self.guard = patch('dummy_motion.ik.IKSolver.solve_pose', side_effect=AssertionError('IK forbidden'))
         self.hardware = patch('app.core.controller.serial.Serial', side_effect=AssertionError('hardware forbidden'))
         self.guard.start(); self.hardware.start()
 

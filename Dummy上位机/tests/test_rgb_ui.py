@@ -25,7 +25,8 @@ class RGBPreviewUiTests(unittest.TestCase):
         self.window.show()
         self.window.navigation.setCurrentRow(4)
         APPLICATION.processEvents()
-        self.assertIs(self.window.pages.currentWidget(), self.window.rgb_page)
+        self.assertEqual(self.window.pages.currentIndex(), 0)
+        self.assertTrue(self.window.rgb_window.isVisible())
 
     def tearDown(self):
         self.window.close()
@@ -58,14 +59,16 @@ class RGBPreviewUiTests(unittest.TestCase):
         self.assertFalse(w.rgb_preview_source.isVisible())
         self.assertTrue(w.rgb_preview_source_button.isVisible())
         self.assertFalse(w.rgb_preview_mode.isEnabled())
-        self.assertIn("未连接", w.rgb_ring.toolTip())
+        self.assertIn("未连接", w.rgb_preview_title.text())
+        self.assertFalse(hasattr(w, "rgb_ring"))
         self.assertFalse(hasattr(w, "motion_rgb_ring"))
         self.assertFalse(hasattr(w, "motion_rgb_overlay"))
         w.rgb_preview_source_button.click()
         self.assertEqual(w.rgb_preview_source.currentIndex(), 0)
         self.assertTrue(w.rgb_preview_mode.isEnabled())
         self.assertIn("返回设备", w.rgb_preview_source_button.text())
-        self.assertEqual(w.viewer.rgb_frame, w.rgb_ring._colors)
+        self.assertEqual(len(w.viewer.rgb_frame), 24)
+        self.assertTrue(w.rgb_window.isAncestorOf(w.rgb_preview_source_button))
         w.rgb_preview_source_button.click()
         self.assertEqual(w.rgb_preview_source.currentIndex(), 1)
         w.fields["_rgb_bright"].widget.setValue(70)
@@ -109,7 +112,8 @@ class RGBPreviewUiTests(unittest.TestCase):
         self.assertEqual(w.rgb_preview_state.currentData(), "CALIBRATION")
         self.assertEqual(w._rgb_simulator.mode, 9)
         self.assertEqual(self.commands(), [])
-        self.assertTrue(w.rgb_ring.isVisible())
+        self.assertTrue(w.rgb_window.isVisible())
+        self.assertTrue(w.rgb_window.isAncestorOf(w.rgb_tabs))
 
     def test_offline_bank_switch_restores_defaults_and_each_local_edit(self):
         w = self.window
@@ -152,7 +156,7 @@ class RGBPreviewUiTests(unittest.TestCase):
         w.rgb_preview_source.setCurrentIndex(1)
         self.assertEqual(w._rgb_simulator.mode, 8)
         self.assertFalse(w.rgb_preview_mode.isEnabled())
-        self.assertIn("模拟", w.rgb_ring.toolTip())
+        self.assertIn("模拟", w.rgb_preview_brightness.text())
         for line in READBACK[:5]:
             self.controller._process_rx_line(line)
         self.assertEqual(w.rgb_preview_source.currentIndex(), 1)
@@ -171,16 +175,23 @@ class RGBPreviewUiTests(unittest.TestCase):
         w.navigation.setCurrentRow(0)
         self.assertTrue(w._rgb_render_timer.isActive())
         self.assertFalse(hasattr(w, "motion_rgb_ring"))
-        self.assertEqual(w.viewer.rgb_frame, w.rgb_ring._colors)
+        self.assertEqual(len(w.viewer.rgb_frame), 24)
         self.assertTrue(self.controller._rgb_monitoring)
         w.navigation.setCurrentRow(1)
+        self.assertTrue(w._rgb_render_timer.isActive())
+        self.assertTrue(self.controller._rgb_monitoring)
+        w.rgb_window.close()
+        APPLICATION.processEvents()
+        self.assertFalse(w.rgb_window.isVisible())
         self.assertFalse(w._rgb_render_timer.isActive())
         self.commands()
         self.controller._poll_rgb()
         self.assertEqual(self.commands(), [])
         w.navigation.setCurrentRow(4)
-        self.assertIs(w.pages.currentWidget(), w.rgb_page)
+        self.assertEqual(w.pages.currentIndex(), 0)
+        self.assertTrue(w.rgb_window.isVisible())
         self.assertTrue(w._rgb_render_timer.isActive())
+        w.rgb_window.hide()
         w.hide()
         APPLICATION.processEvents()
         self.assertFalse(w._rgb_render_timer.isActive())
@@ -188,6 +199,7 @@ class RGBPreviewUiTests(unittest.TestCase):
         APPLICATION.processEvents()
         self.assertTrue(w._rgb_render_timer.isActive())
         w.close()
+        self.assertFalse(w.rgb_window.isVisible())
         self.assertFalse(w._rgb_render_timer.isActive())
         self.commands()
         self.controller._poll_rgb()
@@ -196,14 +208,14 @@ class RGBPreviewUiTests(unittest.TestCase):
     def test_incomplete_stale_and_disconnected_follow_are_clearly_marked(self):
         w = self.window
         w.rgb_preview_source.setCurrentIndex(1)
-        self.assertIn("未连接", w.rgb_ring.toolTip())
+        self.assertIn("未连接", w.rgb_preview_title.text())
         self.receive_config()
         w._render_rgb_preview()
         self.assertIn("设备配置跟随", w.rgb_preview_status.text())
         received = w._rgb_device["received_at"]
         with patch("app.ui.main_window.time.monotonic", return_value=received + 4):
             w._render_rgb_preview()
-        self.assertIn("状态已过期", w.rgb_ring.toolTip())
+        self.assertIn("状态已过期", w.rgb_preview_title.text())
         self.assertFalse(w._rgb_follow_seeded)
         self.assertIs(w.viewer.rgb_light_on, False)
         for line in READBACK[:5]:
@@ -211,8 +223,37 @@ class RGBPreviewUiTests(unittest.TestCase):
         self.assertTrue(w._rgb_follow_seeded)
         self.assertEqual(w._rgb_simulator.current_brightness, 35)
         self.controller.disconnect_port()
-        self.assertIn("未连接", w.rgb_ring.toolTip())
-        self.assertFalse(any(w.rgb_ring._colors[i][j] for i in range(24) for j in range(3)))
+        self.assertIn("未连接", w.rgb_preview_title.text())
+        self.assertFalse(any(w.viewer.rgb_frame[i][j] for i in range(24) for j in range(3)))
+
+    def test_modeless_window_reopens_without_losing_drafts_or_duplicate_queries(self):
+        w = self.window
+        window = w.rgb_window
+        self.assertTrue(window.isWindow())
+        self.assertFalse(window.isModal())
+        w.fields["_rgb_color_vars"][0].widget.setValue(77)
+        window.close()
+        APPLICATION.processEvents()
+        self.assertFalse(window.isVisible())
+        self.assertTrue(w._rgb_render_timer.isActive(), 'The main model still needs animation')
+        w.navigation.setCurrentRow(4)
+        APPLICATION.processEvents()
+        self.assertIs(w.rgb_window, window)
+        self.assertTrue(window.isVisible())
+        self.assertEqual(w._rgb_field_values("_rgb_color_vars")[0], 77)
+        self.assertEqual(self.commands(), [])
+
+    def test_minimized_rgb_window_only_stops_animation_when_model_is_not_visible(self):
+        w = self.window
+        w.rgb_window.showMinimized()
+        APPLICATION.processEvents()
+        self.assertTrue(w._rgb_render_timer.isActive())
+        w.navigation.setCurrentRow(1)
+        APPLICATION.processEvents()
+        self.assertFalse(w._rgb_render_timer.isActive())
+        w.rgb_window.showNormal()
+        APPLICATION.processEvents()
+        self.assertTrue(w._rgb_render_timer.isActive())
 
 
 if __name__ == "__main__":

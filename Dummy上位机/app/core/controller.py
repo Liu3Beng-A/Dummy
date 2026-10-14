@@ -13,7 +13,7 @@ from app.core.fields import ValueField, ListField
 from app.core.scheduler import QtScheduler
 from app.core.gamepad_session import GamepadSession
 from app.core.cartesian_session import CartesianSession
-from app.core.cartesian_backend import CartesianBackend, configured_tool, point_tool, world_target, native_command
+from app.core.cartesian_backend import configured_tool, point_tool, world_target, native_command
 from app.protocol import capabilities
 from app.protocol.constants import *
 from app.protocol.parser import finite_numbers
@@ -361,8 +361,6 @@ class RobotController(QObject, RobotBusiness):
 
     def send_cartesian_point(self, point, speed=None):
         value = point.speed if speed is None else self._validated_speed(speed)
-        if self.cartesian.backend == CartesianBackend.STREAM:
-            return self.cartesian.start_points((point,), speed=value)
         if point.frame == "base" and point.target_kind == "flange":
             return self.send_cmd(self._teaching_command(point, value))
         if self.cartesian.feedback.estimate(self.cartesian.clock())[0].value != "OK":
@@ -433,8 +431,8 @@ class RobotController(QObject, RobotBusiness):
         # Coalesce every finite seven-axis readback for display, including
         # measured positions outside planning limits. Planning validates its
         # own feedback independently from the actual model.
-        self._transport.line_observer = self.cartesian.stream.receive
-        self._transport.written_observer = self.cartesian.stream.written
+        self._transport.line_observer = self.cartesian.diagnostics.receive
+        self._transport.written_observer = self.cartesian.diagnostics.written
         self._transport.start()
         self.log(f"已连接 {port} @ {BAUDRATE} ({self.connection_type})")
         self.send_cmd("#RGB_GET")
@@ -528,16 +526,20 @@ class RobotController(QObject, RobotBusiness):
                     request["generation"] == generation)
 
     def _can_write(self, generation, command):
-        owned_stream = self.cartesian.stream.owns_command(generation, command)
-        if owned_stream is not None:
-            return bool(owned_stream and self.is_connected and generation == self._tx_generation and
-                        (not self._stop_locked or self.cartesian.stream._locked_command(command)) and not self._calibration_busy)
+        owned_diagnostic = self.cartesian.diagnostics.owns_command(generation, command)
+        if owned_diagnostic is not None:
+            return bool(owned_diagnostic and self.is_connected and generation == self._tx_generation and
+                         (not self._stop_locked or self.cartesian.diagnostics._locked_command(command)) and not self._calibration_busy)
+        # Only the diagnostic worker may authorize mode 7 or stream packets.
+        # Recheck at the writer even if an obsolete caller queued them earlier.
+        if command.startswith(("~S", "!STREAM_")):
+            return False
+        if command.startswith("#CMDMODE") and command not in ("#CMDMODE 1", "#CMDMODE 2", "#CMDMODE 3", "#CMDMODE 4"):
+            return False
         if self._reject_plain_motion_in_stream_mode(command):
             return False
         diagnostic = capabilities.diagnostic(command)
-        owned_motion = (self.cartesian.busy and
-                        (command.startswith((">", "&", "@", "#CMDMODE ")) or
-                         (self.cartesian.job and command == self.cartesian.job["command"])))
+        owned_motion = self.cartesian.busy and (self._is_arm_motion(command) or command.startswith("#CMDMODE"))
         allowed = (self.is_connected and generation == self._tx_generation and
                 (not owned_motion or self.cartesian.can_write(generation, command)) and
                 (self._control_owner != "gamepad" or not command.startswith("@") or
@@ -553,12 +555,16 @@ class RobotController(QObject, RobotBusiness):
                 return False
         return allowed
 
+    @staticmethod
+    def _is_arm_motion(command):
+        return command.startswith(("@", ">", "&")) or command in ("!HOME", "!RESET")
+
     def _reject_plain_motion_in_stream_mode(self, command):
         # Check again at actual writer admission: a native command may have
         # waited in the queue while a reconnect/mode receipt confirmed mode 7.
-        # StreamSession-owned packets are admitted before this ordinary path.
-        if self.current_cmdmode == 7 and command.startswith(("@", ">", "&")):
-            self.log("主控实际处于模式 7，普通运动指令未发送；请选择并确认曲线透传后端，或切换回主控模式后重试", "WARN")
+        # DiagnosticSession-owned packets are admitted before this ordinary path.
+        if self.current_cmdmode == 7 and self._is_arm_motion(command):
+            self.log("主控实际处于模式 7，普通运动指令未发送；请显式关闭诊断会话并确认主控模式后重试", "WARN")
             return True
         return False
 
@@ -579,11 +585,11 @@ class RobotController(QObject, RobotBusiness):
             return False
         shared_joint_poll = (source == "telemetry" and
                              self._is_joint_telemetry_request(self._tx_generation, command))
-        if (self.cartesian.busy and source != "cartesian" and not shared_joint_poll and
+        if (self.cartesian.busy and not shared_joint_poll and
                 not capabilities.diagnostic(command) and command not in ("!STOP", "!DISABLE")):
             # Hand position remains independent during gamepad ownership.
             if not (source == "gamepad" and command.startswith("!HAND_POS ")):
-                self.log("上位机轨迹或后端切换处理中，请等待完成或 STOP", "WARN")
+                self.log("诊断或模式恢复处理中，请等待完成或 STOP", "WARN")
                 return False
         if self._is_position_command(command) and (source == "gamepad" or
                 (self._control_owner == "gamepad" and not
@@ -623,16 +629,15 @@ class RobotController(QObject, RobotBusiness):
         if self._calibration_busy and not diagnostic and command not in ("!STOP", "!DISABLE"):
             self.log("校准及保存中，只接受 STOP、DISABLE 和保护快照查询", "WARN")
             return False
-        if command.startswith('#CMDMODE ') and source != 'cartesian':
-            try:
-                mode = int(command.split()[1])
-            except (ValueError, IndexError):
-                self.log('无效的主控模式', 'WARN')
+        if command.startswith('#CMDMODE'):
+            if command not in ('#CMDMODE 1', '#CMDMODE 2', '#CMDMODE 3', '#CMDMODE 4', '#CMDMODE 7'):
+                self.log('普通模式指令须为 #CMDMODE 1～4；模式 7 仅用于独立诊断', 'WARN')
                 return False
-            if mode == 7 or self.current_cmdmode == 7 or self.cartesian.backend == CartesianBackend.STREAM:
+            mode = int(command[-1])
+            if mode == 7 or self.current_cmdmode == 7:
                 return self.cartesian.select_mode(mode)
             if mode not in (1, 2, 3, 4):
-                self.log('模式 5/6 保留；请选择 1～4 或 7', 'WARN')
+                self.log('普通运动仅支持模式 1～4；模式 7 仅用于独立诊断', 'WARN')
                 return False
         if self._stop_locked and not diagnostic and command not in ("!STOP", "!START", "!DISABLE"):
             self.log("保护锁定中，请 START 或 DISABLE；STOP 可中断保护动作", "WARN")
@@ -662,20 +667,10 @@ class RobotController(QObject, RobotBusiness):
             self._cancel_motion_for_stop()
             self._stop_locked = True
             self._handle_stop_status("Stopping ok" if command == "!STOP" else "Disable pending")
-        if command.startswith("@") and self.cartesian.backend == CartesianBackend.STREAM and source != "cartesian":
-            from app.core.business import TeachingPoint
-            values = finite_numbers(command[1:], 7)
-            point = TeachingPoint("笛卡尔目标", "MOVEL", tuple(values[:6]), 100., values[6])
-            return self.cartesian.start_points((point,))
-        if command.startswith((">", "&")) and self.cartesian.backend == CartesianBackend.STREAM and source != "cartesian":
-            from app.core.business import TeachingPoint
-            values = finite_numbers(command[1:], 8)
-            point = TeachingPoint("关节目标", "MOVEJ", tuple(values[:7]), 100., values[7])
-            return self.cartesian.start_points((point,))
         if self._reject_plain_motion_in_stream_mode(command):
             return False
-        if command.startswith(("~S", "!STREAM_")) and source != "cartesian":
-            self.log("透传数据与会话由 50 Hz 透传后端管理，请使用点位发送", "WARN")
+        if command.startswith(("~S", "!STREAM_")):
+            self.log("透传会话与恒定曲线仅由独立诊断入口发送", "WARN")
             return False
         parameter_spec = self._parameter_spec(command)
         if parameter_spec is not None:
@@ -881,7 +876,7 @@ class RobotController(QObject, RobotBusiness):
 
     def _cancel_motion_for_stop(self):
         self._invalidate_system_pose()
-        stream = getattr(getattr(self, 'cartesian', None), 'stream', None)
+        stream = getattr(getattr(self, 'cartesian', None), 'diagnostics', None)
         axis_cleanup = bool(stream is not None and stream.active and self.cartesian.kind == 'axis_test' and self.is_connected)
         if axis_cleanup:
             with stream.lock:
@@ -903,10 +898,10 @@ class RobotController(QObject, RobotBusiness):
         return self._mode_request_counter
 
     def _set_cmdmode(self, mode):
-        if mode == 7 or self.current_cmdmode == 7 or self.cartesian.backend == CartesianBackend.STREAM:
+        if mode == 7 or self.current_cmdmode == 7:
             return self.cartesian.select_mode(mode)
         if mode not in (1, 2, 3, 4):
-            self.log('模式 5/6 保留；请选择 1～4 或 7', 'WARN')
+            self.log('普通运动仅支持模式 1～4；模式 7 仅用于独立诊断', 'WARN')
             return False
         return super()._set_cmdmode(mode)
 
@@ -926,7 +921,7 @@ class RobotController(QObject, RobotBusiness):
             self._stop_locked = True
             self.lbl_motor_state.config(text="● 等待停稳并解锁")
             return
-        stream = self.cartesian.stream
+        stream = self.cartesian.diagnostics
         if (stream.active and self.cartesian.kind == 'axis_test' and stream.recovering and
                 line in ('Stopping ok', 'STOP locked', 'STOP locked disabled', 'Disabled ok', 'error STOP_LOCKED')):
             # The test has retired its curve writer. Keep only bounded read,
@@ -1239,7 +1234,7 @@ class RobotController(QObject, RobotBusiness):
         self._emit_state()
 
     def _position_polling_paused(self):
-        return ((self.cartesian.active and self.cartesian.kind in ("stream", "axis_test")) or not self._poll_enabled or not self.is_connected or self._stop_locked or
+        return ((self.cartesian.active and self.cartesian.kind in ("mode_switch", "axis_test")) or not self._poll_enabled or not self.is_connected or self._stop_locked or
                 self._calibration_busy or self._acc_sync_waiting or self._parameter_request is not None or
                 (self.connection_type == "UART4" and self._motor_state_known and not self._motor_enabled))
 

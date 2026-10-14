@@ -19,6 +19,9 @@ from app.ui.main_window import MainWindow
 from tests.test_ui import APPLICATION, FakeView
 
 
+_READ_ONLY_COMMANDS = {"#GETJPOS", "#RGB_GET", "#RGB_STATUS"}
+
+
 class MemoryFirmwarePort:
     """Respond while write() is still running to exercise RX-before-written."""
 
@@ -106,6 +109,12 @@ class MemoryFirmwarePort:
                 self.inject("STOP locked")
         elif command == "#RGB_GET":
             self.inject("RGB_GET end")
+        elif command == "#RGB_STATUS":
+            self.inject("RGB_STATUS on=1 auto=1 bright=100 current=100 mode=11",
+                        "RGB_RUNTIME state=READY_INT source=READY_INT",
+                        "RGB_STORAGE dirty=0 storage=1 dma=0",
+                        "RGB_DMA frames=0 errors=0",
+                        "RGB_TIMEOUT timeouts=0")
         else:
             raise AssertionError(f"unexpected command: {command}")
         # The actual RX worker can publish responses before command_written.
@@ -260,14 +269,14 @@ class GamepadThreadedIntegrationTests(unittest.TestCase):
             panel.action_buttons["start"].click()
         self.wait_for(lambda: self.controller.gamepad.stage == "init_confirmation", "second Start single MoveJ acceptance")
         QTest.qWait(300)
-        self.assertEqual([command for command in self.port.commands()[before_init:] if command != "#GETJPOS"],
+        self.assertEqual([command for command in self.port.commands()[before_init:] if command not in _READ_ONLY_COMMANDS],
                          [">0,10,80,0,90,0,0,10"])
         self.assertEqual(panel.action_buttons["initialize"].text(), "确认到位")
         self.assertFalse(self.controller.gamepad.ready)
         self.assertTrue(panel.action_buttons["start"].isEnabled())
         panel.action_buttons["start"].click()
         self.wait_for(lambda: self.controller.gamepad.ready, "local arrival confirmation and centered unlock")
-        self.assertEqual([command for command in self.port.commands()[before_init:] if command != "#GETJPOS"],
+        self.assertEqual([command for command in self.port.commands()[before_init:] if command not in _READ_ONLY_COMMANDS],
                          [">0,10,80,0,90,0,0,10"])
         commands = self.port.commands()
         self.assertEqual(commands.count("!START"), 1)
@@ -443,13 +452,13 @@ class GamepadThreadedIntegrationTests(unittest.TestCase):
         self.wait_for(lambda: self.controller.gamepad.stage == "target_rejected", "target rejection")
         before = self.port.commands()
         QTest.qWait(180)
-        self.assertEqual([command for command in self.port.commands() if command != "#GETJPOS"],
-                         [command for command in before if command != "#GETJPOS"])
+        self.assertEqual([command for command in self.port.commands() if command not in _READ_ONLY_COMMANDS],
+                         [command for command in before if command not in _READ_ONLY_COMMANDS])
         self.assertEqual(self.controller.gamepad.target_tcp, reference)
         self.reader.decoded.update(ly=0., centered=True)
         self.wait_for(lambda: self.controller.gamepad.ready, "center rearm")
-        self.assertEqual([command for command in self.port.commands() if command != "#GETJPOS"],
-                         [command for command in before if command != "#GETJPOS"])
+        self.assertEqual([command for command in self.port.commands() if command not in _READ_ONLY_COMMANDS],
+                         [command for command in before if command not in _READ_ONLY_COMMANDS])
         moves_before = sum(command.startswith("@") for command in before)
         self.reader.decoded.update(ly=1., centered=False)
         self.wait_for(lambda: sum(command.startswith("@") for command in self.port.commands()) > moves_before,
@@ -482,7 +491,10 @@ class GamepadThreadedIntegrationTests(unittest.TestCase):
             self.reader.decoded.update(ly=0., centered=True)
             self.window.navigation.setCurrentRow(0)
             self.window.input_mode.setCurrentIndex(0)
-            self.wait_for(lambda: not self.controller.gamepad.claimed, "interface handover STOP confirmed")
+            self.wait_for(lambda: self.controller.is_connected and not self.controller.gamepad.claimed and
+                          self.controller.gamepad.state()["stop_confirmed"], "interface handover STOP confirmed")
+            self.assertEqual(self.controller.gamepad.stage, "released")
+            self.assertEqual(self.controller.state()["control_owner"], "ui")
             self.assertEqual(self.port.commands().count("!STOP"), 1)
             self.assertFalse(self.reader.running)
         finally:

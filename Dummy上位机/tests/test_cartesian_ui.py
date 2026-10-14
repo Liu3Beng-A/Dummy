@@ -1,9 +1,10 @@
-"""Backend selection and world-TCP UI semantics with a fake viewer/device."""
+"""Fixed native execution and preserved world-TCP UI with a fake viewer/device."""
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from PySide6.QtCore import QEvent
+from PySide6.QtWidgets import QComboBox
 from app.core.controller import RobotController
 from app.storage.store import AppStore
 from app.ui.main_window import MainWindow
@@ -29,28 +30,37 @@ class CartesianUiTests(unittest.TestCase):
         self.store.close()
         self.directory.cleanup()
 
-    def test_default_firmware_switch_is_persisted_without_writes_or_target_changes(self):
-        self.assertEqual(self.w.ik_backend.currentData(), 'firmware')
+    def test_fixed_firmware_has_no_execution_selector_or_motion_side_effects(self):
         before = [spin.value() for spin in self.w.pose_spins]
-        self.w.ik_backend.setCurrentIndex(1)
-        self.assertEqual(self.c.cartesian.backend.value, 'stream')
-        self.assertEqual(self.store.settings['cartesian_backend'], 'stream')
+        self.w._update_state(self.c.state())
+        self.assertFalse(hasattr(self.w, 'ik_backend'))
+        self.assertIsNone(self.w.findChild(QComboBox, 'CartesianBackend'))
+        self.assertEqual(self.c.cartesian.backend.value, 'firmware')
+        self.assertEqual(self.store.settings['cartesian_backend'], 'firmware')
+        self.assertIn('固定使用主控', self.w.cartesian_execution.text())
         self.assertEqual([spin.value() for spin in self.w.pose_spins], before)
         self.assertTrue(self.c._tx_queue.empty())
-        self.assertEqual(self.w.ik_backend.count(), 2)
-        self.assertEqual(self.w.mode_combo.currentIndex(), 4)
+        self.assertEqual(self.w.mode_combo.count(), 4)
+        self.assertEqual(self.w.mode_combo.currentIndex(), 1)
         self.assertEqual(self.w.poll_hz.maximum(), 50)
 
-    def test_stream_selection_is_explicit_persisted_and_no_hardware_command(self):
-        self.w.ik_backend.setCurrentIndex(1)
-        self.assertEqual(self.w.ik_backend.currentData(), 'stream')
-        self.assertEqual(self.c.cartesian.backend.value, 'stream')
-        self.assertEqual(self.store.settings['cartesian_backend'], 'stream')
-        self.assertTrue(self.c._tx_queue.empty())
-        self.assertIn('50 Hz', self.w.ik_status.text())
-        self.w.ik_backend.setCurrentIndex(0)
+    def test_actual_mode7_is_displayed_without_automatic_exit_or_start(self):
+        self.c.is_connected = True
+        self.c.current_cmdmode = 7
+        before = [spin.value() for spin in self.w.pose_spins]
+        self.w._update_state(self.c.state())
+        self.assertIn('模式 7', self.w.mode_status.text())
+        self.assertIn('通信诊断', self.w.mode_status.text())
+        self.assertIn('待退出', self.w.mode_status.text())
+        self.assertIn('普通运动不可用', self.w.mode_status.text())
+        self.assertEqual(self.w.mode_combo.count(), 4)
+        self.assertTrue(all('7' not in self.w.mode_combo.itemText(i) for i in range(4)))
         self.assertEqual(self.c.cartesian.backend.value, 'firmware')
+        self.assertEqual(self.store.settings['cartesian_backend'], 'firmware')
+        self.assertEqual(self.c.current_cmdmode, 7)
+        self.assertEqual([spin.value() for spin in self.w.pose_spins], before)
         self.assertTrue(self.c._tx_queue.empty())
+        self.c.is_connected = False
 
     def test_world_point_roundtrip_retains_tool_and_legacy_point_resets_frame(self):
         self.w.teaching_tabs.setCurrentIndex(1)

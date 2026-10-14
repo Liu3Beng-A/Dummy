@@ -35,6 +35,7 @@ class FakeView(QWidget):
         self.commanded_gripper = None
         self.rgb_frame = ((0, 0, 0),) * 24
         self.rgb_light_on = None
+        self.rgb_preview = False
         self.closed = False
 
     def set_target_pose(self, values, gripper=100):
@@ -74,6 +75,9 @@ class FakeView(QWidget):
     def set_rgb_frame(self, frame, *, light_on=None):
         self.rgb_frame = tuple(tuple(color) for color in frame)
         self.rgb_light_on = light_on
+
+    def set_rgb_preview(self, enabled):
+        self.rgb_preview = bool(enabled)
 
     def set_stale(self, value):
         self.stale = value
@@ -149,10 +153,15 @@ class UiIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.controller._protection_entries["STALL"]), 18)
         self.assertEqual(len(self.controller._protection_entries["CAL"]), 18)
         self.assertEqual(self.commands(), [])
-        for page in range(6):
+        for page in (0, 1, 2, 3, 5):
             self.window.navigation.setCurrentRow(page)
             self.assertEqual(self.window.pages.currentIndex(), page)
-        self.assertIs(self.window.pages.widget(4), self.window.rgb_page)
+        self.window.navigation.setCurrentRow(4)
+        self.assertEqual(self.window.pages.currentIndex(), 0)
+        self.assertEqual(self.window.navigation.currentRow(), 0)
+        self.assertTrue(self.window.rgb_window.isVisible())
+        self.assertIs(self.window.pages.widget(4), self.window.rgb_launch_page)
+        self.assertTrue(self.window.rgb_window.isAncestorOf(self.window.rgb_tabs))
         self.assertTrue(self.window.pages.widget(3).isAncestorOf(self.window.hand_row))
         self.assertTrue(self.window.pages.widget(5).isAncestorOf(self.window.theme_combo))
         self.window.navigation.setCurrentRow(2)

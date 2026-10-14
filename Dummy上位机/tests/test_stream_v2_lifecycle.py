@@ -1,5 +1,7 @@
 """v2 held-reference seed, spawn isolation, cancellation and recovery regressions."""
 import os
+import threading
+from unittest.mock import patch
 import time
 import unittest
 import numpy as np
@@ -10,7 +12,7 @@ from dummy_motion import RobotModel, Tool, Pose
 from dummy_motion.frames import from_wire_joints, to_xyzabc
 from dummy_motion.stream_protocol import decode_knot
 from tests.test_ui import APPLICATION
-from tests import test_stream_transport as transport_tests
+from tests.test_stream_transport import NativeTransportFixture
 
 
 class PlanningProcessTests(unittest.TestCase):
@@ -42,128 +44,97 @@ class PlanningProcessTests(unittest.TestCase):
         with self.assertRaises(InterruptedError):future.done()
 
 
-class StreamV2LifecycleTests(unittest.TestCase):
-    setUp=transport_tests.StreamTransportTests.setUp
-    tearDown=transport_tests.StreamTransportTests.tearDown
-    wait_for=transport_tests.StreamTransportTests.wait_for
-    ready=transport_tests.StreamTransportTests.ready
-    point=transport_tests.StreamTransportTests.point
-    start=transport_tests.StreamTransportTests.start
-
-    def test_v1_capability_is_rejected_before_open_or_any_curve(self):
-        self.port.version=1
-        self.start()
-        self.wait_for(lambda:self.c.cartesian.stage=='error')
-        self.assertFalse(any(cmd.startswith(('!STREAM_OPEN','~S')) for cmd in self.port.commands()))
-        self.assertTrue(any('v2' in message for _,message in self.logs))
-
-    def test_native_residual_uses_held_reference_seed_not_actual_position(self):
-        held=self.port.held.copy()
-        self.port.joints[0]+=.07  # 498 motor subdivisions, valid ordinary settling tolerance.
-        self.start()
-        self.wait_for(lambda:self.c.cartesian.stage in ('complete','error'))
-        self.assertEqual(self.c.cartesian.stage,'complete',self.logs)
-        knot=next(decode_knot(cmd)[1] for cmd in self.port.commands() if cmd.startswith('~S'))
-        np.testing.assert_array_equal(knot.motor[:,0],held)
-
-    def test_each_sequence_point_rechecks_held_reference_and_uses_confirmed_seed(self):
-        self.ready();self.port.actual_offset[0]=.04
-        self.assertTrue(self.c.cartesian.start_points((self.point(.003),self.point(.006)),sequence=True))
-        self.wait_for(lambda:self.c.cartesian.stage in ('complete','error'),timeout=15.)
-        self.assertEqual(self.c.cartesian.stage,'complete',self.logs)
-        commands=self.port.commands()
-        groups={}
-        for command in commands:
-            if command.startswith('~S'):
-                session,knot=decode_knot(command);groups.setdefault(session,[]).append(knot)
-        self.assertEqual(len(groups),2)
-        first,second=list(groups.values())
-        np.testing.assert_array_equal(first[-1].motor[:,0],second[0].motor[:,0])
-        self.assertGreaterEqual(commands.count('#STREAM_DIAG 1 7'),4)
-
-    def test_stopped_session_can_exit_native_without_reenabling_motors(self):
-        self.start(.01)
-        self.wait_for(lambda:self.c.cartesian.stage=='running')
-        self.assertTrue(self.c.send_cmd('!STOP'))
-        self.wait_for(lambda:getattr(self.c,'_stop_confirmed',False))
-        self.wait_for(lambda:not self.c.cartesian.stream.thread.is_alive())
-        previous=self.port.session
-        self.assertTrue(self.c.set_cartesian_backend('firmware'))
-        self.wait_for(lambda:self.c.cartesian.backend.value=='firmware' or self.c.cartesian.stage=='error')
-        self.assertEqual(self.c.cartesian.backend.value,'firmware',self.logs)
-        self.assertTrue(self.c._stop_locked)
-        commands=self.port.commands()
-        close=commands.index(f'!STREAM_CLOSE {previous}')
-        switch=commands.index('#CMDMODE 2',close)
-        self.assertLess(close,switch)
-        self.assertNotIn('!START',commands[commands.index('!STOP')+1:])
-
-    def test_close_precedes_diags_after_stop_start_recovery(self):
-        self.start(.01);self.wait_for(lambda:self.c.cartesian.stage=='running')
-        self.assertTrue(self.c.send_cmd('!STOP'));self.wait_for(lambda:getattr(self.c,'_stop_confirmed',False))
-        old=self.port.session
-        self.assertTrue(self.c.send_cmd('!START'))
-        self.wait_for(lambda:not self.c._stop_locked and self.c._mode_request is None)
-        self.wait_for(lambda:not self.c.cartesian.stream.thread.is_alive())
-        self.wait_for(lambda:time.perf_counter()-self.c.cartesian.feedback.sample.received_at<.2)
-        before=len(self.port.commands())
-        self.assertTrue(self.c.send_cartesian_point(self.point(.003)))
-        self.wait_for(lambda:self.c.cartesian.stage in ('complete','error'))
-        self.assertEqual(self.c.cartesian.stage,'complete',self.logs)
-        commands=self.port.commands()[before:]
-        self.assertLess(commands.index(f'!STREAM_CLOSE {old}'),commands.index('#STREAM_DIAG 1 5'))
-
-    def test_close_application_cancels_inflight_planning_and_reaps_process(self):
-        self.start(.08)
-        self.wait_for(lambda:self.c.cartesian.stream.planner_future is not None)
-        future=self.c.cartesian.stream.planner_future
-        self.c.close()
-        self.assertFalse(future.process.is_alive())
-        self.assertFalse(any(cmd.startswith(('~S','!STREAM_OPEN')) for cmd in self.port.commands()))
-
-    def test_top_mode7_and_native_mode_share_backend_and_never_send_motion(self):
+class StreamV2LifecycleTests(NativeTransportFixture, unittest.TestCase):
+    def residual(self, state='FAULT'):
+        self.port.mode=7;self.port.session=4123;self.port.state=state
         self.ready()
-        self.assertTrue(self.c._set_cmdmode(7))
-        self.wait_for(lambda:self.c.current_cmdmode==7 and not self.c.cartesian.busy)
-        self.assertEqual(self.c.cartesian.backend.value,'stream')
-        self.wait_for(lambda:not self.c.cartesian.stream.thread.is_alive())
-        self.assertTrue(self.c._set_cmdmode(1))
-        self.wait_for(lambda:self.c.current_cmdmode==1 and not self.c.cartesian.busy)
-        self.assertEqual(self.c.cartesian.backend.value,'firmware')
-        self.assertFalse(any(cmd.startswith(('!STREAM_OPEN','~S','>','@')) for cmd in self.port.commands()))
+        self.assertEqual(self.c.current_cmdmode,7)
 
-    def test_busy_mode_switch_is_explicit_and_does_not_change_mode(self):
-        self.ready();self.port.busy=True
-        self.assertTrue(self.c._set_cmdmode(7))
-        self.wait_for(lambda:self.c.cartesian.stage=='error')
-        self.assertEqual(self.port.mode,2)
-        self.assertTrue(any('仍在运动' in message for _,message in self.logs))
-        self.assertFalse(any('Malformed' in message for _,message in self.logs))
-
-    def test_terminal_mode_exit_uses_same_close_gate_while_stop_locked(self):
-        self.start(.01);self.wait_for(lambda:self.c.cartesian.stage=='running')
-        self.assertTrue(self.c.send_cmd('!STOP'))
-        self.wait_for(lambda:getattr(self.c,'_stop_confirmed',False))
-        self.wait_for(lambda:not self.c.cartesian.stream.thread.is_alive())
-        old=self.port.session
-        self.assertTrue(self.c.send_cmd('#CMDMODE 2'))
-        self.wait_for(lambda:self.c.cartesian.backend.value=='firmware' or self.c.cartesian.stage=='error')
-        self.assertEqual(self.c.cartesian.backend.value,'firmware',self.logs)
-        self.assertIn(f'!STREAM_CLOSE {old}',self.port.commands())
-        self.assertTrue(self.c._stop_locked)
-
-    def test_reconnect_mode7_with_native_preference_never_writes_plain_or_teaching_motion(self):
-        self.assertTrue(self.c.connect_port('MEMORY_NATIVE_ONLY','USB'))
-        self.wait_for(lambda:self.c._mode_request is None)
-        self.c.disconnect_port()
-        self.port=transport_tests.StreamMemoryPort();self.port.mode=7
-        self.c._serial_factory=lambda *args,**kwargs:self.port
-        self.assertTrue(self.c.connect_port('MEMORY_RECONNECT_ONLY','USB'))
-        self.wait_for(lambda:self.c.current_cmdmode==7)
+    def test_reconnect_mode7_does_not_auto_takeover_or_send_motion(self):
+        self.residual()
         self.assertEqual(self.c.cartesian.backend.value,'firmware')
         for command in ('@146.5,0,288.9,180,0,180,35','>0,10,80,0,90,0,0,35','&0,10,80,0,90,0,0,35'):
             self.assertFalse(self.c.send_cmd(command))
         self.assertFalse(self.c.send_cartesian_point(self.point()))
-        QTest.qWait(40)
-        self.assertFalse(any(command.startswith(('@','>','&','#CMDMODE ','!STREAM_OPEN')) for command in self.port.commands()))
+        QTest.qWait(35)
+        self.assertFalse(any(command.startswith(('@','>','&','#CMDMODE ','!STREAM_CLOSE ')) for command in self.port.commands()))
         self.assertEqual(self.port.mode,7)
+
+    def test_explicit_native_recovery_closes_before_mode_set_without_enable(self):
+        self.residual();marker=len(self.port.commands())
+        self.assertTrue(self.c.cartesian.select_mode(2))
+        self.wait_for(lambda:not self.c.cartesian.busy)
+        commands=self.port.commands()[marker:]
+        self.assertLess(commands.index('!STREAM_CLOSE 4123'),commands.index('#CMDMODE 2'))
+        self.assertNotIn('!START',commands)
+        self.assert_no_planned_motion(commands)
+        self.assertEqual(self.port.mode,2)
+        self.assertEqual(self.c.current_cmdmode,2)
+
+    def test_stop_locked_recovery_keeps_lock_and_never_enables(self):
+        self.residual();self.c._stop_locked=True;self.c._stop_confirmed=True
+        marker=len(self.port.commands())
+        self.assertFalse(self.c.cartesian.select_mode(3))
+        self.assertTrue(self.c.cartesian.select_mode(2))
+        self.wait_for(lambda:not self.c.cartesian.busy)
+        commands=self.port.commands()[marker:]
+        self.assertIn('!STREAM_CLOSE 4123',commands)
+        self.assertIn('#CMDMODE 2',commands)
+        self.assertNotIn('!START',commands)
+        self.assertTrue(self.c._stop_locked)
+
+    def test_unconfirmed_stop_blocks_recovery_before_query_or_close(self):
+        self.residual();self.c._stop_locked=True;self.c._stop_confirmed=False
+        marker=len(self.port.commands())
+        self.assertFalse(self.c.cartesian.select_mode(2))
+        self.assertEqual(self.port.commands()[marker:],[])
+
+    def test_foreign_running_session_is_not_closed_or_taken_over(self):
+        self.residual('RUNNING');marker=len(self.port.commands())
+        self.assertTrue(self.c.cartesian.select_mode(2))
+        self.wait_for(lambda:not self.c.cartesian.busy)
+        self.assertEqual(self.c.cartesian.stage,'error')
+        commands=self.port.commands()[marker:]
+        self.assertFalse(any(command.startswith(('!STREAM_CLOSE ','#CMDMODE ')) for command in commands))
+        self.assertEqual(self.port.mode,7)
+
+    def test_close_without_confirmation_cannot_switch_or_accept_native_target(self):
+        self.residual();original=self.port.write
+        def missing_close(data):
+            command=data.decode('ascii').strip()
+            if command.startswith('!STREAM_CLOSE '):
+                with self.port.lock:self.port.writes.append(command)
+                return len(data)
+            return original(data)
+        marker=len(self.port.commands())
+        with patch.object(self.port,'write',side_effect=missing_close):
+            self.assertTrue(self.c.cartesian.select_mode(2))
+            self.wait_for(lambda:not self.c.cartesian.busy)
+        self.assertEqual(self.c.cartesian.stage,'error')
+        self.assertNotIn('#CMDMODE 2',self.port.commands()[marker:])
+        self.assertEqual(self.port.mode,7)
+        self.assertFalse(self.c.send_cartesian_point(self.point()))
+
+    def test_busy_mode_recovery_cannot_close_or_change_mode(self):
+        self.residual();self.port.busy=True;marker=len(self.port.commands())
+        self.assertTrue(self.c.cartesian.select_mode(2))
+        self.wait_for(lambda:not self.c.cartesian.busy)
+        self.assertEqual(self.c.cartesian.stage,'error')
+        self.assertFalse(any(command.startswith(('!STREAM_CLOSE ','#CMDMODE ')) for command in self.port.commands()[marker:]))
+
+    def test_stop_during_close_recovery_discards_queued_mode_tail(self):
+        self.residual();worker=self.c.cartesian.diagnostics
+        reached,release=threading.Event(),threading.Event();original=worker._cleanup_existing_session
+        def cleanup(check_feedback):
+            original(check_feedback);reached.set();release.wait(3.)
+        marker=len(self.port.commands())
+        with patch.object(worker,'_cleanup_existing_session',side_effect=cleanup):
+            self.assertTrue(self.c.cartesian.select_mode(3))
+            self.wait_for(reached.is_set)
+            self.assertTrue(self.c.send_cmd('!STOP'))
+            release.set();self.wait_for(lambda:not worker.thread.is_alive())
+        QTest.qWait(30)
+        commands=self.port.commands()[marker:]
+        self.assertNotIn('#CMDMODE 3',commands)
+        self.assertIn('!STOP',commands)
+        self.assertTrue(self.c._stop_locked)

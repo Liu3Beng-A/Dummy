@@ -59,6 +59,7 @@ class RobotView(QWidget):
         self._state = {
             "mode": "preview", "theme": "light", "stale": True,
             "actualOnly": False, "feedbackPaused": False,
+            "rgbPreview": False,
             "actualKnown": False, "actualGripperKnown": False,
             "highlight": None, "camera": "isometric", "cameraSeq": 0,
             "grid": True, "axes": True, "visibilitySeq": 0,
@@ -198,6 +199,15 @@ class RobotView(QWidget):
                 "colors": self._rgb_frame, "light_on": self._rgb_light_on,
             }
             self._bridge.rgb_changed.emit(json.dumps(payload, allow_nan=False))
+
+    def set_rgb_preview(self, enabled):
+        """Allow an explicitly labelled local lamp model when no pose is known."""
+        if self._closed:
+            return
+        value = bool(enabled)
+        if self._state["rgbPreview"] != value:
+            self._state["rgbPreview"] = value
+            self._sync()
 
     def set_target_gripper(self, gripper_pct):
         """Update the display opening while preserving the last joint target.

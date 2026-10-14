@@ -50,7 +50,7 @@ class AxisPollingContractTests(unittest.TestCase):
                 self.worker_queries.append(dict(stamp=time.perf_counter(), kind=self.c.cartesian.kind))
             return original_worker_send(command)
         self.guards = [patch('app.core.controller.serial.Serial', side_effect=AssertionError('hardware forbidden')),
-                       patch('app.core.stream_session.PlanningProcess', side_effect=AssertionError('IK forbidden')),
+                       patch('dummy_motion.ik.IKSolver.solve_pose', side_effect=AssertionError('IK forbidden')),
                        patch.object(self.c,'send_cmd',side_effect=send),
                        patch.object(self.c.cartesian.stream,'_send',side_effect=worker_send)]
         for guard in self.guards:
@@ -139,9 +139,9 @@ class AxisPollingContractTests(unittest.TestCase):
         self.wait(lambda:not self.c._stop_locked and self.c._motor_enabled and self.c._mode_request is None)
         self.assert_gui_resumes()
 
-    def test_ordinary_stream_owner_still_suspends_gui_and_releases_on_cancel(self):
+    def test_diagnostic_owner_suspends_gui_and_releases_on_cancel(self):
         self.ready()
-        self.c.cartesian._begin('stream')
+        self.c.cartesian._begin('axis_test')
         self.c._poll_timer.start(34)
         marker=len(self.gui_queries)
         for _ in range(3):

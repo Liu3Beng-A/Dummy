@@ -317,6 +317,26 @@ class ModelLightBridgeTests(unittest.TestCase):
             self.assertIs(view._rgb_light_on, False)
             self.assertEqual(len(self.frames), count + 1)
 
+    def test_rgb_illustration_flag_never_claims_feedback_or_changes_pose_data(self):
+        from copy import deepcopy
+        view = self.view
+        view._on_ready()
+        self.frames.clear()
+        before = deepcopy(view._state)
+        view.set_rgb_preview(True)
+        self.assertTrue(view._state["rgbPreview"])
+        self.assertIs(view._state["actualKnown"], False)
+        self.assertEqual(view._state["actual"], before["actual"])
+        self.assertEqual(view._state["target"], before["target"])
+        self.assertEqual(view._state["stale"], before["stale"])
+        self.assertEqual(self.frames, [])
+        count = len(self.poses)
+        view.set_rgb_preview(True)
+        self.assertEqual(len(self.poses), count)
+        view.set_rgb_preview(False)
+        self.assertFalse(view._state["rgbPreview"])
+        self.assertEqual(view._state["actual"], before["actual"])
+
 
 if __name__ == '__main__':
     unittest.main()

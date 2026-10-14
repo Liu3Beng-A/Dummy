@@ -163,7 +163,7 @@ class EntryAxisTests(unittest.TestCase):
         self.c = RobotController(serial_factory=lambda *a, **kw: self.port)
         self.events = []
         self.c.cartesian.stream.axis_test_changed.connect(self.events.append)
-        self.guard = patch('app.core.stream_session.PlanningProcess', side_effect=AssertionError('IK forbidden'))
+        self.guard = patch('dummy_motion.ik.IKSolver.solve_pose', side_effect=AssertionError('IK forbidden'))
         self.hardware = patch('app.core.controller.serial.Serial', side_effect=AssertionError('hardware forbidden'))
         self.guard.start(); self.hardware.start()
 
@@ -381,7 +381,7 @@ class EntryOpenTests(unittest.TestCase):
         self.c.cartesian.stream.open_test_changed.connect(self.events.append)
         self.c.log_message.connect(lambda message, tag: self.logs.append(message))
         self.guards = [patch('app.core.controller.serial.Serial', side_effect=AssertionError('hardware forbidden')),
-                       patch('app.core.stream_session.PlanningProcess', side_effect=AssertionError('IK forbidden'))]
+                       patch('dummy_motion.ik.IKSolver.solve_pose', side_effect=AssertionError('IK forbidden'))]
         for guard in self.guards:
             guard.start()
 

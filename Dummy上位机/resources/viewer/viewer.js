@@ -124,6 +124,10 @@ function animateActual(dt) {
   actual.setJointValues(updates);
 }
 
+function isLocalRgbPreview(state) {
+  return state?.rgbPreview === true && state.actualOnly !== true && !state.actualKnown;
+}
+
 function setCamera(name) {
   const points = {
     front: [1.5, 0, 0.3], side: [0, -1.5, 0.3], right: [0, 1.5, 0.3],
@@ -132,7 +136,8 @@ function setCamera(name) {
   cameraName = name;
   const jointPreview = currentState?.mode === 'preview'
     && currentState?.actualOnly !== true && !currentState?.marker;
-  const reference = jointPreview ? target : currentState?.actualKnown ? actual : null;
+  const reference = isLocalRgbPreview(currentState) ? actual
+    : jointPreview ? target : currentState?.actualKnown ? actual : null;
   const center = new THREE.Vector3(0, 0, 0.28);
   const outward = new THREE.Vector3(...(points[name] || points.isometric)).sub(center).normalize();
   let distance = 1.6;
@@ -328,10 +333,12 @@ function setState(state) {
   scene.background.setHex(dark ? 0x141e2c : 0xedf2f8);
   const actualOnly = state.actualOnly === true;
   const feedbackPaused = state.feedbackPaused === true;
+  const localRgbPreview = isLocalRgbPreview(state);
   const preview = !actualOnly && state.mode === 'preview';
   const markerVisible = !actualOnly && Boolean(state.marker);
-  const jointPreview = preview && !markerVisible;
-  document.getElementById('mode').textContent = actualOnly ? feedbackPaused
+  const jointPreview = preview && !markerVisible && !localRgbPreview;
+  document.getElementById('mode').textContent = localRgbPreview ? '灯效预览 · 本地示意'
+    : actualOnly ? feedbackPaused
     ? '最近实际姿态 · 回读已暂停' : '实际关节 · 串口回读'
     : preview ? '目标预览 · 不发送运动' : '实际位置 · 串口回读';
   const telemetry = document.getElementById('telemetry');
@@ -340,11 +347,14 @@ function setState(state) {
     : state.stale ? '回读已过期 · 保留最近姿态' : '位置数据有效';
   telemetry.classList.toggle('warning', state.actualKnown && (state.stale || feedbackPaused));
   const solidLabel = document.getElementById('solid-label');
-  solidLabel.hidden = !state.actualKnown;
-  solidLabel.querySelector('span').textContent = feedbackPaused || state.stale
+  solidLabel.hidden = !state.actualKnown && !localRgbPreview;
+  solidLabel.querySelector('span').textContent = localRgbPreview ? '灯效预览 · 本地示意'
+    : feedbackPaused || state.stale
     ? '最近回读 · 实体' : '实际回读 · 实体';
   document.getElementById('ghost-label').hidden = !jointPreview;
-  document.getElementById('gripper-status').textContent = state.actualKnown && state.actualGripperKnown
+  document.getElementById('gripper-status').textContent = localRgbPreview
+    ? '夹爪：本地目标示意（无实际回读）'
+    : state.actualKnown && state.actualGripperKnown
     ? jointPreview ? '夹爪：实体回读 · 虚体目标' : '夹爪：实际回读'
     : actualOnly ? state.commandedGripper != null
       ? `夹爪：已发送目标 ${state.commandedGripper}%（无实际回读）`
@@ -353,10 +363,14 @@ function setState(state) {
   if (target && actual) {
     target.setJointValues(state.target || {});
     updateActualState(state);
+    // This uses the solid material only to preview its lamp. It never populates
+    // feedback state; the first real readback still seeds actual without damping
+    // from this locally posed model. No IK/TCP marker is derived from the pose.
+    if (localRgbPreview) actual.setJointValues(state.target || {});
     target.visible = jointPreview;
-    actual.visible = Boolean(state.actualKnown);
+    actual.visible = Boolean(state.actualKnown) || localRgbPreview;
     styleRobot(target, true, state.highlight);
-    styleRobot(actual, false, preview ? null : state.highlight);
+    styleRobot(actual, false, preview || localRgbPreview ? null : state.highlight);
   }
   marker.visible = markerVisible;
   if (markerVisible) {
@@ -365,7 +379,8 @@ function setState(state) {
     marker.rotation.set(...state.marker.orientation, 'ZYX');
   }
   document.getElementById('marker-label').hidden = !markerVisible;
-  document.querySelector('.legend').hidden = !state.actualKnown && !jointPreview && !markerVisible;
+  document.querySelector('.legend').hidden = !state.actualKnown && !jointPreview
+    && !markerVisible && !localRgbPreview;
   if (previousCameraSeq !== state.cameraSeq) {
     previousCameraSeq = state.cameraSeq;
     setCamera(state.camera);
@@ -386,6 +401,7 @@ window.robotViewer = {
     renderedMeshes: actual ? countMeshes(actual) : 0,
     gridVisible: grid.visible, axesVisible: axes.visible,
     targetVisible: Boolean(target?.visible), actualVisible: Boolean(actual?.visible),
+    rgbPreviewVisible: Boolean(actual?.visible && isLocalRgbPreview(currentState)),
     markerVisible: marker.visible,
     actualJointValues: actual ? Object.fromEntries(Object.entries(actual.joints)
       .map(([name, joint]) => [name, joint.jointValue])) : {},

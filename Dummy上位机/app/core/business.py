@@ -346,8 +346,6 @@ class RobotBusiness:
         self._handle_motion_receipt(line)
 
     def _stop_sequence(self, reason):
-        if hasattr(self, "cartesian"):
-            self.cartesian.cancel_remaining()
         self._seq_active = self._seq_running = self._seq_wait_mode = False
         self._seq_motion_id = None
         self._seq_expected_type = None
@@ -1116,14 +1114,11 @@ class RobotBusiness:
         try:
             point = self._normalize_teaching_point(record)
             value = self._validated_speed(point.speed if speed is None else speed)
-            command = None if point.kind == "MOVEL" and self.cartesian.backend.value == "stream" else self._teaching_command(point, value)
+            command = self._teaching_command(point, value)
         except (ValueError, TypeError, OverflowError) as error:
             self.log(f"点位无效，未发送：{error}", "WARN")
             return False
         if point.kind == "MOVEL":
-            if continuous and self.cartesian.backend.value == "stream" and self.cartesian.active and self.cartesian.kind in ("points", "stream") and not self.cartesian.sequence:
-                self.cartesian.retarget = (point, speed)
-                return True
             return self.send_cartesian_point(point, speed)
         return self.send_cmd(command)
 
@@ -1159,22 +1154,19 @@ class RobotBusiness:
         if not self.stored_positions:
             self.log("没有存储的点位", "WARN")
             return False
-        if self._seq_active or self._mode_pending is not None or self._mode_request is not None:
-            self.log("顺序发送或模式确认正在进行中", "WARN")
+        if self._seq_active or self._mode_pending is not None or self._mode_request is not None or self.cartesian.busy:
+            self.log("顺序发送、诊断或模式确认正在进行中", "WARN")
             return False
         speed = self._get_pos_speed()
         if speed is None:
             return False
         try:
             snapshot = tuple(self._normalize_teaching_point(record) for record in self.stored_positions)
-            if self.cartesian.backend.value != "stream":
-                for point in snapshot:
-                    self._teaching_command(point, speed)
+            for point in snapshot:
+                self._teaching_command(point, speed)
         except (ValueError, TypeError, OverflowError) as error:
             self.log(f"顺序点位无效，未查询模式或发送：{error}", "WARN")
             return False
-        if self.cartesian.backend.value == "stream":
-            return self.cartesian.start_points(snapshot, speed, sequence=True)
         self._seq_pending = snapshot
         self._seq_idx = 0
         self._seq_speed = speed

@@ -17,6 +17,35 @@ class StoreTests(unittest.TestCase):
         self.store.close()
         self.directory.cleanup()
 
+    def test_old_execution_preferences_migrate_locally_without_changing_other_data(self):
+        point = {"name": "世界TCP保留", "type": "MoveL", "pose": [120, 10, 200, 180, 0, 180],
+                 "frame": "world", "target_kind": "tcp", "tool": [10, 5, 125, 0, 3, 0],
+                 "tool_version": 1, "speed": 35, "gripper": 80}
+        self.store.save_points([point])
+        before = (Path(self.directory.name) / "points.json").read_bytes()
+        self.store.update_settings(theme="dark", geometry="window-geometry", window_state="dock-layout",
+                                   hide_rgb_logs=False, show_grid=False)
+        original = dict(self.store.settings)
+        for old_backend in ("host", "stream", "unknown", None):
+            with self.subTest(backend=old_backend):
+                data = dict(original, cartesian_backend=old_backend)
+                path = Path(self.directory.name) / "settings.json"
+                path.write_text(json.dumps(data), encoding="utf-8")
+                raw = path.read_bytes()
+                migrated = AppStore(self.directory.name)
+                try:
+                    self.assertEqual(migrated.settings["cartesian_backend"], "firmware")
+                    self.assertEqual(migrated.points, self.store.points)
+                    self.assertEqual((Path(self.directory.name) / "points.json").read_bytes(), before)
+                    self.assertEqual(path.read_bytes(), raw)  # Loading is local and does not write.
+                    for key in ("theme", "geometry", "window_state", "hide_rgb_logs", "show_grid", "gamepad_config"):
+                        self.assertEqual(migrated.settings[key], original[key])
+                    migrated.update_settings(cartesian_backend="stream")
+                    self.assertEqual(migrated.settings["cartesian_backend"], "firmware")
+                    self.assertEqual(json.loads(path.read_text())["cartesian_backend"], "firmware")
+                finally:
+                    migrated.close()
+
     def test_rgb_log_hiding_defaults_on_and_persists_only_valid_booleans(self):
         self.assertTrue(self.store.settings["hide_rgb_logs"])
         self.store.update_settings(hide_rgb_logs=False)

@@ -37,11 +37,11 @@ class StreamModeGateTests(unittest.TestCase):
         self.assertTrue(c._wire_admitted.empty())
         self.assertEqual(c.serial_port.written,[])
 
-    def test_selected_stream_routes_finite_targets_before_plain_mode_gate(self):
-        c=self.controller;self.confirm_mode(7);c.cartesian.backend=CartesianBackend.STREAM
-        with patch.object(c.cartesian,'start_points',return_value=True) as start:
-            for command in self.motions:self.assertTrue(c.send_cmd(command))
-            self.assertEqual(start.call_count,3)
+    def test_removed_stream_selection_does_not_bypass_actual_mode7(self):
+        c=self.controller;self.confirm_mode(7)
+        self.assertFalse(c.set_cartesian_backend('stream'))
+        self.assertEqual(c.cartesian.backend,CartesianBackend.FIRMWARE)
+        for command in self.motions:self.assertFalse(c.send_cmd(command))
         self.assertEqual(self.commands(),[])
 
     def test_native_mode2_still_admits_plain_motion(self):

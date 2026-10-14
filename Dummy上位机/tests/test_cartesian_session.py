@@ -25,15 +25,17 @@ class CartesianSessionTests(unittest.TestCase):
         self.assertTrue(self.c._tx_queue.empty())
 
     def test_native_backend_cannot_run_pc_trajectory(self):
-        self.assertFalse(self.s.start_points(()))
+        self.assertFalse(hasattr(self.s, 'start_points'))
+        self.assertFalse(hasattr(self.s.diagnostics, 'start_points'))
         self.assertFalse(self.s.active)
         self.assertTrue(self.c._tx_queue.empty())
 
-    def test_reserved_modes_are_rejected_and_mode7_selects_stream_offline(self):
+    def test_reserved_and_diagnostic_modes_are_not_selectable_for_ordinary_motion(self):
         self.assertFalse(self.s.select_mode(5))
         self.assertFalse(self.s.select_mode(6))
-        self.assertTrue(self.s.select_mode(7))
-        self.assertEqual(self.s.backend.value, 'stream')
+        self.assertFalse(self.s.select_mode(7))
+        self.assertFalse(self.s.switch('stream'))
+        self.assertEqual(self.s.backend.value, 'firmware')
         self.assertTrue(self.s.select_mode(3))
         self.assertEqual(self.s.backend.value, 'firmware')
         self.assertTrue(self.c._tx_queue.empty())
@@ -41,9 +43,11 @@ class CartesianSessionTests(unittest.TestCase):
     def test_old_host_setting_migrates_to_default(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppStore(directory)
-            store.update_settings(cartesian_backend='host')
-            self.assertEqual(store.settings['cartesian_backend'], 'firmware')
-            store.close()
+            try:
+                store.update_settings(cartesian_backend='host')
+                self.assertEqual(store.settings['cartesian_backend'], 'firmware')
+            finally:
+                store.close()
 
     def test_same_read_batch_keeps_last_pose_without_fake_time_or_velocity(self):
         stamp = time.perf_counter()

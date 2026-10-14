@@ -168,14 +168,14 @@ class GamepadSession(QObject):
         return True
 
     def claim(self):
-        if self.controller.cartesian.backend.value == "stream":
-            self.controller.log("50 Hz 曲线透传 v2 支持有限点位与顺序轨迹；手柄控制请先选择并确认主控模式", "WARN")
+        if self.controller.current_cmdmode == 7:
+            self.controller.log("主控实际处于诊断模式 7；请先显式退出并确认主控模式，再接管手柄", "WARN")
             return False
         if self.claimed:
             return not self.release_pending
         c = self.controller
         if c.cartesian.busy:
-            self._stage("connected", "请先结束上位机轨迹或后端切换")
+            self._stage("connected", "请先结束诊断或模式恢复")
             return False
         if not c.is_connected or not self.device_connected:
             self._stage("disconnected", "请连接机械臂并检查有效手柄输入，再接管")

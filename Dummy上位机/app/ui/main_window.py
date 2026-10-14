@@ -28,7 +28,7 @@ from app.ui.gamepad_panel import GamepadPanel, GamepadSettingsDialog
 from app.ui.terminal_diagnostics import TerminalDiagnostics
 from app.gamepad.backend import GamepadReader
 from app.gamepad.config import default_config as default_gamepad_config, validate_config as validate_gamepad_config
-from app.ui.rgb_ring import RgbRing
+from app.ui.rgb_window import RgbSettingsWindow
 from app.core.rgb_simulator import RgbSimulator, default_config
 from app.visualization.robot_view import RobotView
 from app.protocol.parser import finite_numbers
@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
         controller.gamepad.target_changed.connect(self._gamepad_target_changed)
         controller.gamepad.gripper_command_written.connect(self._gamepad_gripper_written)
         controller.gamepad.set_config(self._gamepad_config)
-        controller.set_cartesian_backend(store.settings.get("cartesian_backend", "firmware"))
+        controller.set_cartesian_backend("firmware")
         self._gamepad_state_changed(controller.gamepad.state())
         if hasattr(controller, "position_synced"):
             controller.position_synced.connect(self._position_synced)
@@ -241,7 +241,6 @@ class MainWindow(QMainWindow):
         self.pages.setObjectName("Pages")
         body.addWidget(self.pages, 1)
         outer.addLayout(body, 1)
-        self.navigation.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.navigation.currentRowChanged.connect(self._navigation_changed)
         self.navigation.setCurrentRow(0)
         self.statusBar().showMessage("离线预览可用；连接设备后可读取实际位置。")
@@ -304,10 +303,10 @@ class MainWindow(QMainWindow):
             control = button(text, callback, role)
             row.addWidget(control)
             self.motion_system_buttons.append(control)
-        self.mode_combo = self._combo(("1 · SEQ 顺序", "2 · INT 打断", "3 · TRJ 连续", "4 · TUN 扫频", "7 · STREAM 曲线透传"), 1)
+        self.mode_combo = self._combo(("1 · SEQ 顺序", "2 · INT 打断", "3 · TRJ 连续", "4 · TUN 扫频"), 1)
         self.mode_combo.setToolTip("TUN 使用固件内置扫频激励；切换前确认各轴运动空间")
         row.addWidget(self.mode_combo)
-        self.mode_set_button = button("设置模式", lambda: self.controller._set_cmdmode((1, 2, 3, 4, 7)[self.mode_combo.currentIndex()]))
+        self.mode_set_button = button("设置模式", lambda: self.controller._set_cmdmode((1, 2, 3, 4)[self.mode_combo.currentIndex()]))
         row.addWidget(self.mode_set_button)
         self.mode_query_button = button("查询", self.controller._query_command_mode)
         row.addWidget(self.mode_query_button)
@@ -1210,11 +1209,17 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def _build_rgb_page(self):
-        layout = self._page("RGB 灯效", "白色散光灯环 · 预设、动画与设备状态联动。编辑不自动发送；应用改 RAM，保存整组后掉电保持。", False)
-        self.rgb_page = layout.parentWidget()
+        # Retain navigation indices; this launch slot is never shown to the user.
+        self.rgb_launch_page = QWidget()
+        self.rgb_page = self.rgb_launch_page
+        self.pages.addWidget(self.rgb_launch_page)
+        self.rgb_window = RgbSettingsWindow(self)
+        self.rgb_window.visibility_changed.connect(lambda *_: self._sync_rgb_preview_activity())
+        layout = self.rgb_window.content_layout
+        layout.addWidget(hint("灯效在主界面三维模型中预览。编辑不发送；应用改 RAM，保存整组后掉电保持。", "muted"))
         self.rgb_status = hint("尚未回读 RGB 配置。", "muted")
         # Keep complete diagnostics in the existing field and the summary tooltip.
-        self.rgb_detail_label = QLabel(self.rgb_page)
+        self.rgb_detail_label = QLabel(self.rgb_window)
         self.rgb_detail_label.hide()
         self._bind("_rgb_status_var", self.rgb_detail_label)
         layout.addWidget(self.rgb_status)
@@ -1353,30 +1358,28 @@ class MainWindow(QMainWindow):
         content.addWidget(hint("独立颜色仅在该颜色来源被选中时使用；AUTO 来源引用自动颜色。报警不可改色，STOP / 校准期间只允许查询。"))
         box.addWidget(group)
         box.addStretch()
-        columns = QHBoxLayout()
-        columns.setSpacing(12)
-        columns.addWidget(tabs, 3)
         self.rgb_preview_panel = QFrame()
         self.rgb_preview_panel.setObjectName("Card")
-        self.rgb_preview_panel.setMinimumWidth(285)
         preview = QVBoxLayout(self.rgb_preview_panel)
         preview.setContentsMargins(10, 10, 10, 10)
         preview.setSpacing(6)
-        title = QLabel("灯环模拟")
-        title.setObjectName("RgbPreviewTitle")
-        preview.addWidget(title)
         self.rgb_preview_source = self._combo(("本地编辑预览", "跟随设备配置"), 1)
         self.rgb_preview_source.setParent(self.rgb_preview_panel)
         self.rgb_preview_source.hide()
         self.rgb_preview_source_button = button("切换到本地编辑预览", self._toggle_rgb_preview_source)
         self.rgb_preview_source_button.setObjectName("RgbPreviewSourceButton")
         self.rgb_preview_source_button.setToolTip("默认跟随设备配置；点击按钮或编辑参数可本地试看，再点击返回设备跟随。切换预览不发送设置指令。")
-        preview.addWidget(self.rgb_preview_source_button)
+        source_row = QHBoxLayout()
+        source_row.setSpacing(8)
+        source_row.addWidget(self.rgb_preview_source_button, 1)
+        source_row.addWidget(QLabel("本地灯效"))
         self.rgb_preview_mode = self._combo(RGB_MODES, 3)
-        self.rgb_preview_mode.setToolTip("选择仅在电脑灯环中模拟的灯效；应用设备灯效使用左侧按钮。")
-        preview.addWidget(self.rgb_preview_mode)
+        self.rgb_preview_mode.setToolTip("只在主界面三维模型中模拟灯效；应用设备灯效使用下方对应按钮。")
+        source_row.addWidget(self.rgb_preview_mode, 1)
+        preview.addLayout(source_row)
         simulation = QHBoxLayout()
         simulation.setSpacing(6)
+        simulation.addWidget(QLabel("模拟状态"))
         self.rgb_preview_state = QComboBox()
         self.rgb_preview_state.addItem("手动灯效", "MANUAL")
         for code, name in (*RGB_STATES, ("FAULT", "故障报警")):
@@ -1387,12 +1390,19 @@ class MainWindow(QMainWindow):
         self.rgb_preview_on.setChecked(True)
         simulation.addWidget(self.rgb_preview_on)
         preview.addLayout(simulation)
-        self.rgb_ring = RgbRing()
-        preview.addWidget(self.rgb_ring, 1)
+        information = QHBoxLayout()
+        information.setSpacing(10)
+        self.rgb_preview_title = QLabel("等待设备配置")
+        self.rgb_preview_title.setObjectName("RgbPreviewTitle")
+        information.addWidget(self.rgb_preview_title)
+        self.rgb_preview_brightness = QLabel("")
+        self.rgb_preview_brightness.setProperty("role", "muted")
+        information.addWidget(self.rgb_preview_brightness)
         self.rgb_preview_status = hint("本地模拟 · 编辑不发送", "muted")
-        preview.addWidget(self.rgb_preview_status)
-        columns.addWidget(self.rgb_preview_panel, 2)
-        layout.addLayout(columns, 1)
+        information.addWidget(self.rgb_preview_status, 1)
+        preview.addLayout(information)
+        layout.insertWidget(0, self.rgb_preview_panel)
+        layout.addWidget(tabs, 1)
 
         for name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state"):
             self._rgb_load_local_editor(name)
@@ -1569,13 +1579,14 @@ class MainWindow(QMainWindow):
         self._sync_rgb_preview_activity()
 
     def _sync_rgb_preview_activity(self):
-        if not hasattr(self, "rgb_ring"):
+        if not hasattr(self, "rgb_window"):
             return
         visible = not self._closed and self.isVisible() and not self.isMinimized()
-        rgb_active = visible and self.pages.currentWidget() is self.rgb_page
+        rgb_active = (not self._closed and self.rgb_window.isVisible()
+                      and not self.rgb_window.isMinimized())
+        self.viewer.set_rgb_preview(rgb_active)
         motion_active = visible and self.pages.currentWidget() is self.motion_page
         active = rgb_active or motion_active
-        self.rgb_ring.set_active(rgb_active)
         if active:
             if not self._rgb_render_timer.isActive():
                 self._rgb_render_timer.start()
@@ -1584,12 +1595,13 @@ class MainWindow(QMainWindow):
         self.controller.set_rgb_monitoring(active and self.rgb_preview_source.currentIndex() == 1)
 
     def _set_rgb_preview_frame(self, frame, title, subtitle, *, light_on=None):
-        self.rgb_ring.set_frame(frame)
-        self.rgb_ring.set_caption(title, subtitle)
+        self.rgb_preview_title.setText(title)
+        self.rgb_preview_brightness.setText(subtitle)
+        self.rgb_preview_title.setToolTip(title + (f"\n{subtitle}" if subtitle else ""))
         self.viewer.set_rgb_frame(frame, light_on=light_on)
 
     def _render_rgb_preview(self):
-        if self._building or not hasattr(self, "rgb_ring") or self._closed:
+        if self._building or not hasattr(self, "rgb_window") or self._closed:
             return
         now = int(time.monotonic() * 1000)
         if self.rgb_preview_source.currentIndex() == 0:
@@ -1617,7 +1629,6 @@ class MainWindow(QMainWindow):
             config, state, source = snapshot["config"], runtime["state"], runtime["source"]
             status = f"设备配置跟随 · {age:.1f}s 前回读\n{source} · 动画相位独立"
         frame = self._rgb_simulator.frame(config, state, now, source=source)
-        self.rgb_ring.set_frame(frame)
         mode = RGB_MODES[self._rgb_simulator.mode].split(" ", 1)[1]
         brightness_label = "亮度" if self.rgb_preview_source.currentIndex() == 0 else "模拟"
         # A breath/blink trough can quantize to RGB zero while the lamp stays on.
@@ -1641,16 +1652,13 @@ class MainWindow(QMainWindow):
 
     def _build_settings_page(self):
         layout = self._page("软件设置", "本地偏好会自动保存；打开或恢复软件配置不会向设备写入参数。")
-        backend_group, backend_box = self._group("笛卡尔运动逆解")
-        self.ik_backend = QComboBox()
-        self.ik_backend.setObjectName("CartesianBackend")
-        self.ik_backend.addItem("主控逆解 · MoveL（默认）", "firmware")
-        self.ik_backend.addItem("上位机离线曲线 · 50 Hz 段 / 模式 7", "stream")
-        self.ik_backend.currentIndexChanged.connect(self._backend_changed)
-        backend_box.addWidget(self.ik_backend)
-        self.ik_status = hint("主控逆解")
-        backend_box.addWidget(self.ik_status)
-        backend_box.addWidget(hint("透传 v2：USB 专用，主控及 J1～J7 必须全部升级。50 Hz 指每 20 ms 一个曲线边界；USB 按缓冲余量发送，电机以 20 kHz 执行。每条有限点位在独立进程预检，用当前电机保持参考作为起点；实际回读用于断流保护、显示与到位核验，不在线重规划。MoveL 档位参与 TCP 规划：100 档最高 20 mm/s、10°/s，35 档 7 mm/s、3.5°/s。地轨与六轴协同；示教点之间停稳再继续。手柄连续运动请使用主控模式。TCP 为名义夹爪中心偏移，标定及固定 TCP 移轨暂未实现。"))
+        backend_group, backend_box = self._group("笛卡尔运动")
+        self.cartesian_execution = hint("运动执行固定使用主控")
+        self.cartesian_execution.setObjectName("CartesianExecution")
+        backend_box.addWidget(self.cartesian_execution)
+        self.cartesian_status = hint("主控逆解")
+        backend_box.addWidget(self.cartesian_status)
+        backend_box.addWidget(hint("当前 MoveL 由主控对目标位置求逆解，再执行普通关节运动；末端直线插补和地轨自动协同尚未实现。世界 / TCP 坐标转换及点位工具偏移保留。TCP 为名义夹爪中心，标定及固定 TCP 移轨暂未实现。终端保留 OPEN 和原地通信诊断入口。"))
         layout.addWidget(backend_group)
         gamepad_group, gamepad_box = self._group("手柄输入")
         gamepad_box.addWidget(hint("映射、死区、速度与设备选择保存在本机。默认不启动手柄采集；检查原始输入不接管机器人。"))
@@ -1706,13 +1714,6 @@ class MainWindow(QMainWindow):
         box.addWidget(hint("UART4 使用 115200 波特率，部分电机设置及夹爪高级配置只支持 USB。操作失败会保留设备回包用于诊断。"))
         layout.addWidget(group)
         layout.addStretch()
-
-    def _backend_changed(self, index):
-        if self._building:
-            return
-        self._cancel_drag()
-        self.controller.set_cartesian_backend(self.ik_backend.itemData(index))
-        self._update_state(self.controller.state())
 
     def _cartesian_frame_changed(self):
         if self._building:
@@ -1868,11 +1869,11 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(button("清空显示", self._clear_logs))
         layout.addLayout(toolbar)
         self.terminal_diagnostics = TerminalDiagnostics()
-        self.terminal_diagnostics.open_test_requested.connect(self.controller.cartesian.stream.start_open_test)
-        self.terminal_diagnostics.axis_test_requested.connect(self.controller.cartesian.stream.start_axis_test)
+        self.terminal_diagnostics.open_test_requested.connect(self.controller.cartesian.diagnostics.start_open_test)
+        self.terminal_diagnostics.axis_test_requested.connect(self.controller.cartesian.diagnostics.start_axis_test)
         self.terminal_diagnostics.test_clicked.connect(self.controller.log)
-        self.controller.cartesian.stream.axis_test_changed.connect(self.terminal_diagnostics.show_axis_test)
-        self.controller.cartesian.stream.open_test_changed.connect(self.terminal_diagnostics.show_open_test)
+        self.controller.cartesian.diagnostics.axis_test_changed.connect(self.terminal_diagnostics.show_axis_test)
+        self.controller.cartesian.diagnostics.open_test_changed.connect(self.terminal_diagnostics.show_open_test)
         self.terminal_diagnostics.command_requested.connect(self.controller.send_cmd)
         self.terminal_diagnostics.export_requested.connect(lambda: self._export_logs(complete=True))
         layout.addWidget(self.terminal_diagnostics)
@@ -2063,24 +2064,23 @@ class MainWindow(QMainWindow):
             self._cancel_drag()
             self._teaching_sync = None
         self._state_generation = generation
-        backend = state.get("cartesian_backend", self.controller.cartesian.backend.value)
-        with QSignalBlocker(self.ik_backend):
-            self.ik_backend.setCurrentIndex({"firmware": 0, "stream": 1}.get(backend, 0))
-        self.ik_backend.setEnabled(not self.controller.cartesian.busy and not self._gamepad_locked())
-        self.ik_status.setText(state.get("cartesian_message", self.controller.cartesian.message))
-        if not self._building and self.store.settings.get("cartesian_backend") != backend:
-            self.store.update_settings(cartesian_backend=backend)
+        self.cartesian_status.setText(state.get("cartesian_message", self.controller.cartesian.message))
+        if not self._building and self.store.settings.get("cartesian_backend") != "firmware":
+            self.store.update_settings(cartesian_backend="firmware")
         self.connect_button.setText("断开连接" if connected else "连接设备")
         self.connection_status.setText("● 已连接" if connected else "○ 未连接")
         self._pill(self.connection_status, connected)
         self.connection_combo.setEnabled(not connected)
         self.port_combo.setEnabled(not connected)
         mode = state.get("cmdmode", getattr(self.controller, "current_cmdmode", None))
-        self.mode_status.setText("模式 " + {1: "SEQ", 2: "INT", 3: "TRJ", 4: "TUN", 5: "TRQ", 6: "SRV", 7: "STREAM"}.get(mode, "—") + (" · 50 Hz曲线" if backend == "stream" else " · 主控规划"))
+        if mode == 7:
+            self.mode_status.setText("模式 7 · 通信诊断 / 待退出 · 普通运动不可用")
+        else:
+            self.mode_status.setText("模式 " + {1: "SEQ", 2: "INT", 3: "TRJ", 4: "TUN", 5: "TRQ", 6: "SRV"}.get(mode, "—") + " · 主控执行")
         selector_mode = mode if connected else self.controller.cartesian.preferred_mode
-        if selector_mode in (1, 2, 3, 4, 7):
+        if selector_mode in (1, 2, 3, 4):
             with QSignalBlocker(self.mode_combo):
-                self.mode_combo.setCurrentIndex((1, 2, 3, 4, 7).index(selector_mode))
+                self.mode_combo.setCurrentIndex((1, 2, 3, 4).index(selector_mode))
         known = getattr(self.controller, "_motor_state_known", False)
         motor = state.get("motor_enabled", getattr(self.controller, "_motor_enabled", None) if known else None)
         locked = state.get("stop_locked", getattr(self.controller, "_stop_locked", False))
@@ -2337,7 +2337,28 @@ class MainWindow(QMainWindow):
     def _navigation_changed(self, index):
         self._cancel_drag()
         self._teaching_sync = None
+        if index == 4:
+            self._open_rgb_window()
+            return
+        self.pages.setCurrentIndex(index)
         self._preview_changed()
+        self._sync_rgb_preview_activity()
+
+    def _open_rgb_window(self):
+        if self._closed:
+            return
+        self._cancel_drag()
+        self._teaching_sync = None
+        with QSignalBlocker(self.navigation):
+            self.navigation.setCurrentRow(0)
+        self.pages.setCurrentIndex(0)
+        self._preview_changed()
+        if self.rgb_window.isMinimized():
+            self.rgb_window.showNormal()
+        else:
+            self.rgb_window.show()
+        self.rgb_window.raise_()
+        self.rgb_window.activateWindow()
         self._sync_rgb_preview_activity()
 
     def _motion_tab_changed(self, index):
@@ -2765,7 +2786,6 @@ class MainWindow(QMainWindow):
         QApplication.instance().setStyleSheet(stylesheet)
         self._schedule_motion_fit()
         self.viewer.set_theme(theme)
-        self.rgb_ring.set_theme(theme)
 
     def _theme_setting(self, index):
         if self._building:
@@ -2869,6 +2889,7 @@ class MainWindow(QMainWindow):
             self.gamepad_reader.close()
             self._rgb_render_timer.stop()
             self.controller.set_rgb_monitoring(False)
+            self.rgb_window.shutdown()
             self.log_dock.hide()
             self._cancel_drag()
             self.controller.close()

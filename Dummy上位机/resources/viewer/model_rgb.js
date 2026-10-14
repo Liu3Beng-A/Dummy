@@ -124,8 +124,11 @@ export function writeDiffuserTexture(frame, kernel, pixels) {
     const peak = Math.min(1, Math.max(0, ...scattered));
     // A finite-slope toe keeps small PWM changes smooth instead of applying an
     // infinite-slope power law near zero. One peak scale preserves RGB ratios.
-    const displayPeak = peak > 0 ? 0.7 * ((peak + DIFFUSER_TOE) ** DIFFUSER_EXPONENT
+    const toePeak = peak > 0 ? 0.7 * ((peak + DIFFUSER_TOE) ** DIFFUSER_EXPONENT
       - DIFFUSER_CURVE_BASE) / DIFFUSER_CURVE_RANGE : 0;
+    // Lift dim colors by up to 30%, smoothly removing that gain at full power.
+    // One common peak gain retains channel ratios and the existing 0.7 ceiling.
+    const displayPeak = toePeak * (1 + 0.3 * (1 - peak) ** 2);
     const scale = peak > 0 ? displayPeak / peak : 0;
     for (let component = 0; component < 3; component++) {
       const light = Math.min(0.7, Math.max(0, scattered[component] * scale));

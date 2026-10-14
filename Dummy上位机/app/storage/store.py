@@ -231,8 +231,9 @@ class AppStore:
         settings = self.settings if settings is None else settings
         if type(settings["gamepad_defaults_revision"]) is not int or settings["gamepad_defaults_revision"] < 8:
             settings["gamepad_defaults_revision"] = 8
-        if settings["cartesian_backend"] not in ("firmware", "stream"):
-            settings["cartesian_backend"] = "firmware"
+        # Legacy host/stream preferences are local metadata only. They never
+        # select an execution backend or claim the device's actual command mode.
+        settings["cartesian_backend"] = "firmware"
         if settings["theme"] not in ("light", "dark"):
             settings["theme"] = "light"
         if settings["connection_type"] not in ("USB", "UART4"):

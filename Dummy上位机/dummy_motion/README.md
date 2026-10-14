@@ -47,9 +47,11 @@ for sample in plan.samples[1:]:
 
 ## 上位机接入
 
-软件设置的“笛卡尔运动逆解”选择主控或上位机，顶部状态同步显示。新配置/旧配置迁移默认主控；用户主动选择后保存在本机。已连接时先核对空闲状态，切换不会发送运动，也不会因求解失败自动换后端。
+应用普通运动固定使用主控，不再提供上位机逆解／曲线运动后端。旧host、stream及未知设置迁移到firmware，不发送设备指令。模式7仅由独立诊断会话执行OPEN→CLOSE和恒定原地曲线；终端、普通点位和手柄不能调用PC点位规划器。
 
-旧版普通 MoveJ 模拟执行器已经从上位机移除。`LinePlanner`、`IKSolver`、`MotionSession` 等纯算法 API 保留，供离线分析和算法调用；它们不再是应用内可选择的运动执行后端。原生主控 MoveJ/MoveL 仍保留原语义。
+应用保留本包的FK、坐标／工具变换和反馈服务，保证既有世界TCP点位与工具快照含义不变。`IKSolver`、`LinePlanner`、`MotionSession`、`StreamPlanner`及规划进程代码保留作离线对照；它们没有生产发送权限。旧普通MoveJ模拟执行器保持删除。
+
+当前主控MoveL仅对终点求逆解，再按普通关节运动执行且保持地轨；完整直线、笛卡尔速度规划和地轨协同将在主控实现。本次退回不更改固件或名义工具尺寸。
 
 ## STREAM_JOINT v2 / 0.3.0
 
@@ -57,9 +59,6 @@ for sample in plan.samples[1:]:
 
 The planner uses high-resolution local IK, a quintic joint spline with zero velocity/acceleration at finite endpoints, global time scaling, quantized-boundary reconstruction, joint extrema, velocity/acceleration/jerk limits, firmware-equivalent Bernstein bounds and Cartesian path checks. Both motor velocity and acceleration arguments must come from fresh device readback in an executing application. The defaults of 30 rev/s and 30 rev/s² are for offline examples only. UI speed affects Cartesian timing, never an ordinary MoveJ speed field.
 
-This API preflights complete finite trajectories before execution. It does not implement future-window feedback correction, interactive continuous jog replanning, calibration, collision avoidance, mechanical identification, or real-device validation. The UI uses live joint feedback for communication watchdogs, actual-position display, and final settling checks; it does not rewrite already planned stream knots during execution. Multi-point callers must preserve endpoint completion semantics. A transport must separately enforce capability/session matching, FIFO credits, authoritative STOP, live feedback, and completion; encoding a packet does not authorize its execution.
+This is an offline planning and packet-encoding API, not a live application execution backend. It does not implement calibration, collision avoidance, mechanical identification, or hardware timing validation. Packet encoding does not authorize serial transmission.
 
-
-Application v2 seeds every finite plan from fresh DIAG7 held-reference integers, not from rounded measured position or an assumed previous endpoint. The actual position is checked against ordinary motor settling tolerance; motors recheck readiness and latch the held reference for exact SEED matching. Each new point rereads this contract before planning and confirms the reference again afterward. The packet layout is unchanged, but VERSION=2 rejects older semantics.
-
-Offline planning executes in a disposable Windows spawn process with no Qt or device access. The application still owns capability checks, actual limits, session cleanup, FIFO credits, STOP and actual-settling checks. Fifty hertz means a 20ms curve interval, not periodic USB writes or online feedback replanning. Feedback at 30–50Hz is PC receive time, not a device encoder measurement timestamp.
+The retained application diagnostics read fresh DIAG7 held-reference integers and send only constant-reference SEED plus 100 zero-velocity/zero-acceleration segments. Normal motor error compensation can still produce small corrections. Session, FIFO, STOP, actual feedback and completion checks belong to DiagnosticSession; it does not import PlanningProcess or call an IK/point planner. Fifty hertz denotes 20ms segment boundaries, not periodic USB writes. GETJPOS contains cached, asynchronous joint samples without device encoder timestamps.

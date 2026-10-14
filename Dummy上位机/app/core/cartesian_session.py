@@ -1,17 +1,18 @@
-"""UI ownership and feedback for native firmware or timed joint curves.
+"""Native firmware mode ownership, FK/frames, and isolated diagnostics.
 
-The ordinary MoveJ approximation backend has been removed. IK/model algorithms
-remain in dummy_motion; only StreamSession may execute a PC-planned trajectory.
+The application does not execute PC IK or timed point trajectories. Pure
+offline algorithms remain in dummy_motion and have no live command owner.
 """
 import threading
 import time
 import re
 import numpy as np
-from PySide6.QtCore import QObject, QTimer
-from dummy_motion import RobotModel, FeedbackSample, Status
+from PySide6.QtCore import QObject
+from dummy_motion import RobotModel, FeedbackSample
 from dummy_motion.feedback import FeedbackTracker
 from dummy_motion.frames import from_wire_joints
 from app.core.cartesian_backend import CartesianBackend
+from app.core.diagnostic_session import DiagnosticSession
 
 
 class CartesianSession(QObject):
@@ -31,11 +32,14 @@ class CartesianSession(QObject):
         self.pending_backend = None
         self.job = None
         self.sequence = False
-        self.retarget = None
-        self.kind = 'stream'
-        self._timer = QTimer(self)  # No GUI timer clocks or executes motion.
-        from app.core.stream_session import StreamSession
-        self.stream = StreamSession(self)
+        self.retarget = None  # Compatibility with edit cancellation; never executed.
+        self.kind = 'idle'
+        self.diagnostics = DiagnosticSession(self)
+
+    @property
+    def stream(self):
+        """Old diagnostic callers only; this object has no point-planning API."""
+        return self.diagnostics
 
     @property
     def busy(self):
@@ -46,19 +50,15 @@ class CartesianSession(QObject):
         self.controller._emit_state()
 
     def switch(self, backend):
-        try:
-            backend = CartesianBackend(backend)
-        except ValueError:
-            self.controller.log('普通 MoveJ 模拟后端已移除；请选择主控或曲线透传', 'WARN')
+        if getattr(backend, 'value', backend) != 'firmware':
+            self.controller.log('上位机运动执行后端已撤下；普通运动仅使用主控', 'WARN')
             return False
-        mode = 7 if backend == CartesianBackend.STREAM else 2
-        return self.select_mode(mode)
+        return self.select_mode(2)
 
     def select_mode(self, mode):
-        if type(mode) is not int or mode not in (1, 2, 3, 4, 7):
-            self.controller.log('支持主控模式 1～4 和曲线透传模式 7；5/6 保留', 'WARN')
+        if type(mode) is not int or mode not in (1, 2, 3, 4):
+            self.controller.log('普通运动仅开放主控模式 1～4；模式 7 仅用于独立诊断', 'WARN')
             return False
-        backend = CartesianBackend.STREAM if mode == 7 else CartesianBackend.FIRMWARE
         c = self.controller
         if (self.busy or c.gamepad.claimed or c._seq_active or c._mode_pending is not None or
                 c._mode_request is not None or c._parameter_request is not None or
@@ -69,81 +69,58 @@ class CartesianSession(QObject):
             c.log('请等待 STOP 停稳确认，再关闭会话或切换模式', 'WARN')
             return False
         if c._stop_locked and mode != 2:
-            c.log('STOP 锁定时仅允许关闭透传并恢复主控 INT；运行前仍需 START', 'WARN')
+            c.log('STOP 锁定时仅允许关闭诊断透传并恢复主控 INT；运行前仍需 START', 'WARN')
             return False
         if not c.is_connected:
             self.preferred_mode = mode
-            self.backend = backend
-            self._state('idle', '主控规划' if mode != 7 else '50 Hz 曲线段透传 · 离线规划')
+            self.backend = CartesianBackend.FIRMWARE
+            self._state('idle', '主控规划')
             return True
         if self._has_queued_control():
             c.log('控制队列尚未清空，请稍后切换', 'WARN')
             return False
-        self._begin('stream')
-        self.pending_backend = backend
-        self.sequence = False
-        self._state('switching', '确认停稳 → 关闭旧会话 → 切换主控模式')
-        return self.stream.start_switch(backend, mode)
-
-    def _available(self):
-        c = self.controller
-        if (not c.is_connected or not c._motor_state_known or not c._motor_enabled or
-                c._stop_locked or c._calibration_busy or c._acc_sync_waiting or
-                c._parameter_request is not None or not c._poll_enabled):
-            c.log("上位机逆解需要已连接、已使能、无保护任务，并开启关节回读", "WARN")
-            return False
-        if self.feedback.estimate(self.clock())[0] != Status.OK:
-            c.log("上位机逆解需要 300 ms 内的新关节回读", "WARN")
-            c._poll_position()
-            return False
-        return True
+        self._begin('mode_switch')
+        self.pending_backend = CartesianBackend.FIRMWARE
+        self._state('switching', '确认停稳 → 关闭旧诊断会话 → 切换主控模式')
+        return self.diagnostics.start_switch(CartesianBackend.FIRMWARE, mode)
 
     def _has_queued_control(self):
-        # GETJPOS is read-only even if RX already retired its request before
-        # the queued command_written callback clears the admitted ledger.
-        # Keep GETJPOS out of the global diagnostic whitelist: STOP/calibration
-        # and parameter transactions must retain their existing polling gates.
+        # Readonly GETJPOS keeps its original parameter/protection gates.
         from app.protocol import capabilities
         c = self.controller
         for pending in (c._tx_queue, c._wire_admitted):
             with pending.mutex:
                 items = [item[:2] for item in pending.queue if item is not None]
-            if any(not capabilities.diagnostic(command) and command != "#GETJPOS"
+            if any(not capabilities.diagnostic(command) and command != '#GETJPOS'
                    for generation, command in items):
                 return True
         return False
 
-    def start_points(self, points, speed=None, sequence=False):
-        if self.backend != CartesianBackend.STREAM:
-            self.controller.log('PC 轨迹仅允许从曲线透传后端执行', 'WARN')
-            return False
-        return self.stream.start_points(points, speed, sequence)
-
     def _begin(self, kind):
+        if kind not in ('mode_switch', 'open_test', 'axis_test'):
+            raise ValueError('Only native-mode recovery or explicit diagnostics may own this session')
         self.cancel_event.set()
         self.cancel_event = threading.Event()
         self.epoch += 1
         self.kind, self.active = kind, True
         self.generation = self.controller._tx_generation
         self.connection = self.controller._connection_id
-        self.job = None
-        self.retarget = None
+        self.job = self.retarget = None
 
     def update_feedback(self, values, received_at=None):
         try:
             now = self.clock()
             sample = FeedbackSample(from_wire_joints(values), now if received_at is None else received_at)
             if sample.received_at > now:
-                self.feedback.rejection_reason = "回读时间戳晚于当前单调时钟"
+                self.feedback.rejection_reason = '回读时间戳晚于当前单调时钟'
                 return False
             return self.feedback.update(sample)
         except ValueError as exc:
-            self.feedback.rejection_reason = f"回读值无效：{exc}"
+            self.feedback.rejection_reason = f'回读值无效：{exc}'
             return False
 
     def can_write(self, generation, command):
-        # StreamSession owns and admits every planning/mode transaction itself.
-        return False
+        return False  # DiagnosticSession admits only its own bounded commands.
 
     def command_written(self, command, generation, connection):
         pass
@@ -158,13 +135,8 @@ class CartesianSession(QObject):
             self.motor_acceleration[int(match[1])-1] = float(match[2])
             self.acceleration_confirmed[int(match[1])-1] = True
 
-    def cancel_remaining(self):
-        if self.active and self.sequence:
-            self.stream.cancel_tail = True
-            self.retarget = None
-
     def fail(self, message, stop=True):
-        had_motion = self.stream.active and getattr(self.stream, 'opened', False)
+        had_motion = self.diagnostics.active and getattr(self.diagnostics, 'opened', False)
         self.cancel()
         self._state('error', message)
         self.controller.log(message, 'WARN')
@@ -172,18 +144,14 @@ class CartesianSession(QObject):
             self.controller.send_cmd('!STOP', source='cartesian')
 
     def cancel(self):
-        self.stream.cancel()
+        self.diagnostics.cancel()
         self.cancel_event.set()
         self.epoch += 1
         self.retarget = None
         self.active = False
-        self.pending_backend = None
-        self.job = None
-        if self.sequence:
-            self.controller._seq_active = self.controller._seq_running = False
+        self.pending_backend = self.job = None
         self.stage = 'idle'
 
     def close(self):
-        self.stream.close()
+        self.diagnostics.close()
         self.cancel()
-        self._timer.stop()

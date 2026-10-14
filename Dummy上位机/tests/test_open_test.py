@@ -8,7 +8,7 @@ from app.core.controller import RobotController
 from app.core.open_test import format_open_test, OPEN_BLOCKS
 from app.ui.terminal_diagnostics import TerminalDiagnostics
 from dummy_motion.stream_protocol import parse_stream_line
-from tests.test_stream_transport import StreamMemoryPort
+from tests.stream_memory_port import StreamMemoryPort
 from tests.test_ui import APPLICATION
 
 
@@ -67,7 +67,7 @@ class OpenTestTransportTests(unittest.TestCase):
         self.c.cartesian.stream.open_test_changed.connect(self.events.append)
         self.c.log_message.connect(lambda msg, tag: self.logs.append(msg))
         self.guards = [patch('app.core.controller.serial.Serial', side_effect=AssertionError('hardware forbidden')),
-                       patch('app.core.stream_session.PlanningProcess', side_effect=AssertionError('IK forbidden'))]
+                       patch('dummy_motion.ik.IKSolver.solve_pose', side_effect=AssertionError('IK forbidden'))]
         for guard in self.guards:
             guard.start()
 

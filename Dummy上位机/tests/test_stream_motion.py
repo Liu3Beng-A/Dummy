@@ -129,9 +129,12 @@ class StreamCurveTests(unittest.TestCase):
     def test_speed_changes_curve_time_without_movej_speed_argument(self):
         pose = self.model.fk(self.q)
         target = Pose(pose.position+[0, .01, 0], pose.rotation)
-        from app.core.cartesian_backend import host_limits
-        slow = self.planner.plan_line(self.q, target, host_limits(20))
-        fast = self.planner.plan_line(self.q, target, host_limits(100))
+        # Pure offline planner limits must not depend on a retired UI backend.
+        from dummy_motion import MotionLimits
+        slow_limits = MotionLimits(linear_speed=.02*.2, angular_speed=np.deg2rad(10)*.2)
+        fast_limits = MotionLimits(linear_speed=.02, angular_speed=np.deg2rad(10))
+        slow = self.planner.plan_line(self.q, target, slow_limits)
+        fast = self.planner.plan_line(self.q, target, fast_limits)
         self.assertGreater(slow.duration, fast.duration*2)
         self.assertTrue(all(k.encode(8).startswith('~S') for k in fast.knots))
         np.testing.assert_allclose(slow.final_q, fast.final_q, atol=1e-4)

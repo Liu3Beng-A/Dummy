@@ -1,14 +1,14 @@
-"""The two backends share frame/tool contracts, but retain their own execution."""
+"""Native MoveL frame/tool helpers; PC planning remains offline only."""
 from enum import Enum
-from dummy_motion import RobotModel, Tool, Pose, MotionLimits
-from dummy_motion.frames import from_xyzabc, to_xyzabc, from_wire_joints
+from dummy_motion import Tool, Pose
+from dummy_motion.frames import from_xyzabc, to_xyzabc
 from app.core.gamepad_session import motion_command
 import numpy as np
 
 
 class CartesianBackend(str, Enum):
     FIRMWARE = "firmware"
-    STREAM = "stream"
+    STREAM = "stream"  # Deprecated identity for old callers; never selectable.
 
 
 def configured_tool(controller):
@@ -33,16 +33,3 @@ def world_target(model, point, rail, tool):
 
 def native_command(model, target, rail, tool, speed):
     return motion_command("@", to_xyzabc(model.native_target(target, rail, tool)) + [speed])
-
-
-def host_limits(speed):
-    """UI MoveL speed controls only Cartesian planning time and rate.
-
-    At 100 the PC envelope is 20 mm/s and 10 deg/s. STREAM_JOINT sends
-    time-parameterized q/v/a boundaries, with no ordinary wire MoveJ speed.
-    """
-    speed = float(speed)
-    if not np.isfinite(speed) or not 1 <= speed <= 100:
-        raise ValueError("Speed must be 1..100")
-    return MotionLimits(linear_speed=.02*speed/100,
-                        angular_speed=np.deg2rad(10)*speed/100)

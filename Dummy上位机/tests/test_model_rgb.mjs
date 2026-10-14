@@ -93,7 +93,7 @@ test('circular normalized scattering keeps uniform light even and zero truly unl
   assert(white.every((value, index) => index % 4 === 3 ? value === 255 : value >= 178 && value <= 179));
   const gray = texture(frame([128, 128, 128]));
   // RGB is bounded display light; alpha carries the original PWM activity.
-  assert(gray.every((value, index) => value === (index % 4 === 3 ? 128 : 127)));
+  assert(gray.every((value, index) => value === (index % 4 === 3 ? 128 : 137)));
 });
 
 test('weak light remains visible, brightness is monotonic and highlights stay bounded', () => {
@@ -109,8 +109,20 @@ test('weak light remains visible, brightness is monotonic and highlights stay bo
     if (level > 0) assert(displayed > 0);
     previous = displayed;
   }
-  assert(texture(frame([0, 10, 0]))[1] >= 30, 'Firmware 4% green background must be visible');
-  assert(texture(frame([0, 64, 0]))[1] >= 85, 'READY green must not disappear under the cover');
+  assert(texture(frame([0, 10, 0]))[1] >= 40, 'Firmware 4% green background must stay visibly colored');
+  assert(texture(frame([0, 64, 0]))[1] >= 100, 'READY green must not disappear under the cover');
+});
+
+test('low light is brighter than the previous response without raising the highlight cap', () => {
+  // Measured previous production response, before the low-light adjustment.
+  for (const [pwm, previous] of [[1, .025228], [2, .043239], [10, .126301], [38, .267877]]) {
+    const pixels = writeDiffuserTexture(frame([0, pwm, 0]), kernel, new Float32Array(288 * 4));
+    assert(pixels[1] > previous * 1.2 && pixels[1] < previous * 1.31);
+    assert.equal(pixels[0], 0);
+    assert.equal(pixels[2], 0);
+  }
+  const full = writeDiffuserTexture(frame([255, 255, 255]), kernel, new Float32Array(288 * 4));
+  assert(Math.abs(full[0] - .7) < 1e-6);
 });
 
 test('float display texture retains fractional low PWM and zero has a finite smooth toe', () => {
@@ -124,7 +136,7 @@ test('float display texture retains fractional low PWM and zero has a finite smo
     assert(Math.abs(pixels[3] - level / 255) < 1e-7);
     if (level > 0) {
       assert(pixels[1] > previous, 'Fractional PWM must not quantize back to an 8-bit step');
-      assert(pixels[1] / (level / 255) < 10, 'Near zero the response must have bounded gain');
+      assert(pixels[1] / (level / 255) < 12, 'Near zero the response must have bounded gain');
     } else assert(pixels.every(value => value === 0));
     previous = pixels[1];
   }
@@ -148,7 +160,7 @@ test('rotating green retains its same-color background with a brighter distinct 
   const greens = Array.from({ length: 288 }, (_, sample) => pixels[sample * 4 + 1]);
   const darkest = Math.min(...greens);
   const brightest = Math.max(...greens);
-  assert(darkest >= 30, 'Dim ring must remain green all around');
+  assert(darkest >= 40, 'Dim ring must remain green all around');
   assert(brightest >= darkest * 2, 'Moving head must remain distinguishable');
   assert(brightest <= darkest * 5, 'The response must compress excessive head/background contrast');
   assert(pixels.every((value, index) => index % 4 === 1 || index % 4 === 3 || value === 0));
