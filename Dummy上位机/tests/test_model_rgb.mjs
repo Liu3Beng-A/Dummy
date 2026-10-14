@@ -18,16 +18,47 @@ async function bundledPhongShader() {
   return JSON.parse(encodedPhong[1]);
 }
 
-// Evaluate the actual injected scalar GLSL helper, rather than maintaining a
-// second response formula that could pass while the production shader changes.
-// The helper uses scalar arithmetic and these standard GLSL/JS math primitives.
-function evaluateProductionHighlight(patched) {
-  const helper = patched.match(/float\s+rgbSoftHighlight\s*\(float\s+color\)\s*\{([^{}]*)\}/);
-  assert(helper, 'Expected the production scalar highlight helper');
-  const body = helper[1].replace(/\bfloat\s+([A-Za-z_]\w*)\s*=/g, 'const $1 =')
-    .replace(/\b(min|max|exp)\s*\(/g, 'Math.$1(');
-  const evaluate = new Function('rgbHighlightKnee', 'color', body);
-  return color => evaluate(DIFFUSER_STYLE.highlightKnee, color);
+// Run the injected GLSL itself with scalar JS math and equivalent vector
+// primitives. No cover/response/shoulder formula is copied into this test.
+function evaluateProductionLight(patched) {
+  const names = ['rgbSoftHighlight', 'rgbLightResponse', 'rgbTintedCover', 'rgbCompositeHighlight'];
+  const declarations = names.map(name => {
+    const helper = patched.match(new RegExp(`float\\s+${name}\\s*\\(([^)]*)\\)\\s*\\{([^{}]*)\\}`));
+    assert(helper, `Expected the production ${name} helper`);
+    const parameters = helper[1].replace(/\bfloat\s+/g, '');
+    const body = helper[2].replace(/\bfloat\s+([A-Za-z_]\w*)\s*=/g, 'const $1 =')
+      .replace(/\b(min|max|exp)\s*\(/g, 'Math.$1(');
+    return `function ${name}(${parameters}) {${body}}`;
+  }).join('\n');
+  const uniforms = ['rgbHighlightKnee', 'rgbCoverTintStrength', 'rgbCoverFadeStrength', 'rgbCoverFadePeak'];
+  const values = [DIFFUSER_STYLE.highlightKnee, DIFFUSER_STYLE.coverTintStrength,
+    DIFFUSER_STYLE.coverFadeStrength, DIFFUSER_STYLE.coverFadePeak];
+  const helpers = new Function(...uniforms, 'mix', `${declarations}\nreturn {${names.join(',')}};`)(
+    ...values, (first, second, amount) => first * (1 - amount) + second * amount);
+
+  const injection = patched.match(/#include <tonemapping_fragment>([\s\S]*?)#include <colorspace_fragment>/);
+  assert(injection, 'Expected the production post-tone-map composition');
+  const indices = { r: 0, g: 1, b: 2 };
+  const body = injection[1]
+    .replace(/\bmax\((rgbDisplayEmission|gl_FragColor\.rgb), vec3\(0\.0\)\)/g, 'positiveRgb($1)')
+    .replace(/vec3\s+([A-Za-z_]\w*)\s*=\s*vec3\(([^;]*)\);/g, 'const $1 = [$2];')
+    .replace('vec3 rgbLightSum = rgbCover + rgbEmission;',
+      'const rgbLightSum = rgbCover.map((value, channel) => value + rgbEmission[channel]);')
+    .replace(/gl_FragColor\.rgb\s*=\s*vec3\(([^;]*)\);/g, 'const output = [$1];')
+    .replace(/\b(?:float|vec3)\s+([A-Za-z_]\w*)\s*=/g, 'const $1 =')
+    .replace(/\b(rgbEmission|rgbReflection|rgbLightSum)\.([rgb])/g,
+      (_, name, channel) => `${name}[${indices[channel]}]`)
+    .replace(/\bmax\s*\(/g, 'Math.max(');
+  const compose = new Function(...names, 'positiveRgb', 'rgbDisplayEmission', 'gl_FragColor',
+    `${body}\nreturn {response: rgbResponse, cover: rgbCover, light: rgbLightSum, output};`);
+  return {
+    highlight: helpers.rgbSoftHighlight,
+    response: helpers.rgbLightResponse,
+    tint: helpers.rgbTintedCover,
+    composite: helpers.rgbCompositeHighlight,
+    compose: (reflection, emission) => compose(...names.map(name => helpers[name]),
+      rgb => rgb.map(value => Math.max(value, 0)), emission, { rgb: reflection }),
+  };
 }
 
 test('display interpolation smooths low PWM steps and never mutates its integer target', () => {
@@ -57,9 +88,23 @@ test('opal shader adds independent light after ACES and softens highlights witho
   const original = await bundledPhongShader();
   const patched = patchDiffuserShader(original);
   const reflection = patched.indexOf('diffuseColor.rgb *= rgbCoverReflection;');
-  assert(patched.includes('uniform float rgbCoverReflection;'));
-  assert(patched.includes('uniform float rgbHighlightKnee;'));
-  assert(patched.indexOf('float rgbSoftHighlight(') < patched.indexOf('void main()'));
+  const viewer = await readFile(new URL('../resources/viewer/viewer.js', import.meta.url), 'utf8');
+  for (const uniform of ['rgbCoverReflection', 'rgbHighlightKnee', 'rgbCoverTintStrength',
+    'rgbCoverFadeStrength', 'rgbCoverFadePeak']) {
+    assert(patched.includes(`uniform float ${uniform};`));
+    const binding = viewer.indexOf(`shader.uniforms.${uniform} =`);
+    assert(binding >= 0 && binding < viewer.indexOf('shader.fragmentShader = patchDiffuserShader('));
+  }
+  for (const [uniform, setting] of [['rgbHighlightKnee', 'highlightKnee'], ['rgbCoverTintStrength', 'coverTintStrength'],
+    ['rgbCoverFadeStrength', 'coverFadeStrength'], ['rgbCoverFadePeak', 'coverFadePeak']]) {
+    assert(viewer.includes(`shader.uniforms.${uniform} = { value: DIFFUSER_STYLE.${setting} };`));
+  }
+  for (const name of ['rgbSoftHighlight', 'rgbLightResponse', 'rgbTintedCover', 'rgbCompositeHighlight']) {
+    assert(patched.indexOf(`float ${name}(`) < patched.indexOf('void main()'));
+    assert.equal((patched.match(new RegExp(`float ${name}\\(`, 'g')) || []).length, 1);
+  }
+  assert.equal(DIFFUSER_STYLE.emissionIntensity, 2.5);
+  assert(viewer.includes('material.emissiveIntensity = DIFFUSER_STYLE.emissionIntensity;'));
   assert(reflection > patched.indexOf('#include <emissivemap_fragment>'));
   assert(reflection < patched.indexOf('#include <lights_phong_fragment>'));
   assert(patched.indexOf('#include <specularmap_fragment>') < reflection);
@@ -68,24 +113,35 @@ test('opal shader adds independent light after ACES and softens highlights witho
   const cached = patched.indexOf('vec3 rgbDisplayEmission = totalEmissiveRadiance;');
   const removed = patched.indexOf('totalEmissiveRadiance = vec3(0.0);');
   const toneMapped = patched.indexOf('#include <tonemapping_fragment>');
-  const restored = patched.indexOf('vec3 rgbLightSum = max(gl_FragColor.rgb, vec3(0.0)) + max(rgbDisplayEmission, vec3(0.0));');
-  const compressed = patched.indexOf('gl_FragColor.rgb = vec3(rgbSoftHighlight(rgbLightSum.r),');
+  const emitted = patched.indexOf('vec3 rgbEmission = max(rgbDisplayEmission, vec3(0.0));');
+  const response = patched.indexOf('float rgbResponse = rgbLightResponse(rgbEmissionPeak);');
+  const tinted = patched.indexOf('vec3 rgbCover = vec3(');
+  const restored = patched.indexOf('vec3 rgbLightSum = rgbCover + rgbEmission;');
+  const peak = patched.indexOf('float rgbLightPeak = max(rgbLightSum.r, max(rgbLightSum.g, rgbLightSum.b));');
+  const compressed = patched.indexOf('gl_FragColor.rgb = vec3(');
   assert(cached > reflection && removed > cached);
   assert(removed < patched.indexOf('#include <lights_phong_fragment>'));
+  assert(emitted > toneMapped && response > emitted && tinted > response);
+  assert(restored > tinted && peak > restored && compressed > peak);
   assert(restored > toneMapped && restored < patched.indexOf('#include <colorspace_fragment>'));
   assert(compressed > restored && compressed < patched.indexOf('#include <colorspace_fragment>'));
-  assert(patched.includes('rgbSoftHighlight(rgbLightSum.g), rgbSoftHighlight(rgbLightSum.b));'));
+  for (const channel of ['r', 'g', 'b']) {
+    assert(patched.includes(`rgbTintedCover(rgbReflection.${channel}, rgbEmission.${channel}, rgbEmissionPeak, rgbResponse)`));
+    assert(patched.includes(`rgbCompositeHighlight(rgbLightSum.${channel}, rgbLightPeak, rgbResponse)`));
+  }
   assert(patched.indexOf('#include <colorspace_fragment>') < patched.indexOf('#include <fog_fragment>'));
   assert(patched.indexOf('#include <fog_fragment>') < patched.indexOf('#include <premultiplied_alpha_fragment>'));
   assert(patched.indexOf('#include <premultiplied_alpha_fragment>') < patched.indexOf('#include <dithering_fragment>'));
   assert.equal((patched.match(/#include <tonemapping_fragment>/g) || []).length, 1);
   assert.equal((patched.match(/vec3 rgbLightSum =/g) || []).length, 1);
-  assert.equal((patched.match(/gl_FragColor\.rgb = vec3\(rgbSoftHighlight/g) || []).length, 1);
+  assert.equal((patched.match(/gl_FragColor\.rgb = vec3\(\s*rgbCompositeHighlight/g) || []).length, 1);
   assert(!/\bclamp\s*\(\s*rgbDisplayEmission/.test(patched), 'Emission intensity must not clip before the soft shoulder');
   assert(!patched.includes('vec3(1.0) - clamp(gl_FragColor.rgb'), 'Cover brightness must not attenuate independent emission');
   assert(!patched.includes('emissiveColor.a'));
   assert(!patched.includes('smoothstep('));
   assert(!patched.includes('diffuseColor.a ='));
+  assert.equal(patched.slice(patched.indexOf('#include <colorspace_fragment>')),
+    original.slice(original.indexOf('#include <colorspace_fragment>')), 'Color conversion, fog and alpha must remain unchanged');
   // Reuse one emission sample: alpha is activity, never material transparency.
   assert(!patched.includes('texture2D('));
   assert.throws(() => patchDiffuserShader('void main() {}'), /shader hook/);
@@ -97,7 +153,7 @@ test('opal shader adds independent light after ACES and softens highlights witho
 });
 
 test('production highlight shoulder is linear below its knee, C1 at the knee and monotonic into HDR', async () => {
-  const highlight = evaluateProductionHighlight(patchDiffuserShader(await bundledPhongShader()));
+  const { highlight } = evaluateProductionLight(patchDiffuserShader(await bundledPhongShader()));
   const knee = DIFFUSER_STYLE.highlightKnee;
   const range = 1 - knee;
   assert(knee >= 0 && knee < 1, 'The highlight shoulder must have a positive finite range');
@@ -126,22 +182,106 @@ test('production highlight shoulder is linear below its knee, C1 at the knee and
   assert.equal(highlight(1000), 1);
 });
 
-test('independent cover plus production emission preserves dark channels and never reverses brightness', async () => {
-  const highlight = evaluateProductionHighlight(patchDiffuserShader(await bundledPhongShader()));
+test('tinted reflection fades dark channels while independent production emission remains additive and monotonic', async () => {
+  const light = evaluateProductionLight(patchDiffuserShader(await bundledPhongShader()));
   // These are post-ACES reflection values, not the material's linear albedo.
   const cover = [.2, .21, .19];
-  assert(Math.abs(highlight(cover[0] + .3) - .5) < 1e-12, 'Below the knee emission must add without white-cover attenuation');
   let previous = cover[1];
+  let previousDark = cover[0];
   for (let pwm = 0; pwm <= 255; pwm++) {
-    const light = writeDiffuserTexture(frame([0, pwm, 0]), kernel, new Float32Array(288 * 4));
-    const displayed = cover.map((value, channel) => highlight(value + light[channel]));
-    assert.equal(displayed[0], cover[0]);
-    assert.equal(displayed[2], cover[2]);
-    assert(displayed[1] >= previous && displayed[1] <= 1, `Composition reversed at PWM ${pwm}`);
-    if (pwm > 0) assert(displayed[1] > previous, `Composition lost a green step at PWM ${pwm}`);
-    previous = displayed[1];
+    const pixels = writeDiffuserTexture(frame([0, pwm, 0]), kernel, new Float32Array(288 * 4));
+    const emission = Array.from(pixels.slice(0, 3), value => value * DIFFUSER_STYLE.emissionIntensity);
+    const rendered = light.compose(cover, emission);
+    for (let channel = 0; channel < 3; channel++) {
+      assert(Math.abs(rendered.light[channel] - rendered.cover[channel] - emission[channel]) < 1e-12,
+        'Tint/fade may change cover reflection, never independent emission');
+    }
+    assert(rendered.cover[0] <= previousDark && rendered.cover[2] <= cover[2]);
+    assert(rendered.output[1] >= previous && rendered.output[1] <= 1, `Composition reversed at PWM ${pwm}`);
+    if (pwm > 0) assert(rendered.output[1] > previous, `Composition lost a green step at PWM ${pwm}`);
+    previous = rendered.output[1];
+    previousDark = rendered.cover[0];
   }
-  assert(highlight(.2 + .7 * 3) > highlight(.2 + .7 * 2), 'Emission intensity above 1 must reach the shoulder without early clipping');
+  assert(light.compose(cover, [0, .7 * 3, 0]).output[1] > light.compose(cover, [0, .7 * 2, 0]).output[1],
+    'Emission above 1 must reach the shoulder without early clipping');
+});
+
+test('production light response has a smooth zero toe and gradual bounded transition', async () => {
+  const { response } = evaluateProductionLight(patchDiffuserShader(await bundledPhongShader()));
+  assert.equal(response(0), 0);
+  assert.equal(response(DIFFUSER_STYLE.coverFadePeak), .5);
+  let previous = 0;
+  for (const peak of [1e-12, 1e-10, 1e-8, 1e-6, .0001, .001, .01, .1, .3, 1, 10, 1000, 1e12]) {
+    const value = response(peak);
+    assert(Number.isFinite(value) && value > previous && value <= 1, `Invalid cover response at ${peak}`);
+    previous = value;
+  }
+  for (const epsilon of [1e-8, 1e-7, 1e-6]) {
+    assert(response(epsilon) / epsilon < 4e-5, 'Cover tint and common-peak response must approach zero with zero slope');
+  }
+});
+
+test('off preserves the old per-channel result even for unequal HDR reflections and approaches it continuously', async () => {
+  const light = evaluateProductionLight(patchDiffuserShader(await bundledPhongShader()));
+  for (const cover of [[0, 0, 0], [.2, .21, .19], [.05, 1.3, 3.2], [4, .7, 12], [-.2, .8, 1.4]]) {
+    const baseline = cover.map(value => light.highlight(Math.max(value, 0)));
+    const off = light.compose(cover, [0, 0, 0]);
+    assert.deepEqual(off.output, baseline);
+    assert.deepEqual(off.cover, cover.map(value => Math.max(value, 0)));
+    assert.equal(off.response, 0);
+    for (const epsilon of [1e-12, 1e-10, 1e-8, 1e-6, .0001]) {
+      const lit = light.compose(cover, [epsilon, epsilon * .4, 0]);
+      for (let channel = 0; channel < 3; channel++) {
+        assert(Math.abs(lit.output[channel] - baseline[channel]) <= 2 * epsilon,
+          `Zero discontinuity for ${cover} at emission ${epsilon}, channel ${channel}`);
+      }
+    }
+  }
+});
+
+test('strong green orange and purple gain saturation and preserve color better than the old white-cover shoulder', async () => {
+  const light = evaluateProductionLight(patchDiffuserShader(await bundledPhongShader()));
+  const cover = [.2, .21, .19];
+  const normalized = rgb => rgb.map(value => value / Math.max(...rgb));
+  const distance = (first, second) => first.reduce((sum, value, index) => sum + Math.abs(value - second[index]), 0);
+  const saturation = rgb => (Math.max(...rgb) - Math.min(...rgb)) / Math.max(...rgb);
+  for (const color of [[0, 255, 0], [255, 180, 0], [180, 0, 255]]) {
+    const pixels = writeDiffuserTexture(frame(color), kernel, new Float32Array(288 * 4));
+    const emission = Array.from(pixels.slice(0, 3), value => value * DIFFUSER_STYLE.emissionIntensity);
+    const rendered = light.compose(cover, emission);
+    const previous = cover.map((value, channel) => light.highlight(value + emission[channel]));
+    assert(rendered.response > .9, 'Strong light must substantially enter the shared-peak shoulder');
+    assert(saturation(rendered.output) > saturation(previous), `Saturation did not improve for ${color}`);
+    assert(distance(normalized(rendered.output), normalized(color)) < distance(normalized(previous), normalized(color)),
+      `Shared-peak composition did not improve ${color} channel ratios`);
+    assert(rendered.output[color.indexOf(0)] < previous[color.indexOf(0)], 'The reflected white floor must fade under colored light');
+  }
+});
+
+test('production composition remains finite and bounded across HDR and its dominant channel stays monotonic', async () => {
+  const light = evaluateProductionLight(patchDiffuserShader(await bundledPhongShader()));
+  const colors = [[0, 1, 0], [1, .7, 0], [.7, 0, 1], [1, 1, 1]];
+  const levels = [0, 1e-12, 1e-8, .0001, .001, .01, .1, .5, 1, 1.75, 10, 1000, 1e12];
+  for (const cover of [[0, 0, 0], [.2, .21, .19], [.7, 1.1, .5], [4, .7, 12]]) {
+    for (const color of colors) {
+      for (const level of levels) {
+        const rendered = light.compose(cover, color.map(value => value * level));
+        assert(rendered.output.every(value => Number.isFinite(value) && value >= 0 && value <= 1));
+        assert(rendered.cover.every(Number.isFinite) && rendered.light.every(Number.isFinite));
+      }
+    }
+  }
+  for (const cover of [[0, 0, 0], [.2, .21, .19], [.7, 1.1, .5]]) {
+    for (const color of colors) {
+      const dominant = color.indexOf(1);
+      let previous = 0;
+      for (let step = 0; step <= 2000; step++) {
+        const output = light.compose(cover, color.map(value => value * step / 400)).output[dominant];
+        assert(output >= previous, `Dominant channel reversed for ${cover}/${color} at step ${step}`);
+        previous = output;
+      }
+    }
+  }
 });
 
 test('RGB input is atomic, finite, bounded and independent of its caller', () => {

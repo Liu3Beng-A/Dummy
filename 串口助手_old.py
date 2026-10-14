@@ -11,6 +11,40 @@ import math
 
 BAUDRATE = 115200  # 固件 usart.c 中 huart4 波特率硬编码
 
+# Read-only STREAM diagnostics, including TM1 component sampling (1/64 ticks).
+STREAM_TIMING_FIELDS = (
+    (51, "TM1计时能力"), (2, "曲线准备峰值"), (9, "流回调峰值"),
+    (12, "流回调迟到次数"), (19, "接收队列等待峰值"), (3, "电机栈最小余量"),
+    (18, "流回包丢弃次数"), (52, "反馈分段抽样峰值"), (53, "保护分段抽样峰值"),
+    (54, "输出分段抽样峰值"), (55, "参考分段抽样峰值"), (56, "到位分段抽样峰值"),
+    (57, "入口/结束回调峰值"), (58, "RUNNING回调峰值"), (59, "软停回调峰值"),
+    (60, "入口/结束抽样次数"), (61, "RUNNING抽样次数"), (62, "软停抽样次数"),
+    (63, "分段抽样除数"),
+)
+
+
+def format_stream_timing(line):
+    match = re.fullmatch(r"STREAM_NODE node=([1-7]) n=([0-9]+) field=([0-9]+) value=([0-9]+)", line)
+    if not match:
+        return None
+    node, nonce, field, value = map(int, match.groups())
+    labels = dict(STREAM_TIMING_FIELDS)
+    if nonce > 65535 or field not in labels or value > 0xffffffff:
+        return None
+    prefix = f"J{node} {labels[field]}（回包n={nonce}）："
+    if field == 51:
+        return prefix + ("TM1已确认" if value == 0x544d0001 else f"未知签名0x{value:08X}")
+    if field == 2:
+        return prefix + f"{value / 72000:.3f} ms；含中断抢占，非独占计算时间（按72MHz）"
+    if field in (9, 52, 53, 54, 55, 56, 57, 58, 59):
+        scope = "1/64 tick抽样，非WCET" if 52 <= field <= 56 else "逐tick观测，50us周期"
+        return prefix + f"{value / 72:.3f} us；{scope}（按72MHz）"
+    if field == 19:
+        return prefix + f"{value / 20:.3f} ms；20kHz软件tick名义换算，不含硬件FIFO等待"
+    if field == 3:
+        return prefix + f"{value} B；已观测路径的最小余量"
+    return prefix + f"{value}；累计计数需比较同次上电前后读数" if field != 63 else prefix + str(value)
+
 RGB_MODES = ("0 单色0", "1 单色1", "2 单色2", "3 彩虹", "4 潮汐",
              "5 呼吸", "6 赛博", "7 心跳", "8 旋转", "9 闪烁",
              "10 AUTO SEQ常亮", "11 AUTO INT常亮", "12 AUTO TRJ常亮")
@@ -382,6 +416,14 @@ class RobotSerialAssistantOld:
                                       bg="#495057", fg="white", relief=tk.FLAT, pady=5,
                                       command=self._query_can_diagnostic)
         self.btn_can_diag.pack(fill=tk.X, padx=1, pady=(2, 0))
+        self.stream_timing_field = ttk.Combobox(query_f, state="readonly", width=21,
+                                               values=[f"{field} · {label}" for field, label in STREAM_TIMING_FIELDS])
+        self.stream_timing_field.current(0)
+        self.stream_timing_field.pack(fill=tk.X, padx=1, pady=(4, 0))
+        self.btn_stream_timing = tk.Button(query_f, text="查询实时字段（参数节点）", font=("Arial", 10),
+                                          bg="#495057", fg="white", relief=tk.FLAT, pady=5,
+                                          command=self._query_stream_timing)
+        self.btn_stream_timing.pack(fill=tk.X, padx=1, pady=(2, 0))
 
         # --- 电机（旧固件只有 J1~J6，节点 1~6）---
         motor_f = ttk.LabelFrame(left_col, text="电机", padding=6)
@@ -1398,6 +1440,9 @@ class RobotSerialAssistantOld:
         self._handle_defaults_status(line)
         self._handle_firmware_version_status(line)
         self._handle_can_diagnostic_status(line)
+        timing = format_stream_timing(line)
+        if timing is not None:
+            self.log(timing + "；独立峰值不可相加，需结合原始日志", "INFO")
 
         # 电机参数查询回包解析：节点匹配且非 0 时，把数值回填到右侧 Entry（仅 UI 辅助，不影响主日志）
         m = re.match(r'ok PID \[(\d+)\] kp=(-?\d+) kv=(-?\d+) ki=(-?\d+) kd=(-?\d+)', line)
@@ -2038,7 +2083,19 @@ class RobotSerialAssistantOld:
                         "#KIN_CONFIG", "#TOOL", "#TCPPOSE", "#CARTESIAN_STATUS") or
                 cmd.startswith("#IKCHECK ") or
                 self._is_stall_status_query(cmd) or self._is_cal_status_query(cmd) or
-                self._is_firmware_version_query(cmd) or self._parse_can_diagnostic_query(cmd) is not None)
+                self._is_firmware_version_query(cmd) or self._parse_can_diagnostic_query(cmd) is not None or
+                re.fullmatch(r"#STREAM_DIAG [1-7] (?:[0-9]|[1-5][0-9]|6[0-3])", cmd) is not None)
+
+    def _query_stream_timing(self):
+        node = self.param_node.get()
+        if node not in range(1, 8):
+            self.log("实时字段仅支持参数节点J1～J7；请选择单节点，禁止ALL/J8", "WARN")
+            return
+        index = self.stream_timing_field.current()
+        if not 0 <= index < len(STREAM_TIMING_FIELDS):
+            return
+        field = STREAM_TIMING_FIELDS[index][0]
+        self.send_cmd(f"#STREAM_DIAG {node} {field}")
 
     def _query_cal_status(self, last=False):
         node = self._protection_nodes["CAL"].get()

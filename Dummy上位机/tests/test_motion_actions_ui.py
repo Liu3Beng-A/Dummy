@@ -133,7 +133,7 @@ class MotionActionUiTests(unittest.TestCase):
         self.assertEqual(w.teaching_speed.value(), record["speed"])
         self.assertEqual(w.teaching_gripper_spin.value(), record["gripper"])
         self.assertEqual(w._selected_row(), len(w.points) - 1)
-        for button, point in zip(w.quick_point_buttons, w.points[:4]):
+        for button, point in zip(w.quick_point_buttons, w.points[:len(w.quick_point_buttons)]):
             self.assertTrue(button.isEnabled())
             self.assertIn(point["name"], button.accessibleName())
             self.assertIn(point["type"], button.accessibleName())
@@ -264,8 +264,12 @@ class MotionActionUiTests(unittest.TestCase):
         save_notice = self.window.statusBar().currentMessage()
         self.assert_saved("MoveJ", "新第五点", before)
         self.assertEqual(len(self.window.points), 5)
-        self.assertEqual([button.accessibleName() for button in self.window.quick_point_buttons], names)
-        self.assertIn("前 4", save_notice)
+        current_names = [button.accessibleName() for button in self.window.quick_point_buttons]
+        self.assertEqual(current_names[:4], names[:4])
+        self.assertIn("新第五点", current_names[4])
+        self.assertEqual(current_names[5:], names[5:])
+        # Five saved points fit the existing eight-slot shortcut area.
+        self.assertNotIn("快捷区显示列表前", save_notice)
 
     def test_terminal_home_reset_preview_immediately_and_cancel_old_drag(self):
         self.connect_fake()

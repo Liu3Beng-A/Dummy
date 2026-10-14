@@ -137,6 +137,27 @@ uint32_t Motor::Controller::CaptureStreamOpen(uint16_t token,bool start) {
 bool Motor::Controller::StreamActive() const { return Active() || stream.stopRequired || stopDispatching; }
 bool Motor::Controller::StreamTerminal() const { return stream.terminal && stream.armed; }
 
+// STOP includes all locked ramp/hold/disabled/fault states. MODE_STOP at boot
+// alone is not a stream STOP sample. Entry also includes END settlement and
+// request/actual-mode handover; RUNNING requires the actual executing runtime.
+uint8_t Motor::Controller::StreamTimingPhase() const {
+    if (IsSoftStopLocked()) return 3;
+    if (modeRunning!=MODE_STREAM_JOINT && requestMode!=MODE_STREAM_JOINT) return 0;
+    return stream.armed && stream.state==StreamProtocol::STATE_RUNNING && !stream.terminal ? 2 : 1;
+}
+
+// Only one in every64 control ticks calls this cold recorder. It uses no
+// division/allocation; recorder overhead is included in whole callback timing.
+#if defined(__GNUC__)
+__attribute__((noinline,optimize("Os")))
+#endif
+void MotorTimingCheckpoint(uint8_t segment) {
+    const uint32_t now=DWT->CYCCNT;
+    const uint32_t elapsed=now-motorTimingCheckpointCycle;
+    motorTimingCheckpointCycle=now;
+    if (elapsed>motorStreamTiming[segment]) motorStreamTiming[segment]=elapsed;
+}
+
 void Motor::Controller::CancelStream(uint8_t reason) {
     Guard guard;
     ++generation; CAN_CancelStreamReplies();
@@ -229,7 +250,9 @@ void Motor::Controller::PollStreamMain() {
                 case 20:value=maxStartAgeTicks;break;
                 case 21:value=motorControlTiming[9];break;
                 case 22:value=motorControlTiming[10];break;
-                default:if(b[2]>=8 && b[2]<=16)value=motorControlTiming[b[2]-8];else if(b[2]>=DIAG_OPEN_SESSION && b[2]<=DIAG_LAST)value=entrySnapshot[b[2]-DIAG_OPEN_SESSION];else return;
+                case 51:value=0x544d0001U;break;
+                case 63:value=64;break;
+                default:if(b[2]>=8 && b[2]<=16)value=motorControlTiming[b[2]-8];else if(b[2]>=DIAG_OPEN_SESSION && b[2]<=DIAG_START_EVIDENCE_MEAN)value=entrySnapshot[b[2]-DIAG_OPEN_SESSION];else if(b[2]>=52 && b[2]<=62)value=motorStreamTiming[b[2]-52];else return;
             }
             uint8_t reply[8]={};Write16(reply,ss);reply[2]=b[2];Write32(reply+4,value);Reply(DIAG,reply);
         } else if (command==CAPS) {

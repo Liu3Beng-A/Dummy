@@ -4,7 +4,8 @@
 
 namespace MotorStream {
 struct Point { int32_t q, v, a; };
-// Relative position and velocity finite differences, Q40. Prepared outside ISR.
+// Relative position/velocity Q40 differences. Integer preparation outside ISR.
+// Build preserves exact 20ms quintic hull checks and bounded int64 arithmetic.
 // Each Tick has nine 64-bit additions, no multiplication, division or float.
 class Curve {
 public:

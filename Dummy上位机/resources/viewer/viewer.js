@@ -224,8 +224,8 @@ function prepareDiffuser(robot) {
     diffuserMeshes.push(object);
     const materials = Array.isArray(object.material) ? object.material : [object.material];
     for (const material of materials) {
-      // The subdued gray-white cover stays fixed from zero to full brightness. RGB only
-      // adds colored emission; power metadata never darkens the white cover.
+      // The neutral pigment/unlit baseline is fixed. The shader continuously
+      // tints/fades its reflection using local RGB emission, never power metadata.
       material.color.setRGB(DIFFUSER_STYLE.coverGray, DIFFUSER_STYLE.coverGray, DIFFUSER_STYLE.coverGray);
       material.specular?.setHex(0x20252a);
       material.shininess = 24;
@@ -235,9 +235,12 @@ function prepareDiffuser(robot) {
       material.onBeforeCompile = shader => {
         shader.uniforms.rgbCoverReflection = rgbCoverReflection;
         shader.uniforms.rgbHighlightKnee = { value: DIFFUSER_STYLE.highlightKnee };
+        shader.uniforms.rgbCoverTintStrength = { value: DIFFUSER_STYLE.coverTintStrength };
+        shader.uniforms.rgbCoverFadeStrength = { value: DIFFUSER_STYLE.coverFadeStrength };
+        shader.uniforms.rgbCoverFadePeak = { value: DIFFUSER_STYLE.coverFadePeak };
         shader.fragmentShader = patchDiffuserShader(shader.fragmentShader);
       };
-      material.customProgramCacheKey = () => 'rgb-opal-cover-v5-gray-additive';
+      material.customProgramCacheKey = () => 'rgb-opal-cover-v6-chroma-reflection';
       material.userData.rgbFixedCover = true;
       material.needsUpdate = true;
     }

@@ -1936,6 +1936,7 @@ class MainWindow(QMainWindow):
         self.terminal_diagnostics = TerminalDiagnostics()
         self.terminal_diagnostics.open_test_requested.connect(self.controller.cartesian.diagnostics.start_open_test)
         self.terminal_diagnostics.axis_test_requested.connect(self.controller.cartesian.diagnostics.start_axis_test)
+        self.terminal_diagnostics.motion_axis_test_requested.connect(self.controller.cartesian.diagnostics.start_motion_axis_test)
         self.terminal_diagnostics.test_clicked.connect(self.controller.log)
         self.controller.cartesian.diagnostics.axis_test_changed.connect(self.terminal_diagnostics.show_axis_test)
         self.controller.cartesian.diagnostics.open_test_changed.connect(self.terminal_diagnostics.show_open_test)

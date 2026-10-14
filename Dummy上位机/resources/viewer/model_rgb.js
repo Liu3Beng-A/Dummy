@@ -2,11 +2,14 @@
 export const RGB_CHANNELS = 24;
 export const DIFFUSER_SAMPLES = 288;
 // Model-display settings only; these never change device RGB configuration.
-// Keep a subdued gray-white cover fixed and add colored light independently.
+// Keep the unlit gray-white cover; colored light gradually takes over its reflection.
 export const DIFFUSER_STYLE = Object.freeze({
   coverGray: 0.85,        // Unlit cover base color, in linear RGB.
-  coverReflection: 0.2,   // Fixed subdued reflection, including at brightness 0.
-  emissionIntensity: 2,   // Colored emission multiplier; the unlit cover stays unchanged.
+  coverReflection: 0.2,   // Neutral reflection baseline; the unlit cover stays unchanged.
+  coverTintStrength: 0.75, // Maximum same-color tint of the reflected cover, 0..1.
+  coverFadeStrength: 0.15, // Maximum reduction of cover reflection under strong light, 0..1.
+  coverFadePeak: 0.3,      // Emission peak at half of the smooth cover/highlight transition; > 0.
+  emissionIntensity: 2.5, // Colored emission multiplier; independent of cover reflection weight.
   emissionLimit: 0.7,     // Peak texture emission before its independent intensity.
   highlightKnee: 0.8,     // Linear output below this point, smooth compression above; 0 <= knee < 1.
   lowLightGain: 0.3,      // Extra dim-light gain, removed smoothly at full PWM.
@@ -68,16 +71,33 @@ export function patchDiffuserShader(fragmentShader) {
     || fragmentShader.includes('rgbCoverReflection')) {
     throw new Error('The diffuser requires unmodified Phong emission-map and tone-map shader hooks.');
   }
-  // The entire ring retains the same gray-white cover at every power/brightness.
-  // Breathing, black arcs and light_on metadata never dim its reflection.
+  // Keep the neutral cover's original lighting path and cache emission separately.
+  // The local, already-smoothed emission later tints/fades reflected white only.
+  // Power metadata and the diagnostic texture alpha never switch the cover.
   const withCover = fragmentShader.replace(uniformHook, `${uniformHook}
 uniform float rgbCoverReflection;
 uniform float rgbHighlightKnee;
+uniform float rgbCoverTintStrength;
+uniform float rgbCoverFadeStrength;
+uniform float rgbCoverFadePeak;
 float rgbSoftHighlight(float color) {
   float knee = rgbHighlightKnee;
   float range = 1.0 - knee;
   float excess = max(color - knee, 0.0);
   return min(color, knee) + range * (1.0 - exp(-excess / range));
+}
+float rgbLightResponse(float peak) {
+  float q = peak / (peak + rgbCoverFadePeak);
+  return q * q * (3.0 - 2.0 * q);
+}
+float rgbTintedCover(float reflected, float emitted, float emissionPeak, float response) {
+  float chroma = emitted / max(emissionPeak, 1e-8);
+  float tint = rgbCoverTintStrength * response;
+  return reflected * (1.0 - rgbCoverFadeStrength * response) * mix(1.0, chroma, tint);
+}
+float rgbCompositeHighlight(float channel, float peak, float response) {
+  float colorScale = rgbSoftHighlight(peak) / max(peak, 1e-8);
+  return mix(rgbSoftHighlight(channel), channel * colorScale, response);
 }`).replace(emissionHook, `${emissionHook}
 diffuseColor.rgb *= rgbCoverReflection;
 specularStrength *= rgbCoverReflection;
@@ -85,16 +105,28 @@ vec3 rgbDisplayEmission = totalEmissiveRadiance;
 totalEmissiveRadiance = vec3(0.0);`);
   // The vendor Phong shader adds totalEmissiveRadiance to outgoingLight before
   // opaque_fragment. Cache emission and zero that contribution before lighting,
-  // tone-map reflection alone, then add the independent colored emission.
-  // Below the knee the sum stays linear; above it a C1, monotonic compression
-  // approaches 1 without a hard clipping edge or a white-base attenuation of
-  // emission. Each output channel remains independent and nondecreasing.
+  // tone-map reflection alone, then tint/fade only that reflected contribution.
+  // Emission remains independent. The common peak shoulder preserves mixed-color
+  // ratios at high light; its transition from the old per-channel shoulder uses
+  // the same smooth response so even unequal HDR reflection has no zero step.
+  // At zero emission, response is exactly zero and the old unlit output is kept.
   // Color/fog/alpha keep their original order, and other robot materials keep
   // the global ACES pipeline.
   return withCover.replace(toneMapHook, `${toneMapHook}
-vec3 rgbLightSum = max(gl_FragColor.rgb, vec3(0.0)) + max(rgbDisplayEmission, vec3(0.0));
-gl_FragColor.rgb = vec3(rgbSoftHighlight(rgbLightSum.r),
-  rgbSoftHighlight(rgbLightSum.g), rgbSoftHighlight(rgbLightSum.b));`);
+vec3 rgbEmission = max(rgbDisplayEmission, vec3(0.0));
+float rgbEmissionPeak = max(rgbEmission.r, max(rgbEmission.g, rgbEmission.b));
+float rgbResponse = rgbLightResponse(rgbEmissionPeak);
+vec3 rgbReflection = max(gl_FragColor.rgb, vec3(0.0));
+vec3 rgbCover = vec3(
+  rgbTintedCover(rgbReflection.r, rgbEmission.r, rgbEmissionPeak, rgbResponse),
+  rgbTintedCover(rgbReflection.g, rgbEmission.g, rgbEmissionPeak, rgbResponse),
+  rgbTintedCover(rgbReflection.b, rgbEmission.b, rgbEmissionPeak, rgbResponse));
+vec3 rgbLightSum = rgbCover + rgbEmission;
+float rgbLightPeak = max(rgbLightSum.r, max(rgbLightSum.g, rgbLightSum.b));
+gl_FragColor.rgb = vec3(
+  rgbCompositeHighlight(rgbLightSum.r, rgbLightPeak, rgbResponse),
+  rgbCompositeHighlight(rgbLightSum.g, rgbLightPeak, rgbResponse),
+  rgbCompositeHighlight(rgbLightSum.b, rgbLightPeak, rgbResponse));`);
 }
 
 export function createDiffuserKernel(samples = DIFFUSER_SAMPLES) {

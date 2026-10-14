@@ -1,3 +1,14 @@
+## 已完成编译与离线验证：电机20kHz/非零曲线修复（2026-10-14，14.02待用户烧录）
+
+- 授权/快照：用户授权修复、编译后由用户烧录，改前所有跟踪/新增文件全量提交d50efb1（本地Liu3Beng身份）；保留八点位/虚体开关/可视化、STOP灯效、地轨方向。无额外提交、自动烧录或设备运动。
+- 现场事实：14.01原生MoveL已Plan OK；ST-Link只读现场证明seq10在RUNNING的TRANSFER/PREPARED阶段60ms超时，mask6B缺J3/J5。主控running，CFSR/HFSR=0。J3/J5准备boot墙钟峰94.943/94.086ms、STREAM被计时主体57.583/57.792us、encoder9.958us、control45.167/45.375us；均累计统计，不能归为seq10单次或稳态CPU利用率。
+- 当前修复：stream_curve一般准备改有界整数，保留Q40/400tick/Bernstein硬界/精确端点；motor控制非terminal一次失效，END全新50ms证据；DCE/PID缓存同tick限流且最终clamp保留；正常反馈掉样恢复精确商余分解绕过软件64除，异常值保留旧处理；TM1字段51..63与主控/Python/Tk只读解析同步。CoreStream诊断membership独立保留，CLOSE不清掉最后确认执行进度，也不保留传输权限。
+- 验证：整数新增112056214检查/有理数102400tick、冻结旧曲线133079925、控制限流旧新21811776、到位/计时62098、实际callback10及旧协议/反馈/稳态均PASS；core 2750/135/19/1136/25071真实协调/解析/lifecycle PASS。真实Qt离线模型smoke PASS（仅本机资源服务，无串口）。受限运行本地页面失败，允许本机访问后验证通过。
+- 固件：全5套统一release2026101402/buildset96279410CC3847A7/source2fd5e9c81a07c5f8648eb0fc7eda5064ac8e4847056bafb48c7573b8b78b50af；BIN/HEX/ELF/MAP/source505输入一致，准备无soft-float/double/heap调用。CoreFlash520492余397012、RAM链接93856余37216；电机Flash35/42=97044余236、57=97036余244、gripper96828余452，RAM链接15632余4848，MSP4096。非零PREP已知帧链496B、含IRQ等工程预算1536B/4096B，非实测水位。反馈允许位移旧新5445475额外通过。
+- 上位机：独立J3/J5非零诊断入口201点；exact SEED/实际v-a硬界/旧marker拒绝/STOP及cleanup门禁、late/丢弃前后差、有效RUNNING计时证据。START前采新鲜实际RX基线，仅RUNNING且新时间戳相对该实际基线计位移，初始0.2°误差不算运动；不改变普通主控运动后端。旧Tk新增只读字段查询/单位与统计范围解释，19项真实隐藏Tk/fake serial PASS。
+- 最终GUI：初轮619项有2个旧字段/四槽断言失败，按新字段/八槽契约修测试、保留八槽生产逻辑；actual基线收紧后专项120 PASS，重新完整621项597.076s全PASS，153输入SHA前后不变。编译、UI与算法身份均已分别冻结验证，不把此前旧598项当本版证据。
+- 交付/待实机：统一firmware_artifacts/CURRENT_RELEASE、motor-timing-notes-2026101402.txt、verification.json、motor-timing-verification-2026101402.json及docs/电机实时性修复与J3_J5非零测试_2026101402.txt。首次用户烧主控、J3 motor-42、J5 motor-35，按握手/原地/单轴非零各5轮推进；默认主控模式2。新固件真实20k主体/尾部时限余量、50Hz持续吞吐、栈水位与流畅性必须板上验收，未宣称已根治硬件问题。无代理烧录/串口运动，EXE未重打包，使用当前源码。
+
 ## 已完成：主控有限 MoveL、IK/FK、TCP 与地轨协同（2026-10-14，本任务待实机）
 
 - 授权/快照：用户批准实现与编译后自行烧录；改前所有跟踪/新增文件快照4148f68，本轮实现留工作区、无额外提交或设备操作。

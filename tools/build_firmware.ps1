@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^[0-9]{10}$')]
-    [string]$ReleaseId = '2026101401'
+    [string]$ReleaseId = '2026101402'
 )
 $ErrorActionPreference = 'Stop'
 $repoPath = Split-Path -Parent $PSScriptRoot

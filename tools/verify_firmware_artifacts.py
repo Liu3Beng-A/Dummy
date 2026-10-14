@@ -93,7 +93,15 @@ for name in targets:
         m=re.match(r'[0-9a-f]+ <(.+)>:',block)
         if m:functions[m[1]]=block
     hot={}
+    preparation={}
     for fn,block in functions.items():
+        if kind and (fn.startswith('MotorStream::Curve::Build(') or
+                     fn.startswith('MotorStream::(anonymous namespace)::Difference(')):
+            calls=re.findall(r'\t(?:bl|blx)\s+[^<]*<([^>]+)>',block)
+            forbidden=re.findall(r'<(__aeabi_[df][^>]*|malloc|operator new[^>]*)>',block)
+            assert not forbidden,(name,'integer preparation',fn,forbidden)
+            preparation[fn]={'bytes':symbols.get(fn,{}).get('bytes'), 'direct_calls':calls,
+                             'float_or_allocation_calls':forbidden}
         if any(fn.startswith(p) for p in ('MotorStream::Curve::Tick(', 'MotorStream::Runtime::Tick(',
                                           'Motor::Controller::TickStream(', 'Tim4Callback20kHz',
                                           'Motor::Controller::CloseLoopControlTick(', 'MT6816Base::UpdateAngle(')):
@@ -103,11 +111,18 @@ for name in targets:
                 assert not forbidden,(name,fn,forbidden)
             hot[fn]={'static_instruction_lines':len(re.findall(r'^\s+[0-9a-f]+:\s+[0-9a-f ]+\s+\S+',block,re.M)),
                      'direct_calls':calls,'float_or_allocation_calls':forbidden}
-    if kind: assert len(hot)>=3
+    if kind:
+        assert len(hot)>=3
+        assert any(fn.startswith('MotorStream::Curve::Build(') for fn in preparation), (name,'missing preparation evidence')
+    # Include alignment holes between data/bss and the heap/stack reservation,
+    # matching the linker's region usage rather than summing section payloads.
+    linked_ram=max(v['address']+v['bytes']-0x20000000 for k,v in sections.items()
+                   if k in ('.data','.bss','._user_heap_stack','.heap','.stack'))
     result['targets'][name]={'flash_bytes':len(binary),'flash_limit':flash_limit,'flash_spare_bytes':flash_limit-len(binary),
         'ram_static_bytes':ram_static,'ram_limit':ram_limit,'msp_reserved_bytes':stack_reserved,
+        'linked_ram_bytes':linked_ram,'linked_ram_spare_bytes':ram_limit-linked_ram,
         'c_heap_address_capacity':heap,'hex_loaded_bytes':count_bytes,'source_files_verified':inputs,
-        'sections':sections,'hot_paths':hot,'stack_frames_count':len(stack_usage),
+        'sections':sections,'hot_paths':hot,'integer_preparation':preparation,'stack_frames_count':len(stack_usage),
         'sha256':{ext:hashlib.sha256((art/(name+'.'+ext)).read_bytes()).hexdigest() for ext in ('bin','hex','elf','map')}}
 result.update(zip(('release','buildset','epoch','source_sha256'),identity))
 (out/'verification.json').write_text(json.dumps(result,indent=2,ensure_ascii=False),encoding='utf-8')

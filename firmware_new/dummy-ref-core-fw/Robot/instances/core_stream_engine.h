@@ -72,7 +72,9 @@ private:
     uint16_t syncCounter=0;
     uint32_t openedAt=0, hostAt=0, transferAt=0, retryAt=0, startAt=0, lastStart=0, closeAt=0, closeRetryAt=0;
     uint32_t lastSync=0, lastPoll=0, maxPollGap=0, revision=0;
-    uint8_t selected=0, capabilities=0, opened=0, prepared=0, committedMask=0;
+    // Diagnostic membership survives CLOSE. Transport membership is still
+    // cleared on release, so this byte grants no transmission authority.
+    uint8_t selected=0, diagnosticMask=0, capabilities=0, opened=0, prepared=0, committedMask=0;
     uint8_t startedMask=0, completedMask=0, closeMask=0, head=0, count=0, txCursor=0, txPart=0;
     uint8_t transferPhase=0, probeCursor=0, reason=0;
     bool havePrevious=false, haveCommitted=false, endAccepted=false, endCommitted=false;

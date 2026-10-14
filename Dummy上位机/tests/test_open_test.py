@@ -224,7 +224,7 @@ class OpenTestViewTests(unittest.TestCase):
         self.assertEqual(item['code'], 0); self.assertEqual(item['session'], 55)
         for line in ('STREAM_TEST s=65536 node=4 st=DONE open=1 closed=1 code=0',
                      'STREAM_TEST s=2 node=8 st=DONE open=1 closed=1 code=0',
-                     'STREAM_NODE node=1 n=1 field=51 value=0'):
+                     'STREAM_NODE node=1 n=1 field=64 value=0'):
             with self.assertRaises(ValueError):
                 parse_stream_line(line)
 

@@ -73,7 +73,11 @@
 
 本版仅有限目标；新能力确认后禁连续手柄/鼠标MoveL，单点/MoveJ/夹爪/预览保留，旧固件兼容。原生执行、关闭、到位确认期间INT新运动明确拒绝；SEQ/TRJ可排队有限点，但不承诺TRJ笛卡尔blend。TCP标定、固定TCP手动移轨、途中重规划后续另行授权。TCP/RGB共保留sector11，显式TOOL_SAVE只允许idle DISABLED，共扇区保存必须保留对方已保存记录而非未保存RAM草稿。
 
-当前构建默认release=2026101401；五套统一firmware_artifacts，以CURRENT_RELEASE/manifest/verification为准。主控command8192B和realtime4096B为静态SRAM栈，USB/UART6144B、MSP2048B；电机MSP4096B。cmd队列160字符静态存储。每次修改需重新核算linked RAM、Flash、.su和F10320k热路；14.01电机最少620B Flash余量。静态工程栈预算和离线通过不能代替#STACK/DWT实际测量。新功能同步串口助手_old.py能力与有限MoveL门禁，不修改仅参考的串口助手.py。完整流程、烧录及分步验收见docs/主控TCP与地轨协同_2026101401.txt。
+当前构建默认release=2026101402；五套统一firmware_artifacts，以CURRENT_RELEASE/manifest/verification为准。主控command8192B和realtime4096B为静态SRAM栈，USB/UART6144B、MSP2048B；电机MSP4096B。cmd队列160字符静态存储。每次修改需重新核算linked RAM、Flash、.su和F10320k热路；14.02电机最少236B Flash余量，禁止为扩功能占用既有EEPROM或编码器分区。静态工程栈预算和离线通过不能代替#STACK/DWT实际测量。新功能同步串口助手_old.py能力与有限MoveL门禁，不修改仅参考的串口助手.py。完整有限MoveL流程见docs/主控TCP与地轨协同_2026101401.txt；本轮电机修复及J3/J5验收见docs/电机实时性修复与J3_J5非零测试_2026101402.txt。
+
+14.02非零曲线准备为有界整数Q40映射，20ms/400tick/q-v-a协议和整段硬界不变；非终端曲线不重复全量重置到位窗口，END仍需新50ms实际稳态证据。DCE/PID复用本次限流值，输出最终限流仍保留。TM1诊断字段51为0x544d0001，52..56为每64tick抽样分段峰值，57..59为逐tick的进入/结束、有效RUNNING、锁态/软停被计时回调主体峰值，60..62为抽样计数、63为除数。独立峰值不可相加，计时终点后仍有统计尾部，不能把这些读数或ARM静态核查称为完整ISR WCET。
+
+上位机仅在独立诊断入口开放J3 -0.5°、J5 +0.5°的4s单轴往返（201点），精确整数SEED，不调用IK、不自动使能、不恢复普通PC运动后端。必须观察RUNNING后相对启动前实际回读的正确方向位移、实际返回、DONE/CLOSE/模式恢复与本轮late/丢弃增量为0，并有有效RUNNING计时证据；不允许将发完、原地快路径或旧回包视作非零验收通过。首阶段仅测试J3/J5，整机MoveL需后续实机逐步验收。本轮不自动烧录或下发设备运动。
 
 ## 4. 工作时行为指引
 

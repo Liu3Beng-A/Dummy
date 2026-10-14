@@ -15,7 +15,7 @@ uint8_t CoreStreamEngine::Begin(uint16_t token,uint8_t mask,uint32_t now,bool op
     if(!port.Allowed()) return BLOCKED;
     testOnly=openTest;testSession=openTest?token:0;testOpened=testCloseFailed=false;testContacted=0;
     testNode=1;while(!(mask&(1U<<(testNode-1))))++testNode;
-    session=token; selected=mask; capabilities=opened=prepared=committedMask=0;
+    session=token; selected=diagnosticMask=mask; capabilities=opened=prepared=committedMask=0;
     featureSession=token; stableEntryMask=0;
     startedMask=completedMask=head=count=txCursor=txPart=transferPhase=probeCursor=reason=0;
     next=committed=finalSequence=syncCounter=0;
@@ -163,7 +163,7 @@ void CoreStreamEngine::Transfer(uint32_t now) {
 }
 uint16_t CoreStreamEngine::LastExecuted() const {
     uint16_t value=0xFFFF;
-    for(unsigned i=0;i<7;++i) if((selected&(1U<<i)) && executed[i]<value) value=executed[i];
+    for(unsigned i=0;i<7;++i) if((diagnosticMask&(1U<<i)) && executed[i]<value) value=executed[i];
     return value==0xFFFF ? 0 : value;
 }
 void CoreStreamEngine::Poll(uint32_t now) {

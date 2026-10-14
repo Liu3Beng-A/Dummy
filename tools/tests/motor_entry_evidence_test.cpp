@@ -156,7 +156,7 @@ int main() {
  reset();begin(64);command(START,64,1,START_DELAY_TICKS);const auto anchor=stream.anchor;
  controller.estVelocity=9999;ticks(100);command(START,64,1,START_DELAY_TICKS-100);
  CHECK(stream.armed && stream.anchor==anchor && entrySnapshot[14]==0);
- for(unsigned field=23;field<=DIAG_LAST;++field){command(DIAG,123,uint16_t(field));CHECK(Read32(replies.back().bytes+4)==entrySnapshot[field-23]);}
+ for(unsigned field=23;field<=DIAG_START_EVIDENCE_MEAN;++field){command(DIAG,123,uint16_t(field));CHECK(Read32(replies.back().bytes+4)==entrySnapshot[field-23]);}
 
  // After retirement history rolls over, a reused old START token belongs to
  // its NEW OPEN. Historical failure/success cannot bypass the new START gate.

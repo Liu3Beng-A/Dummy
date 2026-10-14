@@ -9,6 +9,9 @@
 BoardConfig_t boardConfig;
 Motor motor;
 volatile uint32_t motorControlTiming[11];
+volatile uint32_t motorStreamTiming[11];
+bool motorTimingSampling;
+uint32_t motorTimingCheckpointCycle;
 TB67H450 tb67H450;
 MT6816 mt6816;
 EncoderCalibrator encoderCalibrator(&motor);
@@ -226,6 +229,7 @@ extern "C" void Tim1Callback100Hz()
 extern "C" void Tim4Callback20kHz()
 {
     static uint32_t previousCycle;
+    static uint8_t timingDivider;
     const uint32_t began = DWT->CYCCNT;
     const uint32_t gap = began - previousCycle;
     if (previousCycle && gap > motorCanDiagnostic[MC_CONTROL_GAP]) motorCanDiagnostic[MC_CONTROL_GAP] = gap;
@@ -234,6 +238,12 @@ extern "C" void Tim4Callback20kHz()
     const uint8_t phase=encoderCalibrator.isTriggered ? 2 :
         ((motor.controller->modeRunning==Motor::MODE_STREAM_JOINT || motor.controller->requestMode==Motor::MODE_STREAM_JOINT) ? 1 : 0);
     if (gap>motorControlTiming[phase+6] && havePrevious) motorControlTiming[phase+6]=gap;
+    const uint8_t timingPhase=encoderCalibrator.isTriggered ? 0 : motor.controller->StreamTimingPhase();
+    motorTimingSampling=timingPhase && (++timingDivider & 63U)==0;
+    if (motorTimingSampling) {
+        motorTimingCheckpointCycle=began;
+        ++motorStreamTiming[timingPhase+7];
+    }
     __HAL_TIM_CLEAR_IT(&htim4, TIM_IT_UPDATE);
 
     motor.controller->TickStreamClock();
@@ -242,6 +252,7 @@ extern "C" void Tim4Callback20kHz()
     else
         motor.Tick20kHz();
     const uint32_t elapsed = DWT->CYCCNT - began;
+    if (timingPhase && elapsed>motorStreamTiming[timingPhase+4]) motorStreamTiming[timingPhase+4]=elapsed;
     if (elapsed > motorCanDiagnostic[MC_CONTROL_MAX]) motorCanDiagnostic[MC_CONTROL_MAX] = elapsed;
     if (elapsed>motorControlTiming[phase]) motorControlTiming[phase]=elapsed;
     if (elapsed >= SystemCoreClock / 20000U || __HAL_TIM_GET_FLAG(&htim4, TIM_FLAG_UPDATE)) {

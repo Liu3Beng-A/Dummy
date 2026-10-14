@@ -18,6 +18,7 @@ void Motor::Tick20kHz()
     if (encoderCycles>motorControlTiming[9]) motorControlTiming[9]=encoderCycles;
     // 2.Motor Control Update
     CloseLoopControlTick();
+    if (motorTimingSampling) MotorTimingCheckpoint(4);
     const uint32_t controlCycles=DWT->CYCCNT-beforeControl;
     if (controlCycles>motorControlTiming[10]) motorControlTiming[10]=controlCycles;
 }
@@ -95,10 +96,26 @@ void Motor::CloseLoopControlTick()
         int32_t candidateDelta = static_cast<int32_t>(encoder->angleData.rectifiedAngle) - controller->realLapPosition;
         if (candidateDelta > MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 2) candidateDelta -= MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
         else if (candidateDelta < -MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS / 2) candidateDelta += MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS;
-        const int64_t allowed = controller->transportMissingTicks == 0 ?
-            boardConfig.velocityLimit / motionPlanner.CONTROL_FREQUENCY + 64 :
-            static_cast<int64_t>(boardConfig.velocityLimit) *
-                (controller->transportMissingTicks + 1) / motionPlanner.CONTROL_FREQUENCY + 64;
+        int64_t allowed;
+        if (controller->transportMissingTicks == 0)
+            allowed = boardConfig.velocityLimit / motionPlanner.CONTROL_FREQUENCY + 64;
+        else
+        {
+            const uint32_t elapsedTicks = controller->transportMissingTicks + 1;
+            const int32_t velocityLimit = boardConfig.velocityLimit;
+            if (velocityLimit >= 0 && elapsedTicks <= 20001U && motionPlanner.CONTROL_FREQUENCY == 20000)
+            {
+                // Exact floor(v*t/20000): both products fit u32 even for
+                // INT32_MAX and the existing 20000-missing-tick ceiling.
+                // r*t<=399999999; the full quotient<=2147591021.
+                const uint32_t velocity = static_cast<uint32_t>(velocityLimit);
+                const uint32_t quotient = velocity / 20000U;
+                const uint32_t remainder = velocity % 20000U;
+                allowed = static_cast<int64_t>(quotient * elapsedTicks + remainder * elapsedTicks / 20000U) + 64;
+            }
+            else
+                allowed = static_cast<int64_t>(velocityLimit) * elapsedTicks / motionPlanner.CONTROL_FREQUENCY + 64;
+        }
         // A parity-valid discontinuity is still not usable feedback. Genuine
         // SPI gaps get their elapsed-motion allowance; repeatedly implausible
         // valid packets do not grow that allowance until a jump is accepted.
@@ -145,6 +162,8 @@ void Motor::CloseLoopControlTick()
     // Estimate Error
     controller->estError = controller->softPosition - controller->estPosition;
 
+    if (motorTimingSampling) MotorTimingCheckpoint(0);
+
     controller->TickProtection();
 
     // Requests are submitted by CAN; all ramp/hold transitions run at 20kHz.
@@ -152,6 +171,8 @@ void Motor::CloseLoopControlTick()
     __disable_irq();
     const bool softStopOwnsControl = controller->TickInternalProtection() || controller->TickSoftStop();
     __set_PRIMASK(stopIrqMask);
+
+    if (motorTimingSampling) MotorTimingCheckpoint(1);
 
     /************************************ Ctrl Loop ************************************/
     if (controller->isStalled ||
@@ -204,6 +225,8 @@ void Motor::CloseLoopControlTick()
                 break;
         }
     }
+
+    if (motorTimingSampling) MotorTimingCheckpoint(2);
 
     if (!softStopOwnsControl)
     {
@@ -325,6 +348,8 @@ void Motor::CloseLoopControlTick()
     controller->softDisable = controller->goalDisable;
     controller->softBrake = controller->goalBrake;
 
+    if (motorTimingSampling) MotorTimingCheckpoint(3);
+
     /******************************** State Check ********************************/
     int32_t current = abs(controller->focCurrent);
 
@@ -389,7 +414,17 @@ void Motor::CloseLoopControlTick()
 
 void Motor::Controller::CalcCurrentToOutput(int32_t current)
 {
-    const int32_t limit = EffectiveCurrentLimit();
+    ApplyCurrentToOutput(current, EffectiveCurrentLimit());
+}
+
+
+// Share the final integer clamp/phase/driver path across DCE, PID and direct
+// current modes. Keep O3 control arithmetic; only prevent body duplication.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+void Motor::Controller::ApplyCurrentToOutput(int32_t current, int32_t limit)
+{
     if (current > limit) current = limit;
     else if (current < -limit) current = -limit;
     focCurrent = current;
@@ -429,7 +464,9 @@ void Motor::Controller::CalcPidToOutput(int32_t _speed)
     if (config->pid.output > currentLimit) config->pid.output = currentLimit;
     else if (config->pid.output < -currentLimit) config->pid.output = -currentLimit;
 
-    CalcCurrentToOutput(config->pid.output);
+    // No lower-priority CAN/main mutation can interrupt this 20kHz control
+    // tick. Reuse its limit; ApplyCurrentToOutput still clamps final output.
+    ApplyCurrentToOutput(config->pid.output, currentLimit);
 }
 
 
@@ -461,7 +498,7 @@ void Motor::Controller::CalcDceToOutput(int32_t _location, int32_t _speed)
     if (config->dce.output > currentLimit) config->dce.output = currentLimit;
     else if (config->dce.output < -currentLimit) config->dce.output = -currentLimit;
 
-    CalcCurrentToOutput(config->dce.output);
+    ApplyCurrentToOutput(config->dce.output, currentLimit);
 }
 
 
@@ -778,6 +815,16 @@ void Motor::Controller::InvalidatePositionEntry()
     __set_PRIMASK(irq);
 }
 
+// The same bounded reset is used by motion, STOP and explicit invalidation.
+// Share it without changing control optimization or any reset/arrival gate.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+// The same bounded reset is used by motion, STOP and explicit invalidation.
+// Share it without changing control optimization or any reset/arrival gate.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 void Motor::Controller::ResetPositionCompletion(bool newGoal)
 {
     positionStableTicks = 0;
@@ -788,12 +835,27 @@ void Motor::Controller::ResetPositionCompletion(bool newGoal)
     positionCompletionMode = uint8_t(modeRunning);
     positionEvidenceValid = false;
     positionSettled = false;
+    positionStreamSuspended = false;
     if (newGoal) positionCompleted = false;
 }
 
 bool Motor::Controller::TickPositionCompletion()
 {
     using namespace MotionCompletionProtocol;
+    // A running reference cannot complete or accumulate entry evidence. Retire
+    // it once, instead of resetting goal/home/min/max/64-bit sums at every
+    // 50us tick. Explicit setters/bad feedback still invalidate immediately.
+    // Leaving this phase (including END) starts a wholly new 50ms window.
+    if (modeRunning == MODE_STREAM_JOINT && requestMode == MODE_STREAM_JOINT && !StreamTerminal())
+    {
+        if (!positionStreamSuspended)
+        {
+            ResetPositionCompletion(true);
+            positionStreamSuspended = true;
+        }
+        return false;
+    }
+    if (positionStreamSuspended) ResetPositionCompletion(true);
     const bool streamMode = modeRunning == MODE_STREAM_JOINT && requestMode == MODE_STREAM_JOINT && StreamTerminal();
     if (positionCompletionTarget != goalPosition ||
         positionCompletionHome != context->config.motionParams.encoderHomeOffset ||
