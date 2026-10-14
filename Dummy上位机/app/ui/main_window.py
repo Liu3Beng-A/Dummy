@@ -15,7 +15,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDockWidget, QFileDialog, QFormLayout,
-    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLayout, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
@@ -321,30 +321,56 @@ class MainWindow(QMainWindow):
         scene.setObjectName("Card")
         scene_layout = QVBoxLayout(scene)
         scene_layout.setContentsMargins(10, 10, 10, 8)
-        toolbar = QHBoxLayout()
+        self.viewer_toolbar = QWidget()
+        self.viewer_toolbar.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._viewer_toolbar_grid = QGridLayout(self.viewer_toolbar)
+        self._viewer_toolbar_grid.setContentsMargins(0, 0, 0, 0)
+        self._viewer_toolbar_grid.setSpacing(6)
+        self._viewer_toolbar_grid.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self.viewer_camera_controls = QWidget()
+        camera_row = QHBoxLayout(self.viewer_camera_controls)
+        camera_row.setContentsMargins(0, 0, 0, 0)
+        camera_row.setSpacing(6)
+        self.viewer_display_controls = QWidget()
+        display_row = QHBoxLayout(self.viewer_display_controls)
+        display_row.setContentsMargins(0, 0, 0, 0)
+        display_row.setSpacing(6)
         self._viewer_mode_preference = 1 if self.store.settings.get("viewer_mode") == "actual" else 0
         self.viewer_mode = self._combo(("目标预览", "实际跟随"), self._viewer_mode_preference)
         self.viewer_mode.currentIndexChanged.connect(self._view_mode_changed)
         for title, view in (("等轴", "isometric"), ("正面", "front"), ("俯视", "top")):
-            toolbar.addWidget(button(title, lambda value=view: self.viewer.set_camera(value)))
-        toolbar.addWidget(button("复位视角", lambda: self.viewer.reset_camera()))
+            camera_row.addWidget(button(title, lambda value=view: self.viewer.set_camera(value)))
+        camera_row.addWidget(button("复位视角", lambda: self.viewer.reset_camera()))
+        camera_row.addStretch()
         self.viewer_grid_button = button("网格")
         self.viewer_grid_button.setObjectName("ViewerToggle")
         self.viewer_grid_button.setCheckable(True)
         self.viewer_grid_button.setChecked(self.store.settings.get("show_grid", True))
         self.viewer_grid_button.setToolTip("显示或隐藏三维地面网格")
         self.viewer_grid_button.toggled.connect(self._grid_changed)
-        toolbar.addWidget(self.viewer_grid_button)
+        display_row.addWidget(self.viewer_grid_button)
         self.viewer_axes_button = button("坐标轴")
         self.viewer_axes_button.setObjectName("ViewerToggle")
         self.viewer_axes_button.setCheckable(True)
         self.viewer_axes_button.setChecked(self.store.settings.get("show_axes", True))
         self.viewer_axes_button.setToolTip("显示或隐藏三维坐标轴")
         self.viewer_axes_button.toggled.connect(self._axes_changed)
-        toolbar.addWidget(self.viewer_axes_button)
-        toolbar.addStretch()
-        toolbar.addWidget(self.viewer_mode)
-        scene_layout.addLayout(toolbar)
+        display_row.addWidget(self.viewer_axes_button)
+        self.viewer_target_button = button("目标虚体")
+        self.viewer_target_button.setObjectName("ViewerToggle")
+        self.viewer_target_button.setCheckable(True)
+        self.viewer_target_button.setChecked(self.store.settings.get("show_target_ghost", True))
+        self.viewer_target_button.setToolTip("仅控制目标模型虚体的显示；不改变实际姿态、运动目标或发送指令。")
+        self.viewer_target_button.toggled.connect(self._target_visibility_changed)
+        display_row.addWidget(self.viewer_target_button)
+        display_row.addStretch()
+        display_row.addWidget(self.viewer_mode)
+        self._viewer_toolbar_wrapped = True
+        self._viewer_toolbar_grid.addWidget(self.viewer_camera_controls, 0, 0, 1, 2)
+        self._viewer_toolbar_grid.addWidget(self.viewer_display_controls, 1, 0, 1, 2)
+        self._viewer_toolbar_grid.setColumnStretch(0, 1)
+        self.viewer_toolbar.installEventFilter(self)
+        scene_layout.addWidget(self.viewer_toolbar)
         self.viewer = RobotView()
         self.viewer.setMinimumSize(320, 260)
         self.viewer.ready.connect(self._viewer_ready)
@@ -552,6 +578,7 @@ class MainWindow(QMainWindow):
             self._suspend_gamepad("切换至界面输入，手柄控制已暂停")
         for control in self.quick_point_buttons:
             control.setVisible(index == 0)
+        self.quick_points_scroll.setVisible(index == 0)
         self.motion_input_stack.setCurrentIndex(index)
         self._schedule_motion_fit()
         self._sync_viewer_mode()
@@ -586,6 +613,8 @@ class MainWindow(QMainWindow):
                 return True
             return self._start_gamepad_reader()
         if action == "claim":
+            if self.controller.cartesian.native_tcp:
+                return session.claim()
             if (self.input_mode.currentIndex() != 1 or self.navigation.currentRow() != 0 or
                     self.isMinimized() or self._gamepad_locked()):
                 return False
@@ -643,6 +672,7 @@ class MainWindow(QMainWindow):
         self.gamepad_panel.set_reader_status(status)
         if self._gamepad_settings_dialog is not None:
             self._gamepad_settings_dialog.set_reader_status(status)
+        self._apply_gamepad_conflicts()
 
     def _gamepad_state_changed(self, state):
         if self._closed:
@@ -679,6 +709,28 @@ class MainWindow(QMainWindow):
         if not locked:
             self.motor_page_content.setEnabled(self.connection_combo.currentText() == "USB")
         self.gamepad_settings_button.setEnabled(not locked)
+        finite_only = bool(self.controller.cartesian.native_tcp)
+        message = "当前固件支持单个笛卡尔目标；连续操控暂不可用。"
+        self.gamepad_panel.claim_button.setEnabled(not finite_only and not self._gamepad_state.get("claimed", False))
+        self.gamepad_panel.claim_button.setToolTip(message if finite_only else "")
+        saved = self.__dict__.setdefault("_finite_drag_states", {})
+        for control, kind in ((self.l_drag, "l"), (self.teaching_drag, "teaching")):
+            blocked = finite_only and (kind == "l" or self.teaching_tabs.currentIndex() == 1)
+            if blocked:
+                if control not in saved:
+                    saved[control] = self._gamepad_conflict_states.get(
+                        control, (control.isEnabledTo(control.parentWidget()), control.toolTip()))
+                self._cancel_drag(kind)
+                if kind == "l":
+                    self.fields["movel_drag_enable"].set(False)
+                with QSignalBlocker(control):
+                    control.setChecked(False)
+                control.setEnabled(False)
+                control.setToolTip(message)
+            elif control in saved and not locked:
+                enabled, tooltip = saved.pop(control)
+                control.setEnabled(enabled)
+                control.setToolTip(tooltip)
 
     def _gamepad_target_changed(self, target):
         if self._closed or not target.get("flange") or len(target["flange"]) != 6:
@@ -818,11 +870,11 @@ class MainWindow(QMainWindow):
         self.quick_points_panel = QFrame()
         self.quick_points_panel.setObjectName("Card")
         box = QVBoxLayout(self.quick_points_panel)
-        box.setContentsMargins(8, 6, 8, 8)
-        box.setSpacing(6)
+        box.setContentsMargins(8, 2, 8, 2)
+        box.setSpacing(2)
         header = QHBoxLayout()
         title = QLabel("点位快捷加载")
-        title.setToolTip("按示教列表顺序显示前 4 个点位；点击仅加载目标和预览。")
+        title.setToolTip("按示教列表顺序显示前 8 个点位；点击仅加载目标和预览。")
         header.addWidget(title)
         header.addStretch()
         self.quick_point_save = button("保存当前点位", self._save_motion_point)
@@ -832,16 +884,28 @@ class MainWindow(QMainWindow):
         self.quick_point_manage.setToolTip("打开点位示教，保存、编辑或调整点位顺序")
         header.addWidget(self.quick_point_manage)
         box.addLayout(header)
-        grid = QGridLayout()
+        body = QWidget()
+        grid = QGridLayout(body)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(6)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         self.quick_point_buttons = []
-        for index in range(4):
+        for index in range(8):
             control = PointShortcutButton(index + 1, lambda slot=index: self._load_quick_point(slot))
             self.quick_point_buttons.append(control)
             grid.addWidget(control, index // 2, index % 2)
-        box.addLayout(grid)
+        # Preserve full button rows; only this grid scrolls in compact windows.
+        body.setMinimumHeight(grid.minimumSize().height())
+        self.quick_points_scroll = QScrollArea()
+        self.quick_points_scroll.setObjectName("QuickPointScroll")
+        self.quick_points_scroll.setWidgetResizable(True)
+        self.quick_points_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.quick_points_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.quick_points_scroll.setMinimumHeight(self.quick_point_buttons[0].height())
+        self.quick_points_scroll.setMaximumHeight(grid.minimumSize().height())
+        self.quick_points_scroll.setWidget(body)
+        box.addWidget(self.quick_points_scroll)
         layout.addWidget(self.quick_points_panel)
 
     def _refresh_quick_points(self):
@@ -850,7 +914,7 @@ class MainWindow(QMainWindow):
         self._apply_gamepad_conflicts()
 
     def _load_quick_point(self, index):
-        if self._gamepad_locked() or not 0 <= index < min(4, len(self.points)):
+        if self._gamepad_locked() or not 0 <= index < min(len(self.quick_point_buttons), len(self.points)):
             return
         self.input_mode.setCurrentIndex(0)
         record = self.points[index]
@@ -1658,7 +1722,8 @@ class MainWindow(QMainWindow):
         backend_box.addWidget(self.cartesian_execution)
         self.cartesian_status = hint("主控逆解")
         backend_box.addWidget(self.cartesian_status)
-        backend_box.addWidget(hint("当前 MoveL 由主控对目标位置求逆解，再执行普通关节运动；末端直线插补和地轨自动协同尚未实现。世界 / TCP 坐标转换及点位工具偏移保留。TCP 为名义夹爪中心，标定及固定 TCP 移轨暂未实现。终端保留 OPEN 和原地通信诊断入口。"))
+        backend_box.addWidget(hint("运动由主控规划。新主控固件支持有限 TCP 直线和必要时地轨协同；使用世界 TCP 前请查询主控能力。旧 @ 保持基座 / 法兰坐标，兼容旧固件。TCP 为名义夹爪中心，标定及连续手柄改道暂未实现；终端保留 OPEN 和原地通信诊断入口。"))
+        backend_box.addWidget(button("查询主控 TCP / 地轨能力", lambda: self.controller.send_cmd("#KIN_CONFIG")))
         layout.addWidget(backend_group)
         gamepad_group, gamepad_box = self._group("手柄输入")
         gamepad_box.addWidget(hint("映射、死区、速度与设备选择保存在本机。默认不启动手柄采集；检查原始输入不接管机器人。"))
@@ -2008,6 +2073,9 @@ class MainWindow(QMainWindow):
                     self._trace_gamepad_focus_event(watched, kind)
         if watched is getattr(self, "motion_controls", None) and event.type() == QEvent.Type.Resize:
             self._schedule_motion_fit()
+        if (watched is getattr(self, "viewer_toolbar", None)
+                and event.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest)):
+            self._schedule_viewer_toolbar_fit()
         if watched is getattr(self, "custom_command", None) and event.type() == QEvent.Type.KeyPress:
             if event.key() == Qt.Key.Key_Up:
                 self.controller._history_up(None)
@@ -2180,6 +2248,9 @@ class MainWindow(QMainWindow):
         self._queue_drag(kind)
 
     def _drag_enabled(self, kind):
+        if self.controller.cartesian.native_tcp and (kind == "l" or
+                kind == "teaching" and self.teaching_tabs.currentIndex() == 1):
+            return False
         if kind == "teaching":
             return self.teaching_drag.isChecked()
         flag = {"j": "movej_drag_enable", "l": "movel_drag_enable", "hand": "hand_pos_drag_enable"}[kind]
@@ -2371,11 +2442,12 @@ class MainWindow(QMainWindow):
         self._cancel_drag("teaching")
         self._teaching_sync = None
         self._preview_changed()
+        self._apply_gamepad_conflicts()
 
     def _teaching_target_edited(self):
         self._preview_changed()
         if (not self._building and not self._gamepad_locked() and
-                not self.controller._suppress_drag_send and self.teaching_drag.isChecked()):
+                not self.controller._suppress_drag_send and self._drag_enabled("teaching")):
             self._queue_drag("teaching")
 
     def _send_teaching_target(self):
@@ -2435,12 +2507,46 @@ class MainWindow(QMainWindow):
     def _sync_viewer_mode(self):
         gamepad_mode = self.input_mode.currentIndex() == 1
         self.viewer_mode.setVisible(not gamepad_mode)
+        self.viewer_target_button.setVisible(not gamepad_mode)
+        self.viewer.set_target_visible(self.viewer_target_button.isChecked())
+        self._schedule_viewer_toolbar_fit()
         self.viewer.set_follow_actual(self._viewer_mode_preference == 1)
         self.viewer.set_actual_only(gamepad_mode)
         if gamepad_mode:
             self.viewer.set_cartesian_target(None)
             self.actual_status.setText(f"左侧显示最近实际姿态 · {self._gripper_display_hint()}")
         self._sync_feedback_display()
+
+    def _schedule_viewer_toolbar_fit(self):
+        if self._closed or getattr(self, "_viewer_toolbar_fit_pending", False):
+            return
+        self._viewer_toolbar_fit_pending = True
+        QTimer.singleShot(0, self._fit_viewer_toolbar)
+
+    def _fit_viewer_toolbar(self):
+        self._viewer_toolbar_fit_pending = False
+        if self._closed:
+            return
+        required = (self.viewer_camera_controls.minimumSizeHint().width()
+                    + self.viewer_display_controls.minimumSizeHint().width()
+                    + self._viewer_toolbar_grid.horizontalSpacing())
+        wrapped = required > self.viewer_toolbar.contentsRect().width()
+        if wrapped == self._viewer_toolbar_wrapped:
+            return
+        self._viewer_toolbar_wrapped = wrapped
+        self._viewer_toolbar_grid.removeWidget(self.viewer_camera_controls)
+        self._viewer_toolbar_grid.removeWidget(self.viewer_display_controls)
+        if wrapped:
+            self._viewer_toolbar_grid.addWidget(self.viewer_camera_controls, 0, 0, 1, 2)
+            self._viewer_toolbar_grid.addWidget(self.viewer_display_controls, 1, 0, 1, 2)
+        else:
+            self._viewer_toolbar_grid.addWidget(self.viewer_camera_controls, 0, 0)
+            self._viewer_toolbar_grid.addWidget(self.viewer_display_controls, 0, 1)
+
+    def _target_visibility_changed(self, visible):
+        self.viewer.set_target_visible(visible)
+        if not self._building:
+            self.store.update_settings(show_target_ghost=visible)
 
     def _sync_feedback_display(self):
         # Ownership does not pause feedback; both inputs use the software setting.
@@ -2570,7 +2676,8 @@ class MainWindow(QMainWindow):
             self._restore_points(len(self.points) - 1)
         self._load_point_target(self.points[-1], preview=False)
         self.controller.log(f"已保存点位：{name}", "INFO")
-        self.statusBar().showMessage(f"已保存：{name}" + (" · 快捷区显示列表前 4 个点位" if len(self.points) > 4 else ""))
+        self.statusBar().showMessage(f"已保存：{name}" + (f" · 快捷区显示列表前 {len(self.quick_point_buttons)} 个点位"
+                                                        if len(self.points) > len(self.quick_point_buttons) else ""))
 
     def _replace_point(self):
         index = self._selected_row()
@@ -2785,6 +2892,7 @@ class MainWindow(QMainWindow):
         stylesheet = stylesheet.replace("{{ICONS}}", resource_path("icons").as_posix())
         QApplication.instance().setStyleSheet(stylesheet)
         self._schedule_motion_fit()
+        self._schedule_viewer_toolbar_fit()
         self.viewer.set_theme(theme)
 
     def _theme_setting(self, index):

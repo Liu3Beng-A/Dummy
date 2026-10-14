@@ -20,7 +20,8 @@ DEFAULT_SETTINGS = {
     "hide_rgb_logs": True,
     "port": "", "connection_type": "USB", "geometry": "",
     "window_state": "", "viewer_mode": "preview", "show_grid": True,
-    "show_axes": True, "auto_poll": True, "poll_enabled": True, "model_path": "",
+    "show_axes": True, "show_target_ghost": True,
+    "auto_poll": True, "poll_enabled": True, "model_path": "",
     "gamepad_config": default_gamepad_config(),
     "gamepad_defaults_revision": 8,
     "cartesian_backend": "firmware",
@@ -248,7 +249,7 @@ class AppStore:
         for key in ("port", "geometry", "window_state", "model_path"):
             if not isinstance(settings[key], str):
                 settings[key] = ""
-        for key in ("show_grid", "show_axes", "auto_poll", "poll_enabled", "hide_joint_logs", "hide_rgb_logs"):
+        for key in ("show_grid", "show_axes", "show_target_ghost", "auto_poll", "poll_enabled", "hide_joint_logs", "hide_rgb_logs"):
             if not isinstance(settings[key], bool):
                 settings[key] = DEFAULT_SETTINGS[key]
 

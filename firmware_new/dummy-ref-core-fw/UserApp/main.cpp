@@ -17,6 +17,9 @@ DummyRobot dummy(&hcan1);
 
 /* Thread Definitions -----------------------------------------------------*/
 osThreadId_t controlLoopFixUpdateHandle;
+// Static SRAM avoids consuming additional CCM startup heap for RT headroom.
+alignas(8) static StackType_t realtimeTaskStack[4096 / sizeof(StackType_t)];
+static StaticTask_t realtimeTaskControlBlock;
 void ThreadControlLoopFixUpdate(void* argument)
 {
     // §8.2 + §8.8 — 5ms 节奏累加，每 4 次（即 20ms / 50Hz）触发一次角度查询。
@@ -76,7 +79,7 @@ void ThreadControlLoopFixUpdate(void* argument)
 
 // Keep the command stack out of the nearly full 64 KiB CCM RTOS heap.
 // Size is bytes in CMSIS; FreeRTOS's StackType_t array uses words.
-alignas(8) static StackType_t commandTaskStack[4096 / sizeof(StackType_t)];
+alignas(8) static StackType_t commandTaskStack[8192 / sizeof(StackType_t)];
 static StaticTask_t commandTaskControlBlock;
 osThreadId_t ControlLoopUpdateHandle;
 void ThreadControlLoopUpdate(void* argument)
@@ -226,7 +229,10 @@ void Main(void)
     // Init & Run User Threads.
     const osThreadAttr_t controlLoopTask_attributes = {
         .name = "ControlLoopFixUpdateTask",
-        .stack_size = 2000,
+        .cb_mem = &realtimeTaskControlBlock,
+        .cb_size = sizeof(realtimeTaskControlBlock),
+        .stack_mem = realtimeTaskStack,
+        .stack_size = sizeof(realtimeTaskStack),
         .priority = (osPriority_t) osPriorityRealtime,
     };
     controlLoopFixUpdateHandle = osThreadNew(ThreadControlLoopFixUpdate, nullptr,

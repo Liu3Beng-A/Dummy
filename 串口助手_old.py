@@ -228,6 +228,12 @@ class RobotSerialAssistantOld:
         self._protection_entries = {"STALL": {}, "CAL": {}}
         self._protection_values = {"STALL": {}, "CAL": {}}
         self._tx_generation = 0
+        self._kin_connection = 0
+        self._native_tcp = False
+        self._movel_drag_generation = 0
+        self._movel_drag_callbacks = set()
+        self._movel_drag_written = False
+        self._kin_status_var = tk.StringVar(value="MoveL 坐标：主控基座 / 法兰（mm，°）。")
         self._stop_rx_fragment = ""
         self._acc_sync_waiting = False
         self._acc_sync_timeout_id = None
@@ -1122,7 +1128,7 @@ class RobotSerialAssistantOld:
         self.ent_l_speed = ttk.Entry(movel_ctrl, width=6, font=("Arial", 10))
         self.ent_l_speed.insert(0, str(DEFAULT_SPEED))
         self.ent_l_speed.pack(side=tk.LEFT)
-        self._make_toggle_button(
+        self.btn_movel_drag = self._make_toggle_button(
             movel_ctrl, self.movel_drag_enable,
             text_off="拖发 OFF", text_on="拖发 ON",
             bg_off="#e9ecef", bg_on="#2b8a3e",
@@ -1137,6 +1143,40 @@ class RobotSerialAssistantOld:
         tk.Button(movel_ctrl, text="读取当前位姿", font=("Arial", 10), bg="#495057", fg="white",
                   relief=tk.FLAT, command=self.read_pose_from_robot
                   ).pack(side=tk.RIGHT, padx=2)
+
+        ttk.Label(parent, textvariable=self._kin_status_var, wraplength=470).pack(fill=tk.X, pady=(4, 0))
+
+    def _cancel_movel_drag(self):
+        self._movel_drag_generation += 1
+        for callback in self._movel_drag_callbacks:
+            self.root.after_cancel(callback)
+        self._movel_drag_callbacks.clear()
+        self.movel_drag_enable.set(False)
+        self.btn_movel_drag.configure(text="拖发 OFF", bg="#e9ecef", fg="#495057", relief=tk.RAISED)
+
+    def _reset_kin_capability(self):
+        self._native_tcp = False
+        self._movel_drag_written = False
+        self._cancel_movel_drag()
+        self.btn_movel_drag.configure(state=tk.NORMAL)
+        self._kin_status_var.set("MoveL 坐标：主控基座 / 法兰（mm，°）。")
+
+    def _handle_kin_capability(self, line):
+        if line != "KIN v=2 xyz=mm abc=deg joints=deg rail=mm" or self._native_tcp or not self.is_connected:
+            return
+        dragging = self.movel_drag_enable.get()
+        # Publish the capability under the same lock as the final wire gate.
+        # The writer never reads Tk variables; only successful writes set this flag.
+        with self._serial_write_lock:
+            self._native_tcp = True
+            stop_drag = dragging and self._movel_drag_written
+        self._cancel_movel_drag()
+        self.btn_movel_drag.configure(state=tk.DISABLED)
+        message = "当前固件支持单个笛卡尔目标；连续操控暂不可用。"
+        self._kin_status_var.set(message + " 单点 MoveL 坐标：主控基座 / 法兰。")
+        self.log(message, "WARN")
+        if stop_drag:
+            self.send_cmd("!STOP")
 
     # ==============================================
     # 通用小部件 / 工具
@@ -1220,6 +1260,8 @@ class RobotSerialAssistantOld:
                 self.serial_port = serial.Serial(port, BAUDRATE, timeout=0.5)
                 self.serial_port.write_timeout = 1.0
                 self.is_connected = True
+                self._kin_connection += 1
+                self._reset_kin_capability()
                 self._stop_rx_fragment = ""
                 self.current_cmdmode = None
                 self._mode_pending = self._mode_request = None
@@ -1235,21 +1277,25 @@ class RobotSerialAssistantOld:
                 self.log(f"成功连接 {port} @ {BAUDRATE}")
 
                 self.stop_thread = False
-                self.receive_thread = threading.Thread(target=self.serial_receive_loop, daemon=True)
+                self.receive_thread = threading.Thread(target=self.serial_receive_loop,
+                                                       args=(self.serial_port, self._kin_connection), daemon=True)
                 self.receive_thread.start()
                 self._start_tx_thread()
                 self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
                 self._rgb_status_var.set("RGB 已连接，等待配置回读。")
+                self.send_cmd("#KIN_CONFIG")
                 self.send_cmd("#RGB_GET")
             except Exception as e:
                 messagebox.showerror("连接失败", str(e))
                 self.log(f"连接失败: {e}", "ERROR")
         else:
+            self._kin_connection += 1
             self.stop_thread = True
             self._stop_tx_thread()
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
             self.is_connected = False
+            self._reset_kin_capability()
             self.btn_connect.config(text="连接", bg="#2b8a3e", activebackground="#2f9e44")
             self._draw_led(False)
             self.lbl_status.config(text="未连接", fg="#ff6b6b")
@@ -1269,17 +1315,24 @@ class RobotSerialAssistantOld:
             self._set_acc_sync_waiting(False)
             self.log("已断开串口")
 
-    def serial_receive_loop(self):
+    def serial_receive_loop(self, port=None, connection=None):
         """接收轮询线程：in_waiting 轮询，周期 10ms。所有 UI 操作走 root.after。"""
-        while not self.stop_thread and self.serial_port and self.serial_port.is_open:
+        if port is None:
+            port = self.serial_port
+        if connection is None:
+            connection = self._kin_connection
+        while (not self.stop_thread and connection == self._kin_connection and
+               port is self.serial_port and port and port.is_open):
             try:
                 # 优先用 in_waiting 避免 readline 阻塞（部分 MCU 不发 \n）
-                if self.serial_port.in_waiting:
-                    data = self.serial_port.read(self.serial_port.in_waiting)
+                if port.in_waiting:
+                    data = port.read(port.in_waiting)
                     if data:
+                        if connection != self._kin_connection or port is not self.serial_port:
+                            break
                         text = data.decode('utf-8', errors='replace')
                         for line in self._split_rx_stop_status(text):
-                            self._handle_rx_line(line)
+                            self._handle_rx_line(line, connection)
                 # 无数据时短暂休眠，不阻塞主循环（接收轮询周期 10ms，降低交互延迟）
                 time.sleep(0.01)
             except serial.SerialException as e:
@@ -1304,12 +1357,17 @@ class RobotSerialAssistantOld:
         """保留完整回复；不猜测 ok 子串边界。"""
         return [row.strip() for row in text.split('\n') if row.strip()]
 
-    def _handle_rx_line(self, line):
+    def _handle_rx_line(self, line, connection=None):
         """RX 线程只投递完整行，Tk 变量、顺序发送和控件均由主线程处理。"""
-        self.root.after(0, self._process_rx_line, line)
+        if connection is None:
+            connection = self._kin_connection
+        self.root.after(0, self._process_rx_line, line, connection)
 
-    def _process_rx_line(self, line):
+    def _process_rx_line(self, line, connection=None):
         """在 Tk 主线程处理回执，避免从 RX 线程读取 IntVar 等 Tk 对象。"""
+        if connection is not None and (connection != self._kin_connection or not self.is_connected):
+            return
+        self._handle_kin_capability(line)
         # 裸数字 = 固件指令 FIFO 剩余空位：255 说明队列已满，其余仅是余量计数，静默过滤
         if line.isdigit():
             if line == "255":
@@ -1475,10 +1533,11 @@ class RobotSerialAssistantOld:
             item = self._tx_queue.get()
             if item is None:  # 停止哨兵
                 break
-            generation, cmd = item
+            generation, cmd = item[:2]
+            movel_drag = len(item) > 2 and item[2]
             try:
                 with self._serial_write_lock:
-                    if generation != self._tx_generation:
+                    if generation != self._tx_generation or movel_drag and self._native_tcp:
                         continue
                     if self._defaults_request is not None and not self._defaults_command_allowed(cmd):
                         continue
@@ -1492,6 +1551,8 @@ class RobotSerialAssistantOld:
                         self.root.after(0, self.log, f"发送失败(串口未打开): {cmd}", "ERROR")
                         continue
                     port_obj.write((cmd + "\n").encode('utf-8'))
+                    if movel_drag:
+                        self._movel_drag_written = True
             except Exception as e:
                 self.root.after(0, self.log, f"发送失败: {e}", "ERROR")
 
@@ -1973,7 +2034,9 @@ class RobotSerialAssistantOld:
         return re.fullmatch(r"#CAL_STATUS\s+[78](?:\s+LAST)?", cmd) is not None
 
     def _is_protection_status_query(self, cmd):
-        return (cmd in ("#RGB_STATUS", "#RGB_GET", "!RGB_BRIGHT", "#MOTION_STATUS") or
+        return (cmd in ("#RGB_STATUS", "#RGB_GET", "!RGB_BRIGHT", "#MOTION_STATUS",
+                        "#KIN_CONFIG", "#TOOL", "#TCPPOSE", "#CARTESIAN_STATUS") or
+                cmd.startswith("#IKCHECK ") or
                 self._is_stall_status_query(cmd) or self._is_cal_status_query(cmd) or
                 self._is_firmware_version_query(cmd) or self._parse_can_diagnostic_query(cmd) is not None)
 
@@ -2390,12 +2453,15 @@ class RobotSerialAssistantOld:
         self.hand_pos.set(p)
         self.send_cmd(f"!HAND_POS {p}")
 
-    def send_cmd(self, cmd, sequence=False):
+    def send_cmd(self, cmd, sequence=False, movel_drag=False):
         """所有指令的唯一出口：入队 + 记 TX 日志，由写线程串行发出"""
         if not self.is_connected or not self.serial_port:
             self.log("未连接串口", "WARN")
             return False
         cmd = cmd.strip()
+        if movel_drag and self._native_tcp:
+            self.log("当前固件支持单个笛卡尔目标；连续操控暂不可用。", "WARN")
+            return False
         can_diagnostic = None
         if cmd.startswith("#CAN_DIAG"):
             can_diagnostic = self._parse_can_diagnostic_query(cmd)
@@ -2466,7 +2532,8 @@ class RobotSerialAssistantOld:
             self._stop_locked = True
             self._handle_stop_status("Stopping ok" if cmd == "!STOP" else "Disable pending")
         try:
-            self._tx_queue.put((self._tx_generation, cmd))
+            item = (self._tx_generation, cmd, True) if movel_drag else (self._tx_generation, cmd)
+            self._tx_queue.put(item)
             if can_diagnostic is not None:
                 node, request = can_diagnostic
                 state = {"node": node, "request": request, "fields": {}, "invalid": False}
@@ -2496,7 +2563,8 @@ class RobotSerialAssistantOld:
         self._sync_data = None
         # 解锁不重新开启拖发；迟到的 after 回调也受 send_cmd 门禁限制。
         self.movej_drag_enable.set(False)
-        self.movel_drag_enable.set(False)
+        self._cancel_movel_drag()
+        self._movel_drag_written = False
         self.hand_pos_drag_enable.set(False)
         while True:
             try:
@@ -2507,13 +2575,27 @@ class RobotSerialAssistantOld:
     def _schedule_motion_callback(self, callback):
         """拖发 after 回调带世代；STOP/保护取消后，即使解锁也不能复活旧回调。"""
         generation = self._tx_generation
+        movel_drag = callback == self.send_movel
+        drag_generation = self._movel_drag_generation
+        if movel_drag and self._native_tcp:
+            return
+        callback_id = None
 
         def run_if_current():
+            if movel_drag:
+                self._movel_drag_callbacks.discard(callback_id)
+                if self._native_tcp or drag_generation != self._movel_drag_generation:
+                    return
             if (generation == self._tx_generation and not self._stop_locked and
                     not self._calibration_busy):
-                callback()
+                if movel_drag:
+                    callback(continuous=True)
+                else:
+                    callback()
 
-        self.root.after(1, run_if_current)
+        callback_id = self.root.after(1, run_if_current)
+        if movel_drag:
+            self._movel_drag_callbacks.add(callback_id)
 
     def _handle_stop_status(self, line):
         if line == "Started ok":
@@ -2656,6 +2738,9 @@ class RobotSerialAssistantOld:
 
     def _warn_drag_mode(self):
         """拖发开关切换后回调。若不是「连续模式(3)」则弹提示（不自动切换）。"""
+        if self._native_tcp and self.movel_drag_enable.get():
+            self._cancel_movel_drag()
+            self.log("当前固件支持单个笛卡尔目标；连续操控暂不可用。", "WARN")
         if (self.movej_drag_enable.get() or self.movel_drag_enable.get()
                 or self.hand_pos_drag_enable.get()) \
                 and self.current_cmdmode != 3:
@@ -2699,13 +2784,15 @@ class RobotSerialAssistantOld:
         except ValueError:
             messagebox.showerror("错误", "请输入有效数字；速度档位必须为 1–100（100 = 30 r/s）")
 
-    def send_movel(self):
-        """@X,Y,Z,A,B,C,speed  （7 个值）"""
+    def send_movel(self, continuous=False):
+        """@X,Y,Z,A,B,C,speed：单点为主控基座 / 法兰坐标，保持旧协议。"""
+        if continuous and self._native_tcp:
+            return False
         try:
             p = [float(ent.get()) for ent in self.ent_pose]
             speed = self._validated_speed(self.ent_l_speed.get())
             cmd = "@" + ",".join(f"{v:g}" for v in p) + f",{speed:g}"
-            self.send_cmd(cmd)
+            return self.send_cmd(cmd, movel_drag=continuous)
         except ValueError:
             messagebox.showerror("错误", "请输入有效数字；速度档位必须为 1–100（100 = 30 r/s）")
 

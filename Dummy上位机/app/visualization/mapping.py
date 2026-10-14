@@ -2,7 +2,7 @@
 
 J4/J5 signs and the gripper mapping follow the offline mathematical/mesh
 comparison; their physical direction still needs individual axis validation.
-Firmware FK has a 165 mm base height, versus 227.3 mm in this exported URDF.
+Firmware FK has a 207.3 mm base height, versus 227.3 mm in this exported URDF.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ JOINT_LIMITS = ((-175.0, 175.0), (-75.0, 90.0), (0.0, 180.0),
                 (-270.0, 270.0), (-100.0, 100.0), (-180.0, 180.0),
                 (-250.0, 250.0))
 REST_POSE = (0.0, -75.0, 180.0, 0.0, 0.0, 0.0, 0.0)
-MODEL_Z_OFFSET_M = 0.0623
+MODEL_Z_OFFSET_M = 0.0200
 JOINT_NAMES = tuple(f"Joint{i}" for i in range(1, 7)) + ("rail",)
 
 

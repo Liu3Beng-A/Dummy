@@ -43,10 +43,20 @@ ascii=(core/'UserApp/protocols/ascii_protocol.cpp').read_text(encoding='utf-8-si
 # Find the definition after the forward declaration (source remains unchanged).
 motion=ascii[ascii.index('static bool HandleMotionCommand',ascii.index('static bool HandleStopCommand')):]
 (out/'core_stream_restore_under_test.inc').write_text(function_text(robot,'bool DummyRobot::TrySetCommandMode')+'\n'+function_text(motion,'static bool HandleMotionCommand')+'\n'+function_text(ascii,'static bool HandleStopCommand'),encoding='utf-8')
+# Reuse only the hardware-free state/transport scaffold; compile the actual
+# adapter unchanged. Dedicated lifecycle cases cover its internal native owner.
+prefix=(repo/'tools/tests/core_stream_adapter_test.cpp').read_text(encoding='utf-8').split('static StreamSink* usbStreamOutputPtr')[0]
+prefix=prefix.replace('#include "../../firmware_new/', '#include "'+str(repo/'firmware_new').replace('\\','/')+'/')
+prefix=prefix.replace('#include <vector>','#include <vector>\n#include <algorithm>')
+# A deterministic reentry barrier inside the REAL validator verifies that the
+# publication guard rechecks the token after validation outside IRQ masking.
+prefix=prefix.replace('#include "core_stream_adapter_under_test.inc"', 'static void(*validationHook)()=nullptr;\nstatic double ValidationFabs(double value){if(validationHook){auto callback=validationHook;validationHook=nullptr;callback();}return std::fabs(value);}\n#define fabs ValidationFabs\n#include "core_stream_adapter_under_test.inc"\n#undef fabs')
+(out/'core_native_lifecycle_test.cpp').write_text(prefix+'\n'+(repo/'tools/tests/core_native_lifecycle_test.cpp').read_text(encoding='utf-8'),encoding='utf-8')
 tests = [('core_stream_engine', [core/'Robot/instances/core_stream_engine.cpp', repo/'tools/tests/core_stream_engine_test.cpp']),
          ('core_stream_parser', [repo/'tools/tests/core_stream_parser_test.cpp']),
          ('core_stream_geometry', [repo/'tools/tests/core_stream_geometry_test.cpp']),
-         ('core_stream_adapter', [core/'Robot/instances/core_stream_engine.cpp',repo/'tools/tests/core_stream_adapter_test.cpp'])]
+         ('core_stream_adapter', [core/'Robot/instances/core_stream_engine.cpp',repo/'tools/tests/core_stream_adapter_test.cpp']),
+         ('core_native_lifecycle',[core/'Robot/instances/core_stream_engine.cpp',out/'core_native_lifecycle_test.cpp'])]
 for name, sources in tests:
     executable = out/(name + ('.exe' if msvc else ''))
     if msvc:

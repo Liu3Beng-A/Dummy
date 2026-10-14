@@ -1,9 +1,22 @@
 // Shared-frame rendering only: animation and serial polling remain in Python.
 export const RGB_CHANNELS = 24;
 export const DIFFUSER_SAMPLES = 288;
+// Model-display settings only; these never change device RGB configuration.
+// Keep a subdued gray-white cover fixed and add colored light independently.
+export const DIFFUSER_STYLE = Object.freeze({
+  coverGray: 0.85,        // Unlit cover base color, in linear RGB.
+  coverReflection: 0.2,   // Fixed subdued reflection, including at brightness 0.
+  emissionIntensity: 2,   // Colored emission multiplier; the unlit cover stays unchanged.
+  emissionLimit: 0.7,     // Peak texture emission before its independent intensity.
+  highlightKnee: 0.8,     // Linear output below this point, smooth compression above; 0 <= knee < 1.
+  lowLightGain: 0.3,      // Extra dim-light gain, removed smoothly at full PWM.
+  toe: 0.003,            // Finite-slope transition near zero PWM.
+  exponent: 0.45,        // Smaller values lift dim emission more.
+  smoothingSeconds: 0.06,
+});
 const TAU = 2 * Math.PI;
-const DIFFUSER_TOE = 0.003;
-const DIFFUSER_EXPONENT = 0.45;
+const DIFFUSER_TOE = DIFFUSER_STYLE.toe;
+const DIFFUSER_EXPONENT = DIFFUSER_STYLE.exponent;
 const DIFFUSER_CURVE_BASE = DIFFUSER_TOE ** DIFFUSER_EXPONENT;
 const DIFFUSER_CURVE_RANGE = (1 + DIFFUSER_TOE) ** DIFFUSER_EXPONENT - DIFFUSER_CURVE_BASE;
 
@@ -25,7 +38,7 @@ export function sameRgbFrame(first, second) {
 
 // Display-only interpolation in PWM units. The integer target frame is never
 // mutated, and message arrival intervals do not affect interpolation continuity.
-export function advanceRgbDisplayFrame(displayed, target, dt, seconds = 0.06) {
+export function advanceRgbDisplayFrame(displayed, target, dt, seconds = DIFFUSER_STYLE.smoothingSeconds) {
   if (!Number.isFinite(dt) || dt < 0 || !Number.isFinite(seconds) || seconds <= 0) {
     throw new RangeError('RGB display damping requires a finite nonnegative time step.');
   }
@@ -55,21 +68,33 @@ export function patchDiffuserShader(fragmentShader) {
     || fragmentShader.includes('rgbCoverReflection')) {
     throw new Error('The diffuser requires unmodified Phong emission-map and tone-map shader hooks.');
   }
-  // A metadata-driven uniform describes the entire powered ring. Breathing or
-  // a dark individual arc never toggles its white cover's reflection/opacity.
+  // The entire ring retains the same gray-white cover at every power/brightness.
+  // Breathing, black arcs and light_on metadata never dim its reflection.
   const withCover = fragmentShader.replace(uniformHook, `${uniformHook}
-uniform float rgbCoverReflection;`).replace(emissionHook, `${emissionHook}
+uniform float rgbCoverReflection;
+uniform float rgbHighlightKnee;
+float rgbSoftHighlight(float color) {
+  float knee = rgbHighlightKnee;
+  float range = 1.0 - knee;
+  float excess = max(color - knee, 0.0);
+  return min(color, knee) + range * (1.0 - exp(-excess / range));
+}`).replace(emissionHook, `${emissionHook}
 diffuseColor.rgb *= rgbCoverReflection;
 specularStrength *= rgbCoverReflection;
 vec3 rgbDisplayEmission = totalEmissiveRadiance;
 totalEmissiveRadiance = vec3(0.0);`);
   // The vendor Phong shader adds totalEmissiveRadiance to outgoingLight before
   // opaque_fragment. Cache emission and zero that contribution before lighting,
-  // tone-map reflection alone, then restore bounded emission once. Avoiding a
-  // subtraction also preserves small reflected values. Color/fog/alpha keep
-  // their original order; other robot materials keep the global ACES pipeline.
+  // tone-map reflection alone, then add the independent colored emission.
+  // Below the knee the sum stays linear; above it a C1, monotonic compression
+  // approaches 1 without a hard clipping edge or a white-base attenuation of
+  // emission. Each output channel remains independent and nondecreasing.
+  // Color/fog/alpha keep their original order, and other robot materials keep
+  // the global ACES pipeline.
   return withCover.replace(toneMapHook, `${toneMapHook}
-gl_FragColor.rgb += rgbDisplayEmission;`);
+vec3 rgbLightSum = max(gl_FragColor.rgb, vec3(0.0)) + max(rgbDisplayEmission, vec3(0.0));
+gl_FragColor.rgb = vec3(rgbSoftHighlight(rgbLightSum.r),
+  rgbSoftHighlight(rgbLightSum.g), rgbSoftHighlight(rgbLightSum.b));`);
 }
 
 export function createDiffuserKernel(samples = DIFFUSER_SAMPLES) {
@@ -124,14 +149,14 @@ export function writeDiffuserTexture(frame, kernel, pixels) {
     const peak = Math.min(1, Math.max(0, ...scattered));
     // A finite-slope toe keeps small PWM changes smooth instead of applying an
     // infinite-slope power law near zero. One peak scale preserves RGB ratios.
-    const toePeak = peak > 0 ? 0.7 * ((peak + DIFFUSER_TOE) ** DIFFUSER_EXPONENT
+    const toePeak = peak > 0 ? DIFFUSER_STYLE.emissionLimit * ((peak + DIFFUSER_TOE) ** DIFFUSER_EXPONENT
       - DIFFUSER_CURVE_BASE) / DIFFUSER_CURVE_RANGE : 0;
     // Lift dim colors by up to 30%, smoothly removing that gain at full power.
     // One common peak gain retains channel ratios and the existing 0.7 ceiling.
-    const displayPeak = toePeak * (1 + 0.3 * (1 - peak) ** 2);
+    const displayPeak = toePeak * (1 + DIFFUSER_STYLE.lowLightGain * (1 - peak) ** 2);
     const scale = peak > 0 ? displayPeak / peak : 0;
     for (let component = 0; component < 3; component++) {
-      const light = Math.min(0.7, Math.max(0, scattered[component] * scale));
+      const light = Math.min(DIFFUSER_STYLE.emissionLimit, Math.max(0, scattered[component] * scale));
       pixels[sample * 4 + component] = floating ? light : Math.round(light * 255);
     }
     // Activity is diagnostic data only; the shader never turns it into opacity.

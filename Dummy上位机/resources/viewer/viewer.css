@@ -21,7 +21,7 @@ body.dark .badge.warning { color:#fbbf24; }
 .legend>span { display:flex;align-items:center;gap:6px; }
 i { display:inline-block;width:8px;height:8px;border-radius:50%;flex-shrink:0; }
 i.ghost { background:#e8edf3;border:1px solid #8496ae; }
-i.silver { background:#e1e6ed;border:1px solid #8496ae; }
+i.silver { background:#000;border:1px solid #8496ae; }
 i.orange { background:#f59e0b; }
 .footer { position:absolute;left:16px;right:16px;bottom:15px;display:flex;justify-content:space-between;
           gap:12px;color:var(--muted);font-size:13px;pointer-events:none; }

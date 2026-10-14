@@ -80,7 +80,7 @@ class QuickPointUiTests(unittest.TestCase):
 
     def assert_shortcuts(self, records):
         buttons = self.window.quick_point_buttons
-        self.assertEqual(len(buttons), 4)
+        self.assertEqual(len(buttons), 8)
         for index, control in enumerate(buttons):
             with self.subTest(slot=index):
                 self.assertTrue(self.window.quick_points_panel.isAncestorOf(control))
@@ -116,7 +116,8 @@ class QuickPointUiTests(unittest.TestCase):
         self.assertEqual(w.viewer.mode, "preview")
 
     def test_loading_cancels_all_pending_drag_and_sync_without_transmitting(self):
-        self.seed([JOINT_POINT, POSE_POINT])
+        records = [dict(deepcopy(JOINT_POINT), name=f"关节点-{index + 1}") for index in range(7)]
+        self.seed(records + [POSE_POINT])
         self.connect_fake()
         w, c = self.window, self.controller
         c.movej_drag_enable.set(True)
@@ -133,7 +134,7 @@ class QuickPointUiTests(unittest.TestCase):
         self.assertTrue(all(timer.isActive() for timer in w._drag_timers.values()))
         w._teaching_sync = ("MoveJ", c._tx_generation)
 
-        w.quick_point_buttons[1].click()
+        w.quick_point_buttons[7].click()
 
         self.assertEqual(w._drag_pending, {})
         self.assertTrue(all(not timer.isActive() for timer in w._drag_timers.values()))
@@ -190,15 +191,18 @@ class QuickPointUiTests(unittest.TestCase):
                 self.assertEqual(w._selected_row(), index)
                 self.assertEqual(self.commands(), [])
 
-    def test_first_four_refresh_after_create_rename_replace_reorder_and_delete(self):
+    def test_first_eight_refresh_after_create_rename_replace_reorder_and_delete(self):
         w = self.window
-        for index in range(5):
+        for index in range(9):
             w.point_name.setText(f"位置-{index + 1}")
             w.teaching_joint_spins[0].setValue(index * 10)
             w._save_point()
             self.assert_shortcuts(w.points)
-        self.assertEqual(len(w.points), 5)
-        self.assertNotIn("位置-5", " ".join(control.accessibleName() for control in w.quick_point_buttons))
+        self.assertEqual(len(w.points), 9)
+        self.assertNotIn("位置-9", " ".join(control.accessibleName() for control in w.quick_point_buttons))
+        before = ([spin.value() for spin in w.joint_spins], w._selected_row())
+        w._load_quick_point(8)
+        self.assertEqual(([spin.value() for spin in w.joint_spins], w._selected_row()), before)
 
         w.point_table.item(1, 1).setText("改名后的第二点")
         self.assertEqual(w.points[1]["name"], "改名后的第二点")
@@ -217,23 +221,31 @@ class QuickPointUiTests(unittest.TestCase):
         w.quick_point_buttons[0].click()
         self.assert_target(w.points[0])
 
-        w.point_table.selectRow(4)
+        w.point_table.selectRow(8)
         w._move_point(-1)
-        self.assertEqual([point["name"] for point in w.points[:4]],
-                         ["更新为末端点", "改名后的第二点", "位置-3", "位置-5"])
+        self.assertEqual([point["name"] for point in w.points[:8]],
+                         ["更新为末端点", "改名后的第二点", "位置-3", "位置-4",
+                          "位置-5", "位置-6", "位置-7", "位置-9"])
         self.assert_shortcuts(w.points)
+        w.point_table.item(7, 1).setText("改名后的第八点")
+        self.assert_shortcuts(w.points)
+        w.quick_point_buttons[7].click()
+        self.assert_target(w.points[7])
         w.point_table.selectRow(1)
         w._delete_point()
         self.assertEqual([point["name"] for point in w.points],
-                         ["更新为末端点", "位置-3", "位置-5", "位置-4"])
+                         ["更新为末端点", "位置-3", "位置-4", "位置-5", "位置-6",
+                          "位置-7", "改名后的第八点", "位置-8"])
         self.assert_shortcuts(w.points)
+        w.quick_point_buttons[7].click()
+        self.assert_target(w.points[7])
         self.assertEqual(self.store.points, w.points)
         self.assertEqual(self.commands(), [])
 
-    def test_import_and_restart_restore_first_four_from_existing_point_schema(self):
+    def test_import_and_restart_restore_first_eight_from_existing_point_schema(self):
         self.seed([JOINT_POINT])
         records = []
-        for index in range(6):
+        for index in range(9):
             point = deepcopy(JOINT_POINT if index % 2 == 0 else POSE_POINT)
             point["name"] = f"导入位置-{index + 1}"
             records.append(point)
@@ -257,8 +269,8 @@ class QuickPointUiTests(unittest.TestCase):
         self.assertFalse(self.controller.is_connected)
         self.assertEqual(self.window.points, records)
         self.assert_shortcuts(records)
-        self.window.quick_point_buttons[3].click()
-        self.assert_target(records[3])
+        self.window.quick_point_buttons[7].click()
+        self.assert_target(records[7])
         self.assertEqual(self.commands(), [])
 
     def test_empty_slots_and_clear_are_disabled_and_management_only_navigates(self):

@@ -64,6 +64,8 @@ class StreamMemoryPort:
             self.writes.append(command)
             if command == '#RGB_GET':
                 self.inject('RGB_GET end')
+            elif command == '#KIN_CONFIG':
+                self.inject('error KIN unsupported')
             elif command == '!START':
                 self.inject('Start pending', 'Started ok')
             elif command.startswith('#GET_CMDMODE '):

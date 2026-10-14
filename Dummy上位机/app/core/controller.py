@@ -13,7 +13,7 @@ from app.core.fields import ValueField, ListField
 from app.core.scheduler import QtScheduler
 from app.core.gamepad_session import GamepadSession
 from app.core.cartesian_session import CartesianSession
-from app.core.cartesian_backend import configured_tool, point_tool, world_target, native_command
+from app.core.cartesian_backend import configured_tool, point_tool, world_target, native_command, tcp_command
 from app.protocol import capabilities
 from app.protocol.constants import *
 from app.protocol.parser import finite_numbers
@@ -369,7 +369,8 @@ class RobotController(QObject, RobotBusiness):
         rail = self.cartesian.feedback.sample.q[6]
         tool = point_tool(point, configured_tool(self))
         target = world_target(self.cartesian.model, point, rail, tool)
-        return self.send_cmd(native_command(self.cartesian.model, target, rail, tool, value))
+        command = tcp_command(target, tool, value) if self.cartesian.native_tcp else native_command(self.cartesian.model, target, rail, tool, value)
+        return self.send_cmd(command)
 
     def refresh_ports(self):
         ports = [port.device for port in serial.tools.list_ports.comports()]
@@ -422,6 +423,7 @@ class RobotController(QObject, RobotBusiness):
         # The default GET below publishes only after its in-flight ledger is
         # established; UI monitoring listeners cannot enqueue a second GET.
         self._reset_rgb_state(emit=False)
+        self.cartesian.native_tcp = False
         self._transport = SerialTransport(port_object, self._tx_queue, self._can_write,
                                           self._connection_id, self)
         getattr(self._transport, "line_received_at", self._transport.line_received).connect(self._on_transport_line, Qt.ConnectionType.QueuedConnection)
@@ -437,6 +439,7 @@ class RobotController(QObject, RobotBusiness):
         self.log(f"已连接 {port} @ {BAUDRATE} ({self.connection_type})")
         self.send_cmd("#RGB_GET")
         self._query_command_mode()
+        self.send_cmd("#KIN_CONFIG")
         self.set_polling(self._poll_enabled, self._poll_hz)
         if self._rgb_monitoring:
             self.set_rgb_monitoring(True)
@@ -444,6 +447,7 @@ class RobotController(QObject, RobotBusiness):
         return True
 
     def disconnect_port(self):
+        self.cartesian.native_tcp = False
         self._connection_id += 1  # Ignore callbacks from a previous connection.
         self.is_connected = False
         self.gamepad.disconnected()
@@ -532,6 +536,8 @@ class RobotController(QObject, RobotBusiness):
                          (not self._stop_locked or self.cartesian.diagnostics._locked_command(command)) and not self._calibration_busy)
         # Only the diagnostic worker may authorize mode 7 or stream packets.
         # Recheck at the writer even if an obsolete caller queued them earlier.
+        if (self.cartesian.native_tcp and self._control_owner == "gamepad" and command.startswith("@")):
+            return False
         if command.startswith(("~S", "!STREAM_")):
             return False
         if command.startswith("#CMDMODE") and command not in ("#CMDMODE 1", "#CMDMODE 2", "#CMDMODE 3", "#CMDMODE 4"):
@@ -819,6 +825,18 @@ class RobotController(QObject, RobotBusiness):
         if command.split()[0] in ("#FW_VERSION", "#CAN_DIAG"):
             if not capabilities.identity_query(command):
                 raise ValueError("固件版本查询需节点 0～8，CAN 诊断需节点 1～8；可选请求号为 1～65535")
+        elif command.startswith("@T"):
+            tokens = command[2:].split(",")
+            parsed = [finite_numbers(token, 1) for token in tokens]
+            values = None if any(value is None for value in parsed) else [value[0] for value in parsed]
+            if values is None or len(values) not in (8, 14) or len(command.encode("ascii")) > 159:
+                raise ValueError("TCP指令须包含8或14个有限数值，最长159字节")
+            if any(abs(value) > 3.4028234663852886e38 or (value != 0 and abs(value) < 1.1754943508222875e-38) for value in values):
+                raise ValueError("TCP数值超出主控float32范围")
+            if not 1 <= values[6] <= 100 or values[7] not in (0, 1):
+                raise ValueError("TCP速度档位1～100，自动地轨标志为0或1")
+            if len(values) == 14 and any(abs(value) > 500 for value in values[8:11]):
+                raise ValueError("工具偏移不得超过±500mm")
         elif command[0] in (">", "&", "@"):
             count = 7 if command[0] == "@" else 8
             values = finite_numbers(command[1:], count)

@@ -7,6 +7,8 @@
 #include <cstring>
 #include "rgb.hpp"
 #include "core_stream.h"
+#include "FreeRTOS.h"
+#include "queue.h"
 #define ALL 0
 class ProtectionCoordinator;
 
@@ -233,6 +235,7 @@ public:
     void Init();
     bool MoveJ(float _j1, float _j2, float _j3, float _j4, float _j5, float _j6, float _j7_mm, float _speed = 0);
     bool MoveL(float _x, float _y, float _z, float _a, float _b, float _c);
+    bool HandleCartesianCommand(const char* command, unsigned length, StreamSink& response);
     void MoveJoints(DOF6Kinematic::Joint6D_t _joints);
     void SetJointSpeed(float _speed); // 档位 1..100（非物理速度）
     void SetJointAcceleration(float _acc); // 电机轴 r/s²，J1..J7，运行时应用
@@ -245,9 +248,9 @@ public:
     enum MotionPhase { MOTION_IDLE, MOTION_DISPATCHING, MOTION_RUNNING,
                        MOTION_COMPLETED, MOTION_CANCELLED, MOTION_FAILED };
     uint32_t GetMotionGeneration() const { return motionCompletionGeneration; }
-    bool IsMotionBusy() const { return motionActive || CoreStreamBusy() || (commandMode == COMMAND_MOTOR_TUNING && tuningHelper.IsActive()); }
+    bool IsMotionBusy() const { return motionActive || CoreNativeOwned() || CoreStreamBusy() || (commandMode == COMMAND_MOTOR_TUNING && tuningHelper.IsActive()); }
     bool CanSendMotion(uint32_t epoch, uint32_t generation) const {
-        return motionActive && isEnabled && !IsStopLocked() &&
+        return motionActive && nativePhase != NATIVE_EXECUTING && !CoreNativeOwned() && isEnabled && !IsStopLocked() &&
                epoch == motionEpoch && generation == motionCompletionGeneration;
     }
     void PollMotionCompletion();
@@ -330,7 +333,13 @@ public:
     public:
         explicit CommandHandler(DummyRobot* _context) : context(_context)
         {
-            commandFifo = osMessageQueueNew(16, sizeof(QueueItem), nullptr);
+            osMessageQueueAttr_t attributes{};
+            attributes.cb_mem = &commandQueueControl;
+            attributes.cb_size = sizeof(commandQueueControl);
+            attributes.mq_mem = commandQueueStorage;
+            attributes.mq_size = sizeof(commandQueueStorage);
+            commandFifo = osMessageQueueNew(16, sizeof(QueueItem), &attributes);
+            configASSERT(commandFifo != nullptr);
             cancelledFifo = osMessageQueueNew(32, sizeof(CancelledItem), nullptr);
         }
 
@@ -357,13 +366,17 @@ public:
     private:
         DummyRobot* context;
         osMessageQueueId_t commandFifo;
-        char strBuffer[64]{};
+        char strBuffer[160]{};
         struct QueueItem {
             uint32_t epoch, id;
             CommandMode mode;
             StreamSink* response;
-            char command[64];
+            char command[160];
         };
+        // Larger explicit Cartesian commands use static SRAM, leaving the
+        // existing 64KiB CCM RTOS pool available for task startup/queues.
+        alignas(8) uint8_t commandQueueStorage[16 * sizeof(QueueItem)]{};
+        StaticQueue_t commandQueueControl{};
         struct CancelledItem { uint32_t id; StreamSink* response; const char* kind; };
         osMessageQueueId_t cancelledFifo;
         uint32_t poppedId = 0;
@@ -421,6 +434,10 @@ private:
     volatile uint16_t stopHoldingMask = 0;
     bool stopPerNodeTokens = false;
     volatile uint16_t stopSyncedMask = 0;
+    // This phase spans the CLOSE-to-producer handoff even after the internal
+    // stream adapter releases its CAN lease. Ordinary dispatch stays forbidden.
+    enum NativePhase { NATIVE_NONE, NATIVE_EXECUTING, NATIVE_SETTLING };
+    volatile NativePhase nativePhase = NATIVE_NONE;
     volatile bool motionActive = false;
     volatile bool motionDispatchPending = false;
     volatile uint32_t motionCompletionGeneration = 0;
@@ -475,7 +492,7 @@ private:
     void BeginMotionRound();
     uint16_t FreshMotionCompletionMask();
     bool NeedsMotionCompletion() const {
-        return isEnabled && motionActive && motionMode >= COMMAND_TARGET_POINT_SEQUENTIAL &&
+        return isEnabled && motionActive && nativePhase != NATIVE_EXECUTING && !CoreNativeOwned() && motionMode >= COMMAND_TARGET_POINT_SEQUENTIAL &&
                motionMode <= COMMAND_CONTINUES_TRAJECTORY && !IsStopLocked();
     }
     volatile bool stopNeedsSend = false;
@@ -499,6 +516,8 @@ private:
     bool PlanMoveJ(float j1, float j2, float j3, float j4, float j5, float j6,
                    float rail, float speed, uint32_t epoch, uint32_t id = 0, const char* kind = "MOVEJ");
     bool PlanMoveL(float x, float y, float z, float a, float b, float c, uint32_t epoch, uint32_t id = 0);
+    bool RunCartesian(const DOF6Kinematic::Pose6D_t& goal, const DOF6Kinematic::Pose6D_t& tool,
+                      bool automaticRail, uint32_t epoch, uint32_t id);
     void SetMotionSpeed(float speed, uint32_t epoch);
     bool HomingForGeneration(uint32_t epoch, uint32_t id = 0);
     bool RestingForGeneration(uint32_t epoch, uint32_t id = 0);

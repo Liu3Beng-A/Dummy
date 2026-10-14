@@ -32,6 +32,16 @@ int main(){
  std::mt19937 random(20261013);
  for(unsigned i=0;i<12000;++i){int32_t q=int32_t(random()),home=int32_t(random());const int64_t abs=int64_t(q)+home;compare({q,0,0},{q,0,0},1536000,5120000,home,abs>=INT32_MIN&&abs<=INT32_MAX);}
  for(unsigned i=0;i<20000;++i){Point f{int32_t(random()%2000000000)-1000000000,int32_t(random()%100001)-50000,int32_t(random()%100001)-50000};Point t{f.q+int32_t(random()%1001)-500,int32_t(random()%100001)-50000,int32_t(random()%100001)-50000};compare(f,t);}
+ // Coherent nonzero segments at full velocity/acceleration range, both
+ // signs, high absolute coordinates and legal home offsets.
+ for(unsigned i=0;i<100000;++i){
+  const int32_t v0=int32_t(random()%3000001)-1500000;
+  const int32_t v1=v0+int32_t(random()%60001)-30000;
+  Point f{int32_t(random()%2000000000)-1000000000,v0,int32_t(random()%1000001)-500000};
+  const int32_t distance=int32_t((int64_t(v0)+v1)/100)+int32_t(random()%9)-4;
+  Point t{f.q+distance,v1,int32_t(random()%1000001)-500000};
+  compare(f,t,1536000,5120000,int32_t(random()%200000001)-100000000);
+ }
  // Equal q with nonzero endpoint derivatives must remain on the old route.
  for(int32_t v:{-10000,-1,1,10000}){compare({0,v,0},{0,v,0});compare({0,0,v},{0,0,v});compare({0,v,0},{0,0,0});}
  // Reused curve storage: ordinary->hold->ordinary->extreme hold, including

@@ -7,4 +7,7 @@ constexpr std::size_t MaxPayload = 63;
 // Return the complete field count, or zero. Output is unchanged on failure.
 unsigned Parse(const char* text, std::size_t length, float* values,
                unsigned minimum, unsigned maximum);
+// Explicit v2 Cartesian payload; old Parse retains the 63-byte/8-field limit.
+unsigned ParseCartesian(const char* text, std::size_t length, float* values,
+                        unsigned minimum, unsigned maximum);
 }

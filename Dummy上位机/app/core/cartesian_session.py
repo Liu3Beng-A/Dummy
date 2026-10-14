@@ -20,6 +20,7 @@ class CartesianSession(QObject):
         super().__init__(controller)
         self.controller, self.clock = controller, clock
         self.backend = CartesianBackend.FIRMWARE
+        self.native_tcp = False
         self.preferred_mode = 2
         self.model = RobotModel()
         self.feedback = FeedbackTracker(self.model)
@@ -130,6 +131,15 @@ class CartesianSession(QObject):
             self.acceleration_confirmed[:] = False
 
     def handle_line(self, line):
+        if line == "KIN v=2 xyz=mm abc=deg joints=deg rail=mm" and not self.native_tcp:
+            self.native_tcp = True
+            gamepad = getattr(self.controller, "gamepad", None)
+            if gamepad is not None and gamepad.claimed:
+                gamepad.release("当前固件支持单个笛卡尔目标；连续操控暂不可用", source="firmware-capability", request_stop=True)
+            if not self.busy:
+                self._state("idle", "主控有限TCP目标；连续操控暂不可用")
+            else:
+                self.controller._emit_state()
         match = re.fullmatch(r'ok ACC \[([1-7])\] = ([0-9.eE+\-]+) r/s\^2(?: \(rail\))?', line)
         if match and np.isfinite(float(match[2])) and float(match[2]) > 0:
             self.motor_acceleration[int(match[1])-1] = float(match[2])

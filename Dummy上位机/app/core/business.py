@@ -1097,13 +1097,14 @@ class RobotBusiness:
     def _teaching_command(self, point, speed):
         speed = self._validated_speed(speed)
         if point.kind == "MOVEL" and point.frame == "world":
-            from app.core.cartesian_backend import configured_tool, point_tool, world_target, native_command
+            from app.core.cartesian_backend import configured_tool, point_tool, world_target, native_command, tcp_command
             from dummy_motion import Status
             if self.cartesian.feedback.estimate(self.cartesian.clock())[0] != Status.OK:
                 raise ValueError("世界 TCP 点位需要新关节反馈")
             rail = self.cartesian.feedback.sample.q[6]
             tool = point_tool(point, configured_tool(self))
-            return native_command(self.cartesian.model, world_target(self.cartesian.model, point, rail, tool), rail, tool, speed)
+            target = world_target(self.cartesian.model, point, rail, tool)
+            return tcp_command(target, tool, speed) if self.cartesian.native_tcp else native_command(self.cartesian.model, target, rail, tool, speed)
         prefix = ">" if point.kind == "MOVEJ" else "@"
         command = prefix + ",".join(f"{value:g}" for value in point.target) + f",{speed:g}"
         self._validate_command(command)
@@ -1113,6 +1114,9 @@ class RobotBusiness:
         """Explicitly send one valid MoveJ/MoveL target; gripper is preview only."""
         try:
             point = self._normalize_teaching_point(record)
+            if continuous and point.kind == "MOVEL" and self.cartesian.native_tcp:
+                self.log("当前固件支持发送单个笛卡尔目标；连续拖发暂不可用", "WARN")
+                return False
             value = self._validated_speed(point.speed if speed is None else speed)
             command = self._teaching_command(point, value)
         except (ValueError, TypeError, OverflowError) as error:

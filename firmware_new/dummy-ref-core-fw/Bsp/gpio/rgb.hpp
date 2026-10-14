@@ -46,6 +46,9 @@ public:
     static int FindState(const char* name);
     void LoadConfig(); // Before communication/RGB tasks.
     bool SaveConfig(); // Caller holds the robot's disabled-only save reservation.
+    // The same reservation protects the companion TCP slot. Each save preserves
+    // the other slot's actual persisted bytes, including legacy RGB records.
+    bool SaveToolRecord(const void* record, size_t length);
     Config GetConfig(uint32_t* revision = nullptr) const;
     bool ApplyConfig(const Config& value, uint32_t expectedRevision);
     void SetEnabled(bool enabled);
@@ -103,6 +106,7 @@ private:
     bool lastEnabled = false;
     Status status{};
     static uint32_t Crc(const void* data, size_t length);
+    void RefreshStorageProof();
     static float Smooth(float t);
     static float Phase(uint32_t elapsed, uint32_t period);
     static bool SameScene(const Scene& a, const Scene& b);

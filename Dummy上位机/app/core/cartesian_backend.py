@@ -33,3 +33,20 @@ def world_target(model, point, rail, tool):
 
 def native_command(model, target, rail, tool, speed):
     return motion_command("@", to_xyzabc(model.native_target(target, rail, tool)) + [speed])
+
+
+def tcp_command(target, tool, speed, *, rail_auto=True):
+    """One world/TCP target and immutable tool snapshot; all planning is on MCU."""
+    if not isinstance(rail_auto, (bool, int, float, np.bool_, np.integer, np.floating)) or rail_auto not in (0, 1):
+        raise ValueError("自动地轨标志必须为0或1")
+    if not 1 <= float(speed) <= 100:
+        raise ValueError("速度档位必须为1～100")
+    values = to_xyzabc(target) + [float(speed), int(bool(rail_auto))] + to_xyzabc(tool.flange_tcp)
+    if not np.isfinite(values).all() or np.any(np.abs(values[8:11]) > 500):
+        raise ValueError("TCP指令需要有限数值，工具偏移不得超过±500mm")
+    fields = [f"{value:.4f}".rstrip("0").rstrip(".") for value in values]
+    fields = ["0" if value in ("-0", "") else value for value in fields]
+    command = "@T" + ",".join(fields)
+    if len(command.encode("ascii")) > 159:
+        raise ValueError("TCP指令超过主控159字节限制")
+    return command

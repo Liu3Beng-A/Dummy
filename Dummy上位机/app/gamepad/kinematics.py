@@ -30,27 +30,26 @@ def forward_kinematics(joints):
     alpha = (-math.pi / 2, 0., math.pi / 2, -math.pi / 2, math.pi / 2, 0.)
     rotations = []
     for joint, offset, twist in zip(joints, home, alpha):
-        cq, sq = math.cos(math.radians(joint) + offset), math.sin(math.radians(joint) + offset)
+        cq, sq = math.cos(math.radians(math.remainder(joint, 360.)) + offset), math.sin(math.radians(math.remainder(joint, 360.)) + offset)
         ca, sa = math.cos(twist), math.sin(twist)
         rotation = [[cq, -ca * sq, sa * sq], [sq, ca * cq, -sa * cq], [0., sa, ca]]
         rotations.append(rotation if not rotations else _multiply(rotations[-1], rotation))
-    # dummy_robot.cpp constructs DOF6Kinematic(.165, 0, .170, .117, .0695, .113).
-    vectors = (_rotate(rotations[0], [0., -165., 0.]),
+    # dummy_robot.cpp constructs DOF6Kinematic(.2073, 0, .170, .117, .0695, .113).
+    vectors = (_rotate(rotations[0], [0., -207.3, 0.]),
                _rotate(rotations[1], [170., 0., 0.]),
                _rotate(rotations[2], [-69.5, 0., 117.]),
                _rotate(rotations[5], [0., 0., 113.]))
     position = [sum(vector[i] for vector in vectors) for i in range(3)]
     r = rotations[5]
-    # Match RotMatToEulerAngle's near-gimbal branch, including its 1e-4 threshold.
-    if abs(r[2][0]) >= 1. - .0001:
-        yaw = 0.
-        pitch = math.copysign(math.pi / 2, -r[2][0])
-        roll = math.atan2(r[0][1], r[1][1]) * (1. if r[2][0] < 0 else -1.)
+    # Match the new solver: preserve near-gimbal pitch instead of snapping it.
+    horizontal = math.hypot(r[0][0], r[1][0])
+    pitch = math.atan2(-r[2][0], horizontal)
+    if horizontal > .000001:
+        yaw = math.atan2(r[1][0], r[0][0])
+        roll = math.atan2(r[2][1], r[2][2])
     else:
-        pitch = math.atan2(-r[2][0], math.hypot(r[0][0], r[1][0]))
-        cb = math.cos(pitch)
-        yaw = math.atan2(r[1][0] / cb, r[0][0] / cb)
-        roll = math.atan2(r[2][1] / cb, r[2][2] / cb)
+        roll = 0.
+        yaw = math.atan2(-r[0][1], r[1][1])
     angles = [math.degrees(value) for value in (roll, pitch, yaw)]
     angles = [180. if abs(abs(value) - 180.) < 1e-10 else value for value in angles]
     return [0. if abs(value) < 1e-10 else value for value in position + angles]

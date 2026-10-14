@@ -26,13 +26,14 @@ struct DummyRobot {
  struct Handler {bool busy=false;bool IsBusy(){return busy;}}commandHandler;
  struct Tuning {bool active=false;bool IsActive(){return active;}}tuningHelper;
  bool TrySetCommandMode(uint32_t mode);
+ uint32_t epoch=71;uint32_t GetMotionEpoch()const{return epoch;}
  bool IsMoving(){return motionActive;}bool IsMotionBusy(){return motionActive;}unsigned LastIssuedMotionId(){return 0;}
  bool IsRGBSaveBusy(){return false;}bool RequestStart(){return false;}void RequestDisable(){}
  void PrintMotionStatus(StreamSink&){}bool HandleProtectionCommand(const char*,size_t,StreamSink&){return false;}
  Motor values[7]; Motor* motorJ[8]={nullptr,&values[0],&values[1],&values[2],&values[3],&values[4],&values[5],&values[6]};
  Pose initPose;float jointAccRuntime[8]={0,30,30,30,30,30,30,30};
  bool IsEnabled(){return true;}bool IsStopLocked(){return locked;}bool IsCalibrationBusy(){return calibration;}bool IsProtectionParameterBusy(){return parameter;}
- void RequestSoftStop(){CHECK(criticalNesting==0);++softStops;locked=true;stopState=STOPPING;CoreStreamCancel();}
+ void RequestSoftStop(){CHECK(criticalNesting==0);++softStops;++epoch;locked=true;stopState=STOPPING;CoreStreamCancel();}
  void MotorAccelerationCallback(unsigned node,float value,unsigned){jointAccRuntime[node]=value;}
 } dummy;
 struct CAN_TxHeaderTypeDef {uint32_t StdId=0,IDE=0,RTR=0,DLC=8;};

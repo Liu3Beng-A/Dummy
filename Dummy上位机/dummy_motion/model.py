@@ -8,7 +8,7 @@ from .frames import compose, inverse, flange_to_tcp, tcp_to_flange
 class RobotModel:
     home = np.array([0, -math.pi/2, math.pi/2, 0, 0, 0])
     alpha = np.array([-math.pi/2, 0, math.pi/2, -math.pi/2, math.pi/2, 0])
-    offsets = np.array([[0, -.165, 0], [.170, 0, 0], [-.0695, 0, .117],
+    offsets = np.array([[0, -.2073, 0], [.170, 0, 0], [-.0695, 0, .117],
                         [0, 0, 0], [0, 0, 0], [0, 0, .113]])
 
     def __init__(self, world_rail=None, constraints=None):

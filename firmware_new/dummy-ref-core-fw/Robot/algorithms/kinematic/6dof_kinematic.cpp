@@ -1,509 +1,187 @@
 #include "6dof_kinematic.h"
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#if defined(STM32F405xx)
+#include "stm32f405xx.h"
+#endif
+#include "arm_math.h"
 
-inline float cosf(float x)
-{
-    return arm_cos_f32(x);
+namespace {
+constexpr float Pi = 3.14159265358979323846f;
+constexpr float HalfPi = Pi * 0.5f;
+constexpr float DegToRad = Pi / 180.0f;
+constexpr float RadToDeg = 180.0f / Pi;
+constexpr float ReachTolerance = 0.000001f;
+constexpr float WristSingularTolerance = 0.0001f;
+
+// Release uses -Ofast. std::isfinite may be folded away under finite-math-only.
+bool Finite(float value) {
+    uint32_t bits; std::memcpy(&bits, &value, sizeof(bits));
+    return (bits & 0x7f800000U) != 0x7f800000U;
+}
+void SinCos(float x,float& sine,float& cosine) {
+    sine=arm_sin_f32(x);cosine=arm_cos_f32(x);
+    // CMSIS fast-table interpolation has a small radial error. Restore a unit
+    // pair so analytic inversion is consistent near elbow/wrist boundaries.
+    const float norm=std::sqrt(sine*sine+cosine*cosine);sine/=norm;cosine/=norm;
+}
+float ClampUnit(float x) { return x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x); }
+float Radians(float degrees) { return std::remainderf(degrees, 360.0f) * DegToRad; }
+float NearDegrees(float radians, float seed) {
+    return seed + std::remainderf(radians * RadToDeg - std::remainderf(seed,360.0f),360.0f);
+}
+void Multiply(const float* a, const float* b, float* out) {
+    for(unsigned i=0;i<3;++i) for(unsigned j=0;j<3;++j) {
+        float value=0; for(unsigned k=0;k<3;++k) value += a[i*3+k]*b[k*3+j];
+        out[i*3+j]=value;
+    }
+}
+void Identity(float* r) { for(unsigned i=0;i<9;++i) r[i]=(i%4==0)?1.0f:0.0f; }
+void JointRotation(unsigned i, float q, float* r) {
+    const float ca[6]={0,1,0,0,0,1}, sa[6]={-1,0,1,-1,1,0};
+    const float home[6]={0,-HalfPi,HalfPi,0,0,0};
+    float c,s;SinCos(q+home[i],s,c);
+    r[0]=c;r[1]=-ca[i]*s;r[2]=sa[i]*s;
+    r[3]=s;r[4]=ca[i]*c;r[5]=-sa[i]*c;
+    r[6]=0;r[7]=sa[i];r[8]=ca[i];
+}
+void RotationFirstThree(float q1,float q2,float q3,float* out) {
+    float r[9], tmp[9]; Identity(out);
+    const float q[3]={q1,q2,q3};
+    for(unsigned i=0;i<3;++i) { JointRotation(i,q[i],r);Multiply(out,r,tmp);std::memcpy(out,tmp,sizeof(tmp)); }
+}
+bool ProperRotation(const float* r) {
+    for(unsigned i=0;i<9;++i) if(!Finite(r[i])) return false;
+    for(unsigned i=0;i<3;++i) for(unsigned j=0;j<3;++j) {
+        float dot=0;for(unsigned k=0;k<3;++k)dot+=r[k*3+i]*r[k*3+j];
+        if(std::fabs(dot-(i==j?1.0f:0.0f))>0.002f)return false;
+    }
+    const float determinant=r[0]*(r[4]*r[8]-r[5]*r[7])-r[1]*(r[3]*r[8]-r[5]*r[6])+r[2]*(r[3]*r[7]-r[4]*r[6]);
+    return std::fabs(determinant-1.0f)<=0.003f;
+}
+void EulerToRotation(float roll,float pitch,float yaw,float* r) {
+    float cr,sr,cp,sp,cy,sy;SinCos(roll,sr,cr);SinCos(pitch,sp,cp);SinCos(yaw,sy,cy);
+    r[0]=cy*cp;r[1]=cy*sp*sr-sy*cr;r[2]=cy*sp*cr+sy*sr;
+    r[3]=sy*cp;r[4]=sy*sp*sr+cy*cr;r[5]=sy*sp*cr-cy*sr;
+    r[6]=-sp;r[7]=cp*sr;r[8]=cp*cr;
+}
+void RotationToEuler(const float* r,float& roll,float& pitch,float& yaw) {
+    const float horizontal=std::sqrt(r[0]*r[0]+r[3]*r[3]);
+    pitch=std::atan2(-r[6],horizontal)*RadToDeg;
+    if(horizontal>0.000001f) { roll=std::atan2(r[7],r[8])*RadToDeg;yaw=std::atan2(r[3],r[0])*RadToDeg; }
+    else { roll=0;yaw=std::atan2(-r[1],r[4])*RadToDeg; }
+}
 }
 
-inline float sinf(float x)
-{
-    return arm_sin_f32(x);
-}
-
-static void MatMultiply(const float* _matrix1, const float* _matrix2, float* _matrixOut,
-                        const int _m, const int _l, const int _n)
-{
-    float tmp;
-    int i, j, k;
-    for (i = 0; i < _m; i++)
-    {
-        for (j = 0; j < _n; j++)
-        {
-            tmp = 0.0f;
-            for (k = 0; k < _l; k++)
-            {
-                tmp += _matrix1[_l * i + k] * _matrix2[_n * k + j];
-            }
-            _matrixOut[_n * i + j] = tmp;
-        }
+DOF6Kinematic::DOF6Kinematic(float base,float radial,float arm,float forearm,float elbow,float wrist)
+    : armConfig{base,radial,arm,forearm,elbow,wrist} {
+    geometryValid=Finite(base)&&Finite(radial)&&Finite(arm)&&Finite(forearm)&&Finite(elbow)&&Finite(wrist)
+        &&base>=0&&arm>0&&forearm>0&&elbow>=0&&wrist>=0;
+    if(geometryValid) {
+        l_se=arm;l_se_2=arm*arm;l_ew_2=forearm*forearm+elbow*elbow;
+        l_ew=std::sqrt(l_ew_2);atan_e=std::atan2(elbow,forearm);
+        geometryValid=Finite(l_se_2)&&Finite(l_ew_2)&&Finite(l_ew)&&l_ew>0;
     }
 }
-
-static void RotMatToEulerAngle(const float* _rotationM, float* _eulerAngles)
-{
-    float A, B, C, cb;
-
-    if (fabs(_rotationM[6]) >= 1.0 - 0.0001)
-    {
-        if (_rotationM[6] < 0)
-        {
-            A = 0.0f;
-            B = (float) M_PI_2;
-            C = atan2f(_rotationM[1], _rotationM[4]);
-        } else
-        {
-            A = 0.0f;
-            B = -(float) M_PI_2;
-            C = -atan2f(_rotationM[1], _rotationM[4]);
-        }
-    } else
-    {
-        B = atan2f(-_rotationM[6], sqrtf(_rotationM[0] * _rotationM[0] + _rotationM[3] * _rotationM[3]));
-        cb = cosf(B);
-        A = atan2f(_rotationM[3] / cb, _rotationM[0] / cb);
-        C = atan2f(_rotationM[7] / cb, _rotationM[8] / cb);
+bool DOF6Kinematic::SolveFK(const Joint6D_t& joints,Pose6D_t& out) {
+    out=Pose6D_t{}; if(!geometryValid)return false;
+    for(float q:joints.a)if(!Finite(q))return false;
+    const float offsets[6][3]={{armConfig.D_BASE,-armConfig.L_BASE,0},{armConfig.L_ARM,0,0},
+        {-armConfig.D_ELBOW,0,armConfig.L_FOREARM},{0,0,0},{0,0,0},{0,0,armConfig.L_WRIST}};
+    float rotation[9],joint[9],next[9],p[3]{};Identity(rotation);
+    for(unsigned i=0;i<6;++i) {
+        JointRotation(i,Radians(joints.a[i]),joint);Multiply(rotation,joint,next);
+        std::memcpy(rotation,next,sizeof(next));
+        for(unsigned row=0;row<3;++row) for(unsigned k=0;k<3;++k)p[row]+=rotation[row*3+k]*offsets[i][k];
     }
-
-    _eulerAngles[0] = C;
-    _eulerAngles[1] = B;
-    _eulerAngles[2] = A;
+    if(!Finite(p[0])||!Finite(p[1])||!Finite(p[2])||!ProperRotation(rotation))return false;
+    out.X=p[0];out.Y=p[1];out.Z=p[2];std::memcpy(out.R,rotation,sizeof(rotation));out.hasR=true;
+    RotationToEuler(rotation,out.A,out.B,out.C);return true;
 }
-
-static void EulerAngleToRotMat(const float* _eulerAngles, float* _rotationM)
-{
-    float ca, cb, cc, sa, sb, sc;
-
-    cc = cosf(_eulerAngles[0]);
-    cb = cosf(_eulerAngles[1]);
-    ca = cosf(_eulerAngles[2]);
-    sc = sinf(_eulerAngles[0]);
-    sb = sinf(_eulerAngles[1]);
-    sa = sinf(_eulerAngles[2]);
-
-    _rotationM[0] = ca * cb;
-    _rotationM[1] = ca * sb * sc - sa * cc;
-    _rotationM[2] = ca * sb * cc + sa * sc;
-    _rotationM[3] = sa * cb;
-    _rotationM[4] = sa * sb * sc + ca * cc;
-    _rotationM[5] = sa * sb * cc - ca * sc;
-    _rotationM[6] = -sb;
-    _rotationM[7] = cb * sc;
-    _rotationM[8] = cb * cc;
+bool DOF6Kinematic::IsSolutionValid(const IKSolves_t& solutions,unsigned index) {
+    return index<8&&solutions.solFlag[index][0]!=INVALID&&solutions.solFlag[index][1]!=INVALID&&solutions.solFlag[index][2]!=INVALID;
 }
-
-
-DOF6Kinematic::DOF6Kinematic(float L_BS, float D_BS, float L_AM, float L_FA, float D_EW, float L_WT)
-    : armConfig(ArmConfig_t{L_BS, D_BS, L_AM, L_FA, D_EW, L_WT})
-{
-    float tmp_DH_matrix[6][4] = {
-        {0.0f,            armConfig.L_BASE,    armConfig.D_BASE, -(float) M_PI_2},
-        {-(float) M_PI_2, 0.0f,                armConfig.L_ARM,  0.0f},
-        {(float) M_PI_2,  armConfig.D_ELBOW,   0.0f,             (float) M_PI_2},
-        {0.0f,            armConfig.L_FOREARM, 0.0f,             -(float) M_PI_2},
-        {0.0f,            0.0f,                0.0f,             (float) M_PI_2},
-        {0.0f,            armConfig.L_WRIST, 0.0f, 0.0f}
-    };
-    memcpy(DH_matrix, tmp_DH_matrix, sizeof(tmp_DH_matrix));
-
-    float tmp_L1_bs[3] = {armConfig.D_BASE, -armConfig.L_BASE, 0.0f};
-    memcpy(L1_base, tmp_L1_bs, sizeof(tmp_L1_bs));
-    float tmp_L2_se[3] = {armConfig.L_ARM, 0.0f, 0.0f};
-    memcpy(L2_arm, tmp_L2_se, sizeof(tmp_L2_se));
-    float tmp_L3_ew[3] = {-armConfig.D_ELBOW, 0.0f, armConfig.L_FOREARM};
-    memcpy(L3_elbow, tmp_L3_ew, sizeof(tmp_L3_ew));
-    float tmp_L6_wt[3] = {0.0f, 0.0f, armConfig.L_WRIST};
-    memcpy(L6_wrist, tmp_L6_wt, sizeof(tmp_L6_wt));
-
-    l_se_2 = armConfig.L_ARM * armConfig.L_ARM;
-    l_se = armConfig.L_ARM;
-    l_ew_2 = armConfig.L_FOREARM * armConfig.L_FOREARM + armConfig.D_ELBOW * armConfig.D_ELBOW;
-    l_ew = 0;
-    atan_e = 0;
+bool DOF6Kinematic::NearestInLimits(float angle,float seed,float minimum,float maximum,float& result) {
+    if(!Finite(angle)||!Finite(seed)||!Finite(minimum)||!Finite(maximum)||minimum>maximum)return false;
+    const float base=std::remainderf(angle,360.0f);
+    const float lo=std::ceil((minimum-base)/360.0f),hi=std::floor((maximum-base)/360.0f);
+    if(lo>hi)return false;
+    float turn=std::round((seed-base)/360.0f);if(turn<lo)turn=lo;if(turn>hi)turn=hi;
+    const float candidate=base+360.0f*turn;
+    if(!Finite(candidate)||candidate<minimum||candidate>maximum)return false;
+    result=candidate;return true;
 }
-
-bool
-DOF6Kinematic::SolveFK(const DOF6Kinematic::Joint6D_t &_inputJoint6D, DOF6Kinematic::Pose6D_t &_outputPose6D)
-{
-    float q_in[6];
-    float q[6];
-    float cosq, sinq;
-    float cosa, sina;
-    float P06[6];
-    float R06[9];
-    float R[6][9];
-    float R02[9];
-    float R03[9];
-    float R04[9];
-    float R05[9];
-    float L0_bs[3];
-    float L0_se[3];
-    float L0_ew[3];
-    float L0_wt[3];
-
-    for (int i = 0; i < 6; i++)
-        q_in[i] = _inputJoint6D.a[i] / RAD_TO_DEG;
-
-    for (int i = 0; i < 6; i++)
-    {
-        q[i] = q_in[i] + DH_matrix[i][0];
-        cosq = cosf(q[i]);
-        sinq = sinf(q[i]);
-        cosa = cosf(DH_matrix[i][3]);
-        sina = sinf(DH_matrix[i][3]);
-
-        R[i][0] = cosq;
-        R[i][1] = -cosa * sinq;
-        R[i][2] = sina * sinq;
-        R[i][3] = sinq;
-        R[i][4] = cosa * cosq;
-        R[i][5] = -sina * cosq;
-        R[i][6] = 0.0f;
-        R[i][7] = sina;
-        R[i][8] = cosa;
-    }
-
-    MatMultiply(R[0], R[1], R02, 3, 3, 3);
-    MatMultiply(R02, R[2], R03, 3, 3, 3);
-    MatMultiply(R03, R[3], R04, 3, 3, 3);
-    MatMultiply(R04, R[4], R05, 3, 3, 3);
-    MatMultiply(R05, R[5], R06, 3, 3, 3);
-
-    MatMultiply(R[0], L1_base, L0_bs, 3, 3, 1);
-    MatMultiply(R02, L2_arm, L0_se, 3, 3, 1);
-    MatMultiply(R03, L3_elbow, L0_ew, 3, 3, 1);
-    MatMultiply(R06, L6_wrist, L0_wt, 3, 3, 1);
-
-    for (int i = 0; i < 3; i++)
-        P06[i] = L0_bs[i] + L0_se[i] + L0_ew[i] + L0_wt[i];
-
-    RotMatToEulerAngle(R06, &(P06[3]));
-
-    _outputPose6D.X = P06[0];
-    _outputPose6D.Y = P06[1];
-    _outputPose6D.Z = P06[2];
-    _outputPose6D.A = P06[3] * RAD_TO_DEG;
-    _outputPose6D.B = P06[4] * RAD_TO_DEG;
-    _outputPose6D.C = P06[5] * RAD_TO_DEG;
-    memcpy(_outputPose6D.R, R06, 9 * sizeof(float));
-
-    return true;
+bool DOF6Kinematic::SolveIK(const Pose6D_t& millimetres,const Joint6D_t& seed,IKSolves_t& out) {
+    Pose6D_t metres=millimetres;metres.X*=0.001f;metres.Y*=0.001f;metres.Z*=0.001f;
+    return SolveIKMeters(metres,seed,out);
 }
-
-bool DOF6Kinematic::SolveIK(const DOF6Kinematic::Pose6D_t &_inputPose6D, const Joint6D_t &_lastJoint6D,
-                            DOF6Kinematic::IKSolves_t &_outputSolves)
-{
-    float qs[2];
-    float qa[2][2];
-    float qw[2][3];
-    float cosqs, sinqs;
-    float cosqa[2], sinqa[2];
-    float cosqw, sinqw;
-    float P06[6];
-    float R06[9];
-    float P0_w[3];
-    float P1_w[3];
-    float L0_wt[3];
-    float L1_sw[3];
-    float R10[9];
-    float R31[9];
-    float R30[9];
-    float R36[9];
-    float l_sw_2, l_sw, atan_a, acos_a, acos_e;
-
-    int ind_arm, ind_elbow, ind_wrist;
-    int i;
-
-    if (0 == l_ew)
-    {
-        l_ew = sqrtf(l_ew_2);
-        atan_e = atanf(armConfig.D_ELBOW / armConfig.L_FOREARM);
-    }
-
-    P06[0] = _inputPose6D.X / 1000.0f;
-    P06[1] = _inputPose6D.Y / 1000.0f;
-    P06[2] = _inputPose6D.Z / 1000.0f;
-    if (!_inputPose6D.hasR)
-    {
-        P06[3] = _inputPose6D.A / RAD_TO_DEG;
-        P06[4] = _inputPose6D.B / RAD_TO_DEG;
-        P06[5] = _inputPose6D.C / RAD_TO_DEG;
-        EulerAngleToRotMat(&(P06[3]), R06);
-    } else
-    {
-        memcpy(R06, _inputPose6D.R, 9 * sizeof(float));
-    }
-    for (i = 0; i < 2; i++)
-    {
-        qs[i] = _lastJoint6D.a[0];
-        qa[i][0] = _lastJoint6D.a[1];
-        qa[i][1] = _lastJoint6D.a[2];
-        qw[i][0] = _lastJoint6D.a[3];
-        qw[i][1] = _lastJoint6D.a[4];
-        qw[i][2] = _lastJoint6D.a[5];
-    }
-    MatMultiply(R06, L6_wrist, L0_wt, 3, 3, 1);
-    for (i = 0; i < 3; i++)
-    {
-        P0_w[i] = P06[i] - L0_wt[i];
-    }
-    if (sqrt(P0_w[0] * P0_w[0] + P0_w[1] * P0_w[1]) <= 0.000001)
-    {
-        qs[0] = _lastJoint6D.a[0];
-        qs[1] = _lastJoint6D.a[0];
-        for (i = 0; i < 4; i++)
-        {
-            _outputSolves.solFlag[0 + i][0] = -1;
-            _outputSolves.solFlag[4 + i][0] = -1;
-        }
-    } else
-    {
-        qs[0] = atan2f(P0_w[1], P0_w[0]);
-        qs[1] = atan2f(-P0_w[1], -P0_w[0]);
-        for (i = 0; i < 4; i++)
-        {
-            _outputSolves.solFlag[0 + i][0] = 1;
-            _outputSolves.solFlag[4 + i][0] = 1;
-        }
-    }
-    for (ind_arm = 0; ind_arm < 2; ind_arm++)
-    {
-        cosqs = cosf(qs[ind_arm] + DH_matrix[0][0]);
-        sinqs = sinf(qs[ind_arm] + DH_matrix[0][0]);
-
-        R10[0] = cosqs;
-        R10[1] = sinqs;
-        R10[2] = 0.0f;
-        R10[3] = 0.0f;
-        R10[4] = 0.0f;
-        R10[5] = -1.0f;
-        R10[6] = -sinqs;
-        R10[7] = cosqs;
-        R10[8] = 0.0f;
-
-        MatMultiply(R10, P0_w, P1_w, 3, 3, 1);
-        for (i = 0; i < 3; i++)
-        {
-            L1_sw[i] = P1_w[i] - L1_base[i];
-        }
-        l_sw_2 = L1_sw[0] * L1_sw[0] + L1_sw[1] * L1_sw[1];
-        l_sw = sqrtf(l_sw_2);
-
-        if (fabs(l_se + l_ew - l_sw) <= 0.000001)
-        {
-            qa[0][0] = atan2f(L1_sw[1], L1_sw[0]);
-            qa[1][0] = qa[0][0];
-            qa[0][1] = 0.0f;
-            qa[1][1] = 0.0f;
-            if (l_sw > l_se + l_ew)
-            {
-                for (i = 0; i < 2; i++)
-                {
-                    _outputSolves.solFlag[4 * ind_arm + 0 + i][1] = 0;
-                    _outputSolves.solFlag[4 * ind_arm + 2 + i][1] = 0;
+bool DOF6Kinematic::SolveIKMeters(const Pose6D_t& pose,const Joint6D_t& seed,IKSolves_t& out) {
+    out=IKSolves_t{};
+    if(!geometryValid||!Finite(pose.X)||!Finite(pose.Y)||!Finite(pose.Z))return false;
+    for(float q:seed.a)if(!Finite(q))return false;
+    float target[9];
+    if(pose.hasR)std::memcpy(target,pose.R,sizeof(target));
+    else { if(!Finite(pose.A)||!Finite(pose.B)||!Finite(pose.C))return false;
+        EulerToRotation(Radians(pose.A),Radians(pose.B),Radians(pose.C),target); }
+    if(!ProperRotation(target))return false;
+    const float wrist[3]={pose.X-target[2]*armConfig.L_WRIST,pose.Y-target[5]*armConfig.L_WRIST,pose.Z-target[8]*armConfig.L_WRIST};
+    const float radius=std::sqrt(wrist[0]*wrist[0]+wrist[1]*wrist[1]);
+    if(!Finite(radius))return false;
+    const bool shoulderSingular=radius<=ReachTolerance;
+    const float shoulder[2]={shoulderSingular?Radians(seed.a[0]):std::atan2(wrist[1],wrist[0]),
+        shoulderSingular?Radians(seed.a[0]):std::atan2(-wrist[1],-wrist[0])};
+    bool any=false;
+    for(unsigned arm=0;arm<2;++arm) {
+        float cs,ss;SinCos(shoulder[arm],ss,cs);
+        const float x=cs*wrist[0]+ss*wrist[1]-armConfig.D_BASE,y=armConfig.L_BASE-wrist[2];
+        const float square=x*x+y*y,length=std::sqrt(square),minimum=std::fabs(l_se-l_ew),maximum=l_se+l_ew;
+        if(!Finite(length)||length<minimum-ReachTolerance||length>maximum+ReachTolerance||length<=ReachTolerance)continue;
+        const float ce=(square-l_se_2-l_ew_2)/(2.0f*l_se*l_ew);
+        if(!Finite(ce)||ce>1.0001f||ce< -1.0001f)continue;
+        // Both triangle angles use the same clamped cosine. Independent acos
+        // calls lose their geometric consistency near full extension/folding.
+        const float cosineElbow=ClampUnit(ce),sineElbow=std::sqrt(std::fmax(0.0f,1.0f-cosineElbow*cosineElbow));
+        const float delta=std::atan2(sineElbow,cosineElbow);
+        const float angle=std::atan2(y,x),aa=std::atan2(l_ew*sineElbow,l_se+l_ew*cosineElbow);
+        const bool elbowSingular=std::fabs(length-maximum)<=ReachTolerance||std::fabs(length-minimum)<=ReachTolerance;
+        for(unsigned elbow=0;elbow<2;++elbow) {
+            const bool reverse=(elbow!=arm);
+            const float q2=angle+(reverse?aa:-aa)+HalfPi,q3=atan_e+(reverse?-delta:delta);
+            float r03[9],transpose[9],r36[9];RotationFirstThree(shoulder[arm],q2,q3,r03);
+            for(unsigned i=0;i<3;++i)for(unsigned j=0;j<3;++j)transpose[i*3+j]=r03[j*3+i];
+            Multiply(transpose,target,r36);
+            const float sine=std::sqrt(r36[2]*r36[2]+r36[5]*r36[5]),cosine=ClampUnit(r36[8]);
+            const bool wristSingular=sine<=WristSingularTolerance;
+            for(unsigned wristBranch=0;wristBranch<2;++wristBranch) {
+                float q4,q5,q6;
+                if(wristSingular) {
+                    const bool folded=cosine<0;const float theta=std::atan2(folded?-r36[3]:r36[3],folded?-r36[0]:r36[0]);
+                    q5=folded?Pi:0.0f;
+                    if(wristBranch==0) {q4=Radians(seed.a[3]);q6=folded?q4-theta:theta-q4;}
+                    else {q6=Radians(seed.a[5]);q4=folded?theta+q6:theta-q6;}
+                } else {
+                    const bool negative=(wristBranch!=arm);q5=std::atan2(negative?-sine:sine,cosine);
+                    q4=std::atan2(negative?-r36[5]:r36[5],negative?-r36[2]:r36[2]);
+                    q6=std::atan2(negative?-r36[7]:r36[7],negative?r36[6]:-r36[6]);
                 }
-            } else
-            {
-                for (i = 0; i < 2; i++)
-                {
-                    _outputSolves.solFlag[4 * ind_arm + 0 + i][1] = 1;
-                    _outputSolves.solFlag[4 * ind_arm + 2 + i][1] = 1;
-                }
-            }
-        } else if (fabs(l_sw - fabs(l_se - l_ew)) <= 0.000001)
-        {
-            qa[0][0] = atan2f(L1_sw[1], L1_sw[0]);
-            qa[1][0] = qa[0][0];
-            if (0 == ind_arm)
-            {
-                qa[0][1] = (float) M_PI;
-                qa[1][1] = -(float) M_PI;
-            } else
-            {
-                qa[0][1] = -(float) M_PI;
-                qa[1][1] = (float) M_PI;
-            }
-            if (l_sw < fabs(l_se - l_ew))
-            {
-                for (i = 0; i < 2; i++)
-                {
-                    _outputSolves.solFlag[4 * ind_arm + 0 + i][1] = 0;
-                    _outputSolves.solFlag[4 * ind_arm + 2 + i][1] = 0;
-                }
-            } else
-            {
-                for (i = 0; i < 2; i++)
-                {
-                    _outputSolves.solFlag[4 * ind_arm + 0 + i][1] = 1;
-                    _outputSolves.solFlag[4 * ind_arm + 2 + i][1] = 1;
-                }
-            }
-        } else
-        {
-            atan_a = atan2f(L1_sw[1], L1_sw[0]);
-            acos_a = 0.5f * (l_se_2 + l_sw_2 - l_ew_2) / (l_se * l_sw);
-            if (acos_a >= 1.0f) acos_a = 0.0f;
-            else if (acos_a <= -1.0f) acos_a = (float) M_PI;
-            else acos_a = acosf(acos_a);
-            acos_e = 0.5f * (l_se_2 + l_ew_2 - l_sw_2) / (l_se * l_ew);
-            if (acos_e >= 1.0f) acos_e = 0.0f;
-            else if (acos_e <= -1.0f) acos_e = (float) M_PI;
-            else acos_e = acosf(acos_e);
-            if (0 == ind_arm)
-            {
-                qa[0][0] = atan_a - acos_a + (float) M_PI_2;
-                qa[0][1] = atan_e - acos_e + (float) M_PI;
-                qa[1][0] = atan_a + acos_a + (float) M_PI_2;
-                qa[1][1] = atan_e + acos_e - (float) M_PI;
-
-            } else
-            {
-                qa[0][0] = atan_a + acos_a + (float) M_PI_2;
-                qa[0][1] = atan_e + acos_e - (float) M_PI;
-                qa[1][0] = atan_a - acos_a + (float) M_PI_2;
-                qa[1][1] = atan_e - acos_e + (float) M_PI;
-            }
-            for (i = 0; i < 2; i++)
-            {
-                _outputSolves.solFlag[4 * ind_arm + 0 + i][1] = 1;
-                _outputSolves.solFlag[4 * ind_arm + 2 + i][1] = 1;
-            }
-        }
-        for (ind_elbow = 0; ind_elbow < 2; ind_elbow++)
-        {
-            cosqa[0] = cosf(qa[ind_elbow][0] + DH_matrix[1][0]);
-            sinqa[0] = sinf(qa[ind_elbow][0] + DH_matrix[1][0]);
-            cosqa[1] = cosf(qa[ind_elbow][1] + DH_matrix[2][0]);
-            sinqa[1] = sinf(qa[ind_elbow][1] + DH_matrix[2][0]);
-
-            R31[0] = cosqa[0] * cosqa[1] - sinqa[0] * sinqa[1];
-            R31[1] = cosqa[0] * sinqa[1] + sinqa[0] * cosqa[1];
-            R31[2] = 0.0f;
-            R31[3] = 0.0f;
-            R31[4] = 0.0f;
-            R31[5] = 1.0f;
-            R31[6] = cosqa[0] * sinqa[1] + sinqa[0] * cosqa[1];
-            R31[7] = -cosqa[0] * cosqa[1] + sinqa[0] * sinqa[1];
-            R31[8] = 0.0f;
-
-            MatMultiply(R31, R10, R30, 3, 3, 3);
-            MatMultiply(R30, R06, R36, 3, 3, 3);
-
-            if (R36[8] >= 1.0 - 0.000001)
-            {
-                cosqw = 1.0f;
-                qw[0][1] = 0.0f;
-                qw[1][1] = 0.0f;
-            } else if (R36[8] <= -1.0 + 0.000001)
-            {
-                cosqw = -1.0f;
-                if (0 == ind_arm)
-                {
-                    qw[0][1] = (float) M_PI;
-                    qw[1][1] = -(float) M_PI;
-                } else
-                {
-                    qw[0][1] = -(float) M_PI;
-                    qw[1][1] = (float) M_PI;
-                }
-            } else
-            {
-                cosqw = R36[8];
-                if (0 == ind_arm)
-                {
-                    qw[0][1] = acosf(cosqw);
-                    qw[1][1] = -acosf(cosqw);
-                } else
-                {
-                    qw[0][1] = -acosf(cosqw);
-                    qw[1][1] = acosf(cosqw);
-                }
-            }
-            if (1.0f == cosqw || -1.0f == cosqw)
-            {
-                if (0 == ind_arm)
-                {
-                    qw[0][0] = _lastJoint6D.a[3];
-                    cosqw = cosf(_lastJoint6D.a[3] + DH_matrix[3][0]);
-                    sinqw = sinf(_lastJoint6D.a[3] + DH_matrix[3][0]);
-                    qw[0][2] = atan2f(cosqw * R36[3] - sinqw * R36[0], cosqw * R36[0] + sinqw * R36[3]);
-                    qw[1][2] = _lastJoint6D.a[5];
-                    cosqw = cosf(_lastJoint6D.a[5] + DH_matrix[5][0]);
-                    sinqw = sinf(_lastJoint6D.a[5] + DH_matrix[5][0]);
-                    qw[1][0] = atan2f(cosqw * R36[3] - sinqw * R36[0], cosqw * R36[0] + sinqw * R36[3]);
-                } else
-                {
-                    qw[0][2] = _lastJoint6D.a[5];
-                    cosqw = cosf(_lastJoint6D.a[5] + DH_matrix[5][0]);
-                    sinqw = sinf(_lastJoint6D.a[5] + DH_matrix[5][0]);
-                    qw[0][0] = atan2f(cosqw * R36[3] - sinqw * R36[0], cosqw * R36[0] + sinqw * R36[3]);
-                    qw[1][0] = _lastJoint6D.a[3];
-                    cosqw = cosf(_lastJoint6D.a[3] + DH_matrix[3][0]);
-                    sinqw = sinf(_lastJoint6D.a[3] + DH_matrix[3][0]);
-                    qw[1][2] = atan2f(cosqw * R36[3] - sinqw * R36[0], cosqw * R36[0] + sinqw * R36[3]);
-                }
-                _outputSolves.solFlag[4 * ind_arm + 2 * ind_elbow + 0][2] = -1;
-                _outputSolves.solFlag[4 * ind_arm + 2 * ind_elbow + 1][2] = -1;
-            } else
-            {
-                if (0 == ind_arm)
-                {
-                    qw[0][0] = atan2f(R36[5], R36[2]);
-                    qw[1][0] = atan2f(-R36[5], -R36[2]);
-                    qw[0][2] = atan2f(R36[7], -R36[6]);
-                    qw[1][2] = atan2f(-R36[7], R36[6]);
-                } else
-                {
-                    qw[0][0] = atan2f(-R36[5], -R36[2]);
-                    qw[1][0] = atan2f(R36[5], R36[2]);
-                    qw[0][2] = atan2f(-R36[7], R36[6]);
-                    qw[1][2] = atan2f(R36[7], -R36[6]);
-                }
-                _outputSolves.solFlag[4 * ind_arm + 2 * ind_elbow + 0][2] = 1;
-                _outputSolves.solFlag[4 * ind_arm + 2 * ind_elbow + 1][2] = 1;
-            }
-            for (ind_wrist = 0; ind_wrist < 2; ind_wrist++)
-            {
-                if (qs[ind_arm] > (float) M_PI)
-                    _outputSolves.config[4 * ind_arm + 2 * ind_elbow + ind_wrist].a[0] =
-                        qs[ind_arm] - (float) M_PI;
-                else if (qs[ind_arm] < -(float) M_PI)
-                    _outputSolves.config[4 * ind_arm + 2 * ind_elbow + ind_wrist].a[0] =
-                        qs[ind_arm] + (float) M_PI;
-                else
-                    _outputSolves.config[4 * ind_arm + 2 * ind_elbow + ind_wrist].a[0] = qs[ind_arm];
-
-                for (i = 0; i < 2; i++)
-                {
-                    if (qa[ind_elbow][i] > (float) M_PI)
-                        _outputSolves.config[4 * ind_arm + 2 * ind_elbow + ind_wrist].a[1 + i] =
-                            qa[ind_elbow][i] - (float) M_PI;
-                    else if (qa[ind_elbow][i] < -(float) M_PI)
-                        _outputSolves.config[4 * ind_arm + 2 * ind_elbow + ind_wrist].a[1 + i] =
-                            qa[ind_elbow][i] + (float) M_PI;
-                    else
-                        _outputSolves.config[4 * ind_arm + 2 * ind_elbow + ind_wrist].a[1 + i] =
-                            qa[ind_elbow][i];
-                }
-
-                for (i = 0; i < 3; i++)
-                {
-                    if (qw[ind_wrist][i] > (float) M_PI)
-                        _outputSolves.config[4 * ind_arm + 2 * ind_elbow + ind_wrist].a[3 + i] =
-                            qw[ind_wrist][i] - (float) M_PI;
-                    else if (qw[ind_wrist][i] < -(float) M_PI)
-                        _outputSolves.config[4 * ind_arm + 2 * ind_elbow + ind_wrist].a[3 + i] =
-                            qw[ind_wrist][i] + (float) M_PI;
-                    else
-                        _outputSolves.config[4 * ind_arm + 2 * ind_elbow + ind_wrist].a[3 + i] =
-                            qw[ind_wrist][i];
-                }
+                const unsigned index=arm*4+elbow*2+wristBranch;
+                const float angles[6]={shoulder[arm],q2,q3,q4,q5,q6};Joint6D_t candidate;
+                for(unsigned j=0;j<6;++j)candidate.a[j]=NearDegrees(angles[j],seed.a[j]);
+                Pose6D_t fk;if(!SolveFK(candidate,fk))continue;
+                const float dx=fk.X-pose.X,dy=fk.Y-pose.Y,dz=fk.Z-pose.Z;
+                if(dx*dx+dy*dy+dz*dz>PositionToleranceM*PositionToleranceM)continue;
+                bool rotationMatches=true;for(unsigned j=0;j<9;++j)if(std::fabs(fk.R[j]-target[j])>RotationElementTolerance)rotationMatches=false;
+                if(!rotationMatches)continue;
+                out.config[index]=candidate;
+                out.solFlag[index][0]=shoulderSingular?SINGULAR:REGULAR;
+                out.solFlag[index][1]=elbowSingular?SINGULAR:REGULAR;
+                out.solFlag[index][2]=wristSingular?SINGULAR:REGULAR;any=true;
             }
         }
     }
-
-    for (i = 0; i < 8; i++)
-        for (float &j: _outputSolves.config[i].a)
-            j *= RAD_TO_DEG;
-
-    return true;
+    return any;
 }
-
-DOF6Kinematic::Joint6D_t
-operator-(const DOF6Kinematic::Joint6D_t &_joints1, const DOF6Kinematic::Joint6D_t &_joints2)
-{
-    DOF6Kinematic::Joint6D_t tmp{};
-    for (int i = 0; i < 6; i++)
-        tmp.a[i] = _joints1.a[i] - _joints2.a[i];
-
-    return tmp;
+DOF6Kinematic::Joint6D_t operator-(const DOF6Kinematic::Joint6D_t& a,const DOF6Kinematic::Joint6D_t& b) {
+    DOF6Kinematic::Joint6D_t out;for(unsigned i=0;i<6;++i)out.a[i]=a.a[i]-b.a[i];return out;
 }

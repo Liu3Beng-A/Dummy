@@ -17,10 +17,10 @@ class KinematicsTests(unittest.TestCase):
 
     def test_firmware_golden_flange_poses(self):
         tool = Tool(Pose.identity())
-        cases = [([0, 10, 80, 0, 90, 0, 0], [146.520190203, 0, 288.917318012, 180, 0, 180]),
-                 ([0, -75, 180, 0, 0, 0, 0], [75.943473212, 0, 216.602702221, 180, 75, 180]),
-                 ([0]*7, [-69.5, 0, 565, 0, 0, 0]),
-                 ([15, -30, 120, 25, 20, -35, 0], [129.249304975, 51.541896535, 346.697084972, -155.341912232, 70.057488940, -130.226882438])]
+        cases = [([0, 10, 80, 0, 90, 0, 0], [146.520190203, 0, 331.217318012, 180, 0, 180]),
+                 ([0, -75, 180, 0, 0, 0, 0], [75.943473212, 0, 258.902702221, 180, 75, 180]),
+                 ([0]*7, [-69.5, 0, 607.3, 0, 0, 0]),
+                 ([15, -30, 120, 25, 20, -35, 0], [129.249304975, 51.541896535, 388.997084972, -155.341912232, 70.057488940, -130.226882438])]
         for joints, pose in cases:
             residual = error(self.model.fk(from_wire_joints(joints), tool), from_xyzabc(pose))
             np.testing.assert_allclose(residual, 0, atol=1e-10)
@@ -48,7 +48,7 @@ class KinematicsTests(unittest.TestCase):
         np.testing.assert_allclose(error(model.native_target(target, q[6], tool), flange), 0, atol=1e-12)
 
     def test_tcp_z_uses_flange_orientation_not_world_z(self):
-        self.assertAlmostEqual(self.model.fk(self.q).position[2]*1000, 174.917318012, places=7)
+        self.assertAlmostEqual(self.model.fk(self.q).position[2]*1000, 217.217318012, places=7)
         q = self.q.copy(); q[6] = .2
         np.testing.assert_allclose(self.model.fk(q).position-self.model.fk(self.q).position, [0, .2, 0])
 

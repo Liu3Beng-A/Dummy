@@ -5,11 +5,30 @@ import test from 'node:test';
 // This production module has no Three/DOM dependencies. Loading it by a data
 // URL also works when the Python application's directory has no package.json.
 const source = await readFile(new URL('../resources/viewer/model_rgb.js', import.meta.url), 'utf8');
-const { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, normalizeRgbFrame, patchDiffuserShader, sameRgbFrame,
+const { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, DIFFUSER_STYLE, normalizeRgbFrame, patchDiffuserShader, sameRgbFrame,
   writeDiffuserTexture } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const frame = color => Array.from({ length: 24 }, () => color.slice());
 const kernel = createDiffuserKernel();
 const texture = colors => writeDiffuserTexture(colors, kernel, new Uint8Array(288 * 4));
+
+async function bundledPhongShader() {
+  const threeSource = await readFile(new URL('../resources/viewer/vendor/three/three.module.js', import.meta.url), 'utf8');
+  const encodedPhong = threeSource.match(/const fragment\$6 = ("(?:[^"\\]|\\.)*");/);
+  assert(encodedPhong, 'Expected the bundled MeshPhong fragment shader');
+  return JSON.parse(encodedPhong[1]);
+}
+
+// Evaluate the actual injected scalar GLSL helper, rather than maintaining a
+// second response formula that could pass while the production shader changes.
+// The helper uses scalar arithmetic and these standard GLSL/JS math primitives.
+function evaluateProductionHighlight(patched) {
+  const helper = patched.match(/float\s+rgbSoftHighlight\s*\(float\s+color\)\s*\{([^{}]*)\}/);
+  assert(helper, 'Expected the production scalar highlight helper');
+  const body = helper[1].replace(/\bfloat\s+([A-Za-z_]\w*)\s*=/g, 'const $1 =')
+    .replace(/\b(min|max|exp)\s*\(/g, 'Math.$1(');
+  const evaluate = new Function('rgbHighlightKnee', 'color', body);
+  return color => evaluate(DIFFUSER_STYLE.highlightKnee, color);
+}
 
 test('display interpolation smooths low PWM steps and never mutates its integer target', () => {
   const displayed = frame([1, 1, 1]);
@@ -34,13 +53,13 @@ test('display interpolation smooths low PWM steps and never mutates its integer 
   assert.throws(() => advanceRgbDisplayFrame(displayed, target, -1), RangeError);
 });
 
-test('opal shader separates bounded emission from ACES and leaves opacity/output conversion intact', async () => {
-  const threeSource = await readFile(new URL('../resources/viewer/vendor/three/three.module.js', import.meta.url), 'utf8');
-  const encodedPhong = threeSource.match(/const fragment\$6 = ("(?:[^"\\]|\\.)*");/);
-  assert(encodedPhong, 'Expected the bundled MeshPhong fragment shader');
-  const patched = patchDiffuserShader(JSON.parse(encodedPhong[1]));
+test('opal shader adds independent light after ACES and softens highlights without changing opacity/output conversion', async () => {
+  const original = await bundledPhongShader();
+  const patched = patchDiffuserShader(original);
   const reflection = patched.indexOf('diffuseColor.rgb *= rgbCoverReflection;');
   assert(patched.includes('uniform float rgbCoverReflection;'));
+  assert(patched.includes('uniform float rgbHighlightKnee;'));
+  assert(patched.indexOf('float rgbSoftHighlight(') < patched.indexOf('void main()'));
   assert(reflection > patched.indexOf('#include <emissivemap_fragment>'));
   assert(reflection < patched.indexOf('#include <lights_phong_fragment>'));
   assert(patched.indexOf('#include <specularmap_fragment>') < reflection);
@@ -49,13 +68,21 @@ test('opal shader separates bounded emission from ACES and leaves opacity/output
   const cached = patched.indexOf('vec3 rgbDisplayEmission = totalEmissiveRadiance;');
   const removed = patched.indexOf('totalEmissiveRadiance = vec3(0.0);');
   const toneMapped = patched.indexOf('#include <tonemapping_fragment>');
-  const restored = patched.indexOf('gl_FragColor.rgb += rgbDisplayEmission;');
+  const restored = patched.indexOf('vec3 rgbLightSum = max(gl_FragColor.rgb, vec3(0.0)) + max(rgbDisplayEmission, vec3(0.0));');
+  const compressed = patched.indexOf('gl_FragColor.rgb = vec3(rgbSoftHighlight(rgbLightSum.r),');
   assert(cached > reflection && removed > cached);
   assert(removed < patched.indexOf('#include <lights_phong_fragment>'));
   assert(restored > toneMapped && restored < patched.indexOf('#include <colorspace_fragment>'));
+  assert(compressed > restored && compressed < patched.indexOf('#include <colorspace_fragment>'));
+  assert(patched.includes('rgbSoftHighlight(rgbLightSum.g), rgbSoftHighlight(rgbLightSum.b));'));
   assert(patched.indexOf('#include <colorspace_fragment>') < patched.indexOf('#include <fog_fragment>'));
+  assert(patched.indexOf('#include <fog_fragment>') < patched.indexOf('#include <premultiplied_alpha_fragment>'));
+  assert(patched.indexOf('#include <premultiplied_alpha_fragment>') < patched.indexOf('#include <dithering_fragment>'));
   assert.equal((patched.match(/#include <tonemapping_fragment>/g) || []).length, 1);
-  assert.equal((patched.match(/gl_FragColor\.rgb \+= rgbDisplayEmission;/g) || []).length, 1);
+  assert.equal((patched.match(/vec3 rgbLightSum =/g) || []).length, 1);
+  assert.equal((patched.match(/gl_FragColor\.rgb = vec3\(rgbSoftHighlight/g) || []).length, 1);
+  assert(!/\bclamp\s*\(\s*rgbDisplayEmission/.test(patched), 'Emission intensity must not clip before the soft shoulder');
+  assert(!patched.includes('vec3(1.0) - clamp(gl_FragColor.rgb'), 'Cover brightness must not attenuate independent emission');
   assert(!patched.includes('emissiveColor.a'));
   assert(!patched.includes('smoothstep('));
   assert(!patched.includes('diffuseColor.a ='));
@@ -63,10 +90,58 @@ test('opal shader separates bounded emission from ACES and leaves opacity/output
   assert(!patched.includes('texture2D('));
   assert.throws(() => patchDiffuserShader('void main() {}'), /shader hook/);
   assert.throws(() => patchDiffuserShader(patched), /shader hook/);
-  assert.throws(() => patchDiffuserShader(JSON.parse(encodedPhong[1]).replace(
+  assert.throws(() => patchDiffuserShader(original.replace(
     '#include <tonemapping_fragment>', '')), /shader hook/);
-  assert.throws(() => patchDiffuserShader(JSON.parse(encodedPhong[1]) +
+  assert.throws(() => patchDiffuserShader(original +
     '\n#include <emissivemap_fragment>'), /shader hook/);
+});
+
+test('production highlight shoulder is linear below its knee, C1 at the knee and monotonic into HDR', async () => {
+  const highlight = evaluateProductionHighlight(patchDiffuserShader(await bundledPhongShader()));
+  const knee = DIFFUSER_STYLE.highlightKnee;
+  const range = 1 - knee;
+  assert(knee >= 0 && knee < 1, 'The highlight shoulder must have a positive finite range');
+  assert.equal(highlight(0), 0);
+  for (let step = 0; step <= 100; step++) {
+    const value = knee * step / 100;
+    assert.equal(highlight(value), value, 'The shoulder must leave the dim range unchanged');
+  }
+  const epsilon = 1e-6;
+  const leftSlope = (highlight(knee) - highlight(knee - epsilon)) / epsilon;
+  const rightSlope = (highlight(knee + epsilon) - highlight(knee)) / epsilon;
+  assert(Math.abs(leftSlope - 1) < 1e-8);
+  assert(Math.abs(rightSlope - leftSlope) < 1e-5, 'A slope discontinuity can show as a brightness step');
+  assert(Math.abs(highlight(knee + range) - (knee + range * (1 - Math.E ** -1))) < 1e-12);
+  let previous = 0;
+  for (let step = 0; step <= 4000; step++) {
+    const value = step / 500;
+    const output = highlight(value);
+    assert(Number.isFinite(output) && output >= previous && output <= 1, `Invalid HDR response at ${value}`);
+    previous = output;
+  }
+  // Higher intensities retain distinguishable headroom instead of flattening
+  // at the old hard 1.0 emission clamp; finite precision may reach 1 far above it.
+  assert(highlight(1) < highlight(1.2) && highlight(1.2) < highlight(2));
+  assert(highlight(2) < 1);
+  assert.equal(highlight(1000), 1);
+});
+
+test('independent cover plus production emission preserves dark channels and never reverses brightness', async () => {
+  const highlight = evaluateProductionHighlight(patchDiffuserShader(await bundledPhongShader()));
+  // These are post-ACES reflection values, not the material's linear albedo.
+  const cover = [.2, .21, .19];
+  assert(Math.abs(highlight(cover[0] + .3) - .5) < 1e-12, 'Below the knee emission must add without white-cover attenuation');
+  let previous = cover[1];
+  for (let pwm = 0; pwm <= 255; pwm++) {
+    const light = writeDiffuserTexture(frame([0, pwm, 0]), kernel, new Float32Array(288 * 4));
+    const displayed = cover.map((value, channel) => highlight(value + light[channel]));
+    assert.equal(displayed[0], cover[0]);
+    assert.equal(displayed[2], cover[2]);
+    assert(displayed[1] >= previous && displayed[1] <= 1, `Composition reversed at PWM ${pwm}`);
+    if (pwm > 0) assert(displayed[1] > previous, `Composition lost a green step at PWM ${pwm}`);
+    previous = displayed[1];
+  }
+  assert(highlight(.2 + .7 * 3) > highlight(.2 + .7 * 2), 'Emission intensity above 1 must reach the shoulder without early clipping');
 });
 
 test('RGB input is atomic, finite, bounded and independent of its caller', () => {
@@ -122,7 +197,7 @@ test('low light is brighter than the previous response without raising the highl
     assert.equal(pixels[2], 0);
   }
   const full = writeDiffuserTexture(frame([255, 255, 255]), kernel, new Float32Array(288 * 4));
-  assert(Math.abs(full[0] - .7) < 1e-6);
+  assert(Math.abs(full[0] - DIFFUSER_STYLE.emissionLimit) < 1e-6);
 });
 
 test('float display texture retains fractional low PWM and zero has a finite smooth toe', () => {

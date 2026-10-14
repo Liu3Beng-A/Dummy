@@ -223,7 +223,7 @@ class GamepadControllerTests(GamepadFixture, unittest.TestCase):
         self.g.gripper_target = 51
         self.g.tick()
         commands = self.write()
-        self.assertIn("@148.5,0,288.9,180,0,180,10", commands)
+        self.assertIn("@148.5,0,331.2,180,0,180,10", commands)
         self.assertNotIn("!HAND_POS 51", commands)
         self.feed("queued MOVEL id=43 mode=INT", "accepted MOVEL id=43", "ok 0 10 80 0 90 0 37.25")
         self.clock.advance(.051)
@@ -301,7 +301,7 @@ class GamepadControllerTests(GamepadFixture, unittest.TestCase):
         self.clock.advance(.051)
         self.sample()
         self.g.tick()
-        self.assertEqual(self.write(), ["@148.5,0,288.9,180,0,180,10"])
+        self.assertEqual(self.write(), ["@148.5,0,331.2,180,0,180,10"])
         self.g.stop()
         self.feed("accepted MOVEL id=43")
         self.assertIsNone(self.g.command_reference_tcp)

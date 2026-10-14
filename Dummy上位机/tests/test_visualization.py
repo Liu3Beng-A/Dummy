@@ -44,6 +44,14 @@ class MappingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             firmware_to_urdf(REST_POSE, float('nan'))
 
+    def test_207_3mm_base_keeps_mathematical_marker_aligned_with_urdf(self):
+        from app.gamepad.kinematics import forward_kinematics
+        self.assertAlmostEqual(MODEL_Z_OFFSET_M, .0200)
+        marker = cartesian_marker(forward_kinematics([0] * 6), 0)
+        # The visual URDF remains 227.3mm; only its mathematical marker offset
+        # changes, so the zero-pose flange stays at 627.3mm in display space.
+        self.assertAlmostEqual(marker["position"][2], .6273)
+
     def test_marker_applies_base_and_rail_offset(self):
         marker = cartesian_marker([100, 200, 300, 0, 90, 180], 150)
         self.assertEqual(marker['position'][:2], [0.1, 0.35])
@@ -131,6 +139,82 @@ class OfflineResourceTests(unittest.TestCase):
 
 
 class ActualOnlyViewTests(unittest.TestCase):
+    def test_target_visibility_is_an_independent_preference_and_cannot_bypass_actual_only(self):
+        from copy import deepcopy
+        from PySide6.QtWidgets import QApplication
+        application = QApplication.instance() or QApplication([])
+        from app.visualization.robot_view import RobotView
+        with patch('app.visualization.robot_view.AssetServer', side_effect=RuntimeError('offline test')):
+            view = RobotView()
+        states, frames = [], []
+        view._bridge.state_changed.connect(lambda text: states.append(json.loads(text)))
+        view._bridge.rgb_changed.connect(lambda text: frames.append(json.loads(text)))
+        try:
+            self.assertIs(view._state['targetEnabled'], True)
+            view.set_target_pose([10, -45, 90, 0, 10, 20, 15], 20)
+            view.set_actual_pose([190, -80, 180, 280, 101, 180, 260], 45)
+            view.set_world_cartesian_target([100, 200, 300, 0, 10, 20])
+            view.set_stale(True)
+            view.set_feedback_paused(True)
+            view.set_rgb_preview(True)
+            view.set_rgb_frame([(0, 128, 64)] * 24, light_on=True)
+            view._on_ready()
+            frames.clear()
+            rgb_before = (view._rgb_frame, view._rgb_light_on)
+            for preference in ('preview', 'actual'):
+                view.set_display_mode(preference)
+                before = deepcopy(view._state)
+                before_signals = len(states)
+                view.set_target_visible(False)
+                expected = deepcopy(before)
+                expected['targetEnabled'] = False
+                self.assertEqual(view._state, expected)
+                self.assertEqual(states[-1], expected)
+                self.assertEqual(len(states), before_signals + 1)
+                self.assertEqual(view._display_mode, preference)
+                view.set_target_visible(False)
+                self.assertEqual(len(states), before_signals + 1, 'An unchanged visibility preference must not resend poses')
+                view.set_target_visible(True)
+                self.assertEqual(view._state, before)
+                self.assertEqual(states[-1], before)
+                self.assertEqual(len(states), before_signals + 2)
+
+            view.set_display_mode('preview')
+            view.set_actual_only(True)
+            view.set_commanded_gripper(30)
+            for visible in (False, True, False):
+                before = deepcopy(view._state)
+                view.set_target_visible(visible)
+                expected = deepcopy(before)
+                expected['targetEnabled'] = visible
+                self.assertEqual(view._state, expected)
+                self.assertIs(view._state['actualOnly'], True)
+                self.assertEqual(view._state['mode'], 'actual')
+                self.assertIsNone(view._state['marker'])
+                self.assertEqual(view._display_mode, 'preview')
+            view.set_actual_only(False)
+            self.assertIs(view._state['targetEnabled'], False, 'Leaving actual-only mode must retain the ghost preference')
+            self.assertEqual(view._state['mode'], 'preview')
+            self.assertIsNotNone(view._state['marker'])
+            self.assertTrue(view._state['actualKnown'])
+            self.assertTrue(view._state['actualGripperKnown'])
+            self.assertTrue(view._state['stale'])
+            self.assertTrue(view._state['feedbackPaused'])
+            self.assertEqual(view._state['actual'], firmware_to_urdf([190, -80, 180, 280, 101, 180, 260], 45))
+            self.assertEqual((view._rgb_frame, view._rgb_light_on), rgb_before)
+            self.assertEqual(frames, [], 'The ghost preference must not resend or change the RGB frame')
+
+            before = deepcopy(view._state)
+            before_signals = len(states)
+            view.cleanup()
+            view.set_target_visible(True)
+            self.assertEqual(view._state, before)
+            self.assertEqual(len(states), before_signals, 'Closed views must ignore a new visibility preference')
+        finally:
+            view.close()
+            view.deleteLater()
+            application.processEvents()
+
     def test_commanded_gripper_changes_fingers_without_refreshing_joint_feedback_or_interface_preview(self):
         from PySide6.QtWidgets import QApplication
         application = QApplication.instance() or QApplication([])

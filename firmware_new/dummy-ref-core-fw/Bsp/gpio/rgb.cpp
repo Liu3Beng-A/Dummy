@@ -4,10 +4,47 @@
 #include <cmath>
 #include <cstring>
 
+namespace TcpTool { void RefreshStorageProof(); }
+
 namespace {
 constexpr float PI_F = 3.14159265358979323846f;
 constexpr uint32_t RGB_MAGIC = 0x52474231UL;
 constexpr uint16_t RGB_VERSION = 3;
+constexpr uint32_t TOOL_FLASH_ADDRESS = 0x080FFB00UL, SHARED_BYTES = 1280;
+alignas(4) uint32_t sharedStorage[SHARED_BYTES / 4]{};
+bool sharedStorageBusy = false;
+enum SharedWrite { WRITE_BUSY, WRITE_FAILED, WRITE_VERIFIED };
+SharedWrite RewriteSharedSector(uint32_t address, const void* record, size_t length) {
+    taskENTER_CRITICAL();
+    if (sharedStorageBusy) { taskEXIT_CRITICAL(); return WRITE_BUSY; }
+    sharedStorageBusy = true;
+    taskEXIT_CRITICAL();
+    const auto* flash = reinterpret_cast<const uint8_t*>(TOOL_FLASH_ADDRESS);
+    SharedWrite result = WRITE_VERIFIED;
+    if (std::memcmp(reinterpret_cast<const void*>(address), record, length)) {
+        std::memcpy(sharedStorage, flash, sizeof(sharedStorage));
+        std::memcpy(reinterpret_cast<uint8_t*>(sharedStorage) + address - TOOL_FLASH_ADDRESS, record, length);
+        bool ok = HAL_FLASH_Unlock() == HAL_OK;
+        if (ok) {
+            __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
+                                  FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
+            FLASH_EraseInitTypeDef erase{};
+            erase.TypeErase = FLASH_TYPEERASE_SECTORS; erase.Sector = FLASH_SECTOR_11;
+            erase.NbSectors = 1; erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+            uint32_t sectorError = 0;
+            ok = HAL_FLASHEx_Erase(&erase, &sectorError) == HAL_OK;
+            for (unsigned offset = 0; ok && offset < sizeof(sharedStorage); offset += 4) {
+                const uint32_t word = sharedStorage[offset / 4];
+                if (word != 0xFFFFFFFFUL)
+                    ok = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, TOOL_FLASH_ADDRESS + offset, word) == HAL_OK;
+            }
+            HAL_FLASH_Lock();
+        }
+        if (!ok || std::memcmp(flash, sharedStorage, sizeof(sharedStorage))) result = WRITE_FAILED;
+    }
+    taskENTER_CRITICAL(); sharedStorageBusy = false; taskEXIT_CRITICAL();
+    return result;
+}
 const char* const names[RGB::STATE_COUNT] = {
     "BOOT", "DISABLED", "READY_SEQ", "READY_INT", "READY_TRJ", "READY_TUN",
     "RUN_SEQ", "RUN_INT", "RUN_TRJ", "RUN_TUN", "CALIBRATION", "STOP", "STARTING", "FAULT"
@@ -121,6 +158,7 @@ void RGB::LoadConfig() {
     config = Defaults(); savedValid = false; storage = record.magic == 0xFFFFFFFFUL ? 0 : 2;
 }
 bool RGB::SaveConfig() {
+    static_assert(sizeof(FlashRecord) <= 1024 && sizeof(FlashRecord) % 4 == 0, "RGB slot boundary");
     FlashRecord record{};
     record.magic = RGB_MAGIC; record.version = RGB_VERSION; record.size = sizeof(Config);
     record.config = GetConfig(); record.crc = Crc(&record, offsetof(FlashRecord, crc));
@@ -128,26 +166,44 @@ bool RGB::SaveConfig() {
     bool unchanged = savedValid && !std::memcmp(&record.config, &savedConfig, sizeof(Config));
     taskEXIT_CRITICAL();
     if (unchanged) return true;
-    if (HAL_FLASH_Unlock() != HAL_OK) return false;
-    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
-                          FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
-    FLASH_EraseInitTypeDef erase{};
-    erase.TypeErase = FLASH_TYPEERASE_SECTORS; erase.Sector = FLASH_SECTOR_11;
-    erase.NbSectors = 1; erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;
-    uint32_t sectorError = 0;
-    bool ok = HAL_FLASHEx_Erase(&erase, &sectorError) == HAL_OK;
-    auto bytes = reinterpret_cast<const uint8_t*>(&record);
-    for (unsigned offset=0; ok && offset<sizeof(record); offset+=4) {
-        uint32_t word; std::memcpy(&word, bytes+offset, 4);
-        ok = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, FLASH_ADDRESS+offset, word) == HAL_OK;
-    }
-    HAL_FLASH_Lock();
-    ok = ok && !std::memcmp(reinterpret_cast<const void*>(FLASH_ADDRESS), &record, sizeof(record));
+    const auto written = RewriteSharedSector(FLASH_ADDRESS, &record, sizeof(record));
+    if (written == WRITE_BUSY) return false;
+    const bool ok = written == WRITE_VERIFIED;
+    TcpTool::RefreshStorageProof();
     taskENTER_CRITICAL();
     if (ok) { savedConfig = record.config; savedValid = true; storage = 1; }
     else { savedValid = false; storage = 2; }
     taskEXIT_CRITICAL();
     return ok;
+}
+void RGB::RefreshStorageProof() {
+    FlashRecord record{};
+    std::memcpy(&record, reinterpret_cast<const void*>(FLASH_ADDRESS), sizeof(record));
+    bool valid = record.magic == RGB_MAGIC && (record.version == RGB_VERSION || record.version == 2) &&
+        record.size == sizeof(Config) && record.crc == Crc(&record, offsetof(FlashRecord, crc)) && Valid(record.config);
+    bool current = valid && record.version == RGB_VERSION;
+    if (!valid && record.magic == RGB_MAGIC && record.version == 1 && record.size == sizeof(LegacyConfig)) {
+        LegacyFlashRecord legacy{};
+        std::memcpy(&legacy, reinterpret_cast<const void*>(FLASH_ADDRESS), sizeof(legacy));
+        Config migrated = Defaults();
+        std::memcpy(&migrated, &legacy.config, sizeof(legacy.config));
+        valid = legacy.crc == Crc(&legacy, offsetof(LegacyFlashRecord, crc)) &&
+            legacy.config.manualMode < EFFECT_COUNT && Valid(migrated);
+        for (const auto& binding : legacy.config.bindings)
+            valid = valid && binding.mode < EFFECT_COUNT && binding.customColor <= 1;
+    }
+    taskENTER_CRITICAL();
+    savedValid = current;
+    if (current) savedConfig = record.config;
+    storage = valid ? 1 : record.magic == 0xFFFFFFFFUL ? 0 : 2;
+    taskEXIT_CRITICAL();
+}
+bool RGB::SaveToolRecord(const void* record, size_t length) {
+    if (!record || !length || length > 256 || length % 4) return false;
+    const auto written = RewriteSharedSector(TOOL_FLASH_ADDRESS, record, length);
+    if (written == WRITE_BUSY) return false;
+    RefreshStorageProof();
+    return written == WRITE_VERIFIED;
 }
 RGB::Config RGB::GetConfig(uint32_t* rev) const {
     taskENTER_CRITICAL(); Config result = config;

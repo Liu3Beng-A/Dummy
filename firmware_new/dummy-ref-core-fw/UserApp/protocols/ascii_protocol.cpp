@@ -182,6 +182,7 @@ static bool HandleStopCommand(const char* cmd, size_t len, StreamSink& response)
     }
     if (command == "!START")
     {
+        if (CoreNativeOwned()) { Respond(response, "error START native_cleanup_pending"); return true; }
         if (dummy.IsRGBSaveBusy()) { Respond(response, "error START busy"); return true; }
         if (dummy.IsCalibrationBusy()) { Respond(response, "error CALIBRATION busy"); return true; }
         if (dummy.IsProtectionParameterBusy()) { Respond(response, "error START busy"); return true; }
@@ -263,7 +264,7 @@ static void RespondStackStats(StreamSink& responseChannel)
             (unsigned long) UsbServerStackFreeBytes(),
             (unsigned long) UartServerStackFreeBytes(),
             (unsigned long) xPortGetFreeHeapSize());
-    Respond(responseChannel, "ok STACK cmd=%lu size=4096 heap_min=%lu",
+    Respond(responseChannel, "ok STACK cmd=%lu size=8192 heap_min=%lu",
             (unsigned long) CommandTaskStackFreeBytes(),
             (unsigned long) xPortGetMinimumEverFreeHeapSize());
     Respond(responseChannel, "ok STACK rt=%lu oled=%lu rgb=%lu",
@@ -331,6 +332,7 @@ void OnUsbAsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel)
 {
     if (HandleCoreStreamCommand(_cmd, _len, _responseChannel)) return;
     if (!CoreStreamAuxAllowed(_cmd, _len)) { Respond(_responseChannel, "error STREAM busy"); return; }
+    if (dummy.HandleCartesianCommand(_cmd, _len, _responseChannel)) return;
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
     if (HandleRGBCommand(_cmd, _len, _responseChannel)) return;
     if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;
@@ -761,6 +763,7 @@ void OnUart4AsciiCmd(const char* _cmd, size_t _len, StreamSink &_responseChannel
 {
     if (HandleCoreStreamCommand(_cmd, _len, _responseChannel)) return;
     if (!CoreStreamAuxAllowed(_cmd, _len)) { Respond(_responseChannel, "error STREAM busy"); return; }
+    if (dummy.HandleCartesianCommand(_cmd, _len, _responseChannel)) return;
     if (HandleStopCommand(_cmd, _len, _responseChannel)) return;
     if (HandleRGBCommand(_cmd, _len, _responseChannel)) return;
     if (HandleMotionCommand(_cmd, _len, _responseChannel)) return;

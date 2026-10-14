@@ -2,6 +2,11 @@
 #include "dummy_robot.h"
 #include "protection_coordinator.h"
 #include "motion_values.h"
+#include "cartesian_planner.h"
+#include "tcp_tool.h"
+#include <cmath>
+#include "stm32f405xx.h"
+#include "arm_math.h" // Explicit TUN PI dependency; no longer inherited from IK header.
 #include <cstring>
 #include "FreeRTOS.h"
 #include "task.h"
@@ -132,7 +137,7 @@ DummyRobot::DummyRobot(CAN_HandleTypeDef* _hcan) :
     hand = new StepHand(_hcan, 8);   
     protection = new ProtectionCoordinator(*this);
 
-    dof6Solver = new DOF6Kinematic(0.165f, 0.0f, 0.170f, 0.117f, 0.0695f, 0.113f);
+    dof6Solver = new DOF6Kinematic(0.2073f, 0.0f, 0.170f, 0.117f, 0.0695f, 0.113f);
 }
 
 
@@ -149,6 +154,7 @@ DummyRobot::~DummyRobot()
 
 void DummyRobot::Init()
 {
+    TcpTool::Load();
     SetCommandMode(DEFAULT_COMMAND_MODE);
     SetJointSpeed(DEFAULT_JOINT_SPEED);
 
@@ -374,6 +380,7 @@ void DummyRobot::PollPidPrint()
 
 void DummyRobot::MoveJoints(DOF6Kinematic::Joint6D_t)
 {
+    if (nativePhase != NATIVE_NONE) return;
     float targets[8], speeds[8]; uint32_t epoch, generation; uint8_t first;
     taskENTER_CRITICAL();
     epoch = motionTaskEpoch; generation = motionCompletionGeneration;
@@ -416,7 +423,7 @@ bool DummyRobot::MoveJ(float _j1, float _j2, float _j3, float _j4,
 bool DummyRobot::PlanMoveJ(float _j1, float _j2, float _j3, float _j4,
                           float _j5, float _j6, float _j7_mm, float _speed, uint32_t epoch, uint32_t id, const char* kind)
 {
-    if (IsStopLocked() || epoch != motionEpoch || commandMode > COMMAND_CONTINUES_TRAJECTORY) return false;
+    if (IsStopLocked() || epoch != motionEpoch || CoreNativeOwned() || nativePhase != NATIVE_NONE || commandMode > COMMAND_CONTINUES_TRAJECTORY) return false;
     const uint32_t planningGeneration = motionCompletionGeneration;
     if (!IsFiniteCommandValue(_j1) || !IsFiniteCommandValue(_j2) ||
         !IsFiniteCommandValue(_j3) || !IsFiniteCommandValue(_j4) ||
@@ -538,65 +545,15 @@ bool DummyRobot::MoveL(float _x, float _y, float _z, float _a, float _b, float _
     return PlanMoveL(_x, _y, _z, _a, _b, _c, motionEpoch);
 }
 
-bool DummyRobot::PlanMoveL(float _x, float _y, float _z, float _a, float _b, float _c,
+bool DummyRobot::PlanMoveL(float x, float y, float z, float a, float b, float c,
                           uint32_t epoch, uint32_t id)
 {
-    if (IsStopLocked() || epoch != motionEpoch) return false;
-    DOF6Kinematic::Pose6D_t pose6D(_x, _y, _z, _a, _b, _c);
-    DOF6Kinematic::IKSolves_t ikSolves{};
-    DOF6Kinematic::Joint6D_t lastJoint6D{};
-
-    dof6Solver->SolveIK(pose6D, lastJoint6D, ikSolves);
-
-    bool valid[8];
-    int validCnt = 0;
-
-    for (int i = 0; i < 8; i++)
-    {
-        valid[i] = true;
-
-        for (int j = 1; j <= 6; j++)
-        {
-            if (ikSolves.config[i].a[j - 1] > motorJ[j]->angleLimitMax ||
-                ikSolves.config[i].a[j - 1] < motorJ[j]->angleLimitMin)
-            {
-                valid[i] = false;
-                continue;
-            }
-        }
-
-        if (valid[i]) validCnt++;
-    }
-
-    if (validCnt)
-    {
-        float min = 1000;
-        uint8_t indexConfig = 0, indexJoint = 0;
-        for (int i = 0; i < 8; i++)
-        {
-            if (valid[i])
-            {
-                for (int j = 0; j < 6; j++)
-                    lastJoint6D.a[j] = ikSolves.config[i].a[j];
-                DOF6Kinematic::Joint6D_t tmp = currentJoints - lastJoint6D;
-                float maxAngle = AbsMaxOf6(tmp, indexJoint);
-                if (maxAngle < min)
-                {
-                    min = maxAngle;
-                    indexConfig = i;
-                }
-            }
-        }
-
-        // [NEW] MoveL 不动地轨，地轨保持当前位置
-        return PlanMoveJ(ikSolves.config[indexConfig].a[0], ikSolves.config[indexConfig].a[1],
-                     ikSolves.config[indexConfig].a[2], ikSolves.config[indexConfig].a[3],
-                     ikSolves.config[indexConfig].a[4], ikSolves.config[indexConfig].a[5],
-                     currentRailPos, 0, epoch, id, "MOVEL");
-    }
-
-    return false;
+    // Legacy @ remains a base/flange target; no implicit tool/rail change.
+    auto goal = NativeCartesian::FromXYZABC(x*.001f,y*.001f,z*.001f,a,b,c);
+    goal.Y += currentRailPos*.001f;
+    return RunCartesian(goal, NativeCartesian::FromXYZABC(0,0,0,0,0,0),false,epoch,id);
 }
+
 
 void DummyRobot::UpdateJointAngles()
 {
@@ -681,7 +638,7 @@ bool DummyRobot::MotionCompletionCallback(uint8_t node, const uint8_t* data)
         motionTargetReadyMask &= ~bit;
         // Retry only an unaccepted goal. Faults or loss of an adopted goal
         // belong to protection, not to retransmission of the old target.
-        if (!(data[4] & DRIVE_BLOCKED) && motionFirstReadyMs[node] == MOTION_TIME_MISSING) {
+        if (nativePhase != NATIVE_SETTLING && !(data[4] & DRIVE_BLOCKED) && motionFirstReadyMs[node] == MOTION_TIME_MISSING) {
             motionTxOkMask &= ~bit; motionRetryAt[node] = now + 5;
         }
     }
@@ -1246,7 +1203,7 @@ int DummyRobot::SaveRGBConfig()
 {
     taskENTER_CRITICAL();
     const bool allowed = !rgbSaveBusy && stopState == DISABLED && !isEnabled && !startPending &&
-        !stopFaultMask && !motionActive && !commandHandler.IsBusy() &&
+        !stopFaultMask && !motionActive && !CoreStreamActive() && !commandHandler.IsBusy() &&
         (!protection || !protection->Locked());
     if (allowed) rgbSaveBusy = true;
     taskEXIT_CRITICAL();
@@ -1289,6 +1246,10 @@ void DummyRobot::SetCommandMode(uint32_t mode) { TrySetCommandMode(mode); }
 uint32_t DummyRobot::CommandHandler::Push(const std::string& cmd, StreamSink* response)
 {
     if (cmd.empty() || cmd.size() >= sizeof(QueueItem::command)) return 0xFF;
+    if ((CoreNativeOwned() || context->nativePhase != NATIVE_NONE) && context->commandMode == COMMAND_TARGET_POINT_INTERRUPTABLE) {
+        if (response) Respond(*response, "error motion NATIVE_BUSY finish_or_STOP");
+        return 0xFE;
+    }
     QueueItem item{};
     taskENTER_CRITICAL();
     if (context->IsStopLocked() || !context->IsEnabled()) { taskEXIT_CRITICAL(); return 0xFF; }
@@ -1375,6 +1336,14 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string& cmd)
             planned = context->PlanMoveJ(j[0], j[1], j[2], j[3], j[4], j[5], j[6], speed, epoch, id, kind);
             if (planned && count == 8) context->SetMotionSpeed(speed, epoch);
         }
+    } else if (cmd.rfind("@T",0) == 0) {
+        float p[14] = {};
+        const unsigned count = MotionValues::ParseCartesian(cmd.data()+2,cmd.size()-2,p,8,14);
+        if ((count == 8 || (count == 14 && std::fabs(p[8]) <= 500 && std::fabs(p[9]) <= 500 && std::fabs(p[10]) <= 500)) && p[6] >= 1 && p[6] <= 100 && (p[7] == 0 || p[7] == 1) && mode <= COMMAND_CONTINUES_TRAJECTORY) {
+            context->SetMotionSpeed(p[6],epoch);
+            planned = context->RunCartesian(NativeCartesian::FromXYZABC(p[0]*.001f,p[1]*.001f,p[2]*.001f,p[3],p[4],p[5]),count == 14 ? NativeCartesian::FromXYZABC(p[8]*.001f,p[9]*.001f,p[10]*.001f,p[11],p[12],p[13]) : TcpTool::Get(),p[7] == 1,epoch,id);
+            wait = true;
+        }
     } else if (cmd[0] == '@') {
         float p[7] = {};
         const unsigned count = MotionValues::Parse(cmd.data() + 1, cmd.size() - 1, p, 6, 7);
@@ -1382,6 +1351,7 @@ uint32_t DummyRobot::CommandHandler::ParseCommand(const std::string& cmd)
         if (count && mode <= COMMAND_CONTINUES_TRAJECTORY) {
             if (count == 7) context->SetMotionSpeed(speed, epoch);
             planned = context->PlanMoveL(p[0], p[1], p[2], p[3], p[4], p[5], epoch, id);
+            wait = true;
         }
     }
     if (context->motionTaskId == id && context->motionPhase == MOTION_FAILED && context->motionFailureReason) {
@@ -1551,6 +1521,7 @@ void DummyRobot::CancelMotion()
     taskENTER_CRITICAL();
     if (motionActive) { motionPhase = MOTION_CANCELLED; motionCompletedAt = HAL_GetTick(); }
     motionActive = motionDispatchPending = false;
+    nativePhase = NATIVE_NONE;
     ++motionCompletionGeneration;
     motionTxPendingMask = 0;
     motionConfirmedMask = motionRoundSeenMask = motionRoundGoodMask = 0;

@@ -11,7 +11,8 @@ COMMON_HASH = {
     "#GET_CMDMODE", "#CMDMODE", "#RGB_GET", "#RGB_STATUS",
     "#STALL_GET", "#STALL_SET", "#STALL_SAVE", "#STALL_STATUS",
     "#CAL_GET", "#CAL_SET", "#CAL_SAVE", "#CAL_STATUS",
-    "#FW_VERSION", "#CAN_DIAG",
+    "#FW_VERSION", "#CAN_DIAG", "#KIN_CONFIG", "#TCPPOSE", "#TOOL",
+    "#TOOL_SET", "#TOOL_RESET", "#TOOL_SAVE", "#IKCHECK", "#CARTESIAN_STATUS",
 }
 COMMON_BANG = {"!START", "!DISABLE", "!STOP", "!HOME", "!RESET", "!CALIBRATION",
                "!HAND_O", "!HAND_C", "!HAND_I", "!HAND_POS"}
@@ -33,7 +34,7 @@ def identity_query(command):
 
 
 def diagnostic(command):
-    return (command in ("#STREAM", "#STREAM_TEST", "#STREAM_AXES", "#RGB_STATUS", "#RGB_GET", "!RGB_BRIGHT", "#MOTION_STATUS") or
+    return (command in ("#KIN_CONFIG", "#TCPPOSE", "#TOOL", "#CARTESIAN_STATUS", "#STREAM", "#STREAM_TEST", "#STREAM_AXES", "#RGB_STATUS", "#RGB_GET", "!RGB_BRIGHT", "#MOTION_STATUS") or
             re.fullmatch(r"#STREAM_DIAG [1-7] (?:[0-9]|[1-4][0-9]|50)", command) is not None or
             identity_query(command) or
             re.fullmatch(r"#STALL_STATUS\s+[1-7](?:\s+LAST)?", command) is not None or

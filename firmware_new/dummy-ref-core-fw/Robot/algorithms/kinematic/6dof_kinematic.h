@@ -1,83 +1,54 @@
 #ifndef DOF6_KINEMATIC_SOLVER_H
 #define DOF6_KINEMATIC_SOLVER_H
 
-#include "stm32f405xx.h"
-#include "arm_math.h"
-#include "memory.h"
-
+// No MCU state: this module is also compiled directly by the native oracle.
 class DOF6Kinematic
 {
 private:
-    const float RAD_TO_DEG = 57.295777754771045f;
-
-    // DH parameters
-    struct ArmConfig_t
-    {
-        float L_BASE;
-        float D_BASE;
-        float L_ARM;
-        float L_FOREARM;
-        float D_ELBOW;
-        float L_WRIST;
-    };
+    struct ArmConfig_t { float L_BASE, D_BASE, L_ARM, L_FOREARM, D_ELBOW, L_WRIST; };
     ArmConfig_t armConfig;
-
-    float DH_matrix[6][4] = {0}; // home,d,a,alpha
-    float L1_base[3] = {0};
-    float L2_arm[3] = {0};
-    float L3_elbow[3] = {0};
-    float L6_wrist[3] = {0};
-
-    float l_se_2;
-    float l_se;
-    float l_ew_2;
-    float l_ew;
-    float atan_e;
+    float l_se_2{}, l_se{}, l_ew_2{}, l_ew{}, atan_e{};
+    bool geometryValid{};
 
 public:
     struct Joint6D_t
     {
-        Joint6D_t()
-        = default;
-
+        // Public joints, seed and IK results are degrees, including multiple turns.
+        Joint6D_t() = default;
         Joint6D_t(float a1, float a2, float a3, float a4, float a5, float a6)
-            : a{a1, a2, a3, a4, a5, a6}
-        {}
-
-        float a[6];
-
-        friend Joint6D_t operator-(const Joint6D_t &_joints1, const Joint6D_t &_joints2);
+            : a{a1, a2, a3, a4, a5, a6} {}
+        float a[6]{};
+        friend Joint6D_t operator-(const Joint6D_t&, const Joint6D_t&);
     };
-
     struct Pose6D_t
     {
-        Pose6D_t()
-        = default;
-
+        Pose6D_t() = default;
         Pose6D_t(float x, float y, float z, float a, float b, float c)
-            : X(x), Y(y), Z(z), A(a), B(b), C(c), hasR(false)
-        {}
-
-        float X{}, Y{}, Z{};
-        float A{}, B{}, C{};
-        float R[9]{};
-
-        // if Pose was calculated by FK then it's true automatically (so that no need to do extra calc),
-        // otherwise if manually set params then it should be set to false.
+            : X(x), Y(y), Z(z), A(a), B(b), C(c), hasR(false) {}
+        // FK/SolveIKMeters: XYZ metres. Legacy SolveIK: XYZ millimetres.
+        // ABC always degrees, roll/pitch/yaw; R row-major supersedes ABC if hasR.
+        float X{}, Y{}, Z{}, A{}, B{}, C{}, R[9]{};
         bool hasR{};
     };
-
+    enum SolutionFlag { INVALID = 0, REGULAR = 1, SINGULAR = 2 };
     struct IKSolves_t
     {
-        Joint6D_t config[8];
-        char solFlag[8][3];
+        Joint6D_t config[8]{};
+        // Shoulder/elbow/wrist. A singular solution is valid only after FK residual.
+        char solFlag[8][3]{};
     };
+    // Numerical model tolerances, not assertions of mechanical/TCP accuracy.
+    static constexpr float PositionToleranceM = 0.0001f;
+    static constexpr float RotationElementTolerance = 0.001f;
 
     DOF6Kinematic(float L_BS, float D_BS, float L_AM, float L_FA, float D_EW, float L_WT);
-
-    bool SolveFK(const Joint6D_t &_inputJoint6D, Pose6D_t &_outputPose6D);
-
-    bool SolveIK(const Pose6D_t &_inputPose6D, const Joint6D_t &_lastJoint6D, IKSolves_t &_outputSolves);
+    bool SolveFK(const Joint6D_t&, Pose6D_t&);
+    bool SolveIK(const Pose6D_t& millimetres, const Joint6D_t& seedDegrees, IKSolves_t&);
+    bool SolveIKMeters(const Pose6D_t& metres, const Joint6D_t& seedDegrees, IKSolves_t&);
+    static bool IsSolutionValid(const IKSolves_t&, unsigned index);
+    // Solver has no mechanical joint limits. Pick a legal 360-degree equivalent
+    // before checking/connecting branches; never clamp an angle into the limits.
+    static bool NearestInLimits(float angleDegrees, float seedDegrees,
+                                float minimumDegrees, float maximumDegrees, float& result);
 };
-
-#endif //DOF6_KINEMATIC_SOLVER_H
+#endif

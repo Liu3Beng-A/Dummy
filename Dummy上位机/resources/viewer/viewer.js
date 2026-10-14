@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/three/OrbitControls.js';
 import URDFLoader from './vendor/urdf-loader/URDFLoader.js';
-import { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, DIFFUSER_SAMPLES,
+import { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, DIFFUSER_SAMPLES, DIFFUSER_STYLE,
   normalizeRgbFrame, patchDiffuserShader, sameRgbFrame, writeDiffuserTexture } from './model_rgb.js';
 
 const root = document.getElementById('canvas');
@@ -70,8 +70,7 @@ let rgbFrameUpdates = 0;
 let displayedRgbFrame = null;
 let rgbLightOn = false;
 let rgbLightOnUpdates = 0;
-const RGB_SMOOTHING_SECONDS = 0.06;
-const rgbCoverReflection = { value: 1 };
+const rgbCoverReflection = { value: DIFFUSER_STYLE.coverReflection };
 let diffuserTexture = null;
 let diffuserPixels = null;
 let cameraName = 'isometric';
@@ -135,7 +134,7 @@ function setCamera(name) {
   };
   cameraName = name;
   const jointPreview = currentState?.mode === 'preview'
-    && currentState?.actualOnly !== true && !currentState?.marker;
+    && currentState?.actualOnly !== true && currentState?.targetEnabled !== false && !currentState?.marker;
   const reference = isLocalRgbPreview(currentState) ? actual
     : jointPreview ? target : currentState?.actualKnown ? actual : null;
   const center = new THREE.Vector3(0, 0, 0.28);
@@ -225,20 +224,21 @@ function prepareDiffuser(robot) {
     diffuserMeshes.push(object);
     const materials = Array.isArray(object.material) ? object.material : [object.material];
     for (const material of materials) {
-      // The unlit opal cover is pale gray-white. Only overall light_on metadata
-      // changes its reflection; an animation's low/zero PWM never switches it.
-      material.color.setRGB(0.85, 0.85, 0.85);
+      // The subdued gray-white cover stays fixed from zero to full brightness. RGB only
+      // adds colored emission; power metadata never darkens the white cover.
+      material.color.setRGB(DIFFUSER_STYLE.coverGray, DIFFUSER_STYLE.coverGray, DIFFUSER_STYLE.coverGray);
       material.specular?.setHex(0x20252a);
       material.shininess = 24;
       material.emissive.setRGB(1, 1, 1);
-      material.emissiveIntensity = 1;
+      material.emissiveIntensity = DIFFUSER_STYLE.emissionIntensity;
       material.emissiveMap = diffuserTexture;
       material.onBeforeCompile = shader => {
         shader.uniforms.rgbCoverReflection = rgbCoverReflection;
+        shader.uniforms.rgbHighlightKnee = { value: DIFFUSER_STYLE.highlightKnee };
         shader.fragmentShader = patchDiffuserShader(shader.fragmentShader);
       };
-      material.customProgramCacheKey = () => 'rgb-opal-cover-v3';
-      material.userData.rgbCoverReflection = true;
+      material.customProgramCacheKey = () => 'rgb-opal-cover-v5-gray-additive';
+      material.userData.rgbFixedCover = true;
       material.needsUpdate = true;
     }
   });
@@ -271,7 +271,6 @@ function setRgbFrame(frame, lightOn = undefined) {
   }
   if (first || document.hidden) {
     displayedRgbFrame = rgbFrame.map(color => color.slice());
-    rgbCoverReflection.value = rgbLightOn ? 0.002 : 1;
     updateDiffuserTexture();
   }
   return true;
@@ -283,12 +282,7 @@ function animateRgb(dt) {
   // input messages is normal during a breathing trough and never resets damping.
   const snap = document.hidden || dt > 0.25;
   const changed = advanceRgbDisplayFrame(displayedRgbFrame, rgbFrame,
-    snap ? 0.26 : dt, RGB_SMOOTHING_SECONDS);
-  const goal = rgbLightOn ? 0.002 : 1;
-  const previous = rgbCoverReflection.value;
-  const reflection = snap ? goal : THREE.MathUtils.damp(previous, goal,
-    1 / RGB_SMOOTHING_SECONDS, dt);
-  rgbCoverReflection.value = Math.abs(goal - reflection) <= 1e-6 ? goal : reflection;
+    snap ? 0.26 : dt, DIFFUSER_STYLE.smoothingSeconds);
   if (changed) updateDiffuserTexture();
 }
 
@@ -336,7 +330,7 @@ function setState(state) {
   const localRgbPreview = isLocalRgbPreview(state);
   const preview = !actualOnly && state.mode === 'preview';
   const markerVisible = !actualOnly && Boolean(state.marker);
-  const jointPreview = preview && !markerVisible && !localRgbPreview;
+  const jointPreview = preview && state.targetEnabled !== false && !markerVisible && !localRgbPreview;
   document.getElementById('mode').textContent = localRgbPreview ? '灯效预览 · 本地示意'
     : actualOnly ? feedbackPaused
     ? '最近实际姿态 · 回读已暂停' : '实际关节 · 串口回读'
@@ -416,7 +410,7 @@ function diffuserDiagnostics() {
   const summarize = material => ({
     emissive: material.emissive?.toArray(), emissiveIntensity: material.emissiveIntensity,
     hasEmissiveMap: Boolean(material.emissiveMap), opacity: material.opacity,
-    color: material.color?.toArray(), adaptiveCover: material.userData.rgbCoverReflection === true,
+    color: material.color?.toArray(), fixedCover: material.userData.rgbFixedCover === true,
   });
   const actualMaterials = diffuserMeshes.flatMap(object =>
     (Array.isArray(object.material) ? object.material : [object.material]).map(summarize));
@@ -437,7 +431,8 @@ function diffuserDiagnostics() {
     frame: rgbFrame.map(color => color.slice()), frameUpdates: rgbFrameUpdates,
     displayFrame: displayedRgbFrame?.map(color => color.slice()) || null,
     lightOn: rgbLightOn, lightOnUpdates: rgbLightOnUpdates,
-    coverReflection: rgbCoverReflection.value, coverReflectionTarget: rgbLightOn ? 0.002 : 1,
+    coverReflection: rgbCoverReflection.value, coverReflectionTarget: DIFFUSER_STYLE.coverReflection,
+    displayStyle: { ...DIFFUSER_STYLE },
     textureFormat: 'rgba16f',
     localCenter: DIFFUSER_CENTER.slice(), sourceZeroDirection: DIFFUSER_U.slice(),
     worldBounds: bounds.isEmpty() ? null : { min: bounds.min.toArray(), max: bounds.max.toArray() },

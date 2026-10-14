@@ -59,7 +59,7 @@ class RobotView(QWidget):
         self._state = {
             "mode": "preview", "theme": "light", "stale": True,
             "actualOnly": False, "feedbackPaused": False,
-            "rgbPreview": False,
+            "rgbPreview": False, "targetEnabled": True,
             "actualKnown": False, "actualGripperKnown": False,
             "highlight": None, "camera": "isometric", "cameraSeq": 0,
             "grid": True, "axes": True, "visibilitySeq": 0,
@@ -251,6 +251,15 @@ class RobotView(QWidget):
         """Temporarily hide all target displays without inventing telemetry."""
         self._state["actualOnly"] = bool(enabled)
         self._sync()
+
+    def set_target_visible(self, visible):
+        """Show/hide only the joint-target ghost; feedback and MoveL markers keep their rules."""
+        if self._closed:
+            return
+        visible = bool(visible)
+        if self._state["targetEnabled"] != visible:
+            self._state["targetEnabled"] = visible
+            self._sync()
 
     def set_feedback_paused(self, paused):
         """Annotate retained telemetry; software targets never refresh it."""

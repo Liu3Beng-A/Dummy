@@ -8,6 +8,36 @@ using namespace StreamProtocol;
 
 namespace {
 bool stopRequested=false,openTestRequest=false;
+bool nativeOwner=false,nativeStarted=false,nativeCleanupWanted=false,nativeClosedValid=false;
+uint32_t nativeCleanupRetryAt=0;
+CoreNativeSnapshot nativeLastSnapshot{};
+void NativeCleanupPoll(uint32_t now);
+uint32_t nativeEpoch=0,nativeId=0;
+uint16_t nativeTokenCounter=0,nativeDiagCounter=0;
+uint16_t sessionHistory[64]{};
+uint8_t sessionHistoryWrite=0;
+volatile uint8_t nativeHeldPending=0,nativeHeldReady=0;
+uint16_t nativeHeldNonce[7]{};
+uint32_t nativeHeldAt[7]{},nativeHeldAttemptAt[7]{};
+int32_t nativeHeldValue[7]{};
+uint8_t nativeHeldError[7]{},nativeHeldCursor=0;
+void RememberSession(uint16_t token) {
+    if(!token)return;
+    sessionHistory[sessionHistoryWrite]=token;
+    sessionHistoryWrite=(sessionHistoryWrite+1)%64;
+}
+uint16_t NativeToken() {
+    if(!nativeTokenCounter)nativeTokenCounter=uint16_t(HAL_GetTick()+0x6000U);
+    // The 64 remembered tokens cover the union of seven motors' eight-token
+    // retirement windows during this core boot. Motor reboots are still tested
+    // by OPEN; an unknown old reservation is never silently taken over.
+    for(unsigned attempt=0;attempt<66;++attempt) {
+        if(!++nativeTokenCounter)++nativeTokenCounter;
+        bool used=false;for(const auto token:sessionHistory)used|=token==nativeTokenCounter;
+        if(!used)return nativeTokenCounter;
+    }
+    return 0;
+}
 class RobotStreamPort final : public CoreStreamPort {
 public:
     bool Send(uint8_t node,uint8_t command,const uint8_t data[8]) override {
@@ -17,7 +47,10 @@ public:
         return TryCanSendStreamMessage(get_can_ctx(&hcan1),const_cast<uint8_t*>(data),&header,Read16(data));
     }
     bool Allowed() const override {
-        return (openTestRequest || dummy.commandMode==DummyRobot::COMMAND_STREAM_JOINT) && dummy.IsEnabled() &&
+        const bool ownerAllowed=nativeOwner ?
+            (nativeEpoch==dummy.GetMotionEpoch() && unsigned(dummy.commandMode)>=1 && unsigned(dummy.commandMode)<=3) :
+            (openTestRequest || dummy.commandMode==DummyRobot::COMMAND_STREAM_JOINT);
+        return ownerAllowed && dummy.IsEnabled() &&
             !dummy.IsStopLocked() && !dummy.IsCalibrationBusy() && !dummy.IsProtectionParameterBusy();
     }
     bool Validate(const Record& record,const Record* previous,uint8_t mask) const override {
@@ -136,6 +169,9 @@ bool HandleCoreStreamCommand(const char* command,size_t length,StreamSink& respo
     while(length && (command[length-1]==' ' || command[length-1]=='\t' || command[length-1]=='\r' || command[length-1]=='\n')) --length;
     const bool test=Prefix(command,length,"!STREAM_TEST ");
     const bool testQuery=Equal(command,length,"#STREAM_TEST");
+    if(nativeOwner && (test || Prefix(command,length,"~S") || Prefix(command,length,"!STREAM"))) {
+        Respond(response,"error STREAM code=%u native_owner",unsigned(BUSY));return true;
+    }
     if(test || testQuery) {
         if(response.channelType!=StreamSink::CHANNEL_TYPE_USB) { Respond(response,"error STREAM_TEST USB_only");return true; }
         if(testQuery) { PrintOpenTest(response);return true; }
@@ -153,7 +189,7 @@ bool HandleCoreStreamCommand(const char* command,size_t length,StreamSink& respo
             result=engine.Begin(values[0],uint8_t(1U<<(values[1]-1)),HAL_GetTick(),true);
             if(result!=OK)openTestRequest=false;
         }
-        if(result==OK)sink=&response;
+        if(result==OK) { sink=&response;RememberSession(values[0]); }
         taskEXIT_CRITICAL();
         if(result!=OK)Respond(response,"error STREAM_TEST code=%u gate=%s",unsigned(result),gate?gate:"BEGIN");
         else PrintOpenTest(response);
@@ -178,7 +214,10 @@ bool HandleCoreStreamCommand(const char* command,size_t length,StreamSink& respo
         }
         taskENTER_CRITICAL();
         if(diagnosticPending || diagnosticReady) { taskEXIT_CRITICAL(); Respond(response,"error STREAM_DIAG busy"); return true; }
-        if(!++diagnosticNonce) ++diagnosticNonce;
+        // Disjoint nonce namespaces prevent a late UI DIAG7 response from
+        // becoming an internal trajectory seed (and vice versa).
+        diagnosticNonce=uint16_t((diagnosticNonce+1U)&0x7FFFU);
+        if(!diagnosticNonce)diagnosticNonce=1;
         diagnosticNode=uint8_t(values[0]); diagnosticField=uint8_t(values[1]); diagnosticSink=&response;
         diagnosticPending=true;diagnosticAt=HAL_GetTick();diagnosticAttemptAt=diagnosticAt-20;
         taskEXIT_CRITICAL();
@@ -186,7 +225,7 @@ bool HandleCoreStreamCommand(const char* command,size_t length,StreamSink& respo
         return true;
     }
     if(query) {
-        taskENTER_CRITICAL(); engine.Heartbeat(HAL_GetTick()); taskEXIT_CRITICAL();
+        taskENTER_CRITICAL(); if(!nativeOwner)engine.Heartbeat(HAL_GetTick()); taskEXIT_CRITICAL();
         const Snapshot s=ReadSnapshot();
         Respond(response,"STREAM_CAP v=%u hz=50 mode=%u mask=%u",unsigned(VERSION),unsigned(MODE),unsigned(s.mask));
         PrintFeatures(response,s);
@@ -228,7 +267,7 @@ bool HandleCoreStreamCommand(const char* command,size_t length,StreamSink& respo
         (open && values[1]>127)) { Respond(response,"error STREAM syntax"); return true; }
     taskENTER_CRITICAL();
     uint8_t result;
-    if(open) { result=engine.Begin(values[0],uint8_t(values[1]),HAL_GetTick()); if(result==OK) sink=&response; }
+    if(open) { result=engine.Begin(values[0],uint8_t(values[1]),HAL_GetTick()); if(result==OK) { sink=&response;RememberSession(values[0]); } }
     else if(start) result=engine.Start(values[0],HAL_GetTick());
     else result=engine.Close(values[0],HAL_GetTick());
     taskEXIT_CRITICAL();
@@ -240,6 +279,16 @@ bool CoreStreamAuxAllowed(const char* command,size_t length) {
     if(!CoreStreamActive()) return true;
     while(length && (*command==' ' || *command=='\t')) { ++command; --length; }
     while(length && (command[length-1]==' ' || command[length-1]=='\t' || command[length-1]=='\r' || command[length-1]=='\n')) --length;
+    // Native SEQ/TRJ requests may enter their existing command queue while
+    // the current finite move executes. INT admission is checked by the
+    // command handler. No queued command may emit ordinary CAN targets while
+    // this internal executor still owns the seven motors.
+    if(nativeOwner && (Prefix(command,length,"@") || Prefix(command,length,">") ||
+       Prefix(command,length,"&") || Equal(command,length,"!HOME") || Equal(command,length,"!RESET")))return true;
+    if(nativeOwner && (Equal(command,length,"#CARTESIAN_STATUS") ||
+       Equal(command,length,"#KIN_CONFIG") || Equal(command,length,"#TOOL") ||
+       Equal(command,length,"#TCPPOSE") || Equal(command,length,"#IKCHECK") ||
+       Prefix(command,length,"#IKCHECK ")))return true;
     if(engine.IsOpenTest()) return Equal(command,length,"!STOP") || Equal(command,length,"!DISABLE") ||
         Equal(command,length,"#GETJPOS") || Prefix(command,length,"#GET_CMDMODE ") ||
         Equal(command,length,"#STACK") || Equal(command,length,"#MOTION_STATUS") ||
@@ -273,6 +322,19 @@ void CoreStreamPoll() {
     taskENTER_CRITICAL();
     engine.Poll(HAL_GetTick());stop=stopRequested;stopRequested=false;
     if(!engine.Active())openTestRequest=false;
+    if(nativeOwner && nativeEpoch==dummy.GetMotionEpoch() && !dummy.IsStopLocked()) {
+        const uint32_t now=HAL_GetTick();
+        for(unsigned attempt=0;attempt<7;++attempt) {
+            const uint8_t axis=nativeHeldCursor;nativeHeldCursor=(nativeHeldCursor+1)%7;
+            const uint8_t bit=uint8_t(1U<<axis);
+            if(!(nativeHeldPending&bit))continue;
+            if(now-nativeHeldAt[axis]>=1000) { nativeHeldPending&=uint8_t(~bit);nativeHeldError[axis]=DEADLINE;continue; }
+            if(now-nativeHeldAttemptAt[axis]<20)continue;
+            uint8_t data[8]{};Write16(data,nativeHeldNonce[axis]);data[2]=DIAG_HELD_POSITION;
+            if(streamPort.Send(axis+1,DIAG,data))nativeHeldAttemptAt[axis]=now;
+            break;
+        }
+    }
     if(diagnosticPending && HAL_GetTick()-diagnosticAttemptAt>=20 && HAL_GetTick()-diagnosticAt<1000) {
         uint8_t data[8]{};Write16(data,diagnosticNonce);data[2]=diagnosticField;
         if(streamPort.Send(diagnosticNode,DIAG,data)) diagnosticAttemptAt=HAL_GetTick();
@@ -281,6 +343,7 @@ void CoreStreamPoll() {
     // Queue cancellation/soft-stop bookkeeping may touch RTOS queues. Never
     // keep the coordinator's outer CAN interrupt mask around that work.
     if(stop) dummy.RequestSoftStop();
+    NativeCleanupPoll(HAL_GetTick());
     PollCanStreamTransmit(get_can_ctx(&hcan1));
     const uint32_t duration=micros()-began;if(duration>maxPollUs)maxPollUs=duration;
 }
@@ -301,7 +364,7 @@ void CoreStreamPrint() {
         else Respond(*diagnosticSink,"STREAM_NODE node=%u n=%u field=%u value=%lu",unsigned(node),unsigned(nonce),unsigned(field),(unsigned long)value);
     } else if(diagnosticSink && timeout) Respond(*diagnosticSink,"error STREAM_DIAG node=%u timeout",unsigned(node));
     const Snapshot s=ReadSnapshot();
-    if(!sink || s.revision==printedRevision) return;
+    if(nativeOwner || !sink || s.revision==printedRevision) return;
     printedRevision=s.revision;
     if(engine.IsOpenTest()) { PrintOpenTest(*sink);return; }
     PrintFeatures(*sink,s);
@@ -311,6 +374,13 @@ void CoreStreamPrint() {
 }
 void CoreStreamReceive(uint8_t node,uint8_t command,const uint8_t data[8]) {
     if(command==DIAG) {
+        if(nativeOwner && nativeEpoch==dummy.GetMotionEpoch() && node>=1 && node<=7 &&
+           (nativeHeldPending&(1U<<(node-1))) && Read16(data)==nativeHeldNonce[node-1] &&
+           data[2]==DIAG_HELD_POSITION && !data[3]) {
+            nativeHeldValue[node-1]=ReadI32(data+4);
+            nativeHeldPending&=uint8_t(~(1U<<(node-1)));nativeHeldReady|=uint8_t(1U<<(node-1));
+            return;
+        }
         if(diagnosticPending && node==diagnosticNode && Read16(data)==diagnosticNonce &&
             data[2]==diagnosticField && !data[3]) {
             diagnosticValue=Read32(data+4); diagnosticPending=false; diagnosticReady=true;
@@ -322,4 +392,134 @@ void CoreStreamReceive(uint8_t node,uint8_t command,const uint8_t data[8]) {
         return;
     }
     engine.Receive(node,command,data,HAL_GetTick());
+}
+
+
+bool CoreNativeOwned() { return nativeOwner; }
+uint8_t CoreNativeBegin(uint32_t epoch,uint32_t id) {
+    taskENTER_CRITICAL();
+    uint8_t result=BUSY;
+    if(!nativeOwner && !engine.Active() && !engine.Busy()) {
+        if(epoch!=dummy.GetMotionEpoch() || unsigned(dummy.commandMode)<1 || unsigned(dummy.commandMode)>3 ||
+           !dummy.IsEnabled() || dummy.IsStopLocked() || dummy.IsCalibrationBusy() || dummy.IsProtectionParameterBusy())result=BLOCKED;
+        else {
+            nativeOwner=true;nativeStarted=nativeCleanupWanted=nativeClosedValid=false;nativeEpoch=epoch;nativeId=id;
+            nativeHeldPending=nativeHeldReady=nativeHeldCursor=0;
+            memset(nativeHeldError,0,sizeof(nativeHeldError));
+            result=engine.Begin(NativeToken(),ALL_AXES,HAL_GetTick());
+            if(result!=OK)nativeOwner=false;
+            else { RememberSession(engine.Session());sink=nullptr; }
+        }
+    }
+    taskEXIT_CRITICAL();return result;
+}
+uint8_t CoreNativeReadHeld(uint8_t node,uint32_t epoch) {
+    taskENTER_CRITICAL();
+    uint8_t result=OK;
+    if(node<1 || node>7)result=BAD_FLAGS;
+    else if(!nativeOwner || epoch!=nativeEpoch || epoch!=dummy.GetMotionEpoch())result=BAD_SESSION;
+    else if(engine.GetState()!=CoreStreamEngine::OPEN || engine.Next())result=BAD_STATE;
+    else if(nativeHeldError[node-1])result=nativeHeldError[node-1];
+    else if(!((nativeHeldPending|nativeHeldReady)&(1U<<(node-1)))) {
+        nativeDiagCounter=uint16_t((nativeDiagCounter+1U)&0x7FFFU);if(!nativeDiagCounter)nativeDiagCounter=1;
+        nativeHeldNonce[node-1]=uint16_t(0x8000U|nativeDiagCounter);
+        nativeHeldAt[node-1]=HAL_GetTick();nativeHeldAttemptAt[node-1]=HAL_GetTick()-20;
+        nativeHeldPending|=uint8_t(1U<<(node-1));
+    }
+    taskEXIT_CRITICAL();return result;
+}
+bool CoreNativeHeld(uint8_t node,int32_t& value,uint32_t epoch) {
+    taskENTER_CRITICAL();
+    const bool ready=nativeOwner && epoch==nativeEpoch && epoch==dummy.GetMotionEpoch() &&
+        node>=1 && node<=7 && (nativeHeldReady&(1U<<(node-1)));
+    if(ready)value=nativeHeldValue[node-1];
+    taskEXIT_CRITICAL();return ready;
+}
+uint8_t CoreNativeSubmit(const Record& input,uint32_t epoch) {
+    Record record=input,previous{};bool havePrevious=false;uint8_t selected=0;
+    taskENTER_CRITICAL();
+    const bool current=nativeOwner && epoch==nativeEpoch && epoch==dummy.GetMotionEpoch() && input.session==engine.Session();
+    if(current) {
+        havePrevious=engine.Previous()!=nullptr;
+        if(havePrevious)previous=*engine.Previous();selected=engine.SelectedMask();
+    }
+    taskEXIT_CRITICAL();
+    if(!current)return BAD_SESSION;
+    // Native producer geometry validation is kept out of the CAN IRQ mask,
+    // with the same full-segment hull gate as external v2 records.
+    const bool valid=streamPort.Validate(record,havePrevious?&previous:nullptr,selected);
+    taskENTER_CRITICAL();
+    uint8_t result=BAD_SESSION;
+    if(nativeOwner && epoch==nativeEpoch && epoch==dummy.GetMotionEpoch() && record.session==engine.Session())
+        result=valid?engine.Submit(record,HAL_GetTick(),true):uint8_t(BAD_LIMIT);
+    taskEXIT_CRITICAL();return result;
+}
+uint8_t CoreNativeStart(uint32_t epoch) {
+    taskENTER_CRITICAL();
+    const uint8_t result=nativeOwner && epoch==nativeEpoch && epoch==dummy.GetMotionEpoch() ?
+        engine.Start(engine.Session(),HAL_GetTick()):uint8_t(BAD_SESSION);
+    if(result==OK)nativeStarted=true;
+    taskEXIT_CRITICAL();return result;
+}
+bool CoreNativeHeartbeat(uint32_t epoch) {
+    taskENTER_CRITICAL();
+    const bool current=nativeOwner && epoch==nativeEpoch && epoch==dummy.GetMotionEpoch() && streamPort.Allowed();
+    if(current)engine.Heartbeat(HAL_GetTick());
+    taskEXIT_CRITICAL();return current;
+}
+CoreNativeSnapshot CoreNativeSnapshotRead() {
+    taskENTER_CRITICAL();
+    if(!nativeOwner && nativeClosedValid) {
+        const CoreNativeSnapshot value=nativeLastSnapshot;
+        taskEXIT_CRITICAL();return value;
+    }
+    CoreNativeSnapshot value{};value.owned=nativeOwner;value.epoch=nativeEpoch;value.id=nativeId;
+    value.session=engine.Session();value.next=engine.Next();value.committed=engine.LastCommitted();
+    value.executed=engine.LastExecuted();value.finalSequence=engine.FinalSequence();
+    value.state=uint8_t(engine.GetState());value.reason=engine.Reason();value.free=engine.Free();
+    value.capabilities=engine.CapabilityMask();value.revision=engine.Revision();
+    value.closing=engine.TestClosing();value.failure=engine.Failure();
+    taskEXIT_CRITICAL();return value;
+}
+uint8_t CoreNativeClose(uint32_t epoch) {
+    taskENTER_CRITICAL();
+    // Cancellation changes dummy's epoch; the ORIGINAL bound owner retains
+    // cleanup authority only. No START/Submit authority survives that change.
+    uint8_t result=BAD_SESSION;
+    if(nativeOwner && epoch==nativeEpoch) {
+        nativeCleanupWanted=true;nativeCleanupRetryAt=HAL_GetTick();
+        // No motor may have START authority yet. Discard buffered preparations
+        // without manufacturing a STOP for a geometric/preflight rejection.
+        if(!nativeStarted && (engine.GetState()==CoreStreamEngine::BUFFERING || engine.GetState()==CoreStreamEngine::ARMED))engine.Cancel();
+        result=engine.Session()?engine.Close(engine.Session(),HAL_GetTick()):uint8_t(OK);
+    }
+    taskEXIT_CRITICAL();return result;
+}
+bool CoreNativeRelease(uint32_t epoch) {
+    taskENTER_CRITICAL();
+    const bool alreadyClosed=!nativeOwner && nativeClosedValid &&
+        nativeLastSnapshot.epoch==epoch && !engine.Active();
+    const bool closed=nativeOwner && epoch==nativeEpoch && !engine.Active() && !engine.Session();
+    if(closed) {
+        nativeLastSnapshot=CoreNativeSnapshotRead();
+        nativeLastSnapshot.owned=nativeLastSnapshot.closing=false;
+        nativeClosedValid=true;nativeOwner=nativeCleanupWanted=false;
+        nativeHeldPending=nativeHeldReady=0;
+    }
+    taskEXIT_CRITICAL();return closed || alreadyClosed;
+}
+
+namespace {
+void NativeCleanupPoll(uint32_t now) {
+    // Persistent cleanup owns ONLY CLOSE for this original owner. It never
+    // renews producer health, submits a curve, arms START or enables a motor.
+    // Keep the owner until every opened motor confirms this token's CLOSE.
+    taskENTER_CRITICAL();
+    if(nativeOwner && nativeCleanupWanted) {
+        if(!engine.Active() && !engine.Session())CoreNativeRelease(nativeEpoch);
+        else if(!engine.TestClosing() && now-nativeCleanupRetryAt>=20)
+            CoreNativeClose(nativeEpoch);
+    }
+    taskEXIT_CRITICAL();
+}
 }

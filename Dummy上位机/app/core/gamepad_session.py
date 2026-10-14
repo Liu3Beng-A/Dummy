@@ -99,7 +99,8 @@ class GamepadSession(QObject):
         c = self.controller
         return (self.claimed and not self.release_pending and self.stage == "ready" and
                 self.device_connected and c.is_connected and c._motor_enabled and
-                c.current_cmdmode == 2 and not c._stop_locked and not c._calibration_busy)
+                c.current_cmdmode == 2 and not c._stop_locked and not c._calibration_busy and
+                not c.cartesian.native_tcp)
 
     def state(self):
         now = self.clock()
@@ -168,6 +169,12 @@ class GamepadSession(QObject):
         return True
 
     def claim(self):
+        if self.controller.cartesian.native_tcp:
+            message = "当前固件支持单个笛卡尔目标；连续操控暂不可用。"
+            if not self.claimed:
+                self._stage("connected" if self.device_connected else "disconnected", message)
+            self.controller.log(message, "WARN")
+            return False
         if self.controller.current_cmdmode == 7:
             self.controller.log("主控实际处于诊断模式 7；请先显式退出并确认主控模式，再接管手柄", "WARN")
             return False
@@ -298,6 +305,7 @@ class GamepadSession(QObject):
     def can_write_stream(self, generation, command):
         job = self._stream
         return bool(self.claimed and not self.release_pending and
+                    not self.controller.cartesian.native_tcp and
                     self.device_connected and self.controller._motor_enabled and
                     self.controller.current_cmdmode == 2 and
                     self.stage in ("ready", "target_rejected") and job and not job["written"] and

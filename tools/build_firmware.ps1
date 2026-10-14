@@ -1,8 +1,8 @@
-﻿# Build all five firmware targets into the single repository output directory.
+# Build all five firmware targets into the single repository output directory.
 [CmdletBinding()]
 param(
     [ValidatePattern('^[0-9]{10}$')]
-    [string]$ReleaseId = '2026101305'
+    [string]$ReleaseId = '2026101401'
 )
 $ErrorActionPreference = 'Stop'
 $repoPath = Split-Path -Parent $PSScriptRoot

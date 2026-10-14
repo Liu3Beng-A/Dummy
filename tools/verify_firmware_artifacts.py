@@ -66,7 +66,7 @@ for name in targets:
     sections={m[1]:{'bytes':int(m[2]),'address':int(m[3])} for m in re.finditer(r'^(\S+)\s+(\d+)\s+(\d+)\s*$',size,re.M)}
     ram_static=sum(v['bytes'] for k,v in sections.items() if k in ('.data','.bss'))
     if kind==0:
-        for stack,expected in (('commandTaskStack',4096),('usbServerStack',6144),('uartServerStack',6144)):
+        for stack,expected in (('commandTaskStack',8192),('realtimeTaskStack',4096),('usbServerStack',6144),('uartServerStack',6144)):
             assert symbols[stack]['bytes']==expected,(name,stack)
         heap=symbols['__HeapLimit']['address']-symbols['__HeapBase']['address']
         assert heap>=0x3c00,('core reserved C heap',heap)
@@ -84,7 +84,8 @@ for name in targets:
         if kind and ('CMakeFiles/'+name+'.elf.dir') not in file.as_posix():continue
         for line in file.read_text(errors='replace').splitlines():
             if any(x in line for x in ('Stream','stream','Can','CAN_','Tim4Callback','CloseLoop','UpdateAngle','Main()',
-                                       'ThreadControlLoopFixUpdate','ASCII_protocol','OnUsbAsciiCmd','ADC','Transmit')):
+                                       'ThreadControlLoopFixUpdate','ASCII_protocol','OnUsbAsciiCmd','ADC','Transmit',
+                                       'Cartesian','Planner::','SolveIK','SolveFK','MotionValues','TcpTool','SaveConfig','SaveToolRecord')):
                 stack_usage.append(line)
     (out/(name+'.stack-frames.txt')).write_text('\n'.join(stack_usage),encoding='utf-8')
     functions={}

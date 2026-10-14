@@ -1,3 +1,63 @@
+## 已完成：主控有限 MoveL、IK/FK、TCP 与地轨协同（2026-10-14，本任务待实机）
+
+- 授权/快照：用户批准实现与编译后自行烧录；改前所有跟踪/新增文件快照4148f68，本轮实现留工作区、无额外提交或设备操作。
+- 模型/工具：新图207.3/0/170/69.5/117/113mm到法兰；工具独立+Z114mm，完整XYZ/ABC可设，标定/固定TCP手动移轨未做。IK/FK统一deg/metres，解析残差/奇异/不可达/多圈修复；PC数学和20mm marker同步，历史Cartesian点不自动迁移。
+- 原生有限流程：旧@base/flange锁轨、新@TworldTCP 8/14字段，主控OPEN→新鲜整数SEED→PRECHECK→BUFFER→同步START确认→50Hz持续q/v/a→END/COMPLETED→CLOSE→tagged实际SETTLING→DONE。普通模式2不切公开7，不恢复PC IK或MoveJ模拟；到位不补发0x07。固定轨整路径先试，确需轨才有界批量协同。速度参与TCP时间及动态预检。
+- 安全/状态：独占epoch/session门禁；STOP不同步完成不报DONE，人工CANCELLED12/自动TARGET_READY_TIMEOUT17/真实原始故障分开；丢CLOSE持续仅清理、不使能、不释放未确认owner。有限INT占用期间拒新运动；SEQ/TRJ排队有限点，无连续Cartesian blend承诺。
+- 工具/RGB：单TCP槽CRC与RGB同sector11、共享保存快照1280B；保留对方已存记录，未保存RAM不被另一项SAVE顺带持久化。22个原非存储RGB函数、STOP黄双心跳、地轨inverse/负端触碰方向保护；4881份FW/参考/ESP32内容一致审计通过，仅既有换行口径差异。
+- 上位机：精确KIN v2后世界点发带工具快照@T，断开/重连清能力，旧固件旧@兼容；禁连续MoveL/示教拖发，单点/MoveJ/夹爪/预览保留。旧Tk工具同步cap/connection token/旧拖发尾巴取消，8项真实Tk+fake serial通过。
+- 验证：完整GUI598项PASS/529.376s，139输入测试期间不变、发布134非并行视觉仍一致；IK两组各2730032检查，actual producer precise/fast各10277338，电机101026一般段/133079925，存储250206，独立整轨147231几何样本+全400tick双位置/速度各19630800对照PASS。持久化入口tools/tests/native_cartesian_robot_test.py及run_native_cartesian_oracle.py。
+- 固件：release2026101401/buildset8B5FC328EA354444/source619b1f1165a73725302aee17836b79245fb3a467cf34e964d446b5fce2278d1c，全部5目标同批BIN/HEX/ELF/manifest/505输入/分区校验PASS。CoreFlash520500B余397004，staticRAM76444/link93856余37216；motorRAM15576余4904、最紧Flash620B。cmd8KB/RT4KB静态栈，USB/UART6KB；预算详linked资源报告，不是实测水位。
+- 20k预算：仅一般Curve准备直接Q40映射、264→176B准备帧；40热函数指令/帧对13.05保持。完整IRQ WCET、主控实际IK/预检耗时、栈水位与运动流畅性仍待板上DWT/#STACK，不能宣称烧后必然平滑。
+- 并行视觉：保留DummyRobot上位机任务最终灰白罩（viewer356d465d/model_rgb5bb03a73），独立复验16项NodePASS；对方Qt/WebGL源码身份及像素记录另存统一产物。该JS晚于598项全套，验证身份分别记录；134份非视觉输入仍匹配。未改对方模型/着色/浮窗或状态段。
+- 交付/下一步：统一firmware_artifacts/CURRENT_RELEASE、native-cartesian-notes-2026101401.txt和docs/主控TCP与地轨协同_2026101401.txt。用户主控及J1～J7按板型配套烧录，先只读版本/IK/栈→原地→锁轨5mm低速→STOP→速度/距离→最后轨协同；物理TCP标定及连续输入下轮再做。
+
+## 已验证：TCP能力标志初始化导致的上位机启动错误（2026-10-14）
+
+- **当前问题**：用户用系统Python311启动main.py，RobotController.__init__在CartesianSession构造前访问self.cartesian.native_tcp，出现AttributeError。
+- **已确认事实 / 协调**：初次读源时controller.py第97行访问cartesian、第117行才构造；CartesianSession.__init__本来就设native_tcp=False。已通知“设计含地轨的MoveJ逆解方案”任务实际重叠；对方已独立修正并落盘，复读确认构造前访问已删，connect在串口线程启动前重置能力标志。disconnect能力重置由对方继续处理；本任务不覆盖或重复编辑controller/TCP逻辑。
+- **已排除方向**：本错误发生在控制器对象创建时，与灯罩着色、URDF模型或Python依赖安装无关；不需提前创建CartesianSession或改变整个构造顺序。
+- **验证结果**：使用用户同一个C:/Users/Liu3Beng/AppData/Local/Programs/Python/Python311/python.exe，tests.test_controller的37项全部通过；main.py --smoke-test在独立测试数据目录、Qt软件渲染下正常启动并加载URDF，返回SMOKE PASS/退出0。首次受限运行本地页面加载失败，允许本机localhost资源访问后原生检测通过。日志/启动截图位于Dummy上位机/build/qa/controller_startup_20261014/；未连接串口或操作设备。
+- **最新改动 / 待确认**：本任务仅补此状态记录，生产修复由并行TCP任务完成，灯罩版本保持；用户重新执行原启动命令即可。本验证针对启动及37项控制器专项，不表示对方尚在实现的TCP/固件功能已完成验收。未提交、打包或构建固件。
+
+---
+
+## 已完成：黑色回读图例、八快捷点位、两倍发光与目标虚体开关（2026-10-14）
+
+- **当前问题 / 授权**：用户认可当前灯光后，要求截图“实际回读·实体”的图例点改黑、快捷点位8个；追加仅发光亮度翻倍，熄灯灰白底不变，以及目标虚体开关、默认打开。
+- **已确认事实**：实际图例由viewer.css的i.silver控制，原浅白；快捷构建、加载上限和保存超槽提示均硬编码4，刷新/排序/导入与手柄折叠枚举按钮本体。只扩range会使1120×690四行按钮挤压重叠，需要处理局部布局。
+- **最新改动**：viewer.css实际图例填充#000，原描边/文本/虚体图例保持。MainWindow快捷扩8槽两列四行，加载范围/标题/保存提示按按钮数更新；标题保存/管理固定，按钮体在高度不足时局部竖向滚动，保持每按钮50px、字号和小窗发送/夹爪可达，手柄模式折叠整个按钮区。model_rgb.js仅emissionIntensity由1改2，coverGray=.85/coverReflection=.2/highlightKnee=.8/原曲线/60ms/16F保持。
+- **虚体开关**：MainWindow三维工具栏新增ViewerToggle“目标虚体”，store.show_target_ghost默认True并保存布尔偏好；手柄隐藏按钮、返回界面恢复选择。RobotView.set_target_visible只更新targetEnabled，viewer.js只将此偏好加入jointPreview及相机取景参考。实际模型、MoveL标记、actualOnly、RGB本地示意各自门禁保持。工具栏按宽度分组一/两行，两README已同步。
+- **已排除方向 / 范围**：不改变实际设备RGB配置或指令，快捷载入/开关仍不发送；不提高白罩反射或整个场景曝光，不恢复PC规划/连续MoveL，不覆盖新TCP/finite门禁。未改资产/控制器/固件或旧Tk助手，未联系外部任务、提交、打包或操作设备。
+- **验证**：8槽6项行为、2项相关UI+11项store、18项可视化及16项Node均通过；8槽18场景、工具栏12场景两主题/三尺寸布局通过。原生E1/E2熄灯全图差0、圈外差0，亮灯增强，高端仍受原软压缩限制，不表示显示像素亮度精确翻倍。最新32个真实Qt/WebGL状态通过，关闭期间改目标/重新取景图差0，MoveL标记开关前后图差0，黑回读图例与E2材质隔离正常。系统Python311的main.py --smoke-test加载模型/退出0；均无设备操作。
+- **证据 / 待确认**：QA位于Dummy上位机/build/qa/quick_points_legend_20261014、quick-points-eight、target-ghost-toolbar、model_light_double_20261014、target_ghost_toggle_20261014及target-ghost-final。最终viewer SHA A487C71B、model_rgb 445BAA78、RobotView 3A0E7AAD，原生记录含完整身份。用户重启源码版查看；本轮专项验证不冒充并行TCP/固件验收。
+
+---
+
+## 已完成：固定弱灰白底罩与独立彩色发光（2026-10-14，待用户复测）
+
+- **当前问题 / 授权**：用户实测固定浅白底太重、灯色和明暗被覆盖；已解释旧R+(1-R)*E合成及高白底的亮度余量限制，用户批准执行“较弱固定灰白反射+独立彩色发光+柔和高亮压缩”。按已讨论顺序本轮先验证材质，光晕后续再决定。
+- **已确认事实**：旧v4原生图同1031像素，零光RGB约224/225/226，满绿G只增13.32；gamma/状态缩放与显示曲线仍有变化，是强白底和screen合成压缩了画面。固定反射0.15试测同旧mask熄灯明度约134.21；最终采用0.2，两主题熄灯8位截图明度约153.87/154.41，符合目标灰白外观。
+- **最新改动**：model_rgb.js::DIFFUSER_STYLE固定coverGray=0.85、coverReflection=0.2；保原峰值0.7/低亮toe曲线/倍率1/60ms/RGBA16F。ACES后直接加B+E，不乘1-B、不提前硬截发光；新增highlightKnee=0.8，以下线性，以上H=k+(1-k)*(1-exp(-(x-k)/(1-k)))逐通道平滑压缩，数值和一阶导数连续且非递减。viewer注册knee uniform并换v5材质cache key，其他网格/虚体/回读/桥/模拟器/UI/查询保持。
+- **已排除方向**：不按瞬时PWM、呼吸低谷或light_on切换白罩；不调全场景灯光/曝光，不通过修改固件或模拟器波形补偿显示。固定灰白仍有少量中性色贡献，高亮肩部会改变强通道比例；不承诺实物颜色/亮度标定。
+- **验证结果**：真实vendor Phong与生产soft-knee helper的16项Node测试、JS语法、原生GLSL编译及局部diff通过。真实Qt/WebGL两主题红/绿/蓝/白PWM0→1→2→10→38→128→255同1031灯罩像素均无反向；深色绿0→1明度153.87→158.31，白0→1为153.87→160.10。samezero仅改light_on、圈外模型像素差均0，虚体保持无发光纹理。相对v4满亮红/绿/蓝通道变化分别约6.11/6.24/6.51倍；生产spin换相位平均G差28.31，DISABLED呼吸raw1→38截图明度升45.41（旧约5.66），实看PNG可辨。跑前后3份JS/HTML SHA稳定，直接RobotView无控制器/串口构造。源码快照、基线、原生像素/诊断JSON、比较图、亮度序列和最终SHA清单均在Dummy上位机/build/qa/model_light_additive_20261014/。
+- **待确认 / 调参**：用户重启源码版复测。DIFFUSER_STYLE顶部coverReflection=0.2调熄灯罩反射、emissionIntensity调彩光、highlightKnee=0.8调高亮肩部，仍保留原0.7峰/60ms等参数。光晕按约定后续再判断，不在本轮加入。未作实物颜色/亮度标定；本轮16项与原生验证不冒充并行运动任务的全套GUI或固件验收。
+- **范围 / 并行**：本轮仅viewer.js/model_rgb.js、Node测试、两README与本独立段。保留主控TCP/IK/工具/地轨等并行改动及其状态块，不发送常规任务进度消息，不提交/打包/构建固件或操作设备。
+
+---
+
+## 已完成：固定浅白灯罩与随亮度叠加发光（2026-10-14，待用户复测）
+
+- **当前问题 / 授权**：用户不接受亮度0为白罩、亮度1跳成深灰，要求浅白底罩随亮度增加发光，并询问100%上限和自行调色入口；本轮用户明确同意实施，并要求通知“设计含地轨的MoveJ逆解方案”任务。
+- **已确认事实**：原viewer.js将整体light_on控制的反射由1切到0.002；DISABLED低亮度最终PWM还可能取整为0，造成底罩变暗但发光补不上。配置100%不等于满RGB帧，原纹理曲线峰值0.7也不是显示器或实物70%的亮度。
+- **最新改动**：model_rgb.js新增DIFFUSER_STYLE集中浅白底色、固定反射、发光倍率/峰值、低亮增益/曲线和60ms缓动参数。viewer.js固定浅白反射，整体light_on不再切材质；ACES后按R+(1-clamp(R))*clamp(E)在剩余显示范围内叠加彩色发光，默认E峰值0.7避免直接加法过早截白。RGBA16F、原散射/同比保色曲线、虚体隔离、实时回读和悬浮RGB窗保留。两个README同步调参说明。
+- **已排除方向**：不再以每帧PWM或开灯状态压暗白罩，不调整个场景曝光，也不改模拟器/设备亮度来掩盖显示问题。固定浅白底会让灯色偏柔和，属于用户已认可的方案取舍。
+- **验证结果**：14项Node灯光测试、JS语法及本轮差异检查通过。原生Qt/WebGL软件渲染在两主题共同1031个可见灯罩像素中，核验白/绿PWM0→1→2→10→38→128→255着色亮度均不反向；深色绿亮度均值224.687→225.180→225.485→226.950→229.202→231.998→234.212。相同全零帧仅切换light_on，两主题灯罩像素差均为0；圈外模型像素差0，虚体仍无发光纹理。生产绿色spin两相位空间变化、DISABLED白呼吸raw1→38约5.66/255灰度提升均可辨；固定白罩下灯色较淡，未宣称与实物亮度/饱和度一致。直接RobotView加载，无控制器/串口构造；跑前后生产JS/index.html SHA一致。完整像素/诊断、亮度序列与灯效截图在Dummy上位机/build/qa/model_light_white_20261014/final/，本轮源身份清单在同上QA目录。
+- **待确认 / 调参**：用户重启源码版复测；model_rgb.js顶部DIFFUSER_STYLE可调coverGray、coverReflection、emissionIntensity、emissionLimit等，修改后重启。纹理峰值不代表实物或显示器最大亮度；浅白底限制高饱和彩色效果，与前次解释及用户认可方案一致。
+- **协调 / 边界**：已read_thread并按用户授权通知任务01a12b6a-4c48-7a60-b22d-2e32208b8bdd。本轮只改viewer.js/model_rgb.js、Node测试、两个README及本独立状态段；避开对方dummy_motion/model.py、cartesian_backend.py和固件/协议文件，保留4148f68后的并行工作区修改。未连接串口、下发指令、打包、构建固件或提交。
+
+---
+
 ## 已完成：RGB悬浮设置窗、移除二维圆环与弱光提亮（2026-10-14，待用户复测）
 
 - **当前问题 / 授权**：用户要求低亮度灯色再浅亮一些，并把RGB设置改为独立悬浮窗、删掉RGB页圆环，只看模型灯。已直接实施必要显示/UI修改；此前配色、虚体、灯罩整体开灯状态、呼吸防跳变及普通运动退回主控均保留。

@@ -89,7 +89,7 @@ class CartesianUiTests(unittest.TestCase):
         self.c.cartesian.update_feedback([0, 10, 80, 0, 90, 0, 30])
         self.assertTrue(self.w._world_cartesian_read())
         self.assertAlmostEqual(self.w.pose_spins[1].value(), 30., places=2)
-        self.assertAlmostEqual(self.w.pose_spins[2].value(), 174.92, places=2)
+        self.assertAlmostEqual(self.w.pose_spins[2].value(), 217.22, places=2)
         self.assertEqual(self.w._drag_pending, {})
         self.assertTrue(self.c._tx_queue.empty())
 

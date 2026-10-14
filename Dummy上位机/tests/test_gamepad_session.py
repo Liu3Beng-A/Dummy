@@ -297,12 +297,12 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertTrue(self.g.set_target(self.target(1)))
         self.g.tick()
         first = self.write()
-        self.assertEqual(first, ["@147.5,0,288.9,180,0,180,10"])
+        self.assertEqual(first, ["@147.5,0,331.2,180,0,180,10"])
         self.g.set_target(self.target(2))
         self.clock.advance(.06)
         self.sample()
         self.g.tick()
-        self.assertEqual(self.write(), ["@148.5,0,288.9,180,0,180,10"])
+        self.assertEqual(self.write(), ["@148.5,0,331.2,180,0,180,10"])
         self.feed("queued MOVEL id=42 mode=INT", "accepted MOVEL id=43", "ok MOVEL id=42")
         self.assertEqual(len(self.g._streams), 2)
         self.feed("accepted MOVEL id=42")
@@ -341,7 +341,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.clock.advance(.06)
         self.sample(roll=1, centered=False)
         self.g.tick()
-        self.assertEqual(self.write(), ["@146.5,0,288.9,-179.8,0,180,10"])
+        self.assertEqual(self.write(), ["@146.5,0,331.2,-179.8,0,180,10"])
         self.assertEqual(self.g.target_tcp[3:], [-179.75, 0., 180.])
         self.feed("queued MOVEL id=42 mode=INT", "accepted MOVEL id=42")
         target = list(self.g.target_tcp)
@@ -350,7 +350,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.clock.advance(.06)
         self.sample(ly=-1, centered=False)
         self.g.tick()
-        self.assertEqual(self.write(), ["@147,0,288.9,-180,0,180,10"])
+        self.assertEqual(self.write(), ["@147,0,331.2,-180,0,180,10"])
         self.assertEqual(self.g.target_tcp[3:], [-180., 0., 180.])
 
     def test_small_input_accumulates_but_duplicate_wire_targets_do_not_send(self):
@@ -363,7 +363,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.clock.advance(.02)
         self.sample(ly=-.025, centered=False)
         self.g.tick()
-        self.assertEqual(self.write(), ["@146.6,0,288.9,180,0,180,10"])
+        self.assertEqual(self.write(), ["@146.6,0,331.2,180,0,180,10"])
         self.feed("queued MOVEL id=42 mode=INT", "accepted MOVEL id=42")
         for _ in range(10):
             self.clock.advance(.02)
@@ -378,7 +378,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
             self.clock.advance(.02)
             self.sample(ly=-.025, centered=False)
             self.g.tick()
-        self.assertEqual(self.write(), ["@146.7,0,288.9,180,0,180,10"])
+        self.assertEqual(self.write(), ["@146.7,0,331.2,180,0,180,10"])
 
     def test_quantization_follows_tool_conversion_and_receipt_uses_sent_pose(self):
         from app.core.gamepad_session import tool_translation
@@ -393,7 +393,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.g.tick()
         command = self.write()[0]
         # No intermediate TCP rounding: 147.0496 rounds directly to 147.0.
-        self.assertEqual(command, "@147,0,288.9,180,0.2,180,35")
+        self.assertEqual(command, "@147,0,331.2,180,0.2,180,35")
         sent_flange = [float(value) for value in command[1:].split(",")[:6]]
         sent_offset = tool_translation(sent_flange, 114)
         expected = [sent_flange[i] + sent_offset[i] for i in range(3)] + sent_flange[3:]
@@ -689,7 +689,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.assertEqual(self.c.actual_pose, actual)
         self.assertAlmostEqual(self.g.target_tcp[0], 146.520190203)
         self.assertAlmostEqual(self.g.target_tcp[1], 0)
-        self.assertAlmostEqual(self.g.target_tcp[2], 174.917318012)
+        self.assertAlmostEqual(self.g.target_tcp[2], 217.217318012)
         self.assertEqual(self.g.command_reference_tcp, self.g.target_tcp)
         self.g.tick()
         self.assertTrue(self.g.ready)
@@ -699,7 +699,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.g.tick()
         command = self.write()[0]
         self.assertEqual([float(value) for value in command[1:].split(",")],
-                         [147, 0, 288.9, 180, 0, 180, 35])
+                         [147, 0, 331.2, 180, 0, 180, 35])
         self.assertNotIn("#GETJPOS", self.writes)
         self.assertEqual(self.c.actual_pose, actual)
 
@@ -767,7 +767,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.clock.advance(.03)
         self.sample()
         self.g.tick()
-        self.assertEqual(self.write(), ["@148.5,0,288.9,180,0,180,10"])
+        self.assertEqual(self.write(), ["@148.5,0,331.2,180,0,180,10"])
         self.feed("queued MOVEL id=43 mode=INT", "accepted MOVEL id=43")
         self.clock.advance(.05)
         self.sample()
@@ -783,7 +783,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         self.g.set_config({"robot": {"tool_offset_z": 20, "cmd_speed": 10}})
         self.sample()
         self.ready_session()
-        flange = [146.520190203, 0., 288.917318012, 180., 0., 180.]
+        flange = [146.520190203, 0., 331.217318012, 180., 0., 180.]
         offset = tool_translation(flange, 20)
         for computed, expected in zip(self.g.target_tcp, [flange[i] + offset[i] for i in range(3)] + flange[3:]):
             self.assertAlmostEqual(computed, expected)
@@ -792,7 +792,7 @@ class GamepadSessionTests(GamepadFixture, unittest.TestCase):
         target[0] += 1
         self.assertTrue(self.g.set_target(target))
         self.g.tick()
-        self.assertEqual(self.write(), ["@147.5,0,288.9,180,0,180,10"])
+        self.assertEqual(self.write(), ["@147.5,0,331.2,180,0,180,10"])
 
     def test_input_dt_clamp_and_invalid_trigger_cannot_create_gripper_target(self):
         self.ready_session()

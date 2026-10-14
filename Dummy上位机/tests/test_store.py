@@ -58,10 +58,11 @@ class StoreTests(unittest.TestCase):
             other.close()
 
     def test_roundtrip_chinese_points_and_preferences(self):
+        self.assertTrue(self.store.settings["show_target_ghost"])
         points = [{"name": "休息点位", "joints": [0, -75, 180, 0, 0, 0, 12.5],
                    "gripper": 100, "speed": 35}]
         self.store.save_points(points)
-        self.store.update_settings(theme="dark", poll_hz=7)
+        self.store.update_settings(theme="dark", poll_hz=7, show_target_ghost=False)
         exported = Path(self.directory.name) / "导出点位.json"
         self.store.export_points(exported)
         self.assertEqual(self.store.import_points(exported), self.store.points)
@@ -70,6 +71,9 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(second.points, self.store.points)
             self.assertEqual(second.settings["theme"], "dark")
             self.assertEqual(second.settings["poll_hz"], 7)
+            self.assertFalse(second.settings["show_target_ghost"])
+            second.update_settings(show_target_ghost="invalid")
+            self.assertTrue(second.settings["show_target_ghost"])
         finally:
             second.close()
 

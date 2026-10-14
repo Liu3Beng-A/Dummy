@@ -32,6 +32,7 @@ class FakeView(QWidget):
         self.preferred_mode = "preview"
         self.actual_only = False
         self.feedback_paused = False
+        self.target_visible = True
         self.commanded_gripper = None
         self.rgb_frame = ((0, 0, 0),) * 24
         self.rgb_light_on = None
@@ -68,6 +69,9 @@ class FakeView(QWidget):
 
     def set_feedback_paused(self, value):
         self.feedback_paused = bool(value)
+
+    def set_target_visible(self, value):
+        self.target_visible = bool(value)
 
     def set_theme(self, theme):
         self.theme = theme
@@ -281,6 +285,7 @@ class UiIntegrationTests(unittest.TestCase):
         self.assertEqual(self.commands(), ["#GETJPOS"])
 
     def test_selecting_stored_point_does_not_send_and_order_persists(self):
+        self.window.viewer_target_button.setChecked(False)
         self.connect_fake()
         self.controller.current_cmdmode = 3
         self.window.point_name.setText("起始")
@@ -292,12 +297,14 @@ class UiIntegrationTests(unittest.TestCase):
         self.controller.hand_pos_drag_enable.set(True)
         self.window.point_table.selectRow(0)
         self.assertEqual(self.window.joint_spins[0].value(), 0)
+        self.assertFalse(self.window.viewer.target_visible)
         self.assertEqual(self.commands(), [])
         self.window._move_point(1)
         self.assertEqual([point["name"] for point in self.store.points], ["取料", "起始"])
         reloaded = AppStore(self.directory.name)
         try:
             self.assertEqual(reloaded.points, self.store.points)
+            self.assertFalse(reloaded.settings["show_target_ghost"])
         finally:
             reloaded.close()
 
@@ -325,6 +332,22 @@ class UiIntegrationTests(unittest.TestCase):
         self.assertEqual(self.commands(), ["!RGB_COLOR 0 12 34 56"])
 
     def test_display_and_poll_settings_do_not_dispatch_commands(self):
+        self.assertTrue(self.window.viewer_target_button.isChecked())
+        self.window.viewer_target_button.setChecked(False)
+        self.assertFalse(self.window.viewer.target_visible)
+        self.assertFalse(self.store.settings["show_target_ghost"])
+        self.window.input_mode.setCurrentIndex(1)
+        self.assertTrue(self.window.viewer_target_button.isHidden())
+        self.assertFalse(self.window.viewer_target_button.isChecked())
+        self.window.input_mode.setCurrentIndex(0)
+        self.assertFalse(self.window.viewer_target_button.isHidden())
+        self.assertFalse(self.window.viewer.target_visible)
+        self.window.viewer_mode.setCurrentIndex(1)
+        self.window.viewer_target_button.setChecked(True)
+        self.assertEqual(self.window.viewer.mode, "actual")
+        self.window.motion_tabs.setCurrentIndex(1)
+        self.window.viewer_target_button.setChecked(False)
+        self.assertEqual(self.window.viewer.mode, "actual")
         self.window.theme_combo.setCurrentIndex(1)
         self.assertEqual(self.window.poll_hz.maximum(), 50)
         self.window.poll_hz.setValue(30)

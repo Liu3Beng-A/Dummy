@@ -370,7 +370,7 @@ class RGBControllerTests(unittest.TestCase):
         with patch("app.core.controller.SerialTransport", FakeTransport):
             with patch("app.core.controller.time.monotonic", return_value=100.0):
                 self.assertTrue(self.c.connect_port("FAKE_RGB_FOLLOW", "USB"))
-                self.assertEqual(self.commands(), ["#RGB_GET", "#GET_CMDMODE 1"])
+                self.assertEqual(self.commands(), ["#RGB_GET", "#GET_CMDMODE 1", "#KIN_CONFIG"])
         self.assertEqual(pending_when_published, [102.0])
         self.assertTrue(self.c._rgb_monitor_timer.isActive())
 

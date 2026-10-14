@@ -19,7 +19,7 @@ from app.ui.main_window import MainWindow
 from tests.test_ui import APPLICATION, FakeView
 
 
-_READ_ONLY_COMMANDS = {"#GETJPOS", "#RGB_GET", "#RGB_STATUS"}
+_READ_ONLY_COMMANDS = {"#GETJPOS", "#RGB_GET", "#RGB_STATUS", "#KIN_CONFIG"}
 
 
 class MemoryFirmwarePort:
@@ -107,6 +107,8 @@ class MemoryFirmwarePort:
             self.inject("Stopping ok")
             if not self.hold_stop:
                 self.inject("STOP locked")
+        elif command == "#KIN_CONFIG":
+            self.inject("error KIN unsupported")
         elif command == "#RGB_GET":
             self.inject("RGB_GET end")
         elif command == "#RGB_STATUS":
