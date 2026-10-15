@@ -55,6 +55,7 @@ class RobotView(QWidget):
         self._cartesian_frame = "base"
         self._rgb_frame = ((0, 0, 0),) * 24
         self._rgb_light_on = None
+        self._rgb_effect_mode = None
         self._display_mode = "preview"
         self._state = {
             "mode": "preview", "theme": "light", "stale": True,
@@ -150,6 +151,8 @@ class RobotView(QWidget):
             return
         self._state["target"] = firmware_to_urdf(self._target_pose, self._target_gripper, preview=True)
         actual_only = self._state["actualOnly"]
+        if actual_only:
+            self._state["highlight"] = None
         self._state["mode"] = "actual" if actual_only else self._display_mode
         gripper = self._actual_gripper
         if gripper is None:
@@ -173,12 +176,15 @@ class RobotView(QWidget):
         self._target_gripper = float(gripper_pct)
         self._sync()
 
-    def set_rgb_frame(self, colors, *, light_on=None):
+    def set_rgb_frame(self, colors, *, light_on=None, effect_mode=None):
         """Update the model's diffuser without touching poses or telemetry age."""
         if self._closed:
             return
         if light_on is not None and not isinstance(light_on, bool):
             raise ValueError("灯环开灯状态须为布尔值")
+        if effect_mode is not None and (isinstance(effect_mode, bool)
+                or not isinstance(effect_mode, Integral) or not 0 <= effect_mode < 17):
+            raise ValueError("灯效编号须为 0..16 的整数或 None")
         try:
             frame = tuple(tuple(color) for color in colors)
         except TypeError as error:
@@ -188,16 +194,23 @@ class RobotView(QWidget):
                 or not 0 <= channel <= 255 for channel in color) for color in frame):
             raise ValueError("灯环帧须包含 24 组 0..255 的 RGB 整数")
         frame = tuple(tuple(int(channel) for channel in color) for color in frame)
-        if frame != self._rgb_frame or light_on != self._rgb_light_on:
+        effect_mode = int(effect_mode) if effect_mode is not None else None
+        if (frame != self._rgb_frame or light_on != self._rgb_light_on
+                or effect_mode != self._rgb_effect_mode):
             self._rgb_frame = frame
             self._rgb_light_on = light_on
+            self._rgb_effect_mode = effect_mode
             self._emit_rgb_frame()
 
     def _emit_rgb_frame(self):
         if self._ready and not self._closed:
-            payload = self._rgb_frame if self._rgb_light_on is None else {
-                "colors": self._rgb_frame, "light_on": self._rgb_light_on,
-            }
+            payload = self._rgb_frame
+            if self._rgb_light_on is not None or self._rgb_effect_mode is not None:
+                payload = {"colors": self._rgb_frame}
+                if self._rgb_light_on is not None:
+                    payload["light_on"] = self._rgb_light_on
+                if self._rgb_effect_mode is not None:
+                    payload["effect_mode"] = self._rgb_effect_mode
             self._bridge.rgb_changed.emit(json.dumps(payload, allow_nan=False))
 
     def set_rgb_preview(self, enabled):

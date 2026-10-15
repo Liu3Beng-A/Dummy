@@ -23,6 +23,8 @@ class SerialTransport(QObject):
         self._stop = threading.Event()
         self._write_lock = threading.Lock()
         self._threads = []
+        self.write_in_progress = False
+        self.last_activity_at = 0.0
         self.line_observer = None
         self.written_observer = None
         self.telemetry_validator = None
@@ -41,6 +43,11 @@ class SerialTransport(QObject):
             self.line_received_at.emit(line, self.connection_id, stamp)
             self.line_received.emit(line, self.connection_id)
 
+    @property
+    def pending_writes(self):
+        # Queue tracks the item even between get() and write_in_progress=True.
+        return self.outbox.unfinished_tasks
+
     def start(self):
         self._telemetry_timer.start()
         self._threads = [threading.Thread(target=self._receive, daemon=True, name="Dummy RX"),
@@ -55,6 +62,7 @@ class SerialTransport(QObject):
                 waiting = self.port.in_waiting
                 if waiting:
                     chunk = self.port.read(min(waiting, 16384))
+                    self.last_activity_at = time.monotonic()
                     received_at, wall_time = time.perf_counter(), time.time()
                     for line in framer.feed(chunk):
                         self.wire_log.record('RX', line, received_at, wall_time)
@@ -88,6 +96,7 @@ class SerialTransport(QObject):
                 return
             generation, command = item
             try:
+                self.write_in_progress = True
                 with self._write_lock:
                     if self._stop.is_set() or not self.allowed(generation, command):
                         continue
@@ -96,13 +105,17 @@ class SerialTransport(QObject):
                     if count != len(data):
                         raise IOError("串口发送不完整")
                     self.wire_log.record('TX', command, time.perf_counter(), time.time())
+                    self.last_activity_at = time.monotonic()
                 if self.written_observer is not None and self.written_observer(command, generation, self.connection_id):
                     continue
                 self.command_written.emit(command, self.connection_id)
             except Exception as error:
                 if not self._stop.is_set():
-                    self.failed.emit(f"串口发送失败：{error}", self.connection_id)
+                    self.failed.emit(f"串口发送失败（{command}）：{error}", self.connection_id)
                 return
+            finally:
+                self.write_in_progress = False
+                self.outbox.task_done()
 
     def close(self):
         self._telemetry_timer.stop()

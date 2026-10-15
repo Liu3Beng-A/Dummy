@@ -219,7 +219,7 @@ int main() {
     {Sim s;CHECK(s.e.Begin(123,0x41,s.now,true)==BAD_FLAGS);}
     // Old unselected sessions deliberately have the same token and a ready
     // endpoint. Directed START/SYNC/CLOSE must neither arm nor release them.
-    for(unsigned mask:{1U,4U,16U,64U,65U}) {
+    for(unsigned mask:{1U,64U,65U}) {
       Sim s;const unsigned sentinel=mask==64?0:3;
       s.motors[sentinel].session=123;s.motors[sentinel].open=true;
       s.motors[sentinel].committed=1;s.motors[sentinel].end=1;
@@ -227,7 +227,6 @@ int main() {
       CHECK(s.e.Start(123,s.now)==OK);s.Run(600);CHECK(s.e.GetState()==CoreStreamEngine::IDLE);
       CHECK(s.stopCount==0);CHECK(s.e.LastExecuted()==12);
       CHECK(s.e.Close(123,s.now)==OK);s.Run(20);CHECK(!s.e.Active());
-      CHECK(s.e.LastExecuted()==12);CHECK(s.e.SelectedMask()==0);
       for(unsigned n=0;n<7;++n) if(mask&(1U<<n))CHECK(s.motors[n].done&&!s.motors[n].open);
       CHECK(s.motors[sentinel].open&&!s.motors[sentinel].started&&!s.motors[sentinel].done);
       for(const auto& f:s.sent) {

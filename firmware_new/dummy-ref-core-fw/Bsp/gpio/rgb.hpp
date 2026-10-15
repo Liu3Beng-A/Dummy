@@ -7,11 +7,13 @@
 // Only the RGB task owns rendering/PWM storage. Commands exchange small snapshots.
 class RGB {
 public:
-    static constexpr unsigned LED_COUNT = 24, MODE_COUNT = 13, EFFECT_COUNT = 10, AUTO_COLOR_COUNT = 3;
+    static constexpr unsigned LED_COUNT = 24, PRESET_MODE_COUNT = 13, MODE_COUNT = 17,
+        EFFECT_COUNT = 10, AUTO_COLOR_COUNT = 3, MOTION_COUNT = 4;
     enum Rgb_style_t : uint8_t {
         PURE_COLOR_0, PURE_COLOR_1, PURE_COLOR_2, RAINBOW, BLUE_TIDE,
         WHITE_BREATH, CYBER_BREATH, RED_HEARTBEAT, GREEN_SPIN, BLINK,
-        AUTO_SEQ_COLOR, AUTO_INT_COLOR, AUTO_TRJ_COLOR
+        AUTO_SEQ_COLOR, AUTO_INT_COLOR, AUTO_TRJ_COLOR,
+        MOTION_CIRCLE, MOTION_ARC, MOTION_WAVE, MOTION_CONVERGE
     };
     enum State : uint8_t {
         BOOT, DISABLED, READY_SEQ, READY_INT, READY_TRJ, READY_TUN,
@@ -25,6 +27,7 @@ public:
     };
     // color source: 0=preset/effect, 1=explicit RGB, 2/3/4=auto SEQ/INT/TRJ bank.
     struct Binding { uint8_t mode, customColor; Color color; };
+    struct Motion { uint16_t periodMs; uint8_t reverse, width; };
     struct Config {
         uint8_t enabled, automatic, brightness, manualMode;
         uint16_t fadeOnMs, fadeOffMs, brightnessMs, transitionMs;
@@ -32,6 +35,7 @@ public:
         Effect effects[EFFECT_COUNT];
         Binding bindings[STATE_COUNT];
         Color autoColors[AUTO_COLOR_COUNT];
+        Motion motion[MOTION_COUNT]; // RUN_SEQ/INT/TRJ, CALIBRATION; independent of preset 8.
     };
     struct Status {
         uint8_t mode, state, source; // state index, STATE_COUNT=manual, +1=off
@@ -44,6 +48,7 @@ public:
     static bool Valid(const Config& value);
     static const char* StateName(unsigned state);
     static int FindState(const char* name);
+    static int MotionSlot(unsigned state);
     void LoadConfig(); // Before communication/RGB tasks.
     bool SaveConfig(); // Caller holds the robot's disabled-only save reservation.
     // The same reservation protects the companion TCP slot. Each save preserves
@@ -80,6 +85,20 @@ private:
         LegacyConfig config;
         uint32_t crc;
     };
+    struct PreviousConfig { // v2/v3; keep the persisted prefix and its padding.
+        uint8_t enabled, automatic, brightness, manualMode;
+        uint16_t fadeOnMs, fadeOffMs, brightnessMs, transitionMs;
+        Color colors[3];
+        Effect effects[EFFECT_COUNT];
+        Binding bindings[STATE_COUNT];
+        Color autoColors[AUTO_COLOR_COUNT];
+    };
+    struct PreviousFlashRecord {
+        uint32_t magic;
+        uint16_t version, size;
+        PreviousConfig config;
+        uint32_t crc;
+    };
     struct Scene {
         uint8_t mode, source;
         Color solid;
@@ -106,6 +125,7 @@ private:
     bool lastEnabled = false;
     Status status{};
     static uint32_t Crc(const void* data, size_t length);
+    static uint8_t ReadSavedConfig(Config& value, bool& current);
     void RefreshStorageProof();
     static float Smooth(float t);
     static float Phase(uint32_t elapsed, uint32_t period);

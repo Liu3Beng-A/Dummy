@@ -18,6 +18,7 @@ static void PrintRGBStatus(StreamSink& response, bool full)
     Respond(response, "RGB_DMA frames=%lu errors=%lu", (unsigned long)s.frames, (unsigned long)s.errors);
     Respond(response, "RGB_TIMEOUT timeouts=%lu", (unsigned long)s.timeouts);
     if (!full) return;
+    Respond(response, "RGB_CAPS motion=1");
     Respond(response, "RGB_CONFIG manual=%u fade_on=%u fade_off=%u",
         unsigned(c.manualMode), unsigned(c.fadeOnMs), unsigned(c.fadeOffMs));
     Respond(response, "RGB_TIMING bright_ms=%u transition=%u", unsigned(c.brightnessMs), unsigned(c.transitionMs));
@@ -32,6 +33,10 @@ static void PrintRGBStatus(StreamSink& response, bool full)
             unsigned(e.first.r), unsigned(e.first.g), unsigned(e.first.b),
             unsigned(e.second.r), unsigned(e.second.g), unsigned(e.second.b),
             unsigned(e.periodMs), unsigned(e.reverse), unsigned(e.tail), unsigned(e.onMs), unsigned(e.offMs));
+    }
+    for (unsigned i = 0; i < RGB::MOTION_COUNT; ++i) {
+        const auto& m = c.motion[i];
+        Respond(response, "RGB_MOTION %u %u %u %u", i, unsigned(m.periodMs), unsigned(m.reverse), unsigned(m.width));
     }
     for (unsigned i = 0; i < RGB::STATE_COUNT; ++i) {
         const auto& b = c.bindings[i];
@@ -101,7 +106,7 @@ static bool HandleRGBCommand(const char* cmd, size_t length, StreamSink& respons
     } else if (!std::strcmp(verb, "!RGB_BRIGHT")) {
         ok = numbers(1, 1) && args[0] <= 100; c.brightness = uint8_t(args[0]);
     } else if (!std::strcmp(verb, "!RGB_MODE")) {
-        ok = numbers(1, 1) && args[0] < RGB::MODE_COUNT; c.manualMode = uint8_t(args[0]); c.automatic = 0;
+        ok = numbers(1, 1) && args[0] < RGB::PRESET_MODE_COUNT; c.manualMode = uint8_t(args[0]); c.automatic = 0;
     } else if (!std::strcmp(verb, "!RGB_COLOR")) {
         ok = numbers(1, 4) && args[0] < 3 && args[1] <= 255 && args[2] <= 255 && args[3] <= 255;
         if (ok) c.colors[args[0]] = {uint8_t(args[1]), uint8_t(args[2]), uint8_t(args[3])};
@@ -120,10 +125,23 @@ static bool HandleRGBCommand(const char* cmd, size_t length, StreamSink& respons
         if (ok) c.effects[args[0]] = {{uint8_t(args[1]),uint8_t(args[2]),uint8_t(args[3])},
             {uint8_t(args[4]),uint8_t(args[5]),uint8_t(args[6])}, uint16_t(args[7]), uint16_t(args[10]),
             uint16_t(args[11]), uint8_t(args[8]), uint8_t(args[9])};
+    } else if (!std::strcmp(verb, "!RGB_MOTION")) {
+        ok = numbers(1, 5) && args[0] < RGB::MOTION_COUNT && args[1] < RGB::MOTION_COUNT &&
+            args[2] >= 250 && args[2] <= 30000 && args[3] <= 1 && args[4] >= 1 && args[4] <= 12;
+        if (ok) {
+            const unsigned state = args[0] < 3 ? RGB::RUN_SEQ+args[0] : RGB::CALIBRATION;
+            auto& b = c.bindings[state];
+            if (b.mode == RGB::GREEN_SPIN && !b.customColor) {
+                b.customColor = 1; b.color = c.effects[RGB::GREEN_SPIN].first;
+            }
+            c.motion[args[0]] = {uint16_t(args[2]), uint8_t(args[3]), uint8_t(args[4])};
+            b.mode = RGB::MOTION_CIRCLE+args[1];
+        }
     } else if (!std::strcmp(verb, "!RGB_SET_STATE")) {
         int state = count > 1 ? RGB::FindState(tokens[1]) : -1;
         ok = state >= 0 && state < RGB::FAULT && (count == 3 || count == 4 || count == 6) &&
-            RGBUInt(tokens[2], args[0]) && args[0] < RGB::MODE_COUNT;
+            RGBUInt(tokens[2], args[0]) && args[0] < RGB::MODE_COUNT &&
+            (args[0] < RGB::PRESET_MODE_COUNT || RGB::MotionSlot(unsigned(state)) >= 0);
         uint8_t source = count == 6 ? 1 : 0;
         if (ok && count == 4) {
             source = !std::strcmp(tokens[3], "AUTO_SEQ") ? 2 : !std::strcmp(tokens[3], "AUTO_INT") ? 3 :
@@ -135,7 +153,7 @@ static bool HandleRGBCommand(const char* cmd, size_t length, StreamSink& respons
             {uint8_t(args[1]), uint8_t(args[2]), uint8_t(args[3])}};
     } else if (!std::strcmp(verb, "!RGB_SET_START") || !std::strcmp(verb, "!RGB_SET_ENABLE") ||
                !std::strcmp(verb, "!RGB_SET_DISABLE")) {
-        ok = numbers(1, 1) && args[0] < RGB::MODE_COUNT;
+        ok = numbers(1, 1) && args[0] < RGB::PRESET_MODE_COUNT;
         if (ok) {
             unsigned lo = !std::strcmp(verb, "!RGB_SET_START") ? RGB::BOOT :
                 !std::strcmp(verb, "!RGB_SET_DISABLE") ? RGB::DISABLED : RGB::READY_SEQ;
@@ -161,7 +179,7 @@ static bool HandleRGBCommand(const char* cmd, size_t length, StreamSink& respons
     // need not immediately send a second query (which used to duplicate replies).
     const bool full = !std::strcmp(verb, "!RGB_COLOR") || !std::strcmp(verb, "!RGB_AUTO_COLOR") ||
         !std::strcmp(verb, "!RGB_FADE") ||
-        !std::strcmp(verb, "!RGB_EFFECT") || !std::strcmp(verb, "!RGB_SET_STATE") ||
+        !std::strcmp(verb, "!RGB_EFFECT") || !std::strcmp(verb, "!RGB_MOTION") || !std::strcmp(verb, "!RGB_SET_STATE") ||
         !std::strcmp(verb, "!RGB_SET_START") || !std::strcmp(verb, "!RGB_SET_ENABLE") ||
         !std::strcmp(verb, "!RGB_SET_DISABLE") || !std::strcmp(verb, "!RGB_RESET");
     PrintRGBStatus(response, full);

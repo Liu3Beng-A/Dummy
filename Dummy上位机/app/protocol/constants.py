@@ -7,6 +7,13 @@ RGB_MODES = ("0 单色0", "1 单色1", "2 单色2", "3 彩虹", "4 潮汐",
 
 RGB_AUTO_MODES = ("SEQ 顺序", "INT 打断", "TRJ 轨迹")
 
+# Automatic movement/calibration animations are independent of manual preset 8.
+RGB_MOTION_EFFECTS = ("圆圈旋转", "伸缩光弧", "双峰行波", "双向汇聚")
+RGB_MOTION_TARGETS = ("SEQ 运动", "INT 运动", "TRJ 运动", "校准")
+RGB_MOTION_STATES = ("RUN_SEQ", "RUN_INT", "RUN_TRJ", "CALIBRATION")
+RGB_STATE_MODES = RGB_MODES + tuple(f"{13 + index} 自动 · {name}"
+                                   for index, name in enumerate(RGB_MOTION_EFFECTS))
+
 RGB_COLOR_SOURCES = ("预设 / 动画颜色", "该状态单独颜色", "AUTO_SEQ", "AUTO_INT", "AUTO_TRJ")
 
 RGB_STATES = (

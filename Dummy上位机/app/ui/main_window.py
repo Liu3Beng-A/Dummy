@@ -35,7 +35,7 @@ from app.protocol.parser import finite_numbers
 from app.protocol.constants import (
     CAL_PARAMETERS, DEFAULT_SPEED, JOINT_DEFAULTS, JOINT_RANGES,
     POSE_DEFAULTS, POSE_RANGES, RGB_AUTO_MODES, RGB_COLOR_SOURCES, RGB_MODES,
-    RGB_STATES, STALL_PARAMETERS,
+    RGB_MOTION_EFFECTS, RGB_MOTION_STATES, RGB_MOTION_TARGETS, RGB_STATE_MODES, RGB_STATES, STALL_PARAMETERS,
 )
 
 
@@ -111,7 +111,6 @@ class MainWindow(QMainWindow):
         controller.state_changed.connect(self._update_state)
         controller.actual_pose_changed.connect(self._actual_pose)
         controller.fields_changed.connect(self._fields_updated)
-        controller.ports_changed.connect(self._ports_updated)
         controller.rgb_changed.connect(self._rgb_device_changed)
         controller.preset_pose_requested.connect(self._preset_pose_requested)
         controller.preset_pose_completed.connect(self._preset_pose_completed)
@@ -141,7 +140,7 @@ class MainWindow(QMainWindow):
         self.log_dock.setFloating(True)
         self.log_dock.hide()
         self.controller.set_polling(store.settings.get("auto_poll", True), store.settings.get("poll_hz", 5))
-        self.controller.refresh_ports()
+        self._refresh_ports()
         self._update_state({})
         self._sync_viewer_mode()
         self._preview_changed()
@@ -185,7 +184,7 @@ class MainWindow(QMainWindow):
         self.port_combo.setEditText(self.store.settings.get("port", ""))
         self._bind("cb_ports", self.port_combo)
         row.addWidget(self.port_combo)
-        row.addWidget(button("刷新", self.controller.refresh_ports))
+        row.addWidget(button("刷新", self._refresh_ports))
         self.connection_combo = self._combo(("USB", "UART4"))
         self.connection_combo.setCurrentText(self.store.settings.get("connection_type", "USB"))
         self.connection_combo.setToolTip("USB 为主控 USB 虚拟串口；UART4 为 115200 串口，接口能力不同")
@@ -1279,6 +1278,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.rgb_launch_page)
         self.rgb_window = RgbSettingsWindow(self)
         self.rgb_window.visibility_changed.connect(lambda *_: self._sync_rgb_preview_activity())
+        self.rgb_window.editor_closed.connect(self._rgb_window_closed)
         layout = self.rgb_window.content_layout
         layout.addWidget(hint("灯效在主界面三维模型中预览。编辑不发送；应用改 RAM，保存整组后掉电保持。", "muted"))
         self.rgb_status = hint("尚未回读 RGB 配置。", "muted")
@@ -1364,7 +1364,37 @@ class MainWindow(QMainWindow):
         row.addWidget(button("应用常亮灯效", lambda: self._rgb_apply_mode(10 + auto_index.currentIndex())))
         row.addWidget(button("恢复自动联动", lambda: self.controller.send_cmd("!RGB_AUTO 1")))
         content.addLayout(row)
-        content.addWidget(hint("三种自动颜色分别配置，与手动预设及旋转动画颜色独立。手动预览会退出自动联动。"))
+        content.addWidget(hint("三种自动颜色分别配置，与手动预设独立。下方可分别选择运动与校准的自动动效。"))
+        box.addWidget(group)
+        group, content = self._group("独立自动动效 · 运动 / 校准")
+        form = QFormLayout()
+        motion_index = self._combo(RGB_MOTION_TARGETS)
+        self._bind("_rgb_motion_idx", motion_index)
+        motion_index.currentIndexChanged.connect(lambda *_: self.controller._rgb_fill_motion() if not self._building else None)
+        form.addRow("应用场景", motion_index)
+        motion_kind = self._combo(RGB_MOTION_EFFECTS)
+        self._bind("_rgb_motion_kind", motion_kind)
+        form.addRow("动效形态", motion_kind)
+        content.addLayout(form)
+        grid = QGridLayout()
+        motion_params = []
+        for index, (title, value, low, high) in enumerate((("周期 ms", 1400, 250, 30000), ("光带宽度", 3, 1, 12))):
+            grid.addWidget(QLabel(title), 0, index * 2)
+            edit = number(value, low, high, 0)
+            if index == 1:
+                edit.setToolTip("范围 1～12，默认 3；数值越大光带越宽。")
+            grid.addWidget(edit, 0, index * 2 + 1)
+            motion_params.append(FieldAdapter(edit, lambda value: str(int(value))))
+        self.fields["_rgb_motion_params"] = motion_params
+        content.addLayout(grid)
+        motion_reverse = QCheckBox("反向流动")
+        self._bind("_rgb_motion_reverse", motion_reverse)
+        content.addWidget(motion_reverse)
+        self.rgb_motion_apply = button("应用自动动效", self.controller._rgb_apply_motion, "primary")
+        content.addWidget(self.rgb_motion_apply)
+        self.rgb_motion_support = hint("未连接设备 · 可编辑预览；应用需要支持独立自动动效的新主控固件。", "muted")
+        content.addWidget(self.rgb_motion_support)
+        content.addWidget(hint("编辑仅在模型中预览，点击应用才发送。颜色沿用所选状态绑定；周期、方向和宽度不再引用 8 号旋转预设。"))
         box.addWidget(group)
         box.addStretch()
 
@@ -1405,7 +1435,7 @@ class MainWindow(QMainWindow):
         state = self._combo([title for _, title in RGB_STATES])
         self._bind("_rgb_state", state)
         state.currentIndexChanged.connect(lambda *_: self.controller._rgb_fill_state() if not self._building else None)
-        mode = self._combo(RGB_MODES, 3)
+        mode = self._combo(RGB_STATE_MODES, 3)
         self._bind("_rgb_state_mode", mode)
         source = self._combo(RGB_COLOR_SOURCES)
         self._bind("_rgb_state_source", source)
@@ -1419,7 +1449,7 @@ class MainWindow(QMainWindow):
         source.currentIndexChanged.connect(lambda index: color.setEnabled(index == 1))
         color.setEnabled(False)
         content.addWidget(button("应用当前状态绑定", self.controller._rgb_apply_state, "primary"))
-        content.addWidget(hint("独立颜色仅在该颜色来源被选中时使用；AUTO 来源引用自动颜色。报警不可改色，STOP / 校准期间只允许查询。"))
+        content.addWidget(hint("独立颜色仅在该颜色来源被选中时使用；AUTO 来源引用自动颜色。13～16 号独立动效仅用于 SEQ / INT / TRJ 运动及校准；参数在自动颜色页设置。报警不可改色，STOP / 校准期间只允许查询。"))
         box.addWidget(group)
         box.addStretch()
         self.rgb_preview_panel = QFrame()
@@ -1468,12 +1498,13 @@ class MainWindow(QMainWindow):
         layout.insertWidget(0, self.rgb_preview_panel)
         layout.addWidget(tabs, 1)
 
-        for name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state"):
+        for name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state", "_rgb_motion_idx"):
             self._rgb_load_local_editor(name)
         for name in ("_rgb_bright", "_rgb_color_idx", "_rgb_color_vars", "_rgb_auto_idx",
                      "_rgb_auto_color_vars", "_rgb_fades", "_rgb_effect_mode", "_rgb_effect_first",
                      "_rgb_effect_second", "_rgb_effect_params", "_rgb_reverse", "_rgb_state",
-                     "_rgb_state_mode", "_rgb_state_source", "_rgb_state_color"):
+                     "_rgb_state_mode", "_rgb_state_source", "_rgb_state_color", "_rgb_motion_idx",
+                     "_rgb_motion_kind", "_rgb_motion_params", "_rgb_motion_reverse"):
             adapters = self.fields[name]
             for adapter in adapters if isinstance(adapters, list) else [adapters]:
                 widget = adapter.widget
@@ -1520,9 +1551,19 @@ class MainWindow(QMainWindow):
             elif name == "_rgb_state":
                 state = RGB_STATES[self.fields[name].current()][0]
                 binding = self._rgb_draft["states"][state]
+                model = self.fields["_rgb_state_mode"].widget.model()
+                for index in range(13, len(RGB_STATE_MODES)):
+                    model.item(index).setEnabled(state in RGB_MOTION_STATES)
                 self.fields["_rgb_state_mode"].current(binding[0])
                 self.fields["_rgb_state_source"].current(binding[1])
                 groups = (("_rgb_state_color", binding[2:]),)
+            elif name == "_rgb_motion_idx":
+                slot = self.fields[name].current()
+                mode = self._rgb_draft["states"][RGB_MOTION_STATES[slot]][0]
+                self.fields["_rgb_motion_kind"].current(mode - 13 if 13 <= mode <= 16 else 0)
+                period, reverse, width = self._rgb_draft["motion"][slot]
+                self.fields["_rgb_motion_reverse"].set(bool(reverse))
+                groups = (("_rgb_motion_params", (period, width)),)
             else:
                 return
             for field, values in groups:
@@ -1542,7 +1583,7 @@ class MainWindow(QMainWindow):
     def _rgb_edit_changed(self, name):
         if self._building or self._rgb_loading_editor or getattr(self.controller, "_rgb_applying_readback", False):
             return
-        if name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state"):
+        if name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state", "_rgb_motion_idx"):
             self._rgb_load_local_editor(name)
         self.rgb_preview_source.setCurrentIndex(0)
         if name.startswith("_rgb_color"):
@@ -1555,6 +1596,18 @@ class MainWindow(QMainWindow):
             self._rgb_store_draft(("auto_colors", index), self._rgb_field_values("_rgb_auto_color_vars"))
             self.rgb_preview_state.setCurrentIndex(0)
             self.rgb_preview_mode.setCurrentIndex(index + 9)
+        elif name.startswith("_rgb_motion"):
+            slot = self.fields["_rgb_motion_idx"].current()
+            state = RGB_MOTION_STATES[slot]
+            period, width = self._rgb_field_values("_rgb_motion_params")
+            self._rgb_store_draft(("motion", slot), (period, int(self.fields["_rgb_motion_reverse"].get()), width))
+            binding = self._rgb_draft["states"][state]
+            if binding[0] == 8 and binding[1] == 0:
+                # Mirror firmware's legacy preset-color snapshot on migration.
+                binding = (binding[0], 1) + self._rgb_draft["effects"][8][:3]
+            self._rgb_store_draft(("states", state), (13 + self.fields["_rgb_motion_kind"].current(),) + binding[1:])
+            self._rgb_load_local_editor("_rgb_state")
+            self.rgb_preview_state.setCurrentIndex(self.rgb_preview_state.findData(state))
         elif name.startswith("_rgb_effect") or name == "_rgb_reverse":
             index = self.fields["_rgb_effect_mode"].current() + 3
             period, tail, on, off = self._rgb_field_values("_rgb_effect_params")
@@ -1566,7 +1619,12 @@ class MainWindow(QMainWindow):
         elif name.startswith("_rgb_state"):
             state = RGB_STATES[self.fields["_rgb_state"].current()][0]
             binding = (self.fields["_rgb_state_mode"].current(), self.fields["_rgb_state_source"].current())
+            if binding[0] >= 13 and state not in RGB_MOTION_STATES:
+                self._rgb_load_local_editor("_rgb_state")
+                self.controller.log("独立自动动效仅适用于 SEQ / INT / TRJ 运动及校准状态。", "WARN")
+                return
             self._rgb_store_draft(("states", state), binding + self._rgb_field_values("_rgb_state_color"))
+            self._rgb_load_local_editor("_rgb_motion_idx")
             self.rgb_preview_state.setCurrentIndex(self.rgb_preview_state.findData(state))
         elif name == "_rgb_bright":
             self._rgb_store_draft(("brightness",), int(self.fields[name].get()))
@@ -1597,6 +1655,10 @@ class MainWindow(QMainWindow):
         self._rgb_preview_selection_changed()
         self._sync_rgb_preview_activity()
 
+    def _rgb_window_closed(self):
+        if not self._closed and not self._building:
+            self.rgb_preview_source.setCurrentIndex(1)
+
     def _rgb_device_changed(self, snapshot):
         if self._closed:
             return
@@ -1624,7 +1686,7 @@ class MainWindow(QMainWindow):
                     for adapter, key in zip(self.fields["_rgb_fades"],
                                             ("fade_on_ms", "fade_off_ms", "brightness_ms", "transition_ms")):
                         adapter.set(incoming[key])
-                    for name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state"):
+                    for name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state", "_rgb_motion_idx"):
                         self._rgb_load_local_editor(name)
                 finally:
                     self._rgb_loading_editor = previous_loading
@@ -1639,6 +1701,17 @@ class MainWindow(QMainWindow):
             summary = "已连接 · 等待 RGB 配置与状态回读"
         self.rgb_status.setText(summary)
         self.rgb_status.setToolTip(str(self.fields["_rgb_status_var"].get()))
+        supported = snapshot.get("motion_supported", False)
+        self.rgb_motion_apply.setEnabled(not snapshot["connected"] or supported)
+        if not snapshot["connected"]:
+            motion_support = "未连接设备 · 可编辑预览；应用需要支持独立自动动效的新主控固件。"
+        elif supported:
+            motion_support = "主控支持独立自动动效 · 点击应用后保持自动联动。"
+        elif snapshot["complete"]:
+            motion_support = "当前主控固件不支持独立自动动效，请升级后应用；仍可本地编辑预览。"
+        else:
+            motion_support = "等待主控 RGB 能力回读；确认支持后可应用，当前可本地预览。"
+        self.rgb_motion_support.setText(motion_support)
         self._render_rgb_preview()
         self._sync_rgb_preview_activity()
 
@@ -1658,11 +1731,11 @@ class MainWindow(QMainWindow):
             self._rgb_render_timer.stop()
         self.controller.set_rgb_monitoring(active and self.rgb_preview_source.currentIndex() == 1)
 
-    def _set_rgb_preview_frame(self, frame, title, subtitle, *, light_on=None):
+    def _set_rgb_preview_frame(self, frame, title, subtitle, *, light_on=None, effect_mode=None):
         self.rgb_preview_title.setText(title)
         self.rgb_preview_brightness.setText(subtitle)
         self.rgb_preview_title.setToolTip(title + (f"\n{subtitle}" if subtitle else ""))
-        self.viewer.set_rgb_frame(frame, light_on=light_on)
+        self.viewer.set_rgb_frame(frame, light_on=light_on, effect_mode=effect_mode)
 
     def _render_rgb_preview(self):
         if self._building or not hasattr(self, "rgb_window") or self._closed:
@@ -1693,14 +1766,14 @@ class MainWindow(QMainWindow):
             config, state, source = snapshot["config"], runtime["state"], runtime["source"]
             status = f"设备配置跟随 · {age:.1f}s 前回读\n{source} · 动画相位独立"
         frame = self._rgb_simulator.frame(config, state, now, source=source)
-        mode = RGB_MODES[self._rgb_simulator.mode].split(" ", 1)[1]
+        mode = RGB_STATE_MODES[self._rgb_simulator.mode].split(" ", 1)[1]
         brightness_label = "亮度" if self.rgb_preview_source.currentIndex() == 0 else "模拟"
         # A breath/blink trough can quantize to RGB zero while the lamp stays on.
         # Keep the cover state separate; retain on during an existing fade-out.
         light_on = bool((config["enabled"] and config["brightness"] > 0)
                         or self._rgb_simulator.current_brightness > 0)
         self._set_rgb_preview_frame(frame, mode, f"{brightness_label} {self._rgb_simulator.current_brightness}%",
-                                    light_on=light_on)
+                                    light_on=light_on, effect_mode=self._rgb_simulator.mode)
         self.rgb_preview_status.setText(status)
 
     def _rgb_tab(self, tabs, title):
@@ -1936,7 +2009,6 @@ class MainWindow(QMainWindow):
         self.terminal_diagnostics = TerminalDiagnostics()
         self.terminal_diagnostics.open_test_requested.connect(self.controller.cartesian.diagnostics.start_open_test)
         self.terminal_diagnostics.axis_test_requested.connect(self.controller.cartesian.diagnostics.start_axis_test)
-        self.terminal_diagnostics.motion_axis_test_requested.connect(self.controller.cartesian.diagnostics.start_motion_axis_test)
         self.terminal_diagnostics.test_clicked.connect(self.controller.log)
         self.controller.cartesian.diagnostics.axis_test_changed.connect(self.terminal_diagnostics.show_axis_test)
         self.controller.cartesian.diagnostics.open_test_changed.connect(self.terminal_diagnostics.show_open_test)
@@ -2106,14 +2178,8 @@ class MainWindow(QMainWindow):
             self.store.update_settings(port=port, connection_type=connection)
             self.controller.connect_port(port, connection)
 
-    def _ports_updated(self, ports):
-        selected = self.port_combo.currentText()
-        self.port_combo.blockSignals(True)
-        self.port_combo.clear()
-        self.port_combo.addItems([str(port) for port in ports])
-        if selected:
-            self.port_combo.setEditText(selected)
-        self.port_combo.blockSignals(False)
+    def _refresh_ports(self):
+        return self.controller.refresh_ports(self.connection_combo.currentText())
 
     @staticmethod
     def _pill(widget, healthy=False, busy=False):

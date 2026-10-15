@@ -11,44 +11,14 @@ import math
 
 BAUDRATE = 115200  # 固件 usart.c 中 huart4 波特率硬编码
 
-# Read-only STREAM diagnostics, including TM1 component sampling (1/64 ticks).
-STREAM_TIMING_FIELDS = (
-    (51, "TM1计时能力"), (2, "曲线准备峰值"), (9, "流回调峰值"),
-    (12, "流回调迟到次数"), (19, "接收队列等待峰值"), (3, "电机栈最小余量"),
-    (18, "流回包丢弃次数"), (52, "反馈分段抽样峰值"), (53, "保护分段抽样峰值"),
-    (54, "输出分段抽样峰值"), (55, "参考分段抽样峰值"), (56, "到位分段抽样峰值"),
-    (57, "入口/结束回调峰值"), (58, "RUNNING回调峰值"), (59, "软停回调峰值"),
-    (60, "入口/结束抽样次数"), (61, "RUNNING抽样次数"), (62, "软停抽样次数"),
-    (63, "分段抽样除数"),
-)
-
-
-def format_stream_timing(line):
-    match = re.fullmatch(r"STREAM_NODE node=([1-7]) n=([0-9]+) field=([0-9]+) value=([0-9]+)", line)
-    if not match:
-        return None
-    node, nonce, field, value = map(int, match.groups())
-    labels = dict(STREAM_TIMING_FIELDS)
-    if nonce > 65535 or field not in labels or value > 0xffffffff:
-        return None
-    prefix = f"J{node} {labels[field]}（回包n={nonce}）："
-    if field == 51:
-        return prefix + ("TM1已确认" if value == 0x544d0001 else f"未知签名0x{value:08X}")
-    if field == 2:
-        return prefix + f"{value / 72000:.3f} ms；含中断抢占，非独占计算时间（按72MHz）"
-    if field in (9, 52, 53, 54, 55, 56, 57, 58, 59):
-        scope = "1/64 tick抽样，非WCET" if 52 <= field <= 56 else "逐tick观测，50us周期"
-        return prefix + f"{value / 72:.3f} us；{scope}（按72MHz）"
-    if field == 19:
-        return prefix + f"{value / 20:.3f} ms；20kHz软件tick名义换算，不含硬件FIFO等待"
-    if field == 3:
-        return prefix + f"{value} B；已观测路径的最小余量"
-    return prefix + f"{value}；累计计数需比较同次上电前后读数" if field != 63 else prefix + str(value)
-
 RGB_MODES = ("0 单色0", "1 单色1", "2 单色2", "3 彩虹", "4 潮汐",
              "5 呼吸", "6 赛博", "7 心跳", "8 旋转", "9 闪烁",
              "10 AUTO SEQ常亮", "11 AUTO INT常亮", "12 AUTO TRJ常亮")
 RGB_AUTO_MODES = ("SEQ 顺序", "INT 打断", "TRJ 轨迹")
+RGB_MOTION_STATES = ("RUN_SEQ", "RUN_INT", "RUN_TRJ", "CALIBRATION")
+RGB_MOTION_LABELS = ("SEQ 运动", "INT 运动", "TRJ 运动", "校准")
+RGB_MOTION_KINDS = ("圆圈", "伸缩光弧", "双峰行波", "双向汇聚")
+RGB_MOTION_MODES = tuple(f"{13 + kind} 自动{label}" for kind, label in enumerate(RGB_MOTION_KINDS))
 RGB_COLOR_SOURCES = ("预设 / 动画颜色", "该状态单独颜色", "AUTO_SEQ", "AUTO_INT", "AUTO_TRJ")
 RGB_STATES = (
     ("BOOT", "上电初始化"), ("DISABLED", "已失能"),
@@ -251,6 +221,9 @@ class RobotSerialAssistantOld:
         self._tx_queue = queue.Queue()
         self._serial_write_lock = threading.Lock()
         self._tx_thread = None
+        self._tx_write_active = False
+        self._rgb_save_request = None
+        self._rgb_save_last_io = 0.0
         self.is_connected = False
         self._motor_enabled = False  # 仅为 UI 缓存，未知状态不能证明八轴失能
         self._motor_state_known = False
@@ -416,14 +389,6 @@ class RobotSerialAssistantOld:
                                       bg="#495057", fg="white", relief=tk.FLAT, pady=5,
                                       command=self._query_can_diagnostic)
         self.btn_can_diag.pack(fill=tk.X, padx=1, pady=(2, 0))
-        self.stream_timing_field = ttk.Combobox(query_f, state="readonly", width=21,
-                                               values=[f"{field} · {label}" for field, label in STREAM_TIMING_FIELDS])
-        self.stream_timing_field.current(0)
-        self.stream_timing_field.pack(fill=tk.X, padx=1, pady=(4, 0))
-        self.btn_stream_timing = tk.Button(query_f, text="查询实时字段（参数节点）", font=("Arial", 10),
-                                          bg="#495057", fg="white", relief=tk.FLAT, pady=5,
-                                          command=self._query_stream_timing)
-        self.btn_stream_timing.pack(fill=tk.X, padx=1, pady=(2, 0))
 
         # --- 电机（旧固件只有 J1~J6，节点 1~6）---
         motor_f = ttk.LabelFrame(left_col, text="电机", padding=6)
@@ -619,7 +584,14 @@ class RobotSerialAssistantOld:
     # ==============================================
     def _build_rgb_page(self, parent):
         """RGB独立模块；编辑不发送，应用只写RAM，保存需实际失能确认。"""
-        self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+        self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}, "motions": {}}
+        self._rgb_motion_caps = False
+        self._rgb_motion_supported = False
+        self._rgb_motion_invalid = False
+        self._rgb_motion_states_seen = set()
+        self._rgb_motion_caps_seen = False
+        self._rgb_motion_response_active = False
+        self._rgb_motion_required = False
         self._rgb_runtime = {}
         self._rgb_status_var = tk.StringVar(value="RGB 未回读；连接后可查询配置。")
         status_label = ttk.Label(parent, textvariable=self._rgb_status_var, wraplength=480,
@@ -697,11 +669,40 @@ class RobotSerialAssistantOld:
             f"!RGB_MODE {10 + self._rgb_auto_idx.current()}")).pack(side=tk.LEFT, expand=True, fill=tk.X)
         ttk.Button(row, text="恢复自动联动", command=lambda: self._rgb_send("!RGB_AUTO 1")
                    ).pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ttk.Label(automatic, text="SEQ / INT / TRJ 各有独立颜色，默认待机常亮、运动同色旋转。\n"
+        ttk.Label(automatic, text="SEQ / INT / TRJ 各有独立颜色，默认待机常亮、运动同色圆圈。\n"
                   "与手动预设0 / 1 / 2及动画8的颜色分别设置。\n"
-                  "常亮预设10 / 11 / 12可在状态绑定中选择；旋转选择对应AUTO颜色来源。\n"
+                  "下方动效只用于运动 / 校准，不引用手动旋转预设8。\n"
                   "预览会退出自动联动；应用颜色只改RAM，保存全配置后掉电保留。",
                   foreground="#868e96", wraplength=480).pack(anchor="w", pady=4)
+        self._rgb_motion_status = tk.StringVar(value="尚未确认自动动效能力；请连接新主控后查询全部。")
+        ttk.Label(automatic, textvariable=self._rgb_motion_status, foreground="#868e96",
+                  wraplength=480).pack(anchor="w", pady=(3, 0))
+        self._rgb_motions = []
+        for slot, label in enumerate(RGB_MOTION_LABELS):
+            block = ttk.LabelFrame(automatic, text=label, padding=4)
+            block.pack(fill=tk.X, pady=3)
+            combo = ttk.Combobox(block, values=RGB_MOTION_KINDS, state="disabled", width=11)
+            combo.current(0)
+            combo.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            period = tk.StringVar(value="1400")
+            width = tk.StringVar(value="3")
+            reverse = tk.BooleanVar(value=False)
+            ttk.Label(block, text="周期 ms").grid(row=0, column=1)
+            period_entry = ttk.Entry(block, textvariable=period, width=6, state="disabled")
+            period_entry.grid(row=0, column=2, padx=3)
+            ttk.Label(block, text="宽度").grid(row=0, column=3)
+            width_entry = ttk.Entry(block, textvariable=width, width=3, state="disabled")
+            width_entry.grid(row=0, column=4, padx=3)
+            direction = ttk.Checkbutton(block, text="反向", variable=reverse, state="disabled")
+            direction.grid(row=0, column=5, padx=2)
+            apply = ttk.Button(block, text="应用", command=lambda n=slot: self._rgb_apply_motion(n), state="disabled")
+            apply.grid(row=0, column=6, padx=(3, 0))
+            block.columnconfigure(0, weight=1)
+            self._rgb_motions.append({"kind": combo, "period": period, "width": width, "reverse": reverse,
+                                      "widgets": (combo, period_entry, width_entry, direction, apply)})
+        ttk.Label(automatic, text="周期250～30000ms，宽度1～12。应用动效不退出自动、不保存；\n"
+                  "颜色沿用该状态绑定，校准颜色可在“状态绑定”设置。",
+                  foreground="#868e96", wraplength=480).pack(anchor="w", pady=3)
 
         top = ttk.Frame(effects)
         top.pack(fill=tk.X)
@@ -827,6 +828,21 @@ class RobotSerialAssistantOld:
         except ValueError as error:
             self.log(str(error), "WARN")
 
+    def _rgb_apply_motion(self, slot):
+        try:
+            if not self._rgb_motion_supported:
+                raise ValueError("自动动效未获主控能力确认；请升级主控并查询全部RGB配置。")
+            if slot not in range(4):
+                raise ValueError("自动动效目标无效")
+            editor = self._rgb_motions[slot]
+            kind = editor["kind"].current()
+            if kind not in range(4):
+                raise ValueError("请选择自动动效")
+            period, width = self._rgb_values([editor["period"], editor["width"]], [(250, 30000), (1, 12)])
+            self._rgb_send(f"!RGB_MOTION {slot} {kind} {period} {int(editor['reverse'].get())} {width}")
+        except ValueError as error:
+            self.log(str(error), "WARN")
+
     def _rgb_apply_fades(self):
         try:
             values = self._rgb_values(self._rgb_fades, [(0,10000)] * 3 + [(0,5000)])
@@ -849,7 +865,11 @@ class RobotSerialAssistantOld:
     def _rgb_apply_state(self):
         try:
             state = RGB_STATES[self._rgb_state.current()][0]
-            command = f"!RGB_SET_STATE {state} {self._rgb_state_mode.current()}"
+            mode = self._rgb_state_mode.current()
+            if mode < 0 or (mode >= 13 and
+                            (not self._rgb_motion_supported or state not in RGB_MOTION_STATES)):
+                raise ValueError("该状态不支持所选自动动效；请查询配置并检查主控版本。")
+            command = f"!RGB_SET_STATE {state} {mode}"
             source = self._rgb_state_source.current()
             if source == 1:
                 command += " " + " ".join(map(str, self._rgb_values(self._rgb_state_color, [(0,255)] * 3)))
@@ -860,10 +880,91 @@ class RobotSerialAssistantOld:
             self.log(str(error), "WARN")
 
     def _rgb_save(self):
+        if self._rgb_motion_required and not self._rgb_motion_supported:
+            self.log("RGB自动动效配置回读不完整；请查询全部后再保存。", "WARN")
+            return
         if not self._motor_state_known or self._motor_enabled or self._stop_locked or self._calibration_busy or self._seq_active:
             self.log("RGB保存需先DISABLE并等待Disabled ok，结束校准 / 保护 / 顺序任务。", "WARN")
             return
         self._rgb_send("!RGB_SAVE")
+
+    @staticmethod
+    def _is_rgb_save_command(command):
+        tokens = command.split()
+        return bool(tokens and (tokens[0] == "!RGB_SAVE" or
+                                tokens[0].startswith("!RGB_") and tokens[-1:] == ["&"]))
+
+    def _begin_rgb_save(self, command):
+        if (self._rgb_save_request is not None or not self._motor_state_known or self._motor_enabled or
+                self._stop_locked or self._calibration_busy or self._seq_active or self._acc_sync_waiting or
+                self._defaults_request is not None or self._fw_version_batch is not None or
+                self._can_diag_pending is not None):
+            self.log("RGB保存需确认失能并结束当前参数、校准及顺序任务；保存中不能重复发送。", "WARN")
+            return False
+        if command.split()[0] == "!RGB_SAVE" and command != "!RGB_SAVE":
+            self.log("保存全配置格式为 !RGB_SAVE；其他RGB设置可用命令末尾 & 显式保存。", "WARN")
+            return False
+        now = time.monotonic()
+        request = {"command": command, "connection": self._kin_connection, "phase": "preparing",
+                   "written": False, "prepare_until": now + 3.0, "timer": None}
+        self._rgb_save_request = request
+        self._rgb_save_last_io = now
+        self.log("RGB保存准备中：暂停新查询，等待已排队编辑及回读完成。", "INFO")
+        request["timer"] = self.root.after(20, self._prepare_rgb_save, request)
+        return True
+
+    def _prepare_rgb_save(self, request):
+        if request is not self._rgb_save_request or request["phase"] != "preparing":
+            return
+        request["timer"] = None
+        now = time.monotonic()
+        if not self.is_connected or request["connection"] != self._kin_connection:
+            self._finish_rgb_save("连接已变更，RGB保存未发送。", "WARN")
+            return
+        if now >= request["prepare_until"]:
+            self._finish_rgb_save("RGB保存准备超过3秒，保存未发送；请等待现有回读完成后再试。", "WARN")
+            return
+        ready = (self._tx_queue.empty() and not self._tx_write_active and self._pending_sync is None and
+                 not self._rgb_motion_response_active and now - self._rgb_save_last_io >= 0.15)
+        if ready:
+            with self._serial_write_lock:
+                if self._tx_queue.empty() and not self._tx_write_active:
+                    if not self._motor_state_known or self._motor_enabled or self._stop_locked:
+                        self._finish_rgb_save("失能状态已变更，RGB保存未发送。", "WARN")
+                        return
+                    request["phase"] = "awaiting"
+                    request["timer"] = self.root.after(6000, self._rgb_save_timeout, request)
+                    self._tx_queue.put((self._tx_generation, request["command"]))
+                    self.log(request["command"], "TX")
+                    self.log("RGB保存已排队：暂停查询，等待主控保存回执（最长6秒）。", "INFO")
+                    return
+        request["timer"] = self.root.after(20, self._prepare_rgb_save, request)
+
+    def _rgb_save_timeout(self, request):
+        if request is self._rgb_save_request and request["phase"] == "awaiting":
+            request["timer"] = None
+            request["phase"] = "uncertain"
+            self.log("RGB保存结果未确认（等待6秒超时），未自动重发；查询继续暂停。"
+                     "请等待迟到回执，或断开重连后查询；STOP / DISABLE仍可使用。", "WARN")
+
+    def _finish_rgb_save(self, message, level="INFO"):
+        request = self._rgb_save_request
+        if request is None:
+            return
+        if request["timer"] is not None:
+            self.root.after_cancel(request["timer"])
+        self._rgb_save_request = None
+        self.log(message, level)
+
+    def _handle_rgb_save_status(self, line):
+        request = self._rgb_save_request
+        if (request is None or not request["written"] or
+                request["connection"] != self._kin_connection):
+            return
+        if line == "ok RGB saved":
+            self._finish_rgb_save("RGB保存已确认完成，恢复查询。")
+        elif re.fullmatch(r"error RGB save_[a-z_]+", line):
+            self._finish_rgb_save(f"RGB保存未成功：{line}；恢复查询，不自动重发。", "WARN")
 
     @staticmethod
     def _rgb_set_fields(variables, values):
@@ -889,14 +990,65 @@ class RobotSerialAssistantOld:
             self._rgb_reverse.set(bool(values[7]))
 
     def _rgb_fill_state(self):
-        values = self._rgb_cache["states"].get(RGB_STATES[self._rgb_state.current()][0])
+        state = RGB_STATES[self._rgb_state.current()][0]
+        choices = RGB_MODES + (RGB_MOTION_MODES if self._rgb_motion_supported and state in RGB_MOTION_STATES else ())
+        self._rgb_state_mode["values"] = choices
+        values = self._rgb_cache["states"].get(state)
         if values is not None:
-            self._rgb_state_mode.current(values[0])
+            if values[0] < len(choices):
+                self._rgb_state_mode.current(values[0])
+            else:
+                self._rgb_state_mode.set("")
             self._rgb_state_source.current(values[1])
             self._rgb_set_fields(self._rgb_state_color, values[2:])
+        elif self._rgb_state_mode.current() < 0:
+            self._rgb_state_mode.current(0)
+
+    def _rgb_update_motion_controls(self):
+        enabled = self._rgb_motion_supported
+        for slot, editor in enumerate(self._rgb_motions):
+            for widget in editor["widgets"]:
+                widget.configure(state="readonly" if enabled and widget is editor["kind"]
+                                 else "normal" if enabled else "disabled")
+            params = self._rgb_cache["motions"].get(slot)
+            state = self._rgb_cache["states"].get(RGB_MOTION_STATES[slot])
+            if params is not None:
+                period, reverse, width = params
+                editor["period"].set(str(period))
+                editor["reverse"].set(bool(reverse))
+                editor["width"].set(str(width))
+            editor["kind"].current(state[0] - 13 if state is not None and 13 <= state[0] <= 16 else 0)
+        self._rgb_motion_status.set("自动运动 / 校准动效独立于预设8；应用只更新RAM。" if enabled else
+                                    "主控未支持自动动效或回读不完整；请升级主控后查询全部。")
+        self._rgb_fill_state()
+
+    def _rgb_reset_motion_capability(self):
+        self._rgb_motion_required = False
+        self._rgb_begin_motion_response()
+        self._rgb_motion_response_active = False
+
+    def _rgb_begin_motion_response(self):
+        """Clear extension evidence for one full reply, never for a short status.
+
+        Having seen extension records is sticky until reconnect: malformed or
+        missing CAPS must not turn a new device into a saveable legacy device.
+        """
+        self._rgb_motion_caps = False
+        self._rgb_motion_supported = False
+        self._rgb_motion_invalid = False
+        self._rgb_motion_states_seen = set()
+        self._rgb_motion_caps_seen = False
+        self._rgb_motion_response_active = True
+        self._rgb_cache["motions"] = {}
+        self._rgb_update_motion_controls()
 
     def _handle_rgb_status(self, line):
         """Called exclusively by _process_rx_line on the Tk main thread."""
+        if line.startswith("error RGB ") and self._rgb_motion_response_active:
+            self._rgb_motion_invalid = True
+            self._rgb_motion_supported = False
+            self._rgb_update_motion_controls()
+            return
         if line.startswith(("RGB_STATUS ", "RGB_RUNTIME ", "RGB_STORAGE ", "RGB_DMA ", "RGB_TIMEOUT ")):
             fields = dict(re.findall(r"(\w+)=([\w]+)", line))
             if line.startswith("RGB_STATUS "):
@@ -905,7 +1057,7 @@ class RobotSerialAssistantOld:
             fields = self._rgb_runtime
             required = {"on", "auto", "bright", "current", "mode", "state", "source", "dirty", "storage", "errors", "timeouts"}
             if required <= fields.keys():
-                limits = {"on": 1, "auto": 1, "bright": 100, "current": 100, "mode": 12,
+                limits = {"on": 1, "auto": 1, "bright": 100, "current": 100, "mode": 16,
                           "dirty": 1, "storage": 2, "errors": 0xFFFFFFFF, "timeouts": 0xFFFFFFFF}
                 if any(re.fullmatch(r"[0-9]+", fields[key]) is None or int(fields[key]) > maximum
                        for key, maximum in limits.items()):
@@ -923,11 +1075,42 @@ class RobotSerialAssistantOld:
                 self._rgb_bright.set(fields["bright"])
                 self._rgb_scale.set(int(fields["bright"]))
         elif line.startswith(("RGB_CONFIG ", "RGB_TIMING ")):
+            if not self._rgb_motion_response_active:
+                self._rgb_begin_motion_response()
             fields = dict(re.findall(r"(\w+)=(\d+)", line))
             for index, key in enumerate(("fade_on", "fade_off", "bright_ms", "transition")):
                 if key in fields and int(fields[key]) <= (5000 if index == 3 else 10000):
                     self._rgb_fades[index].set(fields[key])
         else:
+            if line == "RGB_CAPS" or line.startswith("RGB_CAPS "):
+                if not self._rgb_motion_response_active:
+                    self._rgb_begin_motion_response()
+                self._rgb_motion_required = True
+                if self._rgb_motion_caps_seen:
+                    self._rgb_motion_invalid = True
+                else:
+                    self._rgb_motion_caps = line == "RGB_CAPS motion=1"
+                    self._rgb_motion_invalid |= not self._rgb_motion_caps
+                self._rgb_motion_caps_seen = True
+                self._rgb_motion_supported = False
+                self._rgb_update_motion_controls()
+            match = re.fullmatch(r"RGB_MOTION ([0-3]) (\d+) ([01]) (\d+)", line)
+            if line == "RGB_MOTION" or line.startswith("RGB_MOTION "):
+                if not self._rgb_motion_response_active:
+                    self._rgb_begin_motion_response()
+                self._rgb_motion_required = True
+                if not self._rgb_motion_caps:
+                    self._rgb_motion_invalid = True
+                if match:
+                    slot, period, reverse, width = map(int, match.groups())
+                    if slot in self._rgb_cache["motions"]:
+                        self._rgb_motion_invalid = True
+                    if 250 <= period <= 30000 and 1 <= width <= 12:
+                        self._rgb_cache["motions"][slot] = [period, reverse, width]
+                    else:
+                        self._rgb_motion_invalid = True
+                else:
+                    self._rgb_motion_invalid = True
             match = re.fullmatch(r"RGB_COLOR ([0-2]) (\d+) (\d+) (\d+)", line)
             if match:
                 values = list(map(int, match.groups()))
@@ -948,9 +1131,35 @@ class RobotSerialAssistantOld:
             match = re.fullmatch(r"RGB_STATE (\w+) (\d+) (\d+) (\d+) (\d+) (\d+)", line)
             if match and match[1] in {state for state, _ in RGB_STATES}:
                 values = list(map(int, match.groups()[1:]))
-                if 0 <= values[0] < len(RGB_MODES) and 0 <= values[1] < len(RGB_COLOR_SOURCES) and all(0 <= v <= 255 for v in values[2:]):
+                if values[0] >= 13:
+                    if not self._rgb_motion_response_active:
+                        self._rgb_begin_motion_response()
+                    self._rgb_motion_required = True
+                    if not self._rgb_motion_caps:
+                        self._rgb_motion_invalid = True
+                if self._rgb_motion_response_active and match[1] in RGB_MOTION_STATES:
+                    if match[1] in self._rgb_motion_states_seen:
+                        self._rgb_motion_invalid = True
+                    self._rgb_motion_states_seen.add(match[1])
+                mode_valid = (0 <= values[0] < len(RGB_MODES) or
+                              match[1] in RGB_MOTION_STATES and 13 <= values[0] <= 16)
+                if mode_valid and 0 <= values[1] < len(RGB_COLOR_SOURCES) and all(0 <= v <= 255 for v in values[2:]):
                     self._rgb_cache["states"][match[1]] = values
+                elif self._rgb_motion_response_active and match[1] in RGB_MOTION_STATES:
+                    self._rgb_motion_invalid = True
+            elif line.startswith("RGB_STATE ") and self._rgb_motion_response_active:
+                tokens = line.split()
+                if len(tokens) > 1 and tokens[1] in RGB_MOTION_STATES:
+                    self._rgb_motion_invalid = True
             if line == "RGB_GET end":
+                if self._rgb_motion_response_active:
+                    self._rgb_motion_supported = (self._rgb_motion_caps and not self._rgb_motion_invalid and
+                                                  len(self._rgb_cache["motions"]) == 4 and
+                                                  len(self._rgb_motion_states_seen) == 4)
+                    if self._rgb_motion_required and not self._rgb_motion_supported:
+                        self._rgb_motion_invalid = True
+                    self._rgb_motion_response_active = False
+                self._rgb_update_motion_controls()
                 self._rgb_fill_color()
                 self._rgb_fill_auto_color()
                 self._rgb_fill_effect()
@@ -1297,6 +1506,7 @@ class RobotSerialAssistantOld:
 
     def toggle_connection(self):
         if not self.is_connected:
+            self._finish_rgb_save("重新连接：取消旧RGB保存等待，原保存结果需重新查询。", "WARN")
             port = self.cb_ports.get()
             try:
                 self.serial_port = serial.Serial(port, BAUDRATE, timeout=0.5)
@@ -1323,7 +1533,8 @@ class RobotSerialAssistantOld:
                                                        args=(self.serial_port, self._kin_connection), daemon=True)
                 self.receive_thread.start()
                 self._start_tx_thread()
-                self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+                self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}, "motions": {}}
+                self._rgb_reset_motion_capability()
                 self._rgb_status_var.set("RGB 已连接，等待配置回读。")
                 self.send_cmd("#KIN_CONFIG")
                 self.send_cmd("#RGB_GET")
@@ -1331,6 +1542,7 @@ class RobotSerialAssistantOld:
                 messagebox.showerror("连接失败", str(e))
                 self.log(f"连接失败: {e}", "ERROR")
         else:
+            self._finish_rgb_save("断开连接：RGB保存结果不作成功确认，请重连后查询。", "WARN")
             self._kin_connection += 1
             self.stop_thread = True
             self._stop_tx_thread()
@@ -1349,7 +1561,8 @@ class RobotSerialAssistantOld:
             self._update_motor_state(None)
             # 清掉所有等待中的异步状态，避免重连后被上一轮的残留状态卡住
             self._rgb_status_var.set("RGB 已断开；显示值仅供编辑，需重新回读。")
-            self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+            self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}, "motions": {}}
+            self._rgb_reset_motion_capability()
             self._pending_sync = None
             self._sync_data = None
             self._cancel_motion_for_stop()
@@ -1409,6 +1622,8 @@ class RobotSerialAssistantOld:
         """在 Tk 主线程处理回执，避免从 RX 线程读取 IntVar 等 Tk 对象。"""
         if connection is not None and (connection != self._kin_connection or not self.is_connected):
             return
+        self._rgb_save_last_io = time.monotonic()
+        self._handle_rgb_save_status(line)
         self._handle_kin_capability(line)
         # 裸数字 = 固件指令 FIFO 剩余空位：255 说明队列已满，其余仅是余量计数，静默过滤
         if line.isdigit():
@@ -1440,9 +1655,6 @@ class RobotSerialAssistantOld:
         self._handle_defaults_status(line)
         self._handle_firmware_version_status(line)
         self._handle_can_diagnostic_status(line)
-        timing = format_stream_timing(line)
-        if timing is not None:
-            self.log(timing + "；独立峰值不可相加，需结合原始日志", "INFO")
 
         # 电机参数查询回包解析：节点匹配且非 0 时，把数值回填到右侧 Entry（仅 UI 辅助，不影响主日志）
         m = re.match(r'ok PID \[(\d+)\] kp=(-?\d+) kv=(-?\d+) ki=(-?\d+) kd=(-?\d+)', line)
@@ -1580,6 +1792,7 @@ class RobotSerialAssistantOld:
                 break
             generation, cmd = item[:2]
             movel_drag = len(item) > 2 and item[2]
+            self._tx_write_active = True
             try:
                 with self._serial_write_lock:
                     if generation != self._tx_generation or movel_drag and self._native_tcp:
@@ -1591,15 +1804,23 @@ class RobotSerialAssistantOld:
                         continue
                     if self._calibration_busy and not diagnostic and cmd not in ("!CALIBRATION", "!STOP", "!DISABLE"):
                         continue
+                    request = self._rgb_save_request
+                    if request is not None and request["phase"] != "preparing" and cmd not in ("!STOP", "!DISABLE"):
+                        if cmd != request["command"] or request["written"]:
+                            continue
                     port_obj = self.serial_port
                     if port_obj is None or not port_obj.is_open:
-                        self.root.after(0, self.log, f"发送失败(串口未打开): {cmd}", "ERROR")
-                        continue
+                        raise serial.SerialException("串口未打开")
+                    if request is not None and cmd == request["command"] and request["phase"] != "preparing":
+                        request["written"] = True
                     port_obj.write((cmd + "\n").encode('utf-8'))
+                    self._rgb_save_last_io = time.monotonic()
                     if movel_drag:
                         self._movel_drag_written = True
             except Exception as e:
                 self.root.after(0, self.log, f"发送失败: {e}", "ERROR")
+            finally:
+                self._tx_write_active = False
 
     def _start_tx_thread(self):
         self._tx_thread = threading.Thread(target=self._serial_write_loop, daemon=True)
@@ -2083,19 +2304,7 @@ class RobotSerialAssistantOld:
                         "#KIN_CONFIG", "#TOOL", "#TCPPOSE", "#CARTESIAN_STATUS") or
                 cmd.startswith("#IKCHECK ") or
                 self._is_stall_status_query(cmd) or self._is_cal_status_query(cmd) or
-                self._is_firmware_version_query(cmd) or self._parse_can_diagnostic_query(cmd) is not None or
-                re.fullmatch(r"#STREAM_DIAG [1-7] (?:[0-9]|[1-5][0-9]|6[0-3])", cmd) is not None)
-
-    def _query_stream_timing(self):
-        node = self.param_node.get()
-        if node not in range(1, 8):
-            self.log("实时字段仅支持参数节点J1～J7；请选择单节点，禁止ALL/J8", "WARN")
-            return
-        index = self.stream_timing_field.current()
-        if not 0 <= index < len(STREAM_TIMING_FIELDS):
-            return
-        field = STREAM_TIMING_FIELDS[index][0]
-        self.send_cmd(f"#STREAM_DIAG {node} {field}")
+                self._is_firmware_version_query(cmd) or self._parse_can_diagnostic_query(cmd) is not None)
 
     def _query_cal_status(self, last=False):
         node = self._protection_nodes["CAL"].get()
@@ -2516,6 +2725,23 @@ class RobotSerialAssistantOld:
             self.log("未连接串口", "WARN")
             return False
         cmd = cmd.strip()
+        if self._rgb_save_request is not None and cmd not in ("!STOP", "!DISABLE"):
+            self.log("RGB保存事务处理中，查询及其他设置暂停；请等待确认或断开重连，勿重复保存。", "WARN")
+            return False
+        if (self._rgb_motion_required and not self._rgb_motion_supported and
+                (cmd == "!RGB_SAVE" or cmd.startswith("!RGB_") and cmd.split()[-1:] == ["&"])):
+            self.log("RGB自动动效配置回读不完整；请查询全部后再保存。", "WARN")
+            return False
+        if cmd.startswith("!RGB_MOTION") and not self._rgb_motion_supported:
+            self.log("自动动效未获主控能力确认；请升级主控并查询全部RGB配置。", "WARN")
+            return False
+        state_motion = re.match(r"!RGB_SET_STATE\s+(\w+)\s+(1[3-6])(?:\s|$)", cmd)
+        if state_motion and (not self._rgb_motion_supported or state_motion[1] not in RGB_MOTION_STATES):
+            self.log("此状态未支持自动动效；请检查状态及主控能力回读。", "WARN")
+            return False
+        if re.fullmatch(r"!RGB_MODE\s+(?:1[3-9]|[2-9]\d|\d{3,})", cmd):
+            self.log("手动预设仅支持0～12；自动动效请在自动颜色页选择。", "WARN")
+            return False
         if movel_drag and self._native_tcp:
             self.log("当前固件支持单个笛卡尔目标；连续操控暂不可用。", "WARN")
             return False
@@ -2584,13 +2810,21 @@ class RobotSerialAssistantOld:
             self._calibration_busy = True
             self.lbl_motor_state.config(text="● 校准入口检查中", bg="#495057", fg="#ffd43b")
         if cmd in ("!STOP", "!DISABLE"):
-            self._cancel_defaults_restore("用户中断")
-            self._cancel_motion_for_stop()
-            self._stop_locked = True
-            self._handle_stop_status("Stopping ok" if cmd == "!STOP" else "Disable pending")
+            with self._serial_write_lock:
+                self._cancel_defaults_restore("用户中断")
+                self._cancel_motion_for_stop()
+                request = self._rgb_save_request
+                if request is not None and not request["written"]:
+                    self._finish_rgb_save("用户中断：RGB保存未发送。", "WARN")
+                self._stop_locked = True
+                self._handle_stop_status("Stopping ok" if cmd == "!STOP" else "Disable pending")
+        if self._is_rgb_save_command(cmd):
+            return self._begin_rgb_save(cmd)
         try:
             item = (self._tx_generation, cmd, True) if movel_drag else (self._tx_generation, cmd)
             self._tx_queue.put(item)
+            if cmd == "#RGB_GET":
+                self._rgb_begin_motion_response()
             if can_diagnostic is not None:
                 node, request = can_diagnostic
                 state = {"node": node, "request": request, "fields": {}, "invalid": False}

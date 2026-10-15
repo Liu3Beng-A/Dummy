@@ -2,6 +2,7 @@
 #include "cartesian_planner.h"
 #include "tcp_tool.h"
 #include "motion_values.h"
+#include "cartesian_benchmark.h"
 #include <cstring>
 #include <cmath>
 extern DummyRobot dummy;
@@ -40,10 +41,150 @@ void PrintTool(StreamSink& response){auto p=TcpTool::Get();auto s=TcpTool::GetSt
     Respond(response,"TOOL v=1 rev=%lu dirty=%u storage=%u",(unsigned long)s.revision,unsigned(s.dirty),unsigned(s.storage));
     Respond(response,"TOOL XYZ %.3f %.3f %.3f",p.X*1000,p.Y*1000,p.Z*1000);
     Respond(response,"TOOL ABC %.3f %.3f %.3f",p.A,p.B,p.C);}
+
+enum class BenchPhase : uint8_t { IDLE, PENDING, RUNNING, DONE, CANCELLED, ABORTED, BUDGET, CLOCK_ERROR };
+struct BenchJob {
+    CartBench::Config config{};
+    CartBench::Sample data[CartBench::MaxSamples]{};
+    volatile BenchPhase phase=BenchPhase::IDLE;
+    volatile bool cancel=false;
+    uint32_t id=0,epoch=0,clock=0,ctrl=0,demcr=0,began=0;
+    uint32_t probeCycles=0,probeTicks=0,setupCycles=0;
+    unsigned count=0;
+    TickType_t wake=0;
+};
+BenchJob benchJob;
+CartBench::Compute benchCompute;
+bool benchCalibrationEntry=false;
+const char* BenchName(BenchPhase phase) {
+    static const char* const names[]={"IDLE","PENDING","RUNNING","DONE","CANCELLED","ABORTED","BUDGET","CLOCK_ERROR"};
+    return names[unsigned(phase)];
+}
+bool BenchActive() { return benchJob.phase==BenchPhase::PENDING||benchJob.phase==BenchPhase::RUNNING; }
+void BenchStatus(StreamSink& response) {
+    CartBench::Config c;uint32_t id,hz,ctrl,demcr,pc,pt,sc;unsigned count;BenchPhase phase;
+    taskENTER_CRITICAL();c=benchJob.config;id=benchJob.id;hz=benchJob.clock;ctrl=benchJob.ctrl;
+    demcr=benchJob.demcr;count=benchJob.count;phase=benchJob.phase;
+    pc=benchJob.probeCycles;pt=benchJob.probeTicks;sc=benchJob.setupCycles;taskEXIT_CRITICAL();
+    Respond(response,"CBENCH v=1 id=%lu phase=%s",(unsigned long)id,BenchName(phase));
+    Respond(response,"CBENCH config op=%u fixture=%u work=%u samples=%u",unsigned(c.operation),unsigned(c.fixture),unsigned(c.work),unsigned(c.samples));
+    Respond(response,"CBENCH clock_hz=%lu budget_us=%lu n=%u",(unsigned long)hz,(unsigned long)c.budgetUs,count);
+    Respond(response,"CBENCH period_ms=20");
+    Respond(response,"CBENCH dwt_ctrl=%lu demcr=%lu",(unsigned long)ctrl,(unsigned long)demcr);
+    Respond(response,"CBENCH probe_cycles=%lu probe_ticks=%lu",(unsigned long)pc,(unsigned long)pt);
+    Respond(response,"CBENCH setup_cycles=%lu",(unsigned long)sc);
+    Respond(response,"CBENCH no_motion=1 scope=components");
+}
+bool BenchUnsigned(const float* values,const uint32_t* limits,unsigned count) {
+    for(unsigned i=0;i<count;++i)if(values[i]<0||values[i]>limits[i]||std::floor(values[i])!=values[i])return false;
+    return true;
+}
+uint32_t BenchCycles(void*) { return DWT->CYCCNT; }
+uint32_t BenchTicks(void*) { return HAL_GetTick(); }
+uint8_t BenchCheckpoint(void*) {
+    if(benchJob.cancel)return CartBench::CANCELLED;
+    if(HAL_GetTick()-benchJob.began>10000||dummy.GetMotionEpoch()!=benchJob.epoch||
+       dummy.IsEnabled()||dummy.IsStopLocked()||dummy.IsMotionBusy()||dummy.commandHandler.IsBusy()||
+       dummy.IsCalibrationBusy()||dummy.IsProtectionParameterBusy()||dummy.IsRGBSaveBusy()||
+       !(DWT->CTRL&DWT_CTRL_CYCCNTENA_Msk)||!(CoreDebug->DEMCR&CoreDebug_DEMCR_TRCENA_Msk)||
+       SystemCoreClock!=benchJob.clock)return CartBench::ABORTED;
+    return CartBench::COMPLETE;
+}
+bool BenchClockStart() {
+    benchJob.clock=SystemCoreClock;
+    if(benchJob.clock<1000000||benchJob.clock>300000000)return false;
+    // Do not reset the shared counter or replace global micros().
+    CoreDebug->DEMCR|=CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL|=DWT_CTRL_CYCCNTENA_Msk;__DSB();__ISB();
+    benchJob.ctrl=DWT->CTRL;benchJob.demcr=CoreDebug->DEMCR;
+    uint32_t at=DWT->CYCCNT;for(unsigned i=0;i<32;++i)__NOP();
+    if(DWT->CYCCNT==at)return false;
+    const uint32_t tick=HAL_GetTick();at=DWT->CYCCNT;
+    osDelay(20);
+    benchJob.probeCycles=DWT->CYCCNT-at;benchJob.probeTicks=HAL_GetTick()-tick;
+    const uint64_t milliseconds=uint64_t(benchJob.probeCycles)*1000/benchJob.clock;
+    return benchJob.probeTicks>=10&&benchJob.probeTicks<1000&&
+        milliseconds+2>=benchJob.probeTicks&&milliseconds<=benchJob.probeTicks+2;
+}
+}
+
+bool CartesianBenchmarkActive() { return BenchActive(); }
+bool CartesianBenchmarkEnterCalibration() {
+    taskENTER_CRITICAL();
+    const bool allowed=!BenchActive()&&!benchCalibrationEntry;
+    if(allowed)benchCalibrationEntry=true;
+    taskEXIT_CRITICAL();return allowed;
+}
+void CartesianBenchmarkLeaveCalibration() { taskENTER_CRITICAL();benchCalibrationEntry=false;taskEXIT_CRITICAL(); }
+void CartesianBenchmarkPoll() {
+    // Only the normal-priority command task may execute a computation sample.
+    if(osThreadGetId()!=ControlLoopUpdateHandle||!BenchActive())return;
+    if(benchJob.phase==BenchPhase::PENDING) {
+        benchJob.began=HAL_GetTick();
+        // Reservation is still active during clock/setup validation.
+        if(benchJob.cancel){benchJob.phase=BenchPhase::CANCELLED;return;}
+        if(!BenchClockStart()){benchJob.phase=BenchPhase::CLOCK_ERROR;return;}
+        if(BenchCheckpoint(nullptr)!=CartBench::COMPLETE){benchJob.phase=benchJob.cancel?BenchPhase::CANCELLED:BenchPhase::ABORTED;return;}
+        const uint32_t at=DWT->CYCCNT;
+        const bool prepared=benchCompute.Prepare(benchJob.config);
+        benchJob.setupCycles=DWT->CYCCNT-at;
+        if(!prepared){benchJob.phase=BenchPhase::ABORTED;return;}
+        benchJob.wake=xTaskGetTickCount();benchJob.phase=BenchPhase::RUNNING;
+    } else vTaskDelayUntil(&benchJob.wake,pdMS_TO_TICKS(20));
+    const CartBench::Hooks hooks{nullptr,BenchCycles,BenchTicks,BenchCheckpoint,benchJob.clock};
+    const CartBench::Sample sample=benchCompute.Measure(benchJob.config,hooks);
+    taskENTER_CRITICAL();
+    benchJob.data[benchJob.count++]=sample;
+    if(sample.flag==CartBench::BUDGET)benchJob.phase=BenchPhase::BUDGET;
+    else if(sample.flag==CartBench::CANCELLED)benchJob.phase=BenchPhase::CANCELLED;
+    else if(sample.flag!=CartBench::COMPLETE)benchJob.phase=BenchPhase::ABORTED;
+    else if(benchJob.count==benchJob.config.samples)benchJob.phase=BenchPhase::DONE;
+    taskEXIT_CRITICAL();
 }
 bool DummyRobot::HandleCartesianCommand(const char* cmd,unsigned n,StreamSink& response){
     while(n&&(*cmd==' '||*cmd=='\t'||*cmd=='\r'||*cmd=='\n')){++cmd;--n;}
     while(n&&(cmd[n-1]==' '||cmd[n-1]=='\t'||cmd[n-1]=='\r'||cmd[n-1]=='\n'))--n;
+    if(Prefix(cmd,n,"#CBENCH")) {
+        if(response.channelType!=StreamSink::CHANNEL_TYPE_USB){Respond(response,"error CBENCH usb_only");return true;}
+        if(Equal(cmd,n,"#CBENCH")){BenchStatus(response);return true;}
+        if(Equal(cmd,n,"#CBENCH CANCEL")){taskENTER_CRITICAL();if(BenchActive())benchJob.cancel=true;taskEXIT_CRITICAL();BenchStatus(response);return true;}
+        if(Prefix(cmd,n,"#CBENCH READ ")) {
+            float values[2];const uint32_t limits[2]={CartBench::MaxSamples-1,8};
+            if(!MotionValues::ParseCartesian(cmd+13,n-13,values,2,2)||!BenchUnsigned(values,limits,2)||values[1]<1){Respond(response,"error CBENCH read_syntax");return true;}
+            taskENTER_CRITICAL();const bool active=BenchActive();const unsigned count=benchJob.count;const uint32_t id=benchJob.id;taskEXIT_CRITICAL();
+            const unsigned first=unsigned(values[0]),amount=unsigned(values[1]);
+            if(active||first+amount>count){Respond(response,"error CBENCH read_range_or_busy");return true;}
+            for(unsigned i=first;i<first+amount;++i) {
+                CartBench::Sample s;taskENTER_CRITICAL();s=benchJob.data[i];taskEXIT_CRITICAL();
+                Respond(response,"CBENCH DATA %lu,%u,%lu,%lu,%u,%u",(unsigned long)id,i,(unsigned long)s.cycles,(unsigned long)s.ticks,unsigned(s.work),unsigned(s.flag));
+                Respond(response,"CBENCH RESULT %lu,%u,%u,%u,%u,%u,%u,%lu",(unsigned long)id,i,unsigned(s.fk),unsigned(s.ik),unsigned(s.valid),unsigned(s.selected),unsigned(s.failed),(unsigned long)s.checksum);
+            }
+            return true;
+        }
+        if(Prefix(cmd,n,"#CBENCH RUN ")) {
+            float values[5];const uint32_t limits[5]={5,2,CartBench::MaxWork,CartBench::MaxSamples,20000};
+            if(!MotionValues::ParseCartesian(cmd+12,n-12,values,5,5)||!BenchUnsigned(values,limits,5)||values[2]<1||values[3]<1||values[4]<100){Respond(response,"error CBENCH run_syntax");return true;}
+            const CartBench::Config config{uint8_t(values[0]),uint8_t(values[1]),uint16_t(values[2]),uint16_t(values[3]),uint32_t(values[4])};
+            taskENTER_CRITICAL();
+            const bool allowed=!BenchActive()&&!benchCalibrationEntry&&stopState==DISABLED&&!isEnabled&&!startPending&&!IsStopLocked()&&
+                !IsMotionBusy()&&!CoreStreamActive()&&!CoreNativeOwned()&&!plannerLease&&!commandHandler.IsBusy()&&!IsCalibrationBusy()&&!IsProtectionParameterBusy()&&!rgbSaveBusy;
+            if(allowed){benchJob.config=config;benchJob.cancel=false;benchJob.count=0;benchJob.epoch=motionEpoch;
+                benchJob.clock=benchJob.ctrl=benchJob.demcr=benchJob.probeCycles=benchJob.probeTicks=benchJob.setupCycles=0;
+                if(!++benchJob.id)++benchJob.id;benchJob.phase=BenchPhase::PENDING;}
+            taskEXIT_CRITICAL();
+            if(!allowed)Respond(response,"error CBENCH requires_idle_disabled");else BenchStatus(response);
+            return true;
+        }
+        Respond(response,"error CBENCH syntax");return true;
+    }
+    if(BenchActive()) {
+        if(Equal(cmd,n,"!STOP")||Equal(cmd,n,"!DISABLE"))benchJob.cancel=true;
+        else if(!Equal(cmd,n,"#STACK")&&!Equal(cmd,n,"#MOTION_STATUS")&&!Equal(cmd,n,"#GET_CMDMODE")&&
+                !Equal(cmd,n,"#FW_VERSION 0")&&!Equal(cmd,n,"#KIN_CONFIG")&&!Equal(cmd,n,"#TOOL")&&
+                !Equal(cmd,n,"#TCPPOSE")&&!Equal(cmd,n,"#CARTESIAN_STATUS")) {
+            Respond(response,"error CBENCH busy");return true;
+        }
+    }
     if(Equal(cmd,n,"#KIN_CONFIG")){
         Respond(response,"KIN v=2 xyz=mm abc=deg joints=deg rail=mm");
         Respond(response,"KIN base=207.3 db=0 arm=170 forearm=117");

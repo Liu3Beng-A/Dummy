@@ -1,8 +1,9 @@
 """Offline preview of the 24-LED firmware RGB renderer, without Qt or transport.
 
-The scene selection, animation equations, smooth transitions, brightness ramps,
-and gamma table follow firmware_new/dummy-ref-core-fw/Bsp/gpio/rgb.cpp. Frames
-are logical RGB, rather than the firmware's GRB wire order. Python calculations
+The scene selection, smooth transitions, brightness ramps, gamma table and
+effect equations follow firmware_new/dummy-ref-core-fw/Bsp/gpio/rgb.cpp.
+Rotation uses the same cosine front and extended tail to avoid sharp steps.
+Frames are logical RGB, rather than the firmware's GRB wire order. Python calculations
 use double precision, so a channel can differ by one from MCU float rounding.
 Device status has no scene/ramp timestamps or LED frames: a following preview
 can match settings and state, but cannot recover the device's animation phase.
@@ -14,9 +15,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 import math
 
+from .rgb_rainbow import RAINBOW_PALETTE, RAINBOW_SCALE
+
 
 LED_COUNT = 24
-MODE_COUNT = 13
+PRESET_MODE_COUNT = 13
+MODE_COUNT = 17
+MOTION_STATES = ("RUN_SEQ", "RUN_INT", "RUN_TRJ", "CALIBRATION")
 STATE_NAMES = (
     "BOOT", "DISABLED", "READY_SEQ", "READY_INT", "READY_TRJ", "READY_TUN",
     "RUN_SEQ", "RUN_INT", "RUN_TRJ", "RUN_TUN", "CALIBRATION", "STOP",
@@ -24,6 +29,8 @@ STATE_NAMES = (
 )
 _PROTECTED_STATES = frozenset(("FAULT", "STOP", "CALIBRATION", "STARTING"))
 _TICK_MASK = 0xFFFFFFFF
+_SPIN_FRONT_LEDS = 1.5
+_SPIN_TAIL_EXTRA_LEDS = 2.0
 _GAMMA = (
     0, 1, 1, 1, 1, 1, 2, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 11, 12, 13,
     14, 15, 17, 18, 20, 21, 23, 24, 26, 27, 29, 31, 33, 35, 37, 39, 41,
@@ -45,6 +52,7 @@ def default_config() -> dict:
     """
     effects = {mode: (255, 255, 255, 0, 0, 0, 4000, 0, 3, 200, 1000)
                for mode in range(3, 10)}
+    effects[3] = (255, 255, 255, 0, 0, 0, 6000, 0, 3, 200, 1000)
     effects[4] = (0, 0, 255, 0, 0, 0, 4000, 0, 3, 200, 1000)
     effects[5] = (255, 255, 255, 0, 0, 0, 3800, 0, 3, 200, 1000)
     effects[6] = (0, 255, 255, 160, 0, 255, 4200, 0, 3, 200, 1000)
@@ -57,13 +65,14 @@ def default_config() -> dict:
         "colors": {0: (0, 0, 255), 1: (0, 255, 0), 2: (255, 255, 255)},
         "auto_colors": {1: (0, 255, 0), 2: (0, 255, 255), 3: (0, 80, 255)},
         "effects": effects,
+        "motion": {slot: (1400, 0, 3) for slot in range(4)},
         "states": {
             "BOOT": (3, 0, 0, 0, 255), "DISABLED": (5, 0, 255, 255, 255),
             "READY_SEQ": (10, 0, 0, 0, 0), "READY_INT": (11, 0, 0, 0, 0),
             "READY_TRJ": (12, 0, 0, 0, 0), "READY_TUN": (2, 1, 160, 0, 255),
-            "RUN_SEQ": (8, 2, 0, 0, 0), "RUN_INT": (8, 3, 0, 0, 0),
-            "RUN_TRJ": (8, 4, 0, 0, 0), "RUN_TUN": (5, 1, 160, 0, 255),
-            "CALIBRATION": (8, 1, 255, 180, 0), "STOP": (7, 1, 255, 180, 0),
+            "RUN_SEQ": (13, 2, 0, 0, 0), "RUN_INT": (13, 3, 0, 0, 0),
+            "RUN_TRJ": (13, 4, 0, 0, 0), "RUN_TUN": (5, 1, 160, 0, 255),
+            "CALIBRATION": (13, 1, 255, 180, 0), "STOP": (7, 1, 255, 180, 0),
             "STARTING": (4, 1, 0, 255, 255), "FAULT": (7, 1, 255, 0, 0),
         },
     }
@@ -125,6 +134,7 @@ class _Config:
     auto_colors: tuple[Color, ...]
     effects: tuple[_Effect, ...]
     states: tuple[tuple, ...]
+    motion: tuple[tuple[int, bool, int], ...]
 
 
 def _config(value: Mapping) -> _Config:
@@ -146,20 +156,36 @@ def _config(value: Mapping) -> _Config:
         states = []
         for name in STATE_NAMES:
             binding = _sequence(value["states"][name], 5, f"states[{name}]")
+            if binding[0] >= PRESET_MODE_COUNT and name not in MOTION_STATES:
+                raise ValueError("automatic animation bindings require movement or calibration")
             states.append((_integer(binding[0], 0, MODE_COUNT - 1, "state mode"),
                            _integer(binding[1], 0, 4, "color_source"),
                            *_color(binding[2:], f"states[{name}].color")))
         if states[-1] != (7, 1, 255, 0, 0):
             raise ValueError("FAULT binding must be fixed red heartbeat (7, 1, 255, 0, 0)")
+        motion_bank = value.get("motion")
+        if not motion_bank:
+            # Old firmware has no independent motion bank and still binds preset8.
+            if any(binding[0] >= PRESET_MODE_COUNT for binding in states):
+                raise ValueError("automatic animation parameters are missing")
+            e = effects[8]
+            motion_bank = {slot: (e.period, int(e.reverse), e.tail) for slot in range(4)}
+        if not isinstance(motion_bank, Mapping) or set(motion_bank) != set(range(4)):
+            raise ValueError("motion must contain four target slots")
+        motion = []
+        for slot in range(4):
+            m = _sequence(motion_bank[slot], 3, f"motion[{slot}]")
+            motion.append((_integer(m[0], 250, 30000, "motion period"),
+                           _boolean(m[1], "motion reverse"), _integer(m[2], 1, 12, "motion width")))
         return _Config(
             _boolean(value["enabled"], "enabled"), _boolean(value["automatic"], "automatic"),
             _integer(value["brightness"], 0, 100, "brightness"),
-            _integer(value["manual_mode"], 0, MODE_COUNT - 1, "manual_mode"),
+            _integer(value["manual_mode"], 0, PRESET_MODE_COUNT - 1, "manual_mode"),
             _integer(value["fade_on_ms"], 0, 10000, "fade_on_ms"),
             _integer(value["fade_off_ms"], 0, 10000, "fade_off_ms"),
             _integer(value["brightness_ms"], 0, 10000, "brightness_ms"),
             _integer(value["transition_ms"], 0, 5000, "transition_ms"),
-            colors, auto, tuple(effects), tuple(states),
+            colors, auto, tuple(effects), tuple(states), tuple(motion),
         )
     except (KeyError, TypeError, IndexError) as exc:
         raise ValueError("config is missing a required field or contains an invalid bank") from exc
@@ -204,7 +230,11 @@ def _select_scene(c: _Config, state: str, source: str | None) -> _Scene:
     binding = c.states[STATE_NAMES.index(selected if selected != "MANUAL" else state)]
     mode = c.manual_mode if selected == "MANUAL" else binding[0]
     effect = c.effects[mode if mode < 10 else 0]
-    solid = c.colors[mode] if mode < 3 else c.auto_colors[mode - 10] if mode >= 10 else effect.first
+    solid = (c.colors[mode] if mode < 3 else c.auto_colors[mode - 10] if 10 <= mode < 13 else
+             (0, 255, 0) if mode >= 13 else effect.first)
+    if mode >= 13:
+        period, reverse, width = c.motion[MOTION_STATES.index(selected)]
+        effect = _Effect(first=solid, period=period, reverse=reverse, tail=width)
     if selected != "MANUAL" and binding[1]:
         solid = binding[2:] if binding[1] == 1 else c.auto_colors[binding[1] - 2]
         effect = replace(effect, first=solid)
@@ -216,6 +246,33 @@ def _select_scene(c: _Config, state: str, source: str | None) -> _Scene:
         # Firmware fixes STOP heartbeat timing, preserving the binding color.
         effect = _Effect(first=solid, period=1800)
     return _Scene(mode, selected, solid, effect, scale)
+
+
+def _spin_level(distance: float, tail: int) -> float:
+    """Periodic C1 pulse: soft front, configured tail plus two LEDs.
+
+    Positive distance trails the head in either rotation direction. Wire config
+    stays untouched: default tail 3 becomes a 5-LED rear in firmware and preview.
+    """
+    distance %= LED_COUNT
+    rear = tail + _SPIN_TAIL_EXTRA_LEDS
+    if distance < rear:
+        fraction = distance / rear
+    elif distance > LED_COUNT - _SPIN_FRONT_LEDS:
+        fraction = (LED_COUNT - distance) / _SPIN_FRONT_LEDS
+    else:
+        return 0.04
+    return 0.04 + 0.96 * (0.5 + 0.5 * math.cos(math.pi * fraction))
+
+
+def _rainbow_color(phase: float) -> tuple[float, float, float]:
+    """Shared seven-anchor, perceptual-design PWM table, including its wrap."""
+    position = (phase % 1) * len(RAINBOW_PALETTE)
+    index = int(position) % len(RAINBOW_PALETTE)
+    fraction = position - math.floor(position)
+    first = RAINBOW_PALETTE[index]
+    second = RAINBOW_PALETTE[(index + 1) % len(RAINBOW_PALETTE)]
+    return tuple((a + (b-a)*fraction) / RAINBOW_SCALE for a, b in zip(first, second))
 
 
 def _render(scene: _Scene, elapsed: int) -> tuple[tuple[float, float, float], ...]:
@@ -240,26 +297,54 @@ def _render(scene: _Scene, elapsed: int) -> tuple[tuple[float, float, float], ..
     for i in range(LED_COUNT):
         color, level = scene.solid, amplitude
         if scene.mode == 3:
-            hue = (p + i / LED_COUNT) % 1
-            x = hue * 6
-            segment, f = int(x), x - math.floor(x)
-            color = ((255, 255 * f, 0), (255 * (1 - f), 255, 0),
-                     (0, 255, 255 * f), (0, 255 * (1 - f), 255),
-                     (255 * f, 0, 255), (255, 0, 255 * (1 - f)))[segment]
+            color = _rainbow_color(p + i / LED_COUNT)
         elif scene.mode == 6:
             color = tuple(first + (second - first) * mix for first, second in zip(color, e.second))
-        elif scene.mode == 8:
+        elif scene.mode in (8, 13):
             head = p * LED_COUNT
             distance = i - head if e.reverse else head - i
-            if distance < 0:
-                distance += LED_COUNT
-            if distance >= LED_COUNT:
-                distance -= LED_COUNT
-            level = 0.04
-            if distance < e.tail:
-                level += 0.96 * _smooth(1 - distance / e.tail)
+            level = _spin_level(distance, e.tail)
+        elif scene.mode >= 14:
+            x, scale = i / LED_COUNT, e.tail / 3.0
+            if scene.mode == 14:
+                length = min(.95, (.18 + .34 * (.5 - .5 * math.cos(2 * math.pi * p))) * scale)
+                distance = (p - x) % 1
+                level = .04 + .86 * _smooth(distance / (.065 * scale)) * _smooth((length - distance) / (.08 * scale))
+            elif scene.mode == 15:
+                # Same cos-power wave, expressed near its zero without float
+                # cancellation. Integer millisecond phase makes exact valleys
+                # exact zeros even with a wide fractional power on the MCU.
+                ticks = (elapsed % e.period) * LED_COUNT
+                offset = i * e.period + (ticks if e.reverse else -ticks)
+                valley = abs(offset % (e.period * 12) - e.period * 6)
+                wave = math.sin(2 * math.pi * valley / (e.period * LED_COUNT))
+                level = .04 + .86 * wave ** (4 / (scale * scale))
+            else:
+                center = .5 * (1 - _smooth(p / .7))
+                fade = _smooth((p - .7) / .3)
+                width = (.055 + .1 * fade) * scale
+                da, db = abs(x - center) % 1, abs(x + center) % 1
+                da, db = min(da, 1 - da), min(db, 1 - db)
+                a, b = math.exp(-.5 * (da / width) ** 2), math.exp(-.5 * (db / width) ** 2)
+                level = .04 + .86 * _smooth(p / .09) * (1 - fade) * (a + b - a * b)
         output.append(tuple(channel * level * scene.scale for channel in color))
     return tuple(output)
+
+
+def _quantize_frame(frame, gain: float, scene: _Scene) -> list[Color]:
+    """Spatially share fractional white only for a uniform disabled breath."""
+    if (scene.source == "DISABLED" and scene.mode == 5
+            and scene.solid[0] == scene.solid[1] == scene.solid[2]
+            and all(abs(channel - frame[0][0]) <= 0.0001 for led in frame for channel in led)):
+        # Same fixed, far-apart ranks as the MCU. White uses one shared mask.
+        ranks = (0, 8, 16, 4, 12, 20, 2, 10, 18, 6, 14, 22,
+                 1, 9, 17, 5, 13, 21, 3, 11, 19, 7, 15, 23)
+        level = min(255.0, max(0.0, frame[0][0] * gain))
+        base = int(level)
+        count = int((level - base) * LED_COUNT + 0.5)
+        return [(base + (rank < count),) * 3 for rank in ranks]
+    return [tuple(min(255, max(0, int(channel * gain + 0.5))) for channel in led)
+            for led in frame]
 
 
 class RgbSimulator:
@@ -351,5 +436,4 @@ class RgbSimulator:
                 self._brightness = target
         self._source = "OFF" if not c.enabled or not c.brightness else self._scene.source
         gain = _gain(self._brightness)
-        return [tuple(min(255, max(0, int(channel * gain + 0.5))) for channel in led)
-                for led in self._frame]
+        return _quantize_frame(self._frame, gain, self._scene)

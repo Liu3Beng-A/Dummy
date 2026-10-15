@@ -4,40 +4,7 @@
 namespace MotorStream {
 namespace {
 constexpr int64_t Scale = int64_t(1) << 40;
-// Exact rational 20ms/400-tick Q40 maps. Each coefficient is split into
-// an integer and a signed fractional remainder to keep every product in int64.
-// The two large velocity coefficients store their high word separately below.
-// Tables occupy 369 bytes before linker alignment (45 pairs + 9 sign masks).
-int64_t Difference(unsigned row, const int32_t* input) {
-    struct Coefficient { uint32_t whole, remainder; };
-    static constexpr Coefficient map[9][5] = {
-        {{171155U,555363125U}, {54973526U,4089374650U}, {1368U,2337786600U}, {1364U,655282828U}, {3U,2556246597U}},
-        {{1021792U,57460000U}, {12273U,600364475U}, {8162U,426175350U}, {2687U,356046613U}, {20U,458946652U}},
-        {{1007695U,235450625U}, {12123U,20035125U}, {8030U,204400450U}, {60U,225350916U}, {20U,143788U}},
-        {{15307U,321585625U}, {163U,464545825U}, {142U,933487450U}, {0U,748683264U}, {0U,497025024U}},
-        {{77U,377699375U}, {0U,943718400U}, {0U,943718400U}, {0U,3145728U}, {0U,3145728U}},
-        {{1666511735U,698125U}, {123145946U,1085950U}, {81982979U,1935825U}, {54359165U,1044911U}, {204786U,367494U}},
-        {{3127638134U,1211250U}, {244100600U,1557800U}, {162049545U,1122675U}, {1224611U,273841U}, {404100U,1148396U}},
-        {{306918362U,1898750U}, {3275342U,117050U}, {2863025U,389675U}, {12292U,383596U}, {8169U,54291U}},
-        {{1546188U,442500U}, {15461U,1723175U}, {15461U,1723175U}, {51U,1053921U}, {51U,1053921U}},
-    };
-    static constexpr uint8_t negative[9] = {4,6,14,17,14,6,14,17,14};
-    const int64_t denominator = row==0 ? 6103515625LL :
-        row==2 ? 244140625LL : row<5 ? 1220703125LL : 1953125LL;
-    int64_t integral=0, fractional=0;
-    for (unsigned column=0; column<5; ++column) {
-        const int64_t value=(negative[row] & (1U<<column)) ? -int64_t(input[column]) : input[column];
-        integral += int64_t(map[row][column].whole)*value;
-        fractional += int64_t(map[row][column].remainder)*value;
-    }
-    if (row==5 || row==6)
-        integral += int64_t(input[0])*(int64_t(row==5 ? 2 : 4)<<32);
-    // Denominators are odd powers of five, so an exact half cannot occur.
-    // Whole sum <=1.445e15, remainder sum <=2.634e16 for the accepted input
-    // box; adding half a denominator and the final quotient cannot overflow.
-    return integral + (fractional + (fractional<0 ? -denominator/2 : denominator/2))/denominator;
-}
-
+int64_t Round(double x) { return static_cast<int64_t>(x < 0 ? x - .5 : x + .5); }
 int32_t Integer(int64_t x) {
     // Truncation-free nearest rounding, including negative fractional values.
     return static_cast<int32_t>(x >= 0 ? (x + Scale / 2) >> 40 : -((-x + Scale / 2) >> 40));
@@ -72,13 +39,35 @@ bool Curve::Build(const Point& from, const Point& to, int32_t velocityLimit,
         base_ = from.q; to_ = to; tick_ = 0;
         return true;
     }
-    // Hard hull checks above imply |d|<=40000, |v|<=1536000 and
-    // |a|<=5120000. No floating point, wide multiply or run-time powers.
-    const int32_t input[5]={int32_t(d),from.v,to.v,from.a,to.a};
+    // Direct linear maps to Q40 forward differences. Constants include
+    // 2^40, the exact 400-tick interval, and the 20ms velocity/acceleration
+    // units. No run-time power recurrence or software double division.
+    static constexpr double positionDifference[5][5] = {
+        {171155.09099069441, 54973526.670003146, -1368.383022956544, 1364.1073615385394, 3.4188154424524799},
+        {1021792.047071232, -12273.491818577921, -8162.3491228467201, 2687.2916733853694, 20.3759690973184},
+        {1007695.9644057601, -12123.082063872, -8030.8372242431997, -60.923037351936003, 20.000588955647999},
+        {-15307.263442944, 163.38055593984001, 142.76471291903999, 0.61332132986879995, -0.40716289966079999},
+        {77.309411327999996, -0.77309411327999999, -0.77309411327999999, -0.0025769803775999999, 0.0025769803775999999},
+    };
+    static constexpr double velocityDifference[4][5] = {
+        {10256446327.357441, -123145946.5560064, -81982979.991142407, 54359165.534994431, 204786.18815692799},
+        {20307507318.620159, -244100600.79759359, -162049545.57480961, -1224611.1402065919, 404100.58797875198},
+        {-306918362.97215998, 3275342.0599296, 2863025.1995136002, 12292.196401151999, -8169.0277969919998},
+        {1546188.2265600001, -15461.882265599999, -15461.882265599999, -51.539607552, 51.539607552},
+    };
+    const double input[5]={double(d),double(from.v),double(to.v),double(from.a),double(to.a)};
     p_[0]=0;
-    for (unsigned row=0; row<5; ++row) p_[row+1]=Difference(row,input);
-    v_[0]=int64_t(from.v)*Scale;
-    for (unsigned row=0; row<4; ++row) v_[row+1]=Difference(row+5,input);
+    for(unsigned row=0;row<5;++row) {
+        double value=0;
+        for(unsigned column=0;column<5;++column)value+=positionDifference[row][column]*input[column];
+        p_[row+1]=Round(value);
+    }
+    v_[0]=Round(50*(from.v*.02)*double(Scale));
+    for(unsigned row=0;row<4;++row) {
+        double value=0;
+        for(unsigned column=0;column<5;++column)value+=velocityDifference[row][column]*input[column];
+        v_[row+1]=Round(value);
+    }
     base_=from.q; to_=to; tick_=0;
     return true;
 }

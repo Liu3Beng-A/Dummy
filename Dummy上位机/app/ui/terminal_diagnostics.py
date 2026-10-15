@@ -10,7 +10,6 @@ class TerminalDiagnostics(QWidget):
     export_requested = Signal()
     open_test_requested = Signal(int)
     axis_test_requested = Signal(int)
-    motion_axis_test_requested = Signal(int)
     test_clicked = Signal(str)
 
     def __init__(self, parent=None):
@@ -70,19 +69,13 @@ class TerminalDiagnostics(QWidget):
                                         '需要USB、已使能且静止、模式2或7；不调用逆解，不自动使能。 '
                                         '结束后确认CLOSE并恢复进入模式；故障沿用全机软停保护。')
         layout.addWidget(self.axis_test_button, 6, 2, 1, 2)
-        self.motion_axis_test_button = button('J3/J5 · 0.5° 非零往返测试', self._request_motion_axis_test)
-        self.motion_axis_test_button.setToolTip('会真实运动，仅支持下方所选 J3 或 J5 单轴：J3 -0.5°，J5 +0.5°；2 s 出去 + 2 s 返回。 '
-                                               '新电机计时能力确认后才 OPEN；越限拒绝、不自动改方向。不调用逆解、不自动使能。 '
-                                               '结束核对真实位移和返回位置，确认 CLOSE 并恢复模式；故障全机软停。')
-        layout.addWidget(self.motion_axis_test_button, 7, 0, 1, 2)
-        layout.addWidget(hint('真实运动：先选 J3 测通，再选 J5；其他轴不参与，默认主控模式不变。'), 7, 2, 1, 2)
         self.open_test_output = QPlainTextEdit()
         self.open_test_output.setObjectName("OpenTestResult")
         self.open_test_output.setReadOnly(True)
         self.open_test_output.setPlainText('尚未测试。OPEN 使用上方“诊断 / OPEN 节点”；原地曲线使用下方“曲线测试参与轴”。两个选择独立。')
         self.open_test_output.setMinimumHeight(110)
         self.open_test_output.setMaximumHeight(190)
-        layout.addWidget(self.open_test_output, 8, 0, 1, 4)
+        layout.addWidget(self.open_test_output, 7, 0, 1, 4)
         for column in range(4):
             layout.setColumnStretch(column, 1)
         self.node.currentIndexChanged.connect(self._refresh)
@@ -103,10 +96,6 @@ class TerminalDiagnostics(QWidget):
         self.open_test_button.setEnabled(self._open_test_available and node <= 7)
         self.axis_test_button.setEnabled(self._axis_test_available)
         self.axis_test_selector.setEnabled(self._axis_test_available)
-        motion_mask = self.axis_test_selector.currentData()
-        self.motion_axis_test_button.setEnabled(self._axis_test_available and motion_mask in (4, 16))
-        motion_node = 3 if motion_mask == 4 else 5 if motion_mask == 16 else None
-        self.motion_axis_test_button.setText(f'J{motion_node} · {-.5 if motion_node == 3 else .5:+.1f}° 非零往返测试' if motion_node else 'J3/J5 · 0.5° 非零往返测试')
         for key, control in self.buttons.items():
             allowed = (node <= 7 if key.startswith("stall") else
                        node in (7, 8) if key.startswith("cal") else True)
@@ -131,15 +120,6 @@ class TerminalDiagnostics(QWidget):
         self.test_clicked.emit(f'测试点击：2 s 原地曲线；参与轴={self._axis_target()}；mask={mask}；'
                                f'诊断 / OPEN 节点=J{self.node.currentData()}（独立选择，本次不用）')
         self.axis_test_requested.emit(mask)
-
-    def _request_motion_axis_test(self):
-        mask = self.axis_test_selector.currentData()
-        if mask not in (4, 16):
-            return
-        node = 3 if mask == 4 else 5
-        delta = -.5 if node == 3 else .5
-        self.test_clicked.emit(f'测试点击：真实非零往返；仅 J{node}；固定 {delta:+.1f}°；2 s 出去 + 2 s 返回；mask={mask}')
-        self.motion_axis_test_requested.emit(mask)
 
     def show_open_test(self, result):
         from app.core.open_test import format_open_test

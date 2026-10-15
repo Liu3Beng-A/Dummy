@@ -70,6 +70,8 @@ let rgbFrameUpdates = 0;
 let displayedRgbFrame = null;
 let rgbLightOn = false;
 let rgbLightOnUpdates = 0;
+let rgbEffectMode = null;
+const rgbSpinCurve = { value: 0 };
 const rgbCoverReflection = { value: DIFFUSER_STYLE.coverReflection };
 let diffuserTexture = null;
 let diffuserPixels = null;
@@ -203,8 +205,9 @@ function prepareDiffuser(robot) {
   diffuserPixels = new Float32Array(DIFFUSER_SAMPLES * 4);
   diffuserTexture = new THREE.DataTexture(pixels, DIFFUSER_SAMPLES, 1,
     THREE.RGBAFormat, THREE.HalfFloatType);
-  // RGB stores bounded display emission in linear output space; alpha stores
-  // PWM activity for diagnostics only. RGBA16F preserves low-light interpolation
+  // RGB stores base display emission in linear output space; alpha stores local
+  // PWM activity for selective HDR highlight gain and diagnostics, never opacity.
+  // RGBA16F preserves low-light interpolation
   // and supports linear filtering in WebGL2 without float32 filter extensions.
   diffuserTexture.colorSpace = THREE.LinearSRGBColorSpace;
   diffuserTexture.wrapS = THREE.RepeatWrapping;
@@ -212,6 +215,9 @@ function prepareDiffuser(robot) {
   diffuserTexture.minFilter = THREE.LinearFilter;
   diffuserTexture.magFilter = THREE.LinearFilter;
   diffuserTexture.generateMipmaps = false;
+  // +U sampling moves the displayed pattern counterclockwise from +Y toward -X.
+  // Apply the mode-15 registration even when its frame arrived before the STL.
+  diffuserTexture.offset.x = rgbEffectMode === 15 ? 0.25 : 0;
   robot.traverse(object => {
     if (!object.isMesh || !isDiffuserMesh(object)) return;
     // The ghost keeps the original geometry and its own cloned translucent material.
@@ -238,9 +244,13 @@ function prepareDiffuser(robot) {
         shader.uniforms.rgbCoverTintStrength = { value: DIFFUSER_STYLE.coverTintStrength };
         shader.uniforms.rgbCoverFadeStrength = { value: DIFFUSER_STYLE.coverFadeStrength };
         shader.uniforms.rgbCoverFadePeak = { value: DIFFUSER_STYLE.coverFadePeak };
+        shader.uniforms.rgbHighlightBoostStart = { value: DIFFUSER_STYLE.highlightBoostStart };
+        shader.uniforms.rgbHighlightBoostStrength = { value: DIFFUSER_STYLE.highlightBoostStrength };
+        shader.uniforms.rgbSpinCurve = rgbSpinCurve;
+        shader.uniforms.rgbSpinHighlightWhite = { value: DIFFUSER_STYLE.spinHighlightWhite };
         shader.fragmentShader = patchDiffuserShader(shader.fragmentShader);
       };
-      material.customProgramCacheKey = () => 'rgb-opal-cover-v6-chroma-reflection';
+      material.customProgramCacheKey = () => 'rgb-opal-cover-v8-spin-contrast';
       material.userData.rgbFixedCover = true;
       material.needsUpdate = true;
     }
@@ -258,10 +268,14 @@ function updateDiffuserTexture() {
   diffuserTexture.needsUpdate = true;
 }
 
-function setRgbFrame(frame, lightOn = undefined) {
+function setRgbFrame(frame, lightOn = undefined, effectMode = null) {
   if (disposed) return false;
   const normalized = normalizeRgbFrame(frame);
   if (!normalized || (lightOn !== undefined && typeof lightOn !== 'boolean')) return false;
+  if (effectMode !== null && (!Number.isInteger(effectMode) || effectMode < 0 || effectMode > 16)) return false;
+  rgbEffectMode = effectMode;
+  if (diffuserTexture) diffuserTexture.offset.x = effectMode === 15 ? 0.25 : 0;
+  rgbSpinCurve.value = effectMode === 8 || (effectMode >= 13 && effectMode <= 16) ? 1 : 0;
   const first = displayedRgbFrame === null;
   // Legacy arrays preserve the last known power state. Their first frame
   // defaults to powered; zero PWM alone cannot identify an overall switch-off.
@@ -367,7 +381,7 @@ function setState(state) {
     target.visible = jointPreview;
     actual.visible = Boolean(state.actualKnown) || localRgbPreview;
     styleRobot(target, true, state.highlight);
-    styleRobot(actual, false, preview || localRgbPreview ? null : state.highlight);
+    styleRobot(actual, false, actualOnly || preview || localRgbPreview ? null : state.highlight);
   }
   marker.visible = markerVisible;
   if (markerVisible) {
@@ -434,6 +448,7 @@ function diffuserDiagnostics() {
     frame: rgbFrame.map(color => color.slice()), frameUpdates: rgbFrameUpdates,
     displayFrame: displayedRgbFrame?.map(color => color.slice()) || null,
     lightOn: rgbLightOn, lightOnUpdates: rgbLightOnUpdates,
+    effectMode: rgbEffectMode, spinCurve: rgbSpinCurve.value,
     coverReflection: rgbCoverReflection.value, coverReflectionTarget: DIFFUSER_STYLE.coverReflection,
     displayStyle: { ...DIFFUSER_STYLE },
     textureFormat: 'rgba16f',
@@ -490,7 +505,7 @@ manager.onLoad = () => {
   if (window.pendingRgbFrame) {
     const pending = window.pendingRgbFrame;
     if (Array.isArray(pending)) setRgbFrame(pending);
-    else setRgbFrame(pending.colors, pending.light_on);
+    else setRgbFrame(pending.colors, pending.light_on, pending.effect_mode ?? null);
   }
   window.robotBridge?.viewerReady();
 };

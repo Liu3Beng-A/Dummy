@@ -73,7 +73,7 @@ int main(){using namespace StreamProtocol;StreamSink output;
  CHECK(output.lines.back()=="STREAM_AXES v=1 hz=50 mask=127 targeted=1");
  CHECK(!engine.Active()&&frames.empty());
 
- CHECK(RunCommand(output,"#STREAM_DIAG 1 64"));CHECK(output.lines.back().find("range")!=std::string::npos);
+ CHECK(RunCommand(output,"#STREAM_DIAG 1 51"));CHECK(output.lines.back().find("range")!=std::string::npos);
  for(unsigned field=0;field<=DIAG_LAST;++field){char command[40];snprintf(command,sizeof(command),"#STREAM_DIAG 7 %u",field);const auto before=output.lines.size();frames.clear();canBusy=true;
   CHECK(RunCommand(output,command));CHECK(output.lines.size()==before);for(unsigned i=0;i<10;++i){++nowMs;CoreStreamPoll();}CHECK(frames.empty());CHECK(output.lines.size()==before);
   canBusy=false;++nowMs;CoreStreamPoll();CHECK(frames.size()==1);CHECK(frames[0].node==7&&frames[0].command==DIAG);const auto nonce=Read16(frames[0].data);

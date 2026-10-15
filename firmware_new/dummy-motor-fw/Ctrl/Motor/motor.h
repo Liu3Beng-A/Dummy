@@ -9,13 +9,6 @@
 #include "protection_config.h"
 #include "../../../stream_protocol.h"
 
-// TM1 diagnostics: five sampled segments, three every-tick phase peaks and
-// three sample counts. Existing motorControlTiming indices remain unchanged.
-extern volatile uint32_t motorStreamTiming[11];
-extern bool motorTimingSampling;
-extern uint32_t motorTimingCheckpointCycle;
-void MotorTimingCheckpoint(uint8_t segment);
-
 class Motor
 {
 public:
@@ -171,7 +164,6 @@ public:
         void CancelStream(uint8_t reason = StreamProtocol::ABORTED);
         bool StreamActive() const;
         bool StreamTerminal() const;
-        uint8_t StreamTimingPhase() const;
         void InitProtection();
         void PollDefaultsRestore();
         void OnMotionLimitChange();
@@ -184,7 +176,6 @@ public:
 
     private:
         Motor* context;
-        void ApplyCurrentToOutput(int32_t current, int32_t currentLimit);
         void ResetPositionCompletion(bool newGoal = false);
         bool TickPositionCompletion();
         bool IsOrdinaryPositionArrival(bool referenceFinished = true) const;
@@ -203,7 +194,6 @@ public:
         volatile bool softStopLocked = false;
         volatile uint8_t softStopRequest = 0;
         volatile uint8_t softStopPhase = SoftStopProtocol::NORMAL;
-        bool positionStreamSuspended = false; // Uses existing padding; no window during nonterminal STREAM.
         volatile uint16_t softStopToken = 0;
         bool softStopTokenValid = false;
         uint8_t softStopTokenAction = 0; // Idempotence key is action + token.

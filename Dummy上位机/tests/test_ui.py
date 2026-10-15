@@ -36,6 +36,7 @@ class FakeView(QWidget):
         self.commanded_gripper = None
         self.rgb_frame = ((0, 0, 0),) * 24
         self.rgb_light_on = None
+        self.rgb_effect_mode = None
         self.rgb_preview = False
         self.closed = False
 
@@ -76,9 +77,10 @@ class FakeView(QWidget):
     def set_theme(self, theme):
         self.theme = theme
 
-    def set_rgb_frame(self, frame, *, light_on=None):
+    def set_rgb_frame(self, frame, *, light_on=None, effect_mode=None):
         self.rgb_frame = tuple(tuple(color) for color in frame)
         self.rgb_light_on = light_on
+        self.rgb_effect_mode = effect_mode
 
     def set_rgb_preview(self, enabled):
         self.rgb_preview = bool(enabled)
@@ -145,6 +147,27 @@ class UiIntegrationTests(unittest.TestCase):
                     commands.append(item[1])
             except queue.Empty:
                 return commands
+
+    def test_port_refresh_uses_current_ui_interface_and_preserves_connected_selection(self):
+        from types import SimpleNamespace
+        ports = [SimpleNamespace(device="COM5", vid=None, pid=None),
+                 SimpleNamespace(device="COM37", vid=0x1209, pid=0x0D32)]
+        w, c = self.window, self.controller
+        with patch("app.core.controller.serial.tools.list_ports.comports", return_value=ports):
+            w.port_combo.setEditText("COM5")
+            w.connection_combo.setCurrentText("USB")
+            w._refresh_ports()
+            self.assertEqual(w.port_combo.currentText(), "COM37")
+            w.port_combo.setEditText("COM99")
+            w.connection_combo.setCurrentText("UART4")
+            w._refresh_ports()
+            self.assertEqual(w.port_combo.currentText(), "COM99")
+            c.is_connected, c.port_name = True, "COM99"
+            w.connection_combo.setCurrentText("USB")
+            w._refresh_ports()
+            self.assertEqual(w.port_combo.currentText(), "COM99")
+            c.is_connected = False
+        self.assertEqual(self.commands(), [])
 
     def test_launch_is_offline_and_pages_have_all_parameter_fields(self):
         self.assertFalse(self.controller.is_connected)

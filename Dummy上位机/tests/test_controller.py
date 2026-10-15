@@ -5,6 +5,8 @@ import time
 import unittest
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from PySide6.QtCore import QCoreApplication
 from app.core.controller import RobotController
 from app.protocol.parser import LineFramer, finite_numbers
@@ -64,6 +66,75 @@ class FakePort:
 
     def close(self):
         self.is_open = False
+
+
+class PortRefreshTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QCoreApplication.instance() or QCoreApplication([])
+
+    def setUp(self):
+        self.factory = Mock(side_effect=AssertionError("Refresh must not open a port"))
+        self.controller = RobotController(serial_factory=self.factory, scheduler=ManualScheduler())
+
+    def tearDown(self):
+        self.factory.assert_not_called()
+        self.assertTrue(self.controller._tx_queue.empty())
+        self.controller.close()
+
+    def refresh(self, devices, connection="USB"):
+        with patch("app.core.controller.serial.tools.list_ports.comports", return_value=devices):
+            return self.controller.refresh_ports(connection)
+
+    def port(self, name, native=False):
+        return SimpleNamespace(device=name, vid=0x1209 if native else None,
+                               pid=0x0D32 if native else None)
+
+    def test_late_usb_power_on_selects_identity_instead_of_bluetooth_or_list_order(self):
+        c = self.controller
+        bt, robot = self.port("COM5"), self.port("COM37", True)
+        self.refresh([bt])
+        self.assertEqual(c.cb_ports.get(), "COM5")
+        observed = []
+        c.ports_changed.connect(lambda ports: observed.append((ports, c.cb_ports.get())))
+        self.refresh([bt, robot])
+        self.assertEqual(c.cb_ports.get(), "COM37")
+        self.assertEqual(observed[-1], (["COM5", "COM37"], "COM37"))
+        self.refresh([robot, bt])
+        self.assertEqual(c.cb_ports.get(), "COM37")
+
+    def test_uart_and_connected_refresh_preserve_even_a_temporarily_missing_port(self):
+        c = self.controller
+        c.cb_ports.set("COM99")
+        self.refresh([self.port("COM37", True)], "UART4")
+        self.assertEqual(c.cb_ports.get(), "COM99")
+        c.is_connected = True
+        c.port_name = "COM99"
+        self.refresh([self.port("COM37", True)])
+        self.assertEqual(c.cb_ports.get(), "COM99")
+        self.assertTrue(c.is_connected)
+        c.is_connected = False  # No real connection was constructed.
+
+    def test_no_controller_falls_back_only_if_the_usb_selection_disappeared(self):
+        c = self.controller
+        c.cb_ports.set("COM7")
+        self.refresh([self.port("COM5"), self.port("COM7")])
+        self.assertEqual(c.cb_ports.get(), "COM7")
+        c.cb_ports.set("COM99")
+        self.refresh([self.port("COM5")])
+        self.assertEqual(c.cb_ports.get(), "COM5")
+        self.refresh([])
+        self.assertEqual(c.cb_ports.get(), "")
+
+    def test_multiple_controllers_keep_matching_selection_or_request_manual_choice(self):
+        c = self.controller
+        ports = [self.port("COM37", True), self.port("COM12", True)]
+        c.cb_ports.set("COM12")
+        self.refresh(ports)
+        self.assertEqual(c.cb_ports.get(), "COM12")
+        c.cb_ports.set("COM5")
+        self.refresh(ports)
+        self.assertEqual(c.cb_ports.get(), "")
 
 
 class ControllerTests(unittest.TestCase):

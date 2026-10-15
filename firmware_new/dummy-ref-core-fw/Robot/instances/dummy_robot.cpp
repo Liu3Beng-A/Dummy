@@ -4,6 +4,7 @@
 #include "motion_values.h"
 #include "cartesian_planner.h"
 #include "tcp_tool.h"
+#include "cartesian_benchmark.h"
 #include <cmath>
 #include "stm32f405xx.h"
 #include "arm_math.h" // Explicit TUN PI dependency; no longer inherited from IK header.
@@ -716,7 +717,7 @@ void DummyRobot::CalibrateHomeOffset()
 void DummyRobot::CalibrateForGeneration(uint32_t epoch)
 {
     if (epoch == motionEpoch && protection)
-        protection->Command("!CALIBRATION", 12, *usbStreamOutputPtr);
+        HandleProtectionCommand("!CALIBRATION", 12, *usbStreamOutputPtr);
 }
 
 bool DummyRobot::IsStopLocked() const
@@ -726,7 +727,18 @@ bool DummyRobot::IsCalibrationBusy() const
 bool DummyRobot::IsProtectionParameterBusy() const
 { return protection && protection->ParameterBusy(); }
 bool DummyRobot::HandleProtectionCommand(const char* cmd, unsigned len, StreamSink& response)
-{ return protection && protection->Command(cmd, len, response); }
+{
+    if(!protection)return false;
+    const char* first=cmd;unsigned size=len;
+    auto space=[](char c){return c==' '||c=='\t'||c=='\r'||c=='\n';};
+    while(size&&space(*first)){++first;--size;}
+    while(size&&space(first[size-1]))--size;
+    const bool calibration=size==12&&!std::memcmp(first,"!CALIBRATION",12);
+    if(calibration&&!CartesianBenchmarkEnterCalibration()){Respond(response,"error CALIBRATION compute_diagnostic_busy");return true;}
+    const bool handled=protection->Command(cmd,len,response);
+    if(calibration)CartesianBenchmarkLeaveCalibration();
+    return handled;
+}
 void DummyRobot::ProtectionCallback(uint8_t node, uint8_t command, const uint8_t* data)
 { if (protection) protection->Receive(node, command, data); }
 void DummyRobot::PollProtection() { if (protection) protection->Poll(); }
@@ -814,7 +826,7 @@ void DummyRobot::RequestSoftStop()
 bool DummyRobot::RequestStart()
 {
     taskENTER_CRITICAL();
-    if (rgbSaveBusy) { taskEXIT_CRITICAL(); return false; }
+    if (rgbSaveBusy || CartesianBenchmarkActive()) { taskEXIT_CRITICAL(); return false; }
     rgb.EndBoot();
     if (protection && protection->InterceptStart()) { taskEXIT_CRITICAL(); return true; }
     if (stopState == STOPPING || stopState == DISABLING)
@@ -1185,10 +1197,10 @@ RGB::State DummyRobot::GetRGBState() const
     RGB::State state;
     if (stopFaultMask || (protection && protection->RgbAlarm())) state = RGB::FAULT;
     else if (IsCalibrationBusy()) state = RGB::CALIBRATION;
-    else if (stopState == STOPPING || stopState == STOPPED || stopState == DISABLING ||
+    else if (stopState == STOPPING || stopState == STOPPED ||
              (protection && protection->RgbLocked())) state = RGB::STOP;
     else if (stopState == STARTING || (protection && protection->RgbStarting())) state = RGB::STARTING;
-    else if (stopState == DISABLED || !isEnabled) state = RGB::DISABLED;
+    else if (stopState == DISABLING || stopState == DISABLED || !isEnabled) state = RGB::DISABLED;
     else {
         const unsigned mode = unsigned(commandMode);
         const bool moving = mode == COMMAND_MOTOR_TUNING ? tuningHelper.IsActive() : motionActive;

@@ -429,7 +429,7 @@ class EntryUiAndProtocolTests(unittest.TestCase):
         self.assertEqual(parse_stream_line('STREAM_NODE node=4 n=1 field=42 value=-8458')['value'], -8458)
         self.assertEqual(parse_stream_line('STREAM_NODE node=4 n=1 field=48 value=4294967295')['value'], 0xffffffff)
         for line in ('STREAM_FEATURES s=65536 steady=8 start=8', 'STREAM_FEATURES s=123 steady=128 start=8',
-                     'STREAM_NODE node=4 n=1 field=64 value=0', 'STREAM_NODE node=4 n=1 field=48 value=-1'):
+                     'STREAM_NODE node=4 n=1 field=51 value=0', 'STREAM_NODE node=4 n=1 field=48 value=-1'):
             with self.assertRaises(ValueError):
                 parse_stream_line(line)
         self.assertFalse(feature_supported(dict(session=0, steady=8), 0, 4, 'steady'))

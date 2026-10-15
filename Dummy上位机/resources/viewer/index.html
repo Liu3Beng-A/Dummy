@@ -39,7 +39,9 @@
     window.receiveRobotRgbPayload = payload => {
       const legacy = Array.isArray(payload);
       if (!legacy && (payload === null || typeof payload !== 'object'
-        || typeof payload.light_on !== 'boolean')) return false;
+        || (payload.light_on !== undefined && typeof payload.light_on !== 'boolean'))) return false;
+      const effectMode = legacy ? null : (payload.effect_mode ?? null);
+      if (effectMode !== null && (!Number.isInteger(effectMode) || effectMode < 0 || effectMode > 16)) return false;
       const frame = legacy ? payload : payload.colors;
       if (!Array.isArray(frame) || frame.length !== 24) return false;
       for (const color of frame) {
@@ -49,9 +51,9 @@
         }
       }
       const lightOn = legacy ? undefined : payload.light_on;
-      if (window.robotViewer && !window.robotViewer.setRgbFrame(frame, lightOn)) return false;
+      if (window.robotViewer && !window.robotViewer.setRgbFrame(frame, lightOn, effectMode)) return false;
       const colors = frame.map(color => color.slice());
-      window.pendingRgbFrame = legacy ? colors : { colors, light_on: lightOn };
+      window.pendingRgbFrame = legacy ? colors : { colors, light_on: lightOn, effect_mode: effectMode };
       return true;
     };
     if (window.qt && window.QWebChannel) {

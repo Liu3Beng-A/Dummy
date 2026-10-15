@@ -287,7 +287,13 @@ class ActualOnlyViewTests(unittest.TestCase):
             view.set_target_pose([10, -45, 90, 0, 10, 20, 15], 0)
             view.set_cartesian_target([100, 20, 300, 0, 10, 20])
             self.assertIsNotNone(view._state['marker'])
+            view.focus_joint('rail')
+            self.assertEqual(view._state['highlight'], 'rail')
             view.set_actual_only(True)
+            self.assertIsNone(view._state['highlight'])
+            for focused in ('rail', 'J1', 'gripper'):
+                view.focus_joint(focused)
+                self.assertIsNone(view._state['highlight'])
             view.set_feedback_paused(True)
             self.assertEqual(view._state['mode'], 'actual')
             self.assertTrue(view._state['feedbackPaused'])
@@ -308,8 +314,12 @@ class ActualOnlyViewTests(unittest.TestCase):
                 self.assertEqual(view._state['mode'], 'actual')
                 view.set_actual_only(False)
                 self.assertEqual(view._state['mode'], preference)
+                self.assertIsNone(view._state['highlight'])
+                view.focus_joint('J2')
+                self.assertEqual(view._state['highlight'], 'Joint2')
                 self.assertIsNotNone(view._state['marker'])
                 view.set_actual_only(True)
+                self.assertIsNone(view._state['highlight'])
             view.set_actual_known(False)
             self.assertFalse(view._state['actualKnown'])
             view.set_feedback_paused(False)
@@ -400,6 +410,53 @@ class ModelLightBridgeTests(unittest.TestCase):
             self.assertEqual(view._rgb_frame, tuple(zero))
             self.assertIs(view._rgb_light_on, False)
             self.assertEqual(len(self.frames), count + 1)
+
+    def test_effect_mode_is_atomic_cached_and_independent_of_pose(self):
+        view = self.view
+        zero = [(0, 0, 0)] * 24
+        view.set_rgb_frame(zero, light_on=True, effect_mode=8)
+        view._on_ready()
+        self.assertEqual(self.frames[-1]["effect_mode"], 8)
+        self.poses.clear()
+        count = len(self.frames)
+        view.set_rgb_frame(zero, light_on=True, effect_mode=8)
+        self.assertEqual(len(self.frames), count)
+        for invalid in (-1, 17, True, 8.0, "8", float('nan')):
+            with self.assertRaises(ValueError):
+                view.set_rgb_frame([(255, 0, 0)] * 24, light_on=False, effect_mode=invalid)
+            self.assertEqual(view._rgb_effect_mode, 8)
+            self.assertEqual(view._rgb_frame, tuple(zero))
+            self.assertIs(view._rgb_light_on, True)
+            self.assertEqual(len(self.frames), count)
+        view.set_rgb_frame(zero, light_on=True, effect_mode=3)
+        self.assertEqual(self.frames[-1]["effect_mode"], 3)
+        self.assertEqual(len(self.frames), count + 1)
+        view.set_rgb_frame(zero, light_on=True)
+        self.assertNotIn("effect_mode", self.frames[-1])
+        self.assertIsNone(view._rgb_effect_mode)
+        self.assertEqual(self.poses, [])
+
+    def test_independent_motion_modes_replay_and_change_without_touching_pose(self):
+        view = self.view
+        zero = [(0, 0, 0)] * 24
+        view.set_rgb_frame(zero, light_on=True, effect_mode=16)
+        view._on_ready()
+        self.assertEqual(self.frames[-1]["effect_mode"], 16)
+        self.poses.clear()
+        for mode in range(13, 17):
+            view.set_rgb_frame(zero, light_on=True, effect_mode=mode)
+            self.assertEqual(self.frames[-1]["effect_mode"], mode)
+            count = len(self.frames)
+            view.set_rgb_frame(zero, light_on=True, effect_mode=mode)
+            self.assertEqual(len(self.frames), count)
+        before = self.frames[-1]
+        with self.assertRaises(ValueError):
+            view.set_rgb_frame([(255, 0, 0)] * 24, light_on=False, effect_mode=17)
+        self.assertEqual(self.frames[-1], before)
+        self.assertEqual(view._rgb_frame, tuple(zero))
+        self.assertIs(view._rgb_light_on, True)
+        self.assertEqual(view._rgb_effect_mode, 16)
+        self.assertEqual(self.poses, [])
 
     def test_rgb_illustration_flag_never_claims_feedback_or_changes_pose_data(self):
         from copy import deepcopy

@@ -210,7 +210,7 @@ bool HandleCoreStreamCommand(const char* command,size_t length,StreamSink& respo
     if(diagnostic) {
         uint16_t values[2]{};
         if(!Numbers(command+13,length-13,values,2) || values[0]<1 || values[0]>7 || values[1]>DIAG_LAST) {
-            Respond(response,"error STREAM_DIAG range node=1..7 field=0..63"); return true;
+            Respond(response,"error STREAM_DIAG range node=1..7 field=0..50"); return true;
         }
         taskENTER_CRITICAL();
         if(diagnosticPending || diagnosticReady) { taskEXIT_CRITICAL(); Respond(response,"error STREAM_DIAG busy"); return true; }

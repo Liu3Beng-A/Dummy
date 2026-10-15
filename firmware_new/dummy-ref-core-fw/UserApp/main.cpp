@@ -1,4 +1,5 @@
 #include "common_inc.h"
+#include "instances/cartesian_benchmark.h"
 
 
 // On-board Screen, can choose from hi2c2 or hi2c0(soft i2c)
@@ -86,7 +87,10 @@ void ThreadControlLoopUpdate(void* argument)
 {
     for (;;)
     {
-        dummy.commandHandler.ParseCommand(dummy.commandHandler.Pop(osWaitForever));
+        if(CartesianBenchmarkActive()){CartesianBenchmarkPoll();continue;}
+        // A bounded idle wait lets a USB diagnostic request reach this normal
+        // priority owner. No benchmark work enters the 1 kHz realtime pump.
+        dummy.commandHandler.ParseCommand(dummy.commandHandler.Pop(pdMS_TO_TICKS(20)));
     }
 }
 

@@ -15,10 +15,6 @@ void CAN_CancelStreamReplies();
 bool CAN_StreamReplyFault();
 uint32_t CAN_StreamReplyDiagnostic(uint8_t);
 inline volatile uint32_t motorControlTiming[11]{};
-inline volatile uint32_t motorStreamTiming[11]{};
-inline bool motorTimingSampling=false;
-inline uint32_t motorTimingCheckpointCycle=0;
-void MotorTimingCheckpoint(uint8_t);
 extern uint32_t irqMask;
 inline uint32_t __get_PRIMASK(){return irqMask;}
 inline void __disable_irq(){irqMask=1;}
@@ -56,7 +52,7 @@ public:
   uint16_t positionStableTicks{};
   int32_t positionStableMin{},positionStableMax{},positionCompletionTarget{},positionCompletionHome{};
   int64_t positionVelocitySum{},positionEvidenceVelocitySum{};
-  uint8_t positionCompletionMode{};bool positionEvidenceValid{},positionStreamSuspended{};
+  uint8_t positionCompletionMode{};bool positionEvidenceValid{};
   uint32_t positionEvidenceTick{},positionEvidenceRange{};
   uint32_t CaptureStreamOpen(uint16_t,bool=false);
   uint32_t StreamClock()const;uint32_t PositionEntryEvidenceAge()const;
@@ -65,7 +61,6 @@ public:
   void SetProtectionPhase(uint8_t,uint8_t=0);
   bool StreamActive() const;
   bool StreamTerminal() const;
-  uint8_t StreamTimingPhase() const;
   void CancelStream(uint8_t why=StreamProtocol::ABORTED);
   bool ProcessStreamCan(uint8_t,const uint8_t*,uint32_t);
   void TickStreamClock();void TickStream();void PollStreamMain();

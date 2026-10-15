@@ -118,7 +118,7 @@ def parse_stream_line(line):
         ('done', r'STREAM_DONE s=(\d+) n=(\d+)', ('session', 'sequence')),
         ('diag', r'STREAM_DIAG commit=(\d+) exec=(\d+) gap_ms=(\d+) poll_us=(\d+)', ('committed', 'executed', 'gap_ms', 'poll_us')),
         ('diag', r'STREAM_DIAG c=(\d+) e=(\d+) gap=(\d+) us=(\d+)', ('committed', 'executed', 'gap_ms', 'poll_us')),
-        ('node', r'STREAM_NODE node=([1-7]) n=(\d+) field=(0|[1-9]|[1-5][0-9]|6[0-3]) value=(-?\d+)', ('node', 'nonce', 'field', 'value')),
+        ('node', r'STREAM_NODE node=([1-7]) n=(\d+) field=(0|[1-9]|[1-4][0-9]|50) value=(-?\d+)', ('node', 'nonce', 'field', 'value')),
     )
     for kind, pattern, keys in patterns:
         match = re.fullmatch(pattern, line)

@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot, Qt
 from app.core.business import RobotBusiness
 from app.core.fields import ValueField, ListField
 from app.core.scheduler import QtScheduler
+from app.core.rgb_save import RGBSaveSession
 from app.core.gamepad_session import GamepadSession
 from app.core.cartesian_session import CartesianSession
 from app.core.cartesian_backend import configured_tool, point_tool, world_target, native_command, tcp_command
@@ -94,6 +95,7 @@ class RobotController(QObject, RobotBusiness):
         self._protection_values = {"STALL": {}, "CAL": {}}
         self._rgb_applying_readback = False
         self._rgb_monitoring = False
+        self.rgb_save = RGBSaveSession(self)
         self._reset_rgb_state(emit=False)
         self.cmd_history = []
         self.cmd_history_idx = [0]
@@ -126,7 +128,7 @@ class RobotController(QObject, RobotBusiness):
             "ent_l_speed": str(DEFAULT_SPEED), "ent_pos_speed": str(DEFAULT_SPEED),
             "hand_current": 1.0, "hand_pos": 100, "lbl_hand_pos": "100", "ent_custom_cmd": "",
             "_rgb_status_var": "RGB 未回读；显示值仅供编辑。", "_rgb_bright": "100",
-            "_rgb_scale": 100, "_rgb_reverse": False,
+            "_rgb_scale": 100, "_rgb_reverse": False, "_rgb_motion_reverse": False,
         }.items():
             setattr(self, name, ValueField(value))
         for name, values in {
@@ -137,11 +139,12 @@ class RobotController(QObject, RobotBusiness):
             "_rgb_fades": ["1000", "1000", "300", "300"],
             "_rgb_effect_first": ["255", "255", "255"], "_rgb_effect_second": ["0", "0", "0"],
             "_rgb_effect_params": ["4000", "3", "200", "1000"],
+            "_rgb_motion_params": ["1400", "3"],
             "_rgb_state_color": ["0", "0", "255"],
         }.items():
             setattr(self, name, [ValueField(value) for value in values])
         for name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state",
-                     "_rgb_state_mode", "_rgb_state_source"):
+                     "_rgb_state_mode", "_rgb_state_source", "_rgb_motion_idx", "_rgb_motion_kind"):
             setattr(self, name, ValueField())
         self._rgb_state_mode.current(3)
         self._write_buttons = []
@@ -199,6 +202,7 @@ class RobotController(QObject, RobotBusiness):
             "actual_cartesian_pose": deepcopy(self.actual_cartesian_pose),
             "parameter_busy": self._parameter_request is not None,
             "parameter_task": (self._parameter_request["command"] if self._parameter_request else None),
+            "rgb_save_busy": self.rgb_save.active,
         }
 
     def _emit_state(self):
@@ -215,7 +219,8 @@ class RobotController(QObject, RobotBusiness):
 
     def _reset_rgb_state(self, emit=True):
         """Discard readback and query clocks whenever the device identity changes."""
-        self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+        self.rgb_save.reset()
+        self._rgb_cache = {key: {} for key in ("colors", "auto_colors", "effects", "states", "motion")}
         self._rgb_device_config = {key: value for key, value in self._rgb_cache.items()}
         self._rgb_runtime = {}
         self._rgb_runtime_pending = None
@@ -226,6 +231,8 @@ class RobotController(QObject, RobotBusiness):
         self._rgb_complete = False
         self._rgb_full_active = self._rgb_config_started = self._rgb_full_invalid = False
         self._rgb_full_fields = set()
+        self._rgb_full_caps = None
+        self._rgb_motion_supported = False
         self._rgb_get_pending_until = None
         self._rgb_get_retry_at = 0.0
         self._rgb_next_status_at = 0.0
@@ -236,17 +243,22 @@ class RobotController(QObject, RobotBusiness):
         """Return device readback only; changing editable fields cannot change it."""
         return deepcopy({"config": self._rgb_device_config, "runtime": self._rgb_runtime,
                          "complete": self._rgb_complete, "connected": self.is_connected,
+                         "motion_supported": self._rgb_motion_supported,
+                         "save_busy": self.rgb_save.active, "save_stage": self.rgb_save.stage,
+                         "save_message": self.rgb_save.message,
                          "received_at": self._rgb_received_at, "connection_id": self._connection_id})
 
     def _emit_rgb(self):
         self.rgb_changed.emit(self.rgb_snapshot())
 
     def _start_rgb_config_response(self, seed_runtime=False):
-        self._rgb_cache = {"colors": {}, "auto_colors": {}, "effects": {}, "states": {}}
+        self._rgb_cache = {key: {} for key in ("colors", "auto_colors", "effects", "states", "motion")}
         self._rgb_device_config = {key: value for key, value in self._rgb_cache.items()}
         self._rgb_full_active = True
         self._rgb_config_started = self._rgb_full_invalid = self._rgb_complete = False
         self._rgb_full_fields = set()
+        self._rgb_full_caps = None
+        self._rgb_motion_supported = False
         if seed_runtime and self._rgb_runtime_ready_for_config:
             values = self._rgb_runtime
             self._rgb_device_config.update(enabled=bool(values["on"]), automatic=bool(values["auto"]),
@@ -275,7 +287,7 @@ class RobotController(QObject, RobotBusiness):
         self._emit_rgb()
 
     def _accept_rgb_config_fields(self, fields, start=False):
-        if not self._rgb_full_active or (start and self._rgb_config_started):
+        if not self._rgb_full_active:
             self._start_rgb_config_response(seed_runtime=True)
         if start:
             self._rgb_config_started = True
@@ -285,14 +297,52 @@ class RobotController(QObject, RobotBusiness):
                 now = time.monotonic()
                 self._rgb_get_pending_until = now + 2.0
                 self._rgb_get_retry_at = max(self._rgb_get_retry_at, now + 5.0)
+        if self._rgb_full_fields.intersection(fields):
+            self._rgb_full_invalid = True
         self._rgb_device_config.update(fields)
         self._rgb_full_fields.update(fields)
         self._emit_rgb()
 
+    def _validate_rgb_extension_command(self, command):
+        """The manual bank stays 0..12; new writes need confirmed capability."""
+        tokens = command.split()
+        if tokens[-1:] == ["&"]:
+            tokens = tokens[:-1]
+        if tokens[0] == "!RGB_MODE":
+            if len(tokens) != 2 or not tokens[1].isdigit() or int(tokens[1]) not in range(13):
+                raise ValueError("手动RGB预设仅支持0～12；自动动效在自动颜色页设置")
+        elif tokens[0] == "!RGB_MOTION":
+            if not self._rgb_motion_supported:
+                raise ValueError("设备尚未确认支持独立自动动效，请查询全部；旧固件需升级。")
+            if len(tokens) != 6 or not all(token.isdigit() for token in tokens[1:]):
+                raise ValueError("自动动效格式：!RGB_MOTION 目标 形态 周期 反向 宽度")
+            slot, kind, period, reverse, width = map(int, tokens[1:])
+            if not (slot in range(4) and kind in range(4) and 250 <= period <= 30000 and
+                    reverse in (0, 1) and 1 <= width <= 12):
+                raise ValueError("自动动效参数超出范围")
+        elif tokens[0] == "!RGB_SET_STATE" and len(tokens) >= 3:
+            if not tokens[2].isdigit() or int(tokens[2]) not in range(17):
+                raise ValueError("RGB状态动效须为0～16")
+            if int(tokens[2]) >= 13:
+                if tokens[1] not in RGB_MOTION_STATES:
+                    raise ValueError("独立自动动效仅用于SEQ/INT/TRJ运动和校准")
+                if not self._rgb_motion_supported:
+                    raise ValueError("设备尚未确认支持独立自动动效，请查询全部；旧固件需升级。")
+
     def _accept_rgb_config_table(self, kind, key, values):
         if not self._rgb_full_active:
             self._start_rgb_config_response(seed_runtime=True)
+        if key in self._rgb_cache[kind]:
+            self._rgb_full_invalid = True
         self._rgb_cache[kind][key] = tuple(values)
+        self._emit_rgb()
+
+    def _accept_rgb_caps(self, fields):
+        if not self._rgb_full_active:
+            self._start_rgb_config_response(seed_runtime=True)
+        if self._rgb_full_caps is not None:
+            self._rgb_full_invalid = True
+        self._rgb_full_caps = fields
         self._emit_rgb()
 
     def _rgb_invalid_readback(self):
@@ -314,12 +364,22 @@ class RobotController(QObject, RobotBusiness):
         required = {"enabled", "automatic", "brightness", "manual_mode", "fade_on_ms", "fade_off_ms",
                     "brightness_ms", "transition_ms"}
         states = {state for state, _ in RGB_STATES} | {"FAULT"}
+        extended = self._rgb_full_caps == {"motion": 1}
+        extension_complete = (self._rgb_cache["motion"].keys() == set(range(4)) if extended else
+                              not self._rgb_cache["motion"] and
+                              all(binding[0] < 13 for binding in self._rgb_cache["states"].values()))
         self._rgb_complete = bool(
             self._rgb_full_active and self._rgb_config_started and not self._rgb_full_invalid and
             required <= self._rgb_full_fields and self._rgb_cache["colors"].keys() == {0, 1, 2} and
             self._rgb_cache["auto_colors"].keys() == {1, 2, 3} and
             self._rgb_cache["effects"].keys() == set(range(3, 10)) and
-            self._rgb_cache["states"].keys() == states)
+            self._rgb_cache["states"].keys() == states and extension_complete)
+        self._rgb_motion_supported = self._rgb_complete and extended
+        if self._rgb_complete and not extended:
+            # Local preview may try the new shapes with a legacy device; these
+            # defaults are not advertised as a firmware capability or written.
+            effect = self._rgb_cache["effects"][8]
+            self._rgb_cache["motion"].update({slot: (effect[6], effect[7], effect[8]) for slot in range(4)})
         self._rgb_full_active = False
         self._rgb_get_pending_until = None
         self._rgb_runtime_ready_for_config = False
@@ -337,7 +397,7 @@ class RobotController(QObject, RobotBusiness):
 
     def _poll_rgb(self):
         if (not self._rgb_monitoring or not self.is_connected or self.serial_port is None or
-                self._parameter_request is not None or self._acc_sync_waiting):
+                self._parameter_request is not None or self._acc_sync_waiting or self.rgb_save.active):
             return
         now = time.monotonic()
         if self._rgb_get_pending_until is not None:
@@ -372,12 +432,32 @@ class RobotController(QObject, RobotBusiness):
         command = tcp_command(target, tool, value) if self.cartesian.native_tcp else native_command(self.cartesian.model, target, rail, tool, value)
         return self.send_cmd(command)
 
-    def refresh_ports(self):
-        ports = [port.device for port in serial.tools.list_ports.comports()]
-        self.ports_changed.emit(ports)
+    def refresh_ports(self, connection_type=None):
+        """Enumerate only; select the native USB controller without opening it."""
+        devices = list(serial.tools.list_ports.comports())
+        ports = [port.device for port in devices]
+        selected = str(self.cb_ports.get()).strip()
+        connection = (connection_type or self.connection_type).upper()
+        if self.is_connected:
+            selected = self.port_name or selected
+        elif connection == "USB":
+            controllers = [port.device for port in devices
+                           if getattr(port, "vid", None) == 0x1209
+                           and getattr(port, "pid", None) == 0x0D32]
+            if selected in controllers:
+                pass  # Retain an already selected controller among multiple units.
+            elif len(controllers) == 1:
+                selected = controllers[0]
+            elif len(controllers) > 1:
+                selected = ""
+                self.log("检测到多个主控串口，请手动选择：" + "、".join(controllers), "WARN")
+            elif selected not in ports:
+                selected = ports[0] if ports else ""
+        # UART4 and established connections retain their selection, including
+        # temporarily missing ports. The UI's bound adapter owns one list update.
         self.cb_ports["values"] = ports
-        if ports and not self.cb_ports.get():
-            self.cb_ports.current(0)
+        self.cb_ports.set(selected)
+        self.ports_changed.emit(ports)
         return ports
 
     def toggle_connection(self):
@@ -491,6 +571,7 @@ class RobotController(QObject, RobotBusiness):
     @Slot(str, int)
     def _on_written(self, command, connection_id):
         if connection_id == self._connection_id:
+            self.rgb_save.activity()
             self.log(command, "TX")
             try:
                 generation, admitted_command, admitted_connection = self._wire_admitted.get_nowait()
@@ -530,6 +611,8 @@ class RobotController(QObject, RobotBusiness):
                     request["generation"] == generation)
 
     def _can_write(self, generation, command):
+        if not self.rgb_save.allows_write(generation, command):
+            return False
         owned_diagnostic = self.cartesian.diagnostics.owns_command(generation, command)
         if owned_diagnostic is not None:
             return bool(owned_diagnostic and self.is_connected and generation == self._tx_generation and
@@ -555,6 +638,8 @@ class RobotController(QObject, RobotBusiness):
                 (not self._stop_locked or diagnostic or command in ("!STOP", "!START", "!DISABLE")) and
                 (not self._calibration_busy or diagnostic or command in ("!CALIBRATION", "!STOP", "!DISABLE")))
         if allowed:
+            if not self.rgb_save.admitted(generation, command):
+                return False
             try:
                 self._wire_admitted.put_nowait((generation, command, self._connection_id))
             except queue.Full:
@@ -588,6 +673,9 @@ class RobotController(QObject, RobotBusiness):
             return False
         if source not in ("ui", "gamepad", "telemetry", "cartesian"):
             self.log("未知指令来源", "WARN")
+            return False
+        if self.rgb_save.active and command not in RGBSaveSession.SAFETY_COMMANDS:
+            self.log("RGB 保存事务尚未结束；后台查询已暂停，可断开连接或发送 STOP / DISABLE", "WARN")
             return False
         shared_joint_poll = (source == "telemetry" and
                              self._is_joint_telemetry_request(self._tx_generation, command))
@@ -624,6 +712,7 @@ class RobotController(QObject, RobotBusiness):
             return False
         try:
             self._validate_command(command)
+            self._validate_rgb_extension_command(command)
         except ValueError as error:
             self.log(str(error), "WARN")
             return False
@@ -655,11 +744,16 @@ class RobotController(QObject, RobotBusiness):
             if self._seq_active or self._acc_sync_waiting or not self._motor_state_known or self._motor_enabled:
                 self.log("请结束任务并失能，等待 Disabled ok 后校准磁编码器", "WARN")
                 return False
-        if command == "!RGB_SAVE" or command.startswith(("#STALL_SAVE", "#CAL_SAVE")):
+        if RGBSaveSession.is_save(command) or command.startswith(("#STALL_SAVE", "#CAL_SAVE")):
             if (not self._motor_state_known or self._motor_enabled or self._seq_active or
                     self._acc_sync_waiting):
                 self.log("写入 EEPROM 需要结束任务并等待 Disabled ok", "WARN")
                 return False
+        if RGBSaveSession.is_save(command):
+            if self._parameter_request is not None or self._acc_sync_waiting or self.cartesian.busy:
+                self.log("请等待现有参数 / 诊断任务完成后保存 RGB", "WARN")
+                return False
+            return self.rgb_save.begin(command)
         if command == "!CALIBRATION":
             if self._motor_state_known and self._motor_enabled:
                 self._warn_calibration_disabled()
@@ -893,6 +987,7 @@ class RobotController(QObject, RobotBusiness):
                 raise ValueError("保护参数需要为单个有限数值")
 
     def _cancel_motion_for_stop(self):
+        self.rgb_save.cancel_unwritten()
         self._invalidate_system_pose()
         stream = getattr(getattr(self, 'cartesian', None), 'diagnostics', None)
         axis_cleanup = bool(stream is not None and stream.active and self.cartesian.kind == 'axis_test' and self.is_connected)
@@ -999,6 +1094,7 @@ class RobotController(QObject, RobotBusiness):
         return values
 
     def _process_rx_line(self, line, received_at=None):
+        self.rgb_save.activity(line)
         self._handle_parameter_task_reply(line)
         # A seven-value pose is unambiguously joint+rail in firmware_new.
         nums = finite_numbers(line[2:].strip()) if line.startswith("ok ") else None
@@ -1253,7 +1349,7 @@ class RobotController(QObject, RobotBusiness):
 
     def _position_polling_paused(self):
         return ((self.cartesian.active and self.cartesian.kind in ("mode_switch", "axis_test")) or not self._poll_enabled or not self.is_connected or self._stop_locked or
-                self._calibration_busy or self._acc_sync_waiting or self._parameter_request is not None or
+                self._calibration_busy or self._acc_sync_waiting or self._parameter_request is not None or self.rgb_save.active or
                 (self.connection_type == "UART4" and self._motor_state_known and not self._motor_enabled))
 
     def _poll_position(self):

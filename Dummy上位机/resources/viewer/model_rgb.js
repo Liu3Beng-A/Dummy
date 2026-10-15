@@ -10,12 +10,17 @@ export const DIFFUSER_STYLE = Object.freeze({
   coverFadeStrength: 0.15, // Maximum reduction of cover reflection under strong light, 0..1.
   coverFadePeak: 0.3,      // Emission peak at half of the smooth cover/highlight transition; > 0.
   emissionIntensity: 2.5, // Colored emission multiplier; independent of cover reflection weight.
+  highlightBoostStart: 0.35, // Local PWM activity below this threshold keeps the previous light exactly.
+  highlightBoostStrength: 4, // Quadratic extra gain above the threshold; maximum total gain is 1 + this.
   emissionLimit: 0.7,     // Peak texture emission before its independent intensity.
   highlightKnee: 0.8,     // Linear output below this point, smooth compression above; 0 <= knee < 1.
   lowLightGain: 0.3,      // Extra dim-light gain, removed smoothly at full PWM.
+  dimLightFloor: 0.25,   // Retain this fraction of the prior emission near zero PWM.
+  dimLightEnd: 0.35,     // Fade dim attenuation out by this local PWM activity; bright heads stay unchanged.
   toe: 0.003,            // Finite-slope transition near zero PWM.
   exponent: 0.45,        // Smaller values lift dim emission more.
   smoothingSeconds: 0.06,
+  spinHighlightWhite: 4.0, // Mode 8 only: preserve HDR peaks at/above this reference.
 });
 const TAU = 2 * Math.PI;
 const DIFFUSER_TOE = DIFFUSER_STYLE.toe;
@@ -80,6 +85,14 @@ uniform float rgbHighlightKnee;
 uniform float rgbCoverTintStrength;
 uniform float rgbCoverFadeStrength;
 uniform float rgbCoverFadePeak;
+uniform float rgbHighlightBoostStart;
+uniform float rgbHighlightBoostStrength;
+uniform float rgbSpinCurve;
+uniform float rgbSpinHighlightWhite;
+float rgbHighlightGain(float activity) {
+  float t = clamp((activity - rgbHighlightBoostStart) / (1.0 - rgbHighlightBoostStart), 0.0, 1.0);
+  return 1.0 + rgbHighlightBoostStrength * t * t;
+}
 float rgbSoftHighlight(float color) {
   float knee = rgbHighlightKnee;
   float range = 1.0 - knee;
@@ -95,13 +108,25 @@ float rgbTintedCover(float reflected, float emitted, float emissionPeak, float r
   float tint = rgbCoverTintStrength * response;
   return reflected * (1.0 - rgbCoverFadeStrength * response) * mix(1.0, chroma, tint);
 }
+float rgbSpinHighlight(float peak) {
+  float t = clamp(peak / rgbSpinHighlightWhite, 0.0, 1.0);
+  return t * (2.0 - t);
+}
 float rgbCompositeHighlight(float channel, float peak, float response) {
   float colorScale = rgbSoftHighlight(peak) / max(peak, 1e-8);
-  return mix(rgbSoftHighlight(channel), channel * colorScale, response);
+  float previous = mix(rgbSoftHighlight(channel), channel * colorScale, response);
+  if (rgbSpinCurve < 0.5) return previous;
+  // At zero emission response=0, keeping the off cover exactly unchanged.
+  // Spread mode 8's middle levels before reaching the screen ceiling.
+  float spinScale = rgbSpinHighlight(peak) / max(peak, 1e-8);
+  return mix(previous, channel * spinScale, response);
 }`).replace(emissionHook, `${emissionHook}
 diffuseColor.rgb *= rgbCoverReflection;
 specularStrength *= rgbCoverReflection;
 vec3 rgbDisplayEmission = totalEmissiveRadiance;
+#ifdef USE_EMISSIVEMAP
+rgbDisplayEmission *= rgbHighlightGain(emissiveColor.a);
+#endif
 totalEmissiveRadiance = vec3(0.0);`);
   // The vendor Phong shader adds totalEmissiveRadiance to outgoingLight before
   // opaque_fragment. Cache emission and zero that contribution before lighting,
@@ -151,6 +176,12 @@ export function createDiffuserKernel(samples = DIFFUSER_SAMPLES) {
   return kernel;
 }
 
+export function dimLightWeight(peak) {
+  const t = Math.max(0, Math.min(1, peak / DIFFUSER_STYLE.dimLightEnd));
+  return DIFFUSER_STYLE.dimLightFloor + (1 - DIFFUSER_STYLE.dimLightFloor)
+    * t * t * (3 - 2 * t);
+}
+
 export function writeDiffuserTexture(frame, kernel, pixels) {
   const samples = kernel.length / RGB_CHANNELS;
   if (!Number.isInteger(samples) || pixels.length !== samples * 4) {
@@ -183,15 +214,16 @@ export function writeDiffuserTexture(frame, kernel, pixels) {
     // infinite-slope power law near zero. One peak scale preserves RGB ratios.
     const toePeak = peak > 0 ? DIFFUSER_STYLE.emissionLimit * ((peak + DIFFUSER_TOE) ** DIFFUSER_EXPONENT
       - DIFFUSER_CURVE_BASE) / DIFFUSER_CURVE_RANGE : 0;
-    // Lift dim colors by up to 30%, smoothly removing that gain at full power.
-    // One common peak gain retains channel ratios and the existing 0.7 ceiling.
-    const displayPeak = toePeak * (1 + DIFFUSER_STYLE.lowLightGain * (1 - peak) ** 2);
+    // Keep the former response in bright arcs, but lower weak ring/background light.
+    // One smooth peak weight preserves RGB ratios; the original PWM alpha stays intact.
+    const displayPeak = toePeak * (1 + DIFFUSER_STYLE.lowLightGain * (1 - peak) ** 2)
+      * dimLightWeight(peak);
     const scale = peak > 0 ? displayPeak / peak : 0;
     for (let component = 0; component < 3; component++) {
       const light = Math.min(DIFFUSER_STYLE.emissionLimit, Math.max(0, scattered[component] * scale));
       pixels[sample * 4 + component] = floating ? light : Math.round(light * 255);
     }
-    // Activity is diagnostic data only; the shader never turns it into opacity.
+    // Local activity drives only selective HDR light gain and diagnostics, never opacity.
     pixels[sample * 4 + 3] = floating ? peak : Math.round(peak * 255);
   }
   return pixels;

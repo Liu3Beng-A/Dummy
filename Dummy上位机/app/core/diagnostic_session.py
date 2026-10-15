@@ -137,7 +137,7 @@ class DiagnosticSession(AxisCommunicationTestMixin, OpenTestMixin, QObject):
             if kind == 'axis_test_done':
                 c.log(format_axis_test(value), 'INFO' if value.get('passed') else 'WARN')
                 o.cancel()
-                o._state('complete' if value.get('passed') else 'error', ('非零单轴曲线测试：' if value.get('motion') else '原地曲线通信测试：')+value['stage'])
+                o._state('complete' if value.get('passed') else 'error', '原地曲线通信测试：'+value['stage'])
         elif kind == 'state':
             o._state(*value)
         elif kind == 'mode':
@@ -244,15 +244,8 @@ class DiagnosticSession(AxisCommunicationTestMixin, OpenTestMixin, QObject):
                         self.axis_feedback = (q.copy(), received_at)
                         for node, held in self.axis_result.get('held', {}).items():
                             reference = held/MOTOR_SCALE[node-1]+MOTOR_ZERO[node-1]
-                            if self.axis_motion:
-                                if self._axis_motion_feedback_allowed(received_at):
-                                    change = q[node-1]-self.axis_start_actual[node-1]
-                                    self.axis_deviation[node] = max(self.axis_deviation.get(node, 0.), abs(change))
-                                    direction = -1 if self.axis_result['motion_degrees'] < 0 else 1
-                                    self.axis_actual_peak = max(self.axis_actual_peak, direction*change)
-                            else:
-                                deviation = abs(q[node-1]-reference)
-                                self.axis_deviation[node] = max(self.axis_deviation.get(node, 0.), deviation)
+                            deviation = abs(q[node-1]-reference)
+                            self.axis_deviation[node] = max(self.axis_deviation.get(node, 0.), deviation)
             if self.owner.model.valid(q):
                 with self.lock:
                     if received_at >= self.latest_feedback[1]:
@@ -347,7 +340,7 @@ class DiagnosticSession(AxisCommunicationTestMixin, OpenTestMixin, QObject):
         if self.owner.kind == 'open_test' and not self._open_test_command_allowed(command):
             raise ValueError('单电机测试禁止发送运动、START 或模式切换指令')
         if self.owner.kind == 'axis_test' and not self._axis_command_allowed(command):
-            raise ValueError('曲线诊断禁止普通运动、使能 START、逆解或未授权曲线')
+            raise ValueError('原地通信测试禁止普通运动、使能 START、逆解或改变保持位置')
         if self.recovering and not self._locked_command(command):
             if self.owner.kind == 'axis_test' and self.axis_abort:
                 raise InterruptedError('用户 STOP / DISABLE 已中断通信测试')

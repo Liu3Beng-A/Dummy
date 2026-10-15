@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import vm from 'node:vm';
 
 // This production module has no Three/DOM dependencies. Loading it by a data
 // URL also works when the Python application's directory has no package.json.
 const source = await readFile(new URL('../resources/viewer/model_rgb.js', import.meta.url), 'utf8');
-const { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, DIFFUSER_STYLE, normalizeRgbFrame, patchDiffuserShader, sameRgbFrame,
+const { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, dimLightWeight, DIFFUSER_STYLE, normalizeRgbFrame, patchDiffuserShader, sameRgbFrame,
   writeDiffuserTexture } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const frame = color => Array.from({ length: 24 }, () => color.slice());
 const kernel = createDiffuserKernel();
@@ -20,8 +21,8 @@ async function bundledPhongShader() {
 
 // Run the injected GLSL itself with scalar JS math and equivalent vector
 // primitives. No cover/response/shoulder formula is copied into this test.
-function evaluateProductionLight(patched) {
-  const names = ['rgbSoftHighlight', 'rgbLightResponse', 'rgbTintedCover', 'rgbCompositeHighlight'];
+function evaluateProductionLight(patched, spin = false) {
+  const names = ['rgbHighlightGain', 'rgbSoftHighlight', 'rgbLightResponse', 'rgbTintedCover', 'rgbSpinHighlight', 'rgbCompositeHighlight'];
   const declarations = names.map(name => {
     const helper = patched.match(new RegExp(`float\\s+${name}\\s*\\(([^)]*)\\)\\s*\\{([^{}]*)\\}`));
     assert(helper, `Expected the production ${name} helper`);
@@ -30,11 +31,27 @@ function evaluateProductionLight(patched) {
       .replace(/\b(min|max|exp)\s*\(/g, 'Math.$1(');
     return `function ${name}(${parameters}) {${body}}`;
   }).join('\n');
-  const uniforms = ['rgbHighlightKnee', 'rgbCoverTintStrength', 'rgbCoverFadeStrength', 'rgbCoverFadePeak'];
+  const uniforms = ['rgbHighlightKnee', 'rgbCoverTintStrength', 'rgbCoverFadeStrength', 'rgbCoverFadePeak',
+    'rgbHighlightBoostStart', 'rgbHighlightBoostStrength', 'rgbSpinCurve', 'rgbSpinHighlightWhite'];
   const values = [DIFFUSER_STYLE.highlightKnee, DIFFUSER_STYLE.coverTintStrength,
-    DIFFUSER_STYLE.coverFadeStrength, DIFFUSER_STYLE.coverFadePeak];
-  const helpers = new Function(...uniforms, 'mix', `${declarations}\nreturn {${names.join(',')}};`)(
-    ...values, (first, second, amount) => first * (1 - amount) + second * amount);
+    DIFFUSER_STYLE.coverFadeStrength, DIFFUSER_STYLE.coverFadePeak,
+    DIFFUSER_STYLE.highlightBoostStart, DIFFUSER_STYLE.highlightBoostStrength,
+    spin ? 1 : 0, DIFFUSER_STYLE.spinHighlightWhite];
+  const helpers = new Function(...uniforms, 'mix', 'clamp', `${declarations}\nreturn {${names.join(',')}};`)(
+    ...values, (first, second, amount) => first * (1 - amount) + second * amount,
+    (value, lower, upper) => Math.min(Math.max(value, lower), upper));
+
+  const emissionInjection = patched.match(/vec3 rgbDisplayEmission = totalEmissiveRadiance;[\s\S]*?totalEmissiveRadiance = vec3\(0\.0\);/);
+  assert(emissionInjection, 'Expected the cached emission and selective gain injection');
+  const emissionBody = emissionInjection[0]
+    .replace('vec3 rgbDisplayEmission = totalEmissiveRadiance;', 'let rgbDisplayEmission = totalEmissiveRadiance.slice();')
+    .replace('#ifdef USE_EMISSIVEMAP', 'if (useEmissiveMap) {')
+    .replace('#endif', '}')
+    .replace(/rgbDisplayEmission\s*\*=\s*([^;]+);/g,
+      'rgbDisplayEmission = rgbDisplayEmission.map(value => value * ($1));')
+    .replace('totalEmissiveRadiance = vec3(0.0);', 'totalEmissiveRadiance = [0, 0, 0];');
+  const emit = new Function('rgbHighlightGain', 'totalEmissiveRadiance', 'emissiveColor', 'useEmissiveMap',
+    `${emissionBody}\nreturn {emission: rgbDisplayEmission, removed: totalEmissiveRadiance, activity: emissiveColor.a};`);
 
   const injection = patched.match(/#include <tonemapping_fragment>([\s\S]*?)#include <colorspace_fragment>/);
   assert(injection, 'Expected the production post-tone-map composition');
@@ -52,10 +69,14 @@ function evaluateProductionLight(patched) {
   const compose = new Function(...names, 'positiveRgb', 'rgbDisplayEmission', 'gl_FragColor',
     `${body}\nreturn {response: rgbResponse, cover: rgbCover, light: rgbLightSum, output};`);
   return {
+    gain: helpers.rgbHighlightGain,
+    emit: (emission, activity, useEmissiveMap = true) => emit(helpers.rgbHighlightGain,
+      emission, { a: activity }, useEmissiveMap),
     highlight: helpers.rgbSoftHighlight,
     response: helpers.rgbLightResponse,
     tint: helpers.rgbTintedCover,
     composite: helpers.rgbCompositeHighlight,
+    spinHighlight: helpers.rgbSpinHighlight,
     compose: (reflection, emission) => compose(...names.map(name => helpers[name]),
       rgb => rgb.map(value => Math.max(value, 0)), emission, { rgb: reflection }),
   };
@@ -84,33 +105,170 @@ test('display interpolation smooths low PWM steps and never mutates its integer 
   assert.throws(() => advanceRgbDisplayFrame(displayed, target, -1), RangeError);
 });
 
+test('rotation-only shoulder opens middle levels while preserving the off cover and full head', async () => {
+  const shader = patchDiffuserShader(await bundledPhongShader());
+  const previous = evaluateProductionLight(shader);
+  const spin = evaluateProductionLight(shader, true);
+  for (const cover of [[0, 0, 0], [.1, .2, .3], [2, .05, 1.1]]) {
+    assert.deepEqual(spin.compose(cover, [0, 0, 0]).output,
+      previous.compose(cover, [0, 0, 0]).output);
+    let last = 0;
+    for (let value = 0; value <= 255; value++) {
+      const pixels = new Float32Array(288 * 4);
+      writeDiffuserTexture(frame([0, value, value]), kernel, pixels);
+      const emission = previous.emit([...pixels.slice(0, 3)].map(v => v * DIFFUSER_STYLE.emissionIntensity), pixels[3]).emission;
+      const result = spin.compose(cover, emission).output;
+      assert(result.every(v => Number.isFinite(v) && v >= 0 && v <= 1));
+      assert(result[1] >= last - 1e-10, `${value}: dominant channel should be monotonic`);
+      last = result[1];
+      if (value === 128 && cover.every(v => v <= 1)) {
+        assert(result[1] < previous.compose(cover, emission).output[1] - .12);
+      }
+      if (value === 255) {
+        assert(Math.abs(result[1] - previous.compose(cover, emission).output[1]) < .001);
+      }
+    }
+  }
+  const endpoint = DIFFUSER_STYLE.spinHighlightWhite;
+  assert.equal(spin.spinHighlight(0), 0);
+  assert.equal(spin.spinHighlight(endpoint), 1);
+  assert.equal(spin.spinHighlight(endpoint * 2), 1);
+  assert((1 - spin.spinHighlight(endpoint - 1e-5)) / 1e-5 < 1e-5);
+});
+
+test('RGB bridge validates and caches explicit modes, including changes with identical colors', async () => {
+  const html = await readFile(new URL('../resources/viewer/index.html', import.meta.url), 'utf8');
+  const inline = html.match(/<script>\s*([\s\S]*?)<\/script>/)[1];
+  const context = vm.createContext({ window: { addEventListener() {} } });
+  vm.runInContext(inline, context);
+  const window = context.window;
+  const supplied = frame([0, 128, 128]);
+  assert(window.receiveRobotRgbPayload({ colors: supplied, light_on: true, effect_mode: 8 }));
+  assert.equal(window.pendingRgbFrame.effect_mode, 8);
+  const calls = [];
+  window.robotViewer = { setRgbFrame: (...args) => { calls.push(args); return true; } };
+  for (const mode of [3, 8, 7, null, 0, 12, 13, 14, 15, 16]) {
+    assert(window.receiveRobotRgbPayload({ colors: supplied, light_on: true, effect_mode: mode }));
+    assert.equal(calls.at(-1)[2], mode);
+  }
+  const pending = window.pendingRgbFrame;
+  const count = calls.length;
+  for (const mode of [-1, 17, 8.5, true, '8', NaN]) {
+    assert.equal(window.receiveRobotRgbPayload({ colors: supplied, light_on: true, effect_mode: mode }), false);
+    assert.equal(window.pendingRgbFrame, pending);
+    assert.equal(calls.length, count);
+  }
+  assert(window.receiveRobotRgbPayload(supplied));
+  assert.equal(calls.at(-1)[2], null, 'Legacy data must not retain a stale rotation profile');
+});
+
+test('independent automatic modes share the existing rotation contrast curve and reject invalid frames atomically', async () => {
+  const viewer = await readFile(new URL('../resources/viewer/viewer.js', import.meta.url), 'utf8');
+  const setter = viewer.slice(viewer.indexOf('function setRgbFrame('), viewer.indexOf('function animateRgb('));
+  const context = vm.createContext({
+    disposed: false, normalizeRgbFrame, sameRgbFrame, rgbEffectMode: null,
+    diffuserTexture: { offset: { x: 0 } },
+    rgbSpinCurve: { value: 0 }, displayedRgbFrame: frame([0, 0, 0]),
+    document: { hidden: false }, rgbLightOn: true, rgbLightOnUpdates: 0,
+    rgbFrame: frame([0, 0, 0]), rgbFrameUpdates: 0,
+  });
+  vm.runInContext(setter, context);
+  const supplied = frame([0, 128, 128]);
+  for (const mode of [13, 14, 15, 16, ...Array.from({ length: 13 }, (_, i) => i), null]) {
+    assert(context.setRgbFrame(supplied, true, mode));
+    assert.equal(context.rgbEffectMode, mode);
+    assert.equal(context.diffuserTexture.offset.x, mode === 15 ? .25 : 0);
+    assert.equal(context.rgbSpinCurve.value, mode === 8 || (mode >= 13 && mode <= 16) ? 1 : 0);
+  }
+  assert(context.setRgbFrame(supplied, true, 16));
+  const previous = context.rgbFrame;
+  const count = context.rgbFrameUpdates;
+  for (const invalid of [17, -1, 13.1, true, '13']) {
+    assert.equal(context.setRgbFrame(frame([255, 0, 0]), false, invalid), false);
+    assert.equal(context.rgbEffectMode, 16);
+    assert.equal(context.rgbFrame, previous);
+    assert.equal(context.rgbFrameUpdates, count);
+    assert.equal(context.rgbLightOn, true);
+    assert.equal(context.rgbSpinCurve.value, 1);
+    assert.equal(context.diffuserTexture.offset.x, 0);
+  }
+});
+
+test('two-peak registration rotates source zero counterclockwise and survives deferred texture creation', async () => {
+  const viewer = await readFile(new URL('../resources/viewer/viewer.js', import.meta.url), 'utf8');
+  const supplied = frame([0, 0, 0]);
+  supplied[0] = [80, 160, 240]; // Asymmetric probe: two equal peaks would hide the rotation sign.
+  const context = vm.createContext({
+    disposed: false, normalizeRgbFrame, sameRgbFrame, rgbEffectMode: null,
+    rgbSpinCurve: { value: 0 }, diffuserTexture: null, diffuserPixels: null,
+    displayedRgbFrame: supplied.map(color => color.slice()), rgbFrame: supplied,
+    document: { hidden: false }, rgbLightOn: true, rgbLightOnUpdates: 0, rgbFrameUpdates: 0,
+    DIFFUSER_SAMPLES: 288, DIFFUSER_STYLE, diffuserKernel: kernel, writeDiffuserTexture,
+    Float32Array, Uint16Array,
+    THREE: {
+      DataTexture: class {
+        constructor(data) { this.image = { data }; this.offset = { x: 0, y: 0 }; }
+      },
+      DataUtils: { toHalfFloat: value => value },
+    },
+  });
+  vm.runInContext(viewer.slice(viewer.indexOf('function prepareDiffuser('), viewer.indexOf('function animateRgb(')), context);
+  assert(context.setRgbFrame(supplied, true, 15));
+  context.prepareDiffuser({ traverse() {} });
+  assert.equal(context.diffuserTexture.offset.x, .25);
+  const uv = createAngularUv([-.04, 0, 0, -.04, .001, 0, -.04, -.001, .001],
+    [0, 0, 0], [0, 1, 0], [1, 0, 0]);
+  // -X is 90 degrees counterclockwise from the old +Y source-zero position.
+  assert.equal((uv[0] + context.diffuserTexture.offset.x) % 1, 0);
+  const originalTarget = context.rgbFrame;
+  const originalDisplay = context.displayedRgbFrame;
+  for (const mode of [13, 15, 14, 15, 16, 8, 0, null]) {
+    assert(context.setRgbFrame(supplied, true, mode));
+    assert.equal(context.diffuserTexture.offset.x, mode === 15 ? .25 : 0);
+    assert.equal(context.rgbFrame, originalTarget);
+    assert.equal(context.displayedRgbFrame, originalDisplay);
+    assert.equal(context.rgbFrameUpdates, 0);
+  }
+  assert(context.setRgbFrame(supplied, true, 15));
+  assert.equal(context.setRgbFrame(supplied, true, 17), false);
+  assert.equal(context.diffuserTexture.offset.x, .25);
+  assert.equal(context.rgbEffectMode, 15);
+  assert.deepEqual(supplied[0], [80, 160, 240]);
+});
+
 test('opal shader adds independent light after ACES and softens highlights without changing opacity/output conversion', async () => {
   const original = await bundledPhongShader();
   const patched = patchDiffuserShader(original);
   const reflection = patched.indexOf('diffuseColor.rgb *= rgbCoverReflection;');
   const viewer = await readFile(new URL('../resources/viewer/viewer.js', import.meta.url), 'utf8');
   for (const uniform of ['rgbCoverReflection', 'rgbHighlightKnee', 'rgbCoverTintStrength',
-    'rgbCoverFadeStrength', 'rgbCoverFadePeak']) {
+    'rgbCoverFadeStrength', 'rgbCoverFadePeak', 'rgbHighlightBoostStart', 'rgbHighlightBoostStrength']) {
     assert(patched.includes(`uniform float ${uniform};`));
     const binding = viewer.indexOf(`shader.uniforms.${uniform} =`);
     assert(binding >= 0 && binding < viewer.indexOf('shader.fragmentShader = patchDiffuserShader('));
   }
   for (const [uniform, setting] of [['rgbHighlightKnee', 'highlightKnee'], ['rgbCoverTintStrength', 'coverTintStrength'],
-    ['rgbCoverFadeStrength', 'coverFadeStrength'], ['rgbCoverFadePeak', 'coverFadePeak']]) {
+    ['rgbCoverFadeStrength', 'coverFadeStrength'], ['rgbCoverFadePeak', 'coverFadePeak'],
+    ['rgbHighlightBoostStart', 'highlightBoostStart'], ['rgbHighlightBoostStrength', 'highlightBoostStrength']]) {
     assert(viewer.includes(`shader.uniforms.${uniform} = { value: DIFFUSER_STYLE.${setting} };`));
   }
-  for (const name of ['rgbSoftHighlight', 'rgbLightResponse', 'rgbTintedCover', 'rgbCompositeHighlight']) {
+  for (const name of ['rgbHighlightGain', 'rgbSoftHighlight', 'rgbLightResponse', 'rgbTintedCover', 'rgbCompositeHighlight']) {
     assert(patched.indexOf(`float ${name}(`) < patched.indexOf('void main()'));
     assert.equal((patched.match(new RegExp(`float ${name}\\(`, 'g')) || []).length, 1);
   }
   assert.equal(DIFFUSER_STYLE.emissionIntensity, 2.5);
+  assert.equal(DIFFUSER_STYLE.highlightBoostStart, .35);
+  assert.equal(DIFFUSER_STYLE.highlightBoostStrength, 4);
   assert(viewer.includes('material.emissiveIntensity = DIFFUSER_STYLE.emissionIntensity;'));
+  assert(viewer.includes("material.customProgramCacheKey = () => 'rgb-opal-cover-v8-spin-contrast';"));
+  assert(viewer.includes('THREE.RGBAFormat, THREE.HalfFloatType'));
   assert(reflection > patched.indexOf('#include <emissivemap_fragment>'));
   assert(reflection < patched.indexOf('#include <lights_phong_fragment>'));
   assert(patched.indexOf('#include <specularmap_fragment>') < reflection);
   assert(patched.includes('diffuseColor.rgb *= rgbCoverReflection;'));
   assert(patched.includes('specularStrength *= rgbCoverReflection;'));
   const cached = patched.indexOf('vec3 rgbDisplayEmission = totalEmissiveRadiance;');
+  const boosted = patched.indexOf('rgbDisplayEmission *= rgbHighlightGain(emissiveColor.a);');
   const removed = patched.indexOf('totalEmissiveRadiance = vec3(0.0);');
   const toneMapped = patched.indexOf('#include <tonemapping_fragment>');
   const emitted = patched.indexOf('vec3 rgbEmission = max(rgbDisplayEmission, vec3(0.0));');
@@ -119,7 +277,8 @@ test('opal shader adds independent light after ACES and softens highlights witho
   const restored = patched.indexOf('vec3 rgbLightSum = rgbCover + rgbEmission;');
   const peak = patched.indexOf('float rgbLightPeak = max(rgbLightSum.r, max(rgbLightSum.g, rgbLightSum.b));');
   const compressed = patched.indexOf('gl_FragColor.rgb = vec3(');
-  assert(cached > reflection && removed > cached);
+  assert(cached > reflection && boosted > cached && removed > boosted);
+  assert(patched.includes('#ifdef USE_EMISSIVEMAP\nrgbDisplayEmission *= rgbHighlightGain(emissiveColor.a);\n#endif'));
   assert(removed < patched.indexOf('#include <lights_phong_fragment>'));
   assert(emitted > toneMapped && response > emitted && tinted > response);
   assert(restored > tinted && peak > restored && compressed > peak);
@@ -137,7 +296,8 @@ test('opal shader adds independent light after ACES and softens highlights witho
   assert.equal((patched.match(/gl_FragColor\.rgb = vec3\(\s*rgbCompositeHighlight/g) || []).length, 1);
   assert(!/\bclamp\s*\(\s*rgbDisplayEmission/.test(patched), 'Emission intensity must not clip before the soft shoulder');
   assert(!patched.includes('vec3(1.0) - clamp(gl_FragColor.rgb'), 'Cover brightness must not attenuate independent emission');
-  assert(!patched.includes('emissiveColor.a'));
+  assert.equal((patched.match(/emissiveColor\.a/g) || []).length, 1, 'Activity alpha is read only once for the gain');
+  assert(!/emissiveColor\.a\s*=/.test(patched));
   assert(!patched.includes('smoothstep('));
   assert(!patched.includes('diffuseColor.a ='));
   assert.equal(patched.slice(patched.indexOf('#include <colorspace_fragment>')),
@@ -150,6 +310,102 @@ test('opal shader adds independent light after ACES and softens highlights witho
     '#include <tonemapping_fragment>', '')), /shader hook/);
   assert.throws(() => patchDiffuserShader(original +
     '\n#include <emissivemap_fragment>'), /shader hook/);
+});
+
+test('production highlight gain leaves the low range exact and rises C1 monotonically to a bounded fivefold peak', async () => {
+  const { gain } = evaluateProductionLight(patchDiffuserShader(await bundledPhongShader()));
+  const start = DIFFUSER_STYLE.highlightBoostStart;
+  for (const activity of [-10, 0, 1 / 255, .01, .1, .2, start - 1e-8, start]) {
+    assert.equal(gain(activity), 1, `Low activity ${activity} must stay unchanged`);
+  }
+  const epsilon = 1e-6;
+  const leftSlope = (gain(start) - gain(start - epsilon)) / epsilon;
+  const rightSlope = (gain(start + epsilon) - gain(start)) / epsilon;
+  assert.equal(leftSlope, 0);
+  assert(rightSlope >= 0 && Math.abs(rightSlope - leftSlope) < 1e-4, 'The threshold must not create a slope jump');
+  assert(gain(start + .01) > 1 && gain(start + .01) < 1.01, 'Gain should enter gradually above the threshold');
+  let previous = 1;
+  for (let step = 0; step <= 2000; step++) {
+    const value = gain(step / 2000);
+    assert(Number.isFinite(value) && value >= previous && value >= 1 && value <= 5);
+    previous = value;
+  }
+  assert.equal(gain(1), 5);
+  assert.equal(gain(10), 5, 'Activity outside the valid upper range must not amplify past the cap');
+});
+
+test('production emission hook keeps PWM 0 through 89 exact and boosts only bright activity without changing alpha', async () => {
+  const light = evaluateProductionLight(patchDiffuserShader(await bundledPhongShader()));
+  const cover = [.2, .21, .19];
+  for (let pwm = 0; pwm <= 89; pwm++) {
+    const pixels = writeDiffuserTexture(frame([0, pwm, pwm / 2]), kernel, new Float32Array(288 * 4));
+    const emission = Array.from(pixels.slice(0, 3), value => value * DIFFUSER_STYLE.emissionIntensity);
+    const original = emission.slice();
+    const boosted = light.emit(emission, pixels[3]);
+    assert.equal(light.gain(pixels[3]), 1);
+    assert.deepEqual(boosted.emission, emission, `PWM ${pwm} was boosted below the activity threshold`);
+    assert.deepEqual(light.compose(cover, boosted.emission), light.compose(cover, emission));
+    assert.deepEqual(boosted.removed, [0, 0, 0]);
+    assert.equal(boosted.activity, pixels[3]);
+    assert.deepEqual(emission, original, 'The cached shader path must not mutate its input');
+  }
+  for (const pwm of [90, 128, 180, 255]) {
+    const pixels = writeDiffuserTexture(frame([0, pwm, pwm / 2]), kernel, new Float32Array(288 * 4));
+    const emission = Array.from(pixels.slice(0, 3), value => value * DIFFUSER_STYLE.emissionIntensity);
+    const boosted = light.emit(emission, pixels[3]);
+    assert(boosted.emission[1] > emission[1], `PWM ${pwm} should enter the bright-region gain`);
+    assert.equal(boosted.activity, pixels[3]);
+    assert.deepEqual(light.emit(emission, pixels[3], false).emission, emission,
+      'A material without an emissive map must not access texture activity or apply its gain');
+    const rendered = light.compose(cover, boosted.emission);
+    assert(rendered.output.every(value => Number.isFinite(value) && value >= 0 && value <= 1));
+    if (pwm === 255) assert.equal(boosted.emission[1], emission[1] * 5);
+  }
+  assert.deepEqual(light.emit([0, 0, 0], 1).emission, [0, 0, 0], 'Activity cannot create light from zero emission');
+});
+
+test('selective gain preserves mixed-color ratios dim spatial background and existing sixty millisecond display damping', async () => {
+  const light = evaluateProductionLight(patchDiffuserShader(await bundledPhongShader()));
+  const colors = frame([0, 10, 5]);
+  colors[0] = [255, 180, 64];
+  const pixels = writeDiffuserTexture(colors, kernel, new Float32Array(288 * 4));
+  const original = pixels.slice();
+  let dimSamples = 0;
+  let brightSamples = 0;
+  for (let sample = 0; sample < 288; sample++) {
+    const offset = sample * 4;
+    const emission = Array.from(pixels.slice(offset, offset + 3), value => value * DIFFUSER_STYLE.emissionIntensity);
+    const activity = pixels[offset + 3];
+    const boosted = light.emit(emission, activity).emission;
+    if (activity <= DIFFUSER_STYLE.highlightBoostStart) {
+      assert.deepEqual(boosted, emission, `Dim spatial sample ${sample} changed`);
+      dimSamples++;
+    } else {
+      assert(boosted[0] > emission[0]);
+      const dominant = emission.indexOf(Math.max(...emission));
+      for (let channel = 0; channel < 3; channel++) {
+        assert(Math.abs(boosted[channel] / boosted[dominant] - emission[channel] / emission[dominant]) < 1e-12,
+          'The shared gain must not change emitted RGB ratios');
+      }
+      brightSamples++;
+    }
+  }
+  assert(dimSamples > 0 && brightSamples > 0, 'The rotating head fixture must exercise both untouched and boosted regions');
+  assert.deepEqual(pixels, original, 'RGB and original PWM alpha remain unchanged in the texture');
+  assert.equal(DIFFUSER_STYLE.smoothingSeconds, .06);
+  const displayed = frame([0, 10, 0]);
+  const target = frame([0, 255, 128]);
+  const supplied = target.map(color => color.slice());
+  let previous = 1;
+  for (let tick = 0; tick < 40; tick++) {
+    advanceRgbDisplayFrame(displayed, target, 1 / 60);
+    const current = writeDiffuserTexture(displayed, kernel, new Float32Array(288 * 4));
+    const gain = light.gain(current[3]);
+    assert(gain >= previous && gain <= 5, 'Gain must follow the already-smoothed display activity');
+    previous = gain;
+  }
+  assert(previous > 4);
+  assert.deepEqual(target, supplied);
 });
 
 test('production highlight shoulder is linear below its knee, C1 at the knee and monotonic into HDR', async () => {
@@ -311,7 +567,7 @@ test('circular normalized scattering keeps uniform light even and zero truly unl
   assert(gray.every((value, index) => value === (index % 4 === 3 ? 128 : 137)));
 });
 
-test('weak light remains visible, brightness is monotonic and highlights stay bounded', () => {
+test('weak light is reduced but remains nonzero, brightness is monotonic and highlights stay bounded', () => {
   let previous = 0;
   for (let level = 0; level <= 255; level++) {
     const pixels = texture(frame([0, level, 0]));
@@ -324,20 +580,61 @@ test('weak light remains visible, brightness is monotonic and highlights stay bo
     if (level > 0) assert(displayed > 0);
     previous = displayed;
   }
-  assert(texture(frame([0, 10, 0]))[1] >= 40, 'Firmware 4% green background must stay visibly colored');
-  assert(texture(frame([0, 64, 0]))[1] >= 100, 'READY green must not disappear under the cover');
+  const background = texture(frame([0, 10, 0]))[1];
+  assert(background > 0 && background < 41 / 2, 'Firmware 4% green background should be darker than its previous byte value 41');
+  assert(texture(frame([0, 64, 0]))[1] > background, 'Higher PWM must remain distinguishable from the dim background');
 });
 
-test('low light is brighter than the previous response without raising the highlight cap', () => {
-  // Measured previous production response, before the low-light adjustment.
-  for (const [pwm, previous] of [[1, .025228], [2, .043239], [10, .126301], [38, .267877]]) {
+test('dim emission falls below the frozen response while bright PWM and its cap remain exactly unchanged', () => {
+  // Measured Float32 values from the frozen selective-highlight production module.
+  // Fixtures keep this permanent test independent of ignored QA snapshots.
+  let previousWeight = DIFFUSER_STYLE.dimLightFloor;
+  for (const [pwm, previous] of [[1, .03273744136095047], [2, .05600852891802788],
+    [10, .16127800941467285], [38, .32607316970825195]]) {
     const pixels = writeDiffuserTexture(frame([0, pwm, 0]), kernel, new Float32Array(288 * 4));
-    assert(pixels[1] > previous * 1.2 && pixels[1] < previous * 1.31);
+    assert(pixels[1] > 0 && pixels[1] < previous, `Dim PWM ${pwm} should be reduced without becoming black`);
+    const weight = pixels[1] / previous;
+    assert(weight >= previousWeight && weight < 1, 'Attenuation must fade out monotonically as PWM rises');
+    previousWeight = weight;
     assert.equal(pixels[0], 0);
     assert.equal(pixels[2], 0);
+    assert(Math.abs(pixels[3] - pwm / 255) < 1e-7, 'Activity must retain the original PWM');
+  }
+  for (const [pwm, previous] of [[90, .4711666405200958], [128, .5365010499954224],
+    [180, .6061309576034546], [255, .699999988079071]]) {
+    const pixels = writeDiffuserTexture(frame([0, pwm, pwm / 2]), kernel, new Float32Array(288 * 4));
+    assert.equal(pixels[1], previous, `Bright PWM ${pwm} changed from the frozen response`);
+    assert.equal(pixels[2], Math.fround(previous / 2), 'One common dim weight must preserve the RGB ratio');
+    assert(Math.abs(pixels[3] - pwm / 255) < 1e-7);
   }
   const full = writeDiffuserTexture(frame([255, 255, 255]), kernel, new Float32Array(288 * 4));
   assert(Math.abs(full[0] - DIFFUSER_STYLE.emissionLimit) < 1e-6);
+});
+
+test('production dim weight has a bounded monotonic C1 transition through its half and end thresholds', () => {
+  assert.equal(DIFFUSER_STYLE.dimLightFloor, .25);
+  assert.equal(DIFFUSER_STYLE.dimLightEnd, .35);
+  const floor = DIFFUSER_STYLE.dimLightFloor;
+  const end = DIFFUSER_STYLE.dimLightEnd;
+  assert.equal(dimLightWeight(-1), floor);
+  assert.equal(dimLightWeight(0), floor);
+  assert.equal(dimLightWeight(end / 2), .625);
+  for (const peak of [end, end + 1e-8, .5, 1, 100]) assert.equal(dimLightWeight(peak), 1);
+  const epsilon = 1e-6;
+  const toeLeftSlope = (dimLightWeight(0) - dimLightWeight(-epsilon)) / epsilon;
+  const toeRightSlope = (dimLightWeight(epsilon) - dimLightWeight(0)) / epsilon;
+  const endLeftSlope = (dimLightWeight(end) - dimLightWeight(end - epsilon)) / epsilon;
+  const endRightSlope = (dimLightWeight(end + epsilon) - dimLightWeight(end)) / epsilon;
+  assert.equal(toeLeftSlope, 0);
+  assert.equal(endRightSlope, 0);
+  assert(Math.abs(toeRightSlope - toeLeftSlope) < 1e-4, 'The dim toe must not create a slope jump');
+  assert(Math.abs(endRightSlope - endLeftSlope) < 1e-4, 'The unchanged bright range must join with zero slope');
+  let previous = floor;
+  for (let step = 0; step <= 1000; step++) {
+    const weight = dimLightWeight(step / 1000);
+    assert(Number.isFinite(weight) && weight >= previous && weight >= floor && weight <= 1);
+    previous = weight;
+  }
 });
 
 test('float display texture retains fractional low PWM and zero has a finite smooth toe', () => {
@@ -375,9 +672,15 @@ test('rotating green retains its same-color background with a brighter distinct 
   const greens = Array.from({ length: 288 }, (_, sample) => pixels[sample * 4 + 1]);
   const darkest = Math.min(...greens);
   const brightest = Math.max(...greens);
-  assert(darkest >= 40, 'Dim ring must remain green all around');
-  assert(brightest >= darkest * 2, 'Moving head must remain distinguishable');
-  assert(brightest <= darkest * 5, 'The response must compress excessive head/background contrast');
+  assert(darkest > 0 && darkest < 41 / 2, 'Dim ring must remain green but darker than the frozen background');
+  assert.equal(brightest, 155, 'The frozen bright moving head must remain unchanged');
+  const floats = writeDiffuserTexture(colors, kernel, new Float32Array(288 * 4));
+  const floatingGreens = Array.from({ length: 288 }, (_, sample) => floats[sample * 4 + 1]);
+  const dim = Math.min(...floatingGreens);
+  const head = Math.max(...floatingGreens);
+  assert(dim > 0 && dim < .16127800941467285 / 2);
+  assert.equal(head, .6085164546966553);
+  assert(head / dim > 3.7730900629611397 * 3, 'Head/background contrast should improve substantially from the frozen ratio');
   assert(pixels.every((value, index) => index % 4 === 1 || index % 4 === 3 || value === 0));
 });
 

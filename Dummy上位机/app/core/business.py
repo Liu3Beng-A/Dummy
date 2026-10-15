@@ -107,6 +107,18 @@ class RobotBusiness:
         except ValueError as error:
             self.log(str(error), "WARN")
 
+    def _rgb_apply_motion(self):
+        try:
+            if not self._rgb_motion_supported:
+                raise ValueError("设备尚未确认支持独立自动动效，请查询全部；旧固件需升级。")
+            slot, kind = self._rgb_motion_idx.current(), self._rgb_motion_kind.current()
+            if slot not in range(4) or kind not in range(4):
+                raise ValueError("请选择自动运动或校准动效")
+            period, width = self._rgb_values(self._rgb_motion_params, [(250, 30000), (1, 12)])
+            self._rgb_send(f"!RGB_MOTION {slot} {kind} {period} {int(self._rgb_motion_reverse.get())} {width}")
+        except ValueError as error:
+            self.log(str(error), "WARN")
+
     def _rgb_save(self):
         if not self._motor_state_known or self._motor_enabled or self._stop_locked or self._calibration_busy or self._seq_active:
             self.log("RGB保存需先DISABLE并等待Disabled ok，结束校准 / 保护 / 顺序任务。", "WARN")
@@ -147,6 +159,19 @@ class RobotBusiness:
             self._rgb_state_source.current(values[1])
             self._rgb_set_fields(self._rgb_state_color, values[2:])
 
+    @_rgb_readback_guard
+    def _rgb_fill_motion(self):
+        slot = self._rgb_motion_idx.current()
+        if slot not in range(4):
+            return
+        values = self._rgb_cache["motion"].get(slot)
+        binding = self._rgb_cache["states"].get(RGB_MOTION_STATES[slot])
+        if values is not None:
+            self._rgb_set_fields(self._rgb_motion_params, (values[0], values[2]))
+            self._rgb_motion_reverse.set(bool(values[1]))
+        if binding is not None and 13 <= binding[0] <= 16:
+            self._rgb_motion_kind.current(binding[0] - 13)
+
     @staticmethod
     def _rgb_decode_fields(payload, limits):
         """Reject missing, extra, duplicate or malformed wire fields atomically."""
@@ -177,7 +202,7 @@ class RobotBusiness:
             return
         state_names = {state for state, _ in RGB_STATES} | {"FAULT"}
         runtime_limits = {
-            "RGB_STATUS": {"on": 1, "auto": 1, "bright": 100, "current": 100, "mode": 12},
+            "RGB_STATUS": {"on": 1, "auto": 1, "bright": 100, "current": 100, "mode": 16},
             "RGB_RUNTIME": {"state": state_names, "source": state_names | {"MANUAL", "OFF"}},
             "RGB_STORAGE": {"dirty": 1, "storage": 2, "dma": 1},
             "RGB_DMA": {"frames": 0xFFFFFFFF, "errors": 0xFFFFFFFF},
@@ -203,6 +228,9 @@ class RobotBusiness:
                 return
             fields = self._rgb_runtime_pending
             self._rgb_runtime_pending = None
+            if fields["source"] == "MANUAL" and fields["mode"] >= 13:
+                self._rgb_invalid_readback()
+                return
             self._rgb_runtime = dict(fields)
             storage = {0: "未保存默认", 1: "有效", 2: "无效 / 需重新保存"}[fields["storage"]]
             self._rgb_status_var.set(
@@ -214,6 +242,15 @@ class RobotBusiness:
             self._rgb_bright.set(str(fields["bright"]))
             self._rgb_scale.set(fields["bright"])
             self._accept_rgb_runtime(fields)
+            return
+        if prefix == "RGB_CAPS":
+            if not self._rgb_full_active:
+                self._start_rgb_config_response(seed_runtime=True)
+            fields = self._rgb_decode_fields(payload, {"motion": 1})
+            if fields is None:
+                self._rgb_invalid_readback()
+            else:
+                self._accept_rgb_caps(fields)
             return
         config_limits = {
             "RGB_CONFIG": {"manual": 12, "fade_on": 10000, "fade_off": 10000},
@@ -232,7 +269,7 @@ class RobotBusiness:
                 if key in fields:
                     self._rgb_fades[index].set(str(fields[key]))
             return
-        if prefix in ("RGB_COLOR", "RGB_AUTO_COLOR", "RGB_EFFECT", "RGB_STATE"):
+        if prefix in ("RGB_COLOR", "RGB_AUTO_COLOR", "RGB_EFFECT", "RGB_STATE", "RGB_MOTION"):
             match = re.fullmatch(r"RGB_COLOR ([0-2]) ((?:[0-9]+ ){2}[0-9]+)", line)
             kind = "colors"
             if prefix == "RGB_AUTO_COLOR":
@@ -244,6 +281,9 @@ class RobotBusiness:
             elif prefix == "RGB_STATE":
                 match = re.fullmatch(r"RGB_STATE ([A-Z_]+) ((?:[0-9]+ ){4}[0-9]+)", line)
                 kind = "states"
+            elif prefix == "RGB_MOTION":
+                match = re.fullmatch(r"RGB_MOTION ([0-3]) ((?:[0-9]+ ){2}[0-9]+)", line)
+                kind = "motion"
             if not match:
                 self._rgb_invalid_readback()
                 return
@@ -255,14 +295,16 @@ class RobotBusiness:
                          values[7] in (0, 1) and 1 <= values[8] <= 12 and
                          all(20 <= value <= 30000 for value in values[9:]))
             elif kind == "states":
-                valid = (key in state_names and values[0] <= 12 and values[1] <= 4 and
+                valid = (key in state_names and values[0] <= 16 and values[1] <= 4 and
+                         (values[0] < 13 or key in RGB_MOTION_STATES) and
                          all(value <= 255 for value in values[2:]))
                 if key == "FAULT":
                     valid = valid and values == (7, 1, 255, 0, 0)
+            elif kind == "motion":
+                valid = 250 <= values[0] <= 30000 and values[1] in (0, 1) and 1 <= values[2] <= 12
             if not valid:
                 self._rgb_invalid_readback()
                 return
-            self._rgb_cache[kind][key] = values
             self._accept_rgb_config_table(kind, key, values)
             return
         if line == "RGB_GET end":
@@ -270,6 +312,7 @@ class RobotBusiness:
             self._rgb_fill_auto_color()
             self._rgb_fill_effect()
             self._rgb_fill_state()
+            self._rgb_fill_motion()
             self._finish_rgb_readback()
 
     @staticmethod

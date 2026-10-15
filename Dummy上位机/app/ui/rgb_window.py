@@ -7,6 +7,7 @@ class RgbSettingsWindow(QMainWindow):
     """Closing hides the editor so its draft and geometry remain available."""
 
     visibility_changed = Signal(bool)
+    editor_closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -49,6 +50,7 @@ class RgbSettingsWindow(QMainWindow):
         else:
             event.ignore()
             self.hide()
+            self.editor_closed.emit()
 
     def shutdown(self):
         """Close the owned window when the main program really exits."""
