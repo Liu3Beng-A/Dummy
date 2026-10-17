@@ -40,6 +40,23 @@ def _rgb_readback_guard(method):
 
 
 class RobotBusiness:
+    def _action_problem(self, scope, operation, message, next_step="", *,
+                        target="", phase="blocked"):
+        """Keep local validation visible without entering a modal event loop.
+
+        The optional hook also keeps this mixin usable by offline adapters which
+        only provide the historical log and command interfaces.
+        """
+        self.log(message, "WARN")
+        notify = getattr(self, "notify_action", None)
+        if callable(notify):
+            notify(scope, operation, target=target, phase=phase, message=message,
+                   next_step=next_step, evidence="local")
+
+    @staticmethod
+    def _action_node(node):
+        return "全部节点" if node == 0 else f"节点 {node}"
+
     @staticmethod
     def _rgb_values(variables, ranges):
         values = []
@@ -59,28 +76,32 @@ class RobotBusiness:
             value = self._rgb_values([self._rgb_bright], [(0, 100)])[0]
             self._rgb_send(f"!RGB_BRIGHT {value}")
         except ValueError as error:
-            self.log(str(error), "WARN")
+            self._action_problem("rgb", "应用亮度", str(error), "请输入 0～100 的整数后重试。",
+                                 target="亮度", phase="invalid")
 
     def _rgb_apply_color(self):
         try:
             values = self._rgb_values(self._rgb_color_vars, [(0,255)] * 3)
             self._rgb_send(f"!RGB_COLOR {self._rgb_color_idx.current()} " + " ".join(map(str, values)))
         except ValueError as error:
-            self.log(str(error), "WARN")
+            self._action_problem("rgb", "应用预设颜色", str(error), "请检查红、绿、蓝三个颜色值后重试。",
+                                 target="单色预设", phase="invalid")
 
     def _rgb_apply_auto_color(self):
         try:
             values = self._rgb_values(self._rgb_auto_color_vars, [(0,255)] * 3)
             self._rgb_send(f"!RGB_AUTO_COLOR {self._rgb_auto_idx.current() + 1} " + " ".join(map(str, values)))
         except ValueError as error:
-            self.log(str(error), "WARN")
+            self._action_problem("rgb", "应用自动颜色", str(error), "请检查红、绿、蓝三个颜色值后重试。",
+                                 target="自动颜色", phase="invalid")
 
     def _rgb_apply_fades(self):
         try:
             values = self._rgb_values(self._rgb_fades, [(0,10000)] * 3 + [(0,5000)])
             self._rgb_send("!RGB_FADE " + " ".join(map(str, values)))
         except ValueError as error:
-            self.log(str(error), "WARN")
+            self._action_problem("rgb", "应用过渡时间", str(error), "请检查过渡时间的范围及整数格式后重试。",
+                                 target="过渡时间", phase="invalid")
 
     def _rgb_apply_effect(self):
         try:
@@ -92,7 +113,8 @@ class RobotBusiness:
                 period, int(self._rgb_reverse.get()), tail, on, off]
             self._rgb_send("!RGB_EFFECT " + " ".join(map(str, values)))
         except ValueError as error:
-            self.log(str(error), "WARN")
+            self._action_problem("rgb", "应用动画参数", str(error), "请检查颜色、周期和宽度等参数后重试。",
+                                 target="动画参数", phase="invalid")
 
     def _rgb_apply_state(self):
         try:
@@ -105,7 +127,8 @@ class RobotBusiness:
                 command += " " + RGB_COLOR_SOURCES[source]
             self._rgb_send(command)
         except ValueError as error:
-            self.log(str(error), "WARN")
+            self._action_problem("rgb", "应用状态绑定", str(error), "请检查该状态的颜色参数后重试。",
+                                 target="状态绑定", phase="invalid")
 
     def _rgb_apply_motion(self):
         try:
@@ -117,11 +140,14 @@ class RobotBusiness:
             period, width = self._rgb_values(self._rgb_motion_params, [(250, 30000), (1, 12)])
             self._rgb_send(f"!RGB_MOTION {slot} {kind} {period} {int(self._rgb_motion_reverse.get())} {width}")
         except ValueError as error:
-            self.log(str(error), "WARN")
+            self._action_problem("rgb", "应用自动动效", str(error),
+                                 "请查询设备能力，并检查所选动效、周期和宽度后重试。",
+                                 target="自动运动 / 校准动效", phase="invalid")
 
     def _rgb_save(self):
         if not self._motor_state_known or self._motor_enabled or self._stop_locked or self._calibration_busy or self._seq_active:
-            self.log("RGB保存需先DISABLE并等待Disabled ok，结束校准 / 保护 / 顺序任务。", "WARN")
+            self._action_problem("rgb", "保存RGB配置", "RGB 配置未保存：当前不满足保存条件。",
+                                 "请先 DISABLE 并等待失能确认，结束校准、保护或顺序任务后重试。")
             return
         self._rgb_send("!RGB_SAVE")
 
@@ -620,7 +646,8 @@ class RobotBusiness:
         descriptor = next(p for p in descriptors if p[0] == key)
         if kind == "STALL" and (node == 8 or (key == "BACK_DEG" and node == 7) or
                                 (key == "BACK_MM" and node not in (0, 7))):
-            self.log("该普通堵转参数不适用于所选节点", "WARN")
+            self._action_problem("protection", "应用堵转保护参数", "该普通堵转参数不适用于所选节点。",
+                                 "请选择支持该参数的节点。", target=f"{self._action_node(node)} · {descriptor[1]}")
             return
         try:
             value = float(self._protection_entries[kind][key].get())
@@ -632,14 +659,21 @@ class RobotBusiness:
             if (key.endswith("_MS") or key == "ENABLE") and not value.is_integer():
                 raise ValueError("时间/开关参数必须为整数")
         except ValueError as exc:
-            messagebox.showerror("参数错误", f"{key}: {exc}\n单位：{descriptor[2]}", parent=self._protection_window)
+            scope = "protection" if kind == "STALL" else "calibration"
+            self._action_problem(scope, "应用堵转保护参数" if kind == "STALL" else "应用校准参数",
+                                 f"{descriptor[1]}：{exc}（{descriptor[2]}）。",
+                                 "请修正该参数后重试。",
+                                 target=f"{self._action_node(node)} · {descriptor[1]}", phase="invalid")
             return
         self.send_cmd(f"#{kind}_SET {node} {key} {value:g}")
 
     def _save_protection(self, kind):
         if self._motor_state_known and self._motor_enabled:
-            messagebox.showwarning("保存需要失能", "请先 DISABLE 并等待确认，再保存 EEPROM。",
-                                   parent=self._protection_window)
+            self._action_problem("protection" if kind == "STALL" else "calibration",
+                                 "保存堵转保护参数" if kind == "STALL" else "保存校准参数",
+                                 "参数未保存：电机仍处于使能状态。",
+                                 "请先 DISABLE 并等待失能确认，再保存 EEPROM。",
+                                 target=self._action_node(self._protection_nodes[kind].get()))
             return
         self.send_cmd(f"#{kind}_SAVE {self._protection_nodes[kind].get()}")
 
@@ -670,10 +704,12 @@ class RobotBusiness:
         try:
             node = self.param_node.get()
         except (ValueError, ValueError):
-            self.log("请选择单个节点 1～8 进行磁编码器校准", "WARN")
+            self._action_problem("calibration", "磁编码器校准", "请选择单个节点 1～8 进行磁编码器校准。",
+                                 "切换到具体电机节点后重试。", phase="invalid")
             return
         if node not in range(1, 9):
-            self.log("磁编码器校准仅支持单个节点 1～8，禁止 ALL 广播", "WARN")
+            self._action_problem("calibration", "磁编码器校准", "磁编码器校准仅支持单个节点 1～8，禁止 ALL 广播。",
+                                 "请选择具体电机节点后重试。", target=self._action_node(node), phase="invalid")
             return
         cmd = f"#ENC_CAL {node}"
         if not self.is_connected or not self.serial_port:
@@ -681,7 +717,9 @@ class RobotBusiness:
             return
         if (self._stop_locked or self._calibration_busy or self._seq_active or self._acc_sync_waiting or
                 not self._motor_state_known or self._motor_enabled):
-            self.log("请先结束当前任务、支撑好机械臂并失能，等待 Disabled ok 后再校准磁编码器", "WARN")
+            self._action_problem("calibration", "磁编码器校准", "磁编码器校准未开始：当前不满足校准条件。",
+                                 "请结束当前任务、支撑好机械臂并失能，等待失能确认后重试。",
+                                 target=self._action_node(node))
             return
         target = f"J{node}" if node <= 6 else "地轨 J7" if node == 7 else "夹爪 J8"
         if not messagebox.askyesno(
@@ -705,7 +743,8 @@ class RobotBusiness:
             ki = int(self.ent_set_pid_ki.get())
             kd = int(self.ent_set_pid_kd.get())
         except ValueError:
-            messagebox.showerror("错误", "PID 必须为整数")
+            self._action_problem("motor", "保存PID", "PID 必须为整数。",
+                                 "请检查所选节点及 Kp、Kv、Ki、Kd 后重试。", target="PID", phase="invalid")
             return
         self.send_cmd(f"#SET_PID {node} {kp} {kv} {ki} {kd}")
 
@@ -715,10 +754,12 @@ class RobotBusiness:
             node = self.param_node.get()
             acc = float(self.ent_set_acc.get())
         except ValueError:
-            messagebox.showerror("错误", "加速度必须为数值（r/s²）")
+            self._action_problem("motor", "应用加速度", "加速度必须为数值（r/s²）。",
+                                 "请检查所选节点及加速度后重试。", target="加速度", phase="invalid")
             return
         if acc < 0:
-            messagebox.showerror("错误", "加速度不能为负数")
+            self._action_problem("motor", "应用加速度", "加速度不能为负数。",
+                                 "请输入非负加速度后重试。", target=self._action_node(node), phase="invalid")
             return
         if acc > 5000.0:
             acc = 5000.0
@@ -731,10 +772,12 @@ class RobotBusiness:
             node = self.param_node.get()
             acc = float(self.ent_set_acc.get())
         except ValueError:
-            messagebox.showerror("错误", "加速度必须为数值（r/s²）")
+            self._action_problem("motor", "保存加速度", "加速度必须为数值（r/s²）。",
+                                 "请检查所选节点及加速度后重试。", target="加速度", phase="invalid")
             return
         if acc < 0:
-            messagebox.showerror("错误", "加速度不能为负数")
+            self._action_problem("motor", "保存加速度", "加速度不能为负数。",
+                                 "请输入非负加速度后重试。", target=self._action_node(node), phase="invalid")
             return
         if acc > 5000.0:
             acc = 5000.0
@@ -746,10 +789,12 @@ class RobotBusiness:
             node = self.param_node.get()
             i_limit = float(self.ent_set_i.get())
         except ValueError:
-            messagebox.showerror("错误", "电流必须为数值（A）")
+            self._action_problem("motor", "应用电流限制", "电流必须为数值（A）。",
+                                 "请检查所选节点及电流后重试。", target="电流限制", phase="invalid")
             return
         if i_limit <= 0:
-            messagebox.showerror("错误", "电流必须大于 0")
+            self._action_problem("motor", "应用电流限制", "电流必须大于 0。",
+                                 "请输入大于 0 的电流后重试。", target=self._action_node(node), phase="invalid")
             return
         if i_limit > 3.0:
             i_limit = 3.0
@@ -762,10 +807,12 @@ class RobotBusiness:
             node = self.param_node.get()
             i_limit = float(self.ent_set_i.get())
         except ValueError:
-            messagebox.showerror("错误", "电流必须为数值（A）")
+            self._action_problem("motor", "保存电流限制", "电流必须为数值（A）。",
+                                 "请检查所选节点及电流后重试。", target="电流限制", phase="invalid")
             return
         if i_limit <= 0:
-            messagebox.showerror("错误", "电流必须大于 0")
+            self._action_problem("motor", "保存电流限制", "电流必须大于 0。",
+                                 "请输入大于 0 的电流后重试。", target=self._action_node(node), phase="invalid")
             return
         if i_limit > 3.0:
             i_limit = 3.0
@@ -784,7 +831,14 @@ class RobotBusiness:
 
     def _cmd_hand_set_i(self):
         """!HAND_I — 设置运行时电流幅值（纯 RAM，掉电丢）。"""
-        a = self.hand_current.get()
+        try:
+            a = float(self.hand_current.get())
+            if not math.isfinite(a):
+                raise ValueError("电流必须为有限数值")
+        except (TypeError, ValueError):
+            self._action_problem("gripper", "应用夹爪电流", "夹爪电流必须为有限数值（A）。",
+                                 "请检查夹爪电流后重试。", target="运行电流", phase="invalid")
+            return
         # 上限 2.5A / 下限 0.05A 已被 Spinbox 限定；额外夹一道防御
         if a < 0.05:
             a = 0.05
@@ -906,13 +960,8 @@ class RobotBusiness:
         self.send_cmd("!CALIBRATION")
 
     def _warn_calibration_disabled(self):
-        messagebox.showwarning(
-            "校准需要失能",
-            "校准需要八轴失能。请先点击 DISABLE 并等待失能确认，\n"
-            "再重新点击校准。不会自动失能或排队校准。\n"
-            "校准完成后会自动失能并保存 EEPROM。",
-            parent=self.root,
-        )
+        self._action_problem("calibration", "置零校准", "置零校准未开始：需要八轴失能且解除保护锁定。",
+                             "请先点击 DISABLE 并等待失能确认，再重新点击校准。")
 
     def _handle_calibration_status(self, line):
         if line == "!CALIBRATION pending" or line.startswith("CAL "):

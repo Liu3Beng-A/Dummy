@@ -3,26 +3,31 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
+from html import escape
 from pathlib import Path
 import copy
 import json
+import math
 import os
 import re
 import time
 
-from PySide6.QtCore import QByteArray, QEvent, QSignalBlocker, Qt, QTimer
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QSize, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDockWidget, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLayout, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
+    QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QStyle, QStyleOptionButton, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from app.ui.adapters import FieldAdapter, TableAdapter
 from app.core.dialogs import install_dialog_appearance
+from app.core.operation_guidance import operation_actions
+from app.ui.operation_panel import OperationStatusPanel, _ElidedLabel
+from app.ui.action_feedback import ActionFeedbackNotice, feedback_tone
 from app.ui.widgets import AxisRow, ColorEditor, PointShortcutButton, button, hint, number
 from app.ui.gamepad_panel import GamepadPanel, GamepadSettingsDialog
 from app.ui.terminal_diagnostics import TerminalDiagnostics
@@ -37,6 +42,41 @@ from app.protocol.constants import (
     POSE_DEFAULTS, POSE_RANGES, RGB_AUTO_MODES, RGB_COLOR_SOURCES, RGB_MODES,
     RGB_MOTION_EFFECTS, RGB_MOTION_STATES, RGB_MOTION_TARGETS, RGB_STATE_MODES, RGB_STATES, STALL_PARAMETERS,
 )
+
+
+_TOPBAR_MODE_TEXTS = {
+    None: "模式 — · 主控执行",
+    **{mode: f"模式 {name} · 主控执行"
+       for mode, name in enumerate(("SEQ", "INT", "TRJ", "TUN", "TRQ", "SRV"), 1)},
+    7: "模式 7 · 通信诊断 / 待退出 · 普通运动不可用",
+}
+_TOPBAR_MOTOR_TEXTS = (
+    "电机状态未知", "● 已使能", "● 已失能", "校准进行中", "保护 / 软停锁定", "保护锁定",
+    "使能结果待确认", "使能请求待发送", "使能确认中", "STOP 等待发送", "停止确认中",
+    "STOP 已确认锁定", "失能确认中", "运动执行中", "运动已受理", "回读已到目标",
+)
+
+
+class _TopbarModeLabel(_ElidedLabel):
+    """A caption-independent width hint, with room to shrink on small screens."""
+
+    def __init__(self):
+        super().__init__()
+        self._reserved_width = 80
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+    def reserve_width(self, width):
+        self._reserved_width = width
+        self.setMinimumWidth(80)
+        self.setMaximumWidth(width)
+        self.setFixedHeight(40)
+        self.updateGeometry()
+
+    def sizeHint(self):
+        return QSize(self._reserved_width, 40)
+
+    def minimumSizeHint(self):
+        return QSize(80, 40)
 
 
 class MainWindow(QMainWindow):
@@ -56,6 +96,13 @@ class MainWindow(QMainWindow):
         self._gamepad_gripper_commanded = None
         self._control_owner = "ui"
         self._gamepad_conflict_states = {}
+        self._operation_base_tooltips = {}
+        self._feedback_last = {}
+        self._feedback_result_labels = {}
+        self._feedback_invalid_widgets = {}
+        self._page_header_slots = {}
+        self._header_fit_pending = False
+        self._topbar_fit_pending = False
         self._gamepad_close_pending = False
         self._gamepad_close_allowed = False
         self._gamepad_close_timer = QTimer(self)
@@ -113,6 +160,7 @@ class MainWindow(QMainWindow):
         controller.actual_pose_changed.connect(self._actual_pose)
         controller.fields_changed.connect(self._fields_updated)
         controller.rgb_changed.connect(self._rgb_device_changed)
+        controller.feedback_event.connect(self._action_feedback)
         controller.preset_pose_requested.connect(self._preset_pose_requested)
         controller.preset_pose_completed.connect(self._preset_pose_completed)
         self.gamepad_reader = gamepad_reader if gamepad_reader is not None else GamepadReader(self)
@@ -145,6 +193,11 @@ class MainWindow(QMainWindow):
         self._update_state({})
         self._sync_viewer_mode()
         self._preview_changed()
+        # Refresh presentation clocks and input freshness without device queries.
+        self._operation_timer = QTimer(self)
+        self._operation_timer.setInterval(250)
+        self._operation_timer.timeout.connect(self._refresh_operation_status)
+        self._operation_timer.start()
         QApplication.instance().installEventFilter(self)
         for error in store.load_errors:
             controller.log(error, "WARN")
@@ -153,6 +206,127 @@ class MainWindow(QMainWindow):
         adapter = FieldAdapter(widget, cast)
         self.fields[name] = adapter
         return adapter
+
+    def _feedback_result_label(self, scope, layout):
+        label = _ElidedLabel()
+        label.setObjectName("ActionLastResult")
+        label.setFixedHeight(22)
+        label.setText("最近结果：尚未执行应用或保存。")
+        label.setProperty("tone", "info")
+        self._feedback_result_labels.setdefault(scope, []).append(label)
+        layout.addWidget(label)
+        return label
+
+    def _action_feedback(self, event):
+        """Route explicit operation evidence without changing control state."""
+        if self._closed or not isinstance(event, dict):
+            return
+        scope = event.get("scope")
+        previous = self._feedback_last.get(scope)
+        if previous is not None:
+            if event.get("task_id", 0) < previous.get("task_id", 0):
+                return
+            if (event == previous or (event.get("task_id") == previous.get("task_id")
+                    and event.get("updated_at", 0) < previous.get("updated_at", 0))):
+                return
+        self._feedback_last[scope] = copy.deepcopy(event)
+        self._feedback_mark_inputs(event)
+        for label in self._feedback_result_labels.get(scope, ()):
+            label.setText(str(event.get("message") or ""))
+            description = "\n".join(str(event.get(key) or "")
+                                    for key in ("message", "next_step"))
+            label.setAccessibleDescription(description)
+            label.setToolTip("<qt>" + escape(description).replace("\n", "<br>") + "</qt>")
+            tone = feedback_tone(event)
+            if label.property("tone") != tone:
+                label.setProperty("tone", tone)
+                label.style().unpolish(label)
+                label.style().polish(label)
+        notice = (self.rgb_feedback_notice if scope == "rgb" and self.rgb_window.isVisible()
+                  and not self.rgb_window.isMinimized() else self.action_feedback_notice)
+        other_notice = (self.action_feedback_notice if notice is self.rgb_feedback_notice
+                        else self.rgb_feedback_notice)
+        if (other_notice.current_event or {}).get("task_id") == event.get("task_id"):
+            other_notice.clear_event()
+        notice.set_event(event)
+
+    @staticmethod
+    def _feedback_input_style(widget, invalid):
+        widget.setProperty("feedbackInvalid", invalid)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+    def _feedback_mark_inputs(self, event):
+        """Mark locally invalid values; presentation never changes admission."""
+        scope = event.get("scope")
+        for widget in self._feedback_invalid_widgets.pop(scope, ()):
+            self._feedback_input_style(widget, False)
+        if event.get("phase") != "invalid":
+            return
+        candidates = []
+
+        def fields(name, ranges, integer=False):
+            adapters = self.fields.get(name, [])
+            if not isinstance(adapters, list):
+                adapters = [adapters]
+            candidates.extend((adapter, low, high, integer)
+                              for adapter, (low, high) in zip(adapters, ranges))
+
+        operation, target = event.get("operation", ""), event.get("target", "")
+        if scope == "rgb":
+            groups = {
+                "亮度": [("_rgb_bright", [(0, 100)])],
+                "单色预设": [("_rgb_color_vars", [(0, 255)] * 3)],
+                "自动颜色": [("_rgb_auto_color_vars", [(0, 255)] * 3)],
+                "过渡时间": [("_rgb_fades", [(0, 10000)] * 3 + [(0, 5000)])],
+                "动画参数": [("_rgb_effect_first", [(0, 255)] * 3),
+                           ("_rgb_effect_second", [(0, 255)] * 3),
+                           ("_rgb_effect_params", [(250, 30000), (1, 12), (20, 30000), (20, 30000)])],
+                "状态绑定": [("_rgb_state_color", [(0, 255)] * 3)],
+                "自动运动 / 校准动效": [("_rgb_motion_params", [(250, 30000), (1, 12)])],
+            }
+            for name, ranges in groups.get(target, ()):
+                fields(name, ranges, True)
+        elif scope == "motor":
+            if "PID" in operation:
+                for key in ("kp", "kv", "ki", "kd"):
+                    fields(f"ent_set_pid_{key}", [(0, 4294967295)], True)
+            elif "加速度" in operation:
+                fields("ent_set_acc", [(0, 5000)])
+            elif "电流" in operation:
+                fields("ent_set_i", [(.001, 3)])
+        elif scope in ("protection", "calibration"):
+            kind = "STALL" if scope == "protection" else "CAL"
+            descriptors = STALL_PARAMETERS if kind == "STALL" else CAL_PARAMETERS
+            for key, title, _, _, low, high in descriptors:
+                if target.endswith(" · " + title):
+                    adapter = self.fields["_protection_entries"][kind][key]
+                    minimum = (math.nextafter(0., 1.) if low == 0 and
+                               key not in ("STARTUP_MS", "ENABLE") else low)
+                    candidates.append((adapter, minimum, math.inf if high is None else high,
+                                       key.endswith("_MS") or key == "ENABLE"))
+        elif scope == "gripper" and target == "运行电流":
+            fields("hand_current", [(.05, 2.5)])
+        marked = []
+        for adapter, low, high, integer in candidates:
+            widget = adapter.widget
+            try:
+                value = float(adapter.get())
+                valid = (math.isfinite(value) and low <= value <= high and
+                         (not integer or value.is_integer()) and
+                         (not hasattr(widget, "hasAcceptableInput") or widget.hasAcceptableInput()))
+            except (TypeError, ValueError, OverflowError):
+                valid = False
+            if valid:
+                continue
+            self._feedback_input_style(widget, True)
+            if not widget.property("feedbackEditBound"):
+                signal = getattr(widget, "valueChanged", None) or widget.textEdited
+                signal.connect(lambda *_, item=widget: self._feedback_input_style(item, False))
+                widget.setProperty("feedbackEditBound", True)
+            marked.append(widget)
+        self._feedback_invalid_widgets[scope] = marked
 
     def _call(self, method, *args):
         return getattr(self.controller, method)(*args)
@@ -174,10 +348,13 @@ class MainWindow(QMainWindow):
 
         top = QFrame()
         top.setObjectName("TopBar")
+        self.topbar = top
+        top.installEventFilter(self)
         row = QHBoxLayout(top)
         row.setContentsMargins(16, 10, 16, 10)
         row.setSpacing(8)
-        row.addWidget(QLabel("串口"))
+        self.serial_caption = QLabel("串口")
+        row.addWidget(self.serial_caption)
         self.port_combo = QComboBox()
         self.port_combo.setEditable(True)
         self.port_combo.setMinimumWidth(110)
@@ -185,7 +362,8 @@ class MainWindow(QMainWindow):
         self.port_combo.setEditText(self.store.settings.get("port", ""))
         self._bind("cb_ports", self.port_combo)
         row.addWidget(self.port_combo)
-        row.addWidget(button("刷新", self._refresh_ports))
+        self.port_refresh_button = button("刷新", self._refresh_ports)
+        row.addWidget(self.port_refresh_button)
         self.connection_combo = self._combo(("USB", "UART4"))
         self.connection_combo.setCurrentText(self.store.settings.get("connection_type", "USB"))
         self.connection_combo.setToolTip("USB 为主控 USB 虚拟串口；UART4 为 115200 串口，接口能力不同")
@@ -193,14 +371,22 @@ class MainWindow(QMainWindow):
         row.addWidget(self.connection_combo)
         self.connect_button = button("连接设备", self._toggle_connection, "success")
         row.addWidget(self.connect_button)
-        self.connection_status = QLabel("未连接")
+        self.connection_status = _ElidedLabel()
+        self.connection_status.setText("未连接")
+        self.connection_status.setMargin(10)
+        self.connection_status.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.connection_status.setObjectName("StatusPill")
         row.addWidget(self.connection_status)
         row.addStretch()
-        self.mode_status = QLabel("模式 —")
+        self.mode_status = _TopbarModeLabel()
+        self.mode_status.setText("模式 —")
+        self.mode_status.setMargin(10)
         self.mode_status.setObjectName("StatusPill")
         row.addWidget(self.mode_status)
-        self.motor_status = QLabel("电机状态未知")
+        self.motor_status = _ElidedLabel()
+        self.motor_status.setText("电机状态未知")
+        self.motor_status.setMargin(10)
+        self.motor_status.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.motor_status.setObjectName("StatusPill")
         # Keep the controller's detailed calibration/protection status separate
         # from the compact visible pill, which has its own formatting.
@@ -210,9 +396,13 @@ class MainWindow(QMainWindow):
         row.addWidget(self.log_toggle)
         stop = button("STOP", lambda: self._system_command("!STOP"), "danger")
         stop.setObjectName("StopButton")
+        stop.setProperty("operationOverlaySafety", True)
         stop.setToolTip("发送 !STOP，取消上位机任务并请求主控软停")
+        self.stop_button = stop
         row.addWidget(stop)
         outer.addWidget(top)
+        self.operation_panel = OperationStatusPanel(central, compact=True)
+        self.action_feedback_notice = self.operation_panel.set_feedback_widget(ActionFeedbackNotice())
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -239,11 +429,58 @@ class MainWindow(QMainWindow):
         body.addWidget(sidebar)
         self.pages = QStackedWidget()
         self.pages.setObjectName("Pages")
+        self.pages.installEventFilter(self)
+        self.pages.currentChanged.connect(lambda *_: self._schedule_header_fit())
         body.addWidget(self.pages, 1)
         outer.addLayout(body, 1)
         self.navigation.currentRowChanged.connect(self._navigation_changed)
         self.navigation.setCurrentRow(0)
         self.statusBar().showMessage("离线预览可用；连接设备后可读取实际位置。")
+
+    def _schedule_topbar_fit(self):
+        if self._closed or self._topbar_fit_pending:
+            return
+        self._topbar_fit_pending = True
+        QTimer.singleShot(0, self._fit_topbar_slots)
+
+    def _fit_topbar_slots(self):
+        """Reserve maximum caption widths; only window/font changes resize slots."""
+        self._topbar_fit_pending = False
+        if self._closed:
+            return
+
+        def label_width(widget, texts):
+            widget.ensurePolished()
+            return max(widget.fontMetrics().horizontalAdvance(text) for text in texts) + 2 * widget.margin() + 2
+
+        def button_width(widget, texts):
+            widget.ensurePolished()
+            option = QStyleOptionButton()
+            option.initFrom(widget)
+            widths = []
+            for text in texts:
+                option.text = text
+                content = QSize(option.fontMetrics.horizontalAdvance(text), option.fontMetrics.height())
+                widths.append(widget.style().sizeFromContents(QStyle.ContentsType.CT_PushButton,
+                                                              option, content, widget).width())
+            return max(widths)
+
+        widths = {
+            self.serial_caption: self.serial_caption.fontMetrics().horizontalAdvance("串口"),
+            self.port_combo: 110,
+            self.port_refresh_button: button_width(self.port_refresh_button, ("刷新",)),
+            self.connection_combo: 86,
+            self.connect_button: button_width(self.connect_button, ("连接设备", "断开连接")),
+            self.connection_status: label_width(self.connection_status, ("● 已连接", "○ 未连接")),
+            self.motor_status: label_width(self.motor_status, _TOPBAR_MOTOR_TEXTS),
+            self.log_toggle: button_width(self.log_toggle, ("终端",)),
+            self.stop_button: button_width(self.stop_button, ("STOP",)),
+        }
+        for widget, width in widths.items():
+            widget.setFixedSize(width, 40)
+        self.mode_status.reserve_width(170)
+        self.mode_status.setFixedWidth(170)
+        self.topbar.layout().invalidate()
 
     def _page(self, title, subtitle, scroll=True, actions=None, tabs=None):
         page = QWidget()
@@ -254,19 +491,50 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(*margins)
         layout.setSpacing(12)
         if tabs is None:
+            page_header = QWidget()
+            page_header.setFixedHeight(80)
+            header_row = QHBoxLayout(page_header)
+            header_row.setContentsMargins(0, 0, 0, 0)
+            header_row.setSpacing(12)
+            left = QWidget()
+            left.setMinimumWidth(0)
+            left.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            left.setFixedHeight(80)
+            header = QGridLayout(left)
+            header.setContentsMargins(0, 0, 0, 0)
+            header.setSpacing(4)
             heading = QLabel(title)
             heading.setObjectName("PageTitle")
+            description = _ElidedLabel()
+            description.setText(subtitle)
+            description.setObjectName("PageSubtitle")
+            description.setFixedHeight(22)
+            heading.setToolTip(description.toolTip())
+            heading.setAccessibleDescription(subtitle)
             if actions is None:
-                layout.addWidget(heading)
+                header.addWidget(heading, 0, 0)
+                header.addWidget(description, 1, 0)
+                header.setRowStretch(2, 1)
             else:
-                header = QHBoxLayout()
-                header.setSpacing(16)
-                header.addWidget(heading)
-                header.addLayout(actions, 1)
-                layout.addLayout(header)
-        description = hint(subtitle, "muted")
-        description.setObjectName("PageSubtitle")
-        layout.addWidget(description)
+                self._motion_header_left = left
+                self._motion_header_grid = header
+                self._motion_header_title = heading
+                self._motion_header_subtitle = description
+                self._motion_header_compact = None
+                self._motion_header_actions = actions
+                left.installEventFilter(self)
+            header_row.addWidget(left, 1)
+            slot = QWidget()
+            slot.setObjectName("OperationStatusAnchor")
+            slot.setFixedSize(430, 80)
+            slot.installEventFilter(self)
+            header_row.addWidget(slot)
+            layout.addWidget(page_header)
+            self._page_header_slots[page] = (page_header, slot)
+        else:
+            description = hint(subtitle, "muted")
+            description.setObjectName("PageSubtitle")
+            layout.addWidget(description)
         if scroll:
             area = QScrollArea()
             area.setWidgetResizable(True)
@@ -282,6 +550,71 @@ class MainWindow(QMainWindow):
             tabs.addTab(page, title)
         return content_layout if scroll else layout
 
+    def _schedule_header_fit(self):
+        if self._closed or self._header_fit_pending:
+            return
+        self._header_fit_pending = True
+        QTimer.singleShot(0, self._fit_page_header)
+
+    def _fit_page_header(self):
+        """Place one shared status card in the current page's reserved header."""
+        self._header_fit_pending = False
+        if self._closed:
+            return
+        anchors = self._page_header_slots.get(self.pages.currentWidget())
+        if anchors is None:
+            return
+        header, slot = anchors
+        desired = (self.motion_controls_scroll.width() if hasattr(self, "motion_controls_scroll")
+                   else 430)
+        width = max(395, min(545, desired, header.width() - 442))
+        if slot.width() != width:
+            slot.setFixedWidth(width)
+            header.layout().activate()
+        position = slot.mapTo(self.centralWidget(), QPoint(0, 0))
+        self.operation_panel.setGeometry(QRect(position, slot.size()))
+        self.operation_panel.show()
+        if self.operation_panel.details_button.isChecked():
+            self.operation_panel.reposition_overlay()
+            self.operation_panel.details_overlay.raise_()
+        else:
+            self.operation_panel.raise_()
+        self._fit_motion_header()
+
+    def _fit_motion_header(self):
+        if not hasattr(self, "_motion_header_left"):
+            return
+        compact = self._motion_header_left.width() < 1120
+        if compact == self._motion_header_compact:
+            return
+        self._motion_header_compact = compact
+        grid = self._motion_header_grid
+        system, modes = self._motion_header_actions
+        for widget in (self._motion_header_title, system, modes, self._motion_header_subtitle):
+            grid.removeWidget(widget)
+        for column in range(3):
+            grid.setColumnStretch(column, 0)
+        grid.addWidget(self._motion_header_title, 0, 0)
+        if compact:
+            grid.addWidget(modes, 0, 1)
+            grid.addWidget(system, 1, 0, 1, 2)
+            grid.setColumnStretch(1, 1)
+        else:
+            grid.addWidget(system, 0, 1)
+            grid.addWidget(modes, 0, 2)
+            grid.addWidget(self._motion_header_subtitle, 1, 0, 1, 3)
+            grid.setColumnStretch(2, 1)
+        self._motion_header_subtitle.setVisible(not compact)
+        for control, full, short in zip(self.motion_system_buttons, self._motion_system_labels,
+                                        ("启动", "失能", "回零", "休息", "置零校准")):
+            control.setText(short if compact else full)
+            control.setAccessibleName(full)
+        for toolbar in (system, modes):
+            toolbar.setProperty("compact", compact)
+            for control in toolbar.findChildren(QWidget):
+                control.style().unpolish(control)
+                control.style().polish(control)
+
     @staticmethod
     def _group(title):
         group = QGroupBox(title)
@@ -290,7 +623,10 @@ class MainWindow(QMainWindow):
         return group, layout
 
     def _build_motion_page(self):
-        row = QHBoxLayout()
+        system_toolbar = QWidget()
+        system_toolbar.setObjectName("MotionSystemToolbar")
+        row = QHBoxLayout(system_toolbar)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
         self.motion_system_buttons = []
         for text, callback, role in (
@@ -301,8 +637,16 @@ class MainWindow(QMainWindow):
             ("置零 / 校准", self._calibration_command, "calibration"),
         ):
             control = button(text, callback, role)
+            control.setToolTip(text)
             row.addWidget(control)
             self.motion_system_buttons.append(control)
+        self._motion_system_labels = [control.text() for control in self.motion_system_buttons]
+        mode_toolbar = QWidget()
+        mode_toolbar.setObjectName("MotionModeToolbar")
+        row = QHBoxLayout(mode_toolbar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        self.motion_system_buttons[1].setProperty("operationOverlaySafety", True)
         self.mode_combo = self._combo(("1 · SEQ 顺序", "2 · INT 打断", "3 · TRJ 连续", "4 · TUN 扫频"), 1)
         self.mode_combo.setToolTip("TUN 使用固件内置扫频激励；切换前确认各轴运动空间")
         row.addWidget(self.mode_combo)
@@ -311,7 +655,8 @@ class MainWindow(QMainWindow):
         self.mode_query_button = button("查询", self.controller._query_command_mode)
         row.addWidget(self.mode_query_button)
         row.addStretch()
-        layout = self._page("运动控制", "编辑目标与设备实际位置分别管理；三维预览不会自动发送运动指令。", False, row)
+        layout = self._page("运动控制", "编辑目标与设备实际位置分别管理；三维预览不会自动发送运动指令。",
+                            False, (system_toolbar, mode_toolbar))
         self.motion_page = self.pages.widget(0)
         layout.setContentsMargins(20, 14, 20, 14)
         layout.setSpacing(8)
@@ -390,6 +735,7 @@ class MainWindow(QMainWindow):
         self.motion_controls.setMinimumWidth(395)
         self.motion_controls.setMaximumWidth(545)
         controls_layout = QVBoxLayout(self.motion_controls)
+        controls_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(8)
         input_row = QHBoxLayout()
@@ -525,6 +871,9 @@ class MainWindow(QMainWindow):
         self._motion_axis_scrolls = (joint_scroll, pose_scroll)
         self.motion_input_stack.addWidget(self.motion_tabs)
         self.gamepad_panel = GamepadPanel(self._gamepad_config)
+        for action in ("stop", "disable"):
+            self.gamepad_panel.action_buttons[action].setProperty("operationOverlaySafety", True)
+        self.gamepad_panel.scroll.setMinimumHeight(140 + 2 * self.gamepad_panel.scroll.frameWidth())
         self.gamepad_panel.action_requested.connect(self._gamepad_action)
         self.gamepad_panel.config_requested.connect(self._open_gamepad_settings)
         self.gamepad_panel.tuning_requested.connect(self._gamepad_apply_tuning)
@@ -535,11 +884,24 @@ class MainWindow(QMainWindow):
         self._build_quick_points(controls_layout)
         controls_layout.addStretch()
         self.motion_controls.installEventFilter(self)
-        self.motion_splitter.addWidget(self.motion_controls)
+        # Expanded status explanations must not squeeze command buttons below
+        # their text height on a small display. Keep the column readable and
+        # scroll it when the available height is smaller than its minimum.
+        self.motion_controls_scroll = QScrollArea()
+        self.motion_controls_scroll.setObjectName("MotionControlsScroll")
+        self.motion_controls_scroll.setWidgetResizable(True)
+        self.motion_controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.motion_controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.motion_controls_scroll.setMinimumWidth(395)
+        self.motion_controls_scroll.setMaximumWidth(545)
+        self.motion_controls_scroll.setWidget(self.motion_controls)
+        self.motion_controls_scroll.installEventFilter(self)
+        self.motion_splitter.addWidget(self.motion_controls_scroll)
         self.motion_splitter.setStretchFactor(0, 3)
         self.motion_splitter.setStretchFactor(1, 1)
         self.motion_splitter.setSizes((760, 430))
         layout.addWidget(self.motion_splitter, 1)
+        self._schedule_header_fit()
 
     def _schedule_motion_fit(self):
         if self._closed or getattr(self, "_motion_fit_pending", False):
@@ -673,6 +1035,7 @@ class MainWindow(QMainWindow):
         if self._gamepad_settings_dialog is not None:
             self._gamepad_settings_dialog.set_reader_status(status)
         self._apply_gamepad_conflicts()
+        self._refresh_operation_status()
 
     def _gamepad_state_changed(self, state):
         if self._closed:
@@ -681,6 +1044,7 @@ class MainWindow(QMainWindow):
         self.gamepad_panel.set_session_state(state)
         self._sync_feedback_display()
         self._apply_gamepad_conflicts()
+        self._refresh_operation_status()
         if self._gamepad_close_pending and not self._gamepad_locked():
             self._finish_gamepad_close()
 
@@ -1084,6 +1448,7 @@ class MainWindow(QMainWindow):
         row.addWidget(hint("0 = ALL · 1–6 关节 · 7 地轨 · 8 夹爪"), 1)
         row.addWidget(button("读取全部参数", self._query_all_parameters))
         box.addLayout(row)
+        self.motor_feedback_result = self._feedback_result_label("motor", box)
         layout.addWidget(node_group)
         pid_group, box = self._group("PID · 保存直接写 EEPROM")
         row = QHBoxLayout()
@@ -1169,6 +1534,7 @@ class MainWindow(QMainWindow):
             saves[kind] = FieldAdapter(save)
             toolbar.addWidget(save)
             box.addLayout(toolbar)
+            self._feedback_result_label("calibration" if kind == "CAL" else "protection", box)
             box.addWidget(hint("J8 接触仅用于校准，不参与普通堵转保护。" if kind == "CAL" else "J1–J6 回退使用角度；J7 回退使用毫米。ALL 展开 J1–J7。"))
             area = QScrollArea()
             area.setWidgetResizable(True)
@@ -1270,6 +1636,7 @@ class MainWindow(QMainWindow):
         row.addWidget(button("擦除夹爪配置", lambda: self._hand_config("ERASE")))
         box.addLayout(row)
         layout.addWidget(self.hand_advanced)
+        self.gripper_feedback_result = self._feedback_result_label("gripper", layout)
         layout.addStretch()
 
     def _build_rgb_page(self):
@@ -1281,6 +1648,8 @@ class MainWindow(QMainWindow):
         self.rgb_window.visibility_changed.connect(lambda *_: self._sync_rgb_preview_activity())
         self.rgb_window.editor_closed.connect(self._rgb_window_closed)
         layout = self.rgb_window.content_layout
+        self.rgb_feedback_notice = ActionFeedbackNotice()
+        layout.addWidget(self.rgb_feedback_notice)
         layout.addWidget(hint("灯效在主界面三维模型中预览。编辑不发送；应用改 RAM，保存整组后掉电保持。", "muted"))
         self.rgb_status = hint("尚未回读 RGB 配置。", "muted")
         # Keep complete diagnostics in the existing field and the summary tooltip.
@@ -1288,9 +1657,7 @@ class MainWindow(QMainWindow):
         self.rgb_detail_label.hide()
         self._bind("_rgb_status_var", self.rgb_detail_label)
         layout.addWidget(self.rgb_status)
-        self.rgb_save_status = hint("", "warning")
-        self.rgb_save_status.hide()
-        layout.addWidget(self.rgb_save_status)
+        self.rgb_save_status = self._feedback_result_label("rgb", layout)
         row = QHBoxLayout()
         for text, command in (("渐开", "!RGB_ON"), ("渐关", "!RGB_OFF"),
                               ("启用自动联动", "!RGB_AUTO 1"), ("关闭自动联动", "!RGB_AUTO 0"),
@@ -1724,8 +2091,10 @@ class MainWindow(QMainWindow):
                             if save_stage == "uncertain" else
                             "正在确认设备状态，等待回读；请勿重复保存。" if save_stage == "preparing" else
                             "RGB 保存中，查询已暂停；请等待保存结果。")
-        self.rgb_save_status.setText(save_message)
-        self.rgb_save_status.setVisible(bool(save_message))
+        # Older snapshots/tests still carry a save result. Explicit action
+        # feedback takes precedence, so background RGB reads cannot overwrite it.
+        if not self._feedback_last.get("rgb") and save_message:
+            self.rgb_save_status.setText(save_message)
         supported = snapshot.get("motion_supported", False)
         self.rgb_motion_apply.setEnabled(not snapshot["connected"] or supported)
         if not snapshot["connected"]:
@@ -2167,6 +2536,13 @@ class MainWindow(QMainWindow):
             self._gamepad_focus_trace_timer.start(0)
 
     def eventFilter(self, watched, event):
+        if watched is getattr(self, "topbar", None) and event.type() == QEvent.Type.Resize:
+            self._schedule_topbar_fit()
+        if event.type() == QEvent.Type.Resize and (watched is getattr(self, "pages", None) or
+                watched is getattr(self, "_motion_header_left", None) or
+                watched is getattr(self, "motion_controls_scroll", None) or
+                watched.objectName() == "OperationStatusAnchor"):
+            self._schedule_header_fit()
         if not self._closed and not self._building:
             # Window focus is diagnostic only: gamepad control may continue
             # while another application is foreground. Explicit stops remain separate.
@@ -2243,10 +2619,7 @@ class MainWindow(QMainWindow):
         self.connection_combo.setEnabled(not connected)
         self.port_combo.setEnabled(not connected)
         mode = state.get("cmdmode", getattr(self.controller, "current_cmdmode", None))
-        if mode == 7:
-            self.mode_status.setText("模式 7 · 通信诊断 / 待退出 · 普通运动不可用")
-        else:
-            self.mode_status.setText("模式 " + {1: "SEQ", 2: "INT", 3: "TRJ", 4: "TUN", 5: "TRQ", 6: "SRV"}.get(mode, "—") + " · 主控执行")
+        self.mode_status.setText(_TOPBAR_MODE_TEXTS.get(mode, _TOPBAR_MODE_TEXTS[None]))
         selector_mode = mode if connected else self.controller.cartesian.preferred_mode
         if selector_mode in (1, 2, 3, 4):
             with QSignalBlocker(self.mode_combo):
@@ -2291,8 +2664,68 @@ class MainWindow(QMainWindow):
                                        "实际位置未回读 / 已过期 · 夹爪显示目标开度")
         self._sync_rgb_preview_activity()
         self._apply_gamepad_conflicts()
+        self._refresh_operation_status(state)
         if self._gamepad_close_pending and not self._gamepad_locked():
             self._finish_gamepad_close()
+
+    def _refresh_operation_status(self, state=None):
+        """Explain confirmed facts; leave command dispatch and enablement alone."""
+        if self._closed or self._building:
+            return
+        facts = self.controller.state()
+        if state:
+            facts.update(state)
+        operation = facts.get("operation") or {}
+        actions = operation_actions(facts, self.controller.gamepad.state())
+        self.operation_panel.set_status(operation, actions)
+
+        controls = {
+            "start": self.motion_system_buttons[0],
+            "disable": self.motion_system_buttons[1],
+            "stop": self.stop_button,
+            "movej": self.movej_send_button,
+            "movel": self.movel_send_button,
+            "gamepad": self.gamepad_panel.claim_button,
+            "rgb_save": self.rgb_save_button,
+        }
+        for key, control in controls.items():
+            if control not in self._operation_base_tooltips:
+                self._operation_base_tooltips[control] = control.toolTip()
+            condition = actions[key]
+            lines = [self._operation_base_tooltips[control], condition["reason"]]
+            if condition["next_step"]:
+                lines.append("下一步：" + condition["next_step"])
+            description = "\n".join(line for line in lines if line)
+            # Accessible descriptions and the independent conditions panel also
+            # remain readable when a button's parent is disabled.
+            control.setAccessibleDescription(description)
+            control.setToolTip(description)
+
+        motor = facts.get("motor_enabled")
+        locked = facts.get("stop_locked", False)
+        calibrating = facts.get("calibration_busy", False)
+        title = ("校准进行中" if calibrating else "保护 / 软停锁定" if locked else
+                 "● 已使能" if motor is True else "● 已失能" if motor is False else "电机状态未知")
+        busy = bool(locked or calibrating)
+        kind, phase = operation.get("kind"), operation.get("phase")
+        pending = phase in ("queued", "sending", "waiting", "waiting_confirmation", "uncertain")
+        if kind == "protection":
+            title, busy = "保护锁定", True
+        elif kind == "start" and pending:
+            title = "使能结果待确认" if phase == "uncertain" else "使能请求待发送" if phase == "queued" else "使能确认中"
+            busy = True
+        elif kind == "stop" and pending:
+            title, busy = ("STOP 等待发送" if phase == "queued" else "停止确认中"), True
+        elif kind == "stop" and phase == "locked":
+            title, busy = "STOP 已确认锁定", True
+        elif kind == "disable" and pending:
+            title, busy = "失能确认中", True
+        elif kind == "motion" and phase in ("accepted", "executing"):
+            title, busy = ("运动执行中" if phase == "executing" else "运动已受理"), True
+        elif kind == "motion" and phase == "observed_reached":
+            title, busy = "回读已到目标", False
+        self.motor_status.setText(title)
+        self._pill(self.motor_status, motor is True and not busy, busy)
 
     def _actual_pose(self, values):
         # set_actual_pose atomically marks known/fresh and sends one view update.
@@ -2679,12 +3112,17 @@ class MainWindow(QMainWindow):
     def _hand_config(self, key):
         if self.connection_combo.currentText() != "USB":
             self.controller.log("夹爪高级配置仅支持 USB", "WARN")
+            self.controller.notify_action("gripper", "save", key, "blocked",
+                                          "夹爪配置未发送：高级配置仅支持 USB。", "切换为 USB 连接后重试。")
             return
         if not getattr(self.controller, "_motor_state_known", False) or getattr(self.controller, "_motor_enabled", True):
             self.controller.log("请先 DISABLE 并等待已失能确认，再保存夹爪配置。", "WARN")
+            self.controller.notify_action("gripper", "save", key, "blocked",
+                                          "夹爪配置未保存：尚未确认失能。", "点击失能，等待设备确认后重试。")
             return
         if key == "ERASE":
             if QMessageBox.question(self, "擦除夹爪配置", "擦除夹爪电机 EEPROM 配置并恢复默认参数？") != QMessageBox.StandardButton.Yes:
+                self.controller.notify_action("gripper", "erase", key, "cancelled", "已取消擦除夹爪配置。")
                 return
             command = "!HAND_ERASE"
         elif key == "ONBOOT":
@@ -2993,6 +3431,7 @@ class MainWindow(QMainWindow):
         stylesheet = Path(path).read_text(encoding="utf-8")
         stylesheet = stylesheet.replace("{{ICONS}}", resource_path("icons").as_posix())
         QApplication.instance().setStyleSheet(stylesheet)
+        self._schedule_topbar_fit()
         self._schedule_motion_fit()
         self._schedule_viewer_toolbar_fit()
         self.viewer.set_theme(theme)
@@ -3092,6 +3531,9 @@ class MainWindow(QMainWindow):
         if not self._closed:
             self._suspend_gamepad("关闭窗口，手柄输入已停止")
             self._closed = True
+            self.action_feedback_notice.clear_event()
+            self.rgb_feedback_notice.clear_event()
+            self._operation_timer.stop()
             self._gamepad_focus_trace_timer.stop()
             self._gamepad_focus_trace_events = []
             self._gamepad_close_timer.stop()

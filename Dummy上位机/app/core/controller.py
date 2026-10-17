@@ -12,6 +12,8 @@ from app.core.business import RobotBusiness
 from app.core.fields import ValueField, ListField
 from app.core.scheduler import QtScheduler
 from app.core.rgb_save import RGBSaveSession
+from app.core.operation_tracker import OperationTracker
+from app.core.action_feedback import ActionFeedback, configuration_action
 from app.core.gamepad_session import GamepadSession
 from app.core.cartesian_session import CartesianSession
 from app.core.cartesian_backend import configured_tool, point_tool, world_target, native_command, tcp_command
@@ -38,6 +40,7 @@ class RobotController(QObject, RobotBusiness):
     rgb_changed = Signal(dict)
     fields_changed = Signal()
     ports_changed = Signal(list)
+    feedback_event = Signal(dict)  # Explicit user action feedback; never telemetry.
 
     def __init__(self, parent=None, serial_factory=None, scheduler=None):
         super().__init__(parent)
@@ -52,6 +55,8 @@ class RobotController(QObject, RobotBusiness):
         self._tx_queue = queue.Queue()
         self._tx_generation = 0
         self._control_owner = "ui"
+        self.operations = OperationTracker()
+        self.action_feedback = ActionFeedback(self.feedback_event.emit, clock=lambda: time.monotonic())
         self._wire_admitted = queue.Queue(maxsize=256)
         self.is_connected = False
         self.port_name = ""
@@ -73,6 +78,7 @@ class RobotController(QObject, RobotBusiness):
         self.actual_pose = None
         self.last_actual_at = None
         self._actual_received_at = None
+        self._actual_feedback_sequence = 0
         self.actual_cartesian_pose = None
         self.last_actual_cartesian_at = None
         self.stored_positions = []
@@ -169,6 +175,14 @@ class RobotController(QObject, RobotBusiness):
     def log(self, message, tag="INFO"):
         self.log_message.emit(str(message), tag)
 
+    def notify_action(self, scope, operation, target="", phase="blocked", message="",
+                      next_step="", evidence="local", task_id=None):
+        return self.action_feedback.notify(scope, operation, target, phase, message,
+                                           next_step, evidence, task_id)
+
+    def feedback_snapshot(self, scope=None):
+        return self.action_feedback.snapshot(scope)
+
     def wire_history(self):
         transport = getattr(self, '_transport', None)
         return transport.wire_log.snapshot() if transport else getattr(self, '_last_wire_history', '')
@@ -180,7 +194,7 @@ class RobotController(QObject, RobotBusiness):
             status = str(self.lbl_motor_state.get())
         except (AttributeError, TypeError):
             pass
-        return {
+        state = {
             "cartesian_backend": self.cartesian.backend.value if hasattr(self, "cartesian") else "firmware",
             "cartesian_busy": getattr(getattr(self, "cartesian", None), "busy", False), "cartesian_stage": getattr(getattr(self, "cartesian", None), "stage", "idle"),
             "cartesian_message": getattr(getattr(self, "cartesian", None), "message", "主控逆解"),
@@ -196,6 +210,8 @@ class RobotController(QObject, RobotBusiness):
             "actual_stale": (not self.is_connected or self.last_actual_at is None or
                              now - self.last_actual_at > max(1.5, 3 / self._poll_hz)),
             "last_actual_at": self.last_actual_at,
+            "actual_received_at": self._actual_received_at,
+            "actual_feedback_sequence": self._actual_feedback_sequence,
             "polling_enabled": self._poll_enabled, "polling_hz": self._poll_hz,
             "polling_paused": self._position_polling_paused(),
             "actual_pose": self.actual_pose,
@@ -203,12 +219,29 @@ class RobotController(QObject, RobotBusiness):
             "parameter_busy": self._parameter_request is not None,
             "parameter_task": (self._parameter_request["command"] if self._parameter_request else None),
             "rgb_save_busy": self.rgb_save.active,
+            "native_tcp": getattr(getattr(self, "cartesian", None), "native_tcp", False),
+            "stop_confirmed": getattr(self, "_stop_confirmed", False),
+            "mode_request_busy": self._mode_request is not None or self._mode_pending is not None,
+            "mode_pending": self._mode_pending,
+            "position_sync_busy": bool(self._position_request and self._position_request.get("source") != "telemetry"),
+            "rgb_save_stage": self.rgb_save.stage,
+            "rgb_save_message": self.rgb_save.message,
         }
+        gamepad = self.gamepad.state() if hasattr(self, "gamepad") else {}
+        state["operation"] = self.operations.snapshot({**state, "gamepad": gamepad,
+            "rgb_save": {"active": self.rgb_save.active, "stage": self.rgb_save.stage,
+                         "message": self.rgb_save.message, "started_at": getattr(self.rgb_save, "started_at", None)}})
+        return state
 
     def _emit_state(self):
+        self.action_feedback.expire()
         state = self.state()
         visual = {key: value for key, value in state.items()
-                  if key not in ('last_actual_at', 'actual_pose', 'actual_cartesian_pose')}
+                  if key not in ('last_actual_at', 'actual_pose', 'actual_cartesian_pose',
+                                 'actual_received_at', 'actual_feedback_sequence')}
+        # The dedicated 250 ms presentation timer owns elapsed-time refresh.
+        # Telemetry must not turn the whole-window state signal into a clock.
+        visual["operation"] = {key: value for key, value in state["operation"].items() if key != "elapsed_s"}
         if visual != getattr(self, '_last_visual_state', None):
             self._last_visual_state = deepcopy(visual)
             self.state_changed.emit(state)
@@ -480,6 +513,8 @@ class RobotController(QObject, RobotBusiness):
             self.log(f"连接失败：{error}", "ERROR")
             return False
         self._connection_id += 1
+        self.operations.reset(self._connection_id)
+        self.action_feedback.new_connection()
         self._reset_system_pose_tracking()
         self.connection_type = connection_type.upper()
         self.serial_port = port_object
@@ -499,6 +534,7 @@ class RobotController(QObject, RobotBusiness):
         self.actual_pose = None
         self.last_actual_at = None
         self._actual_received_at = None
+        self._actual_feedback_sequence = 0
         self.actual_cartesian_pose = self.last_actual_cartesian_at = None
         # The default GET below publishes only after its in-flight ledger is
         # established; UI monitoring listeners cannot enqueue a second GET.
@@ -528,8 +564,11 @@ class RobotController(QObject, RobotBusiness):
         return True
 
     def disconnect_port(self):
+        self.action_feedback.invalidate(self._tx_generation, self._connection_id, disconnected=True)
+        self.rgb_save.feedback_disconnected()
         self.cartesian.native_tcp = False
         self._connection_id += 1  # Ignore callbacks from a previous connection.
+        self.operations.reset(self._connection_id)
         self.is_connected = False
         self.gamepad.disconnected()
         self._poll_timer.stop()
@@ -581,6 +620,8 @@ class RobotController(QObject, RobotBusiness):
             if (admitted_command != command or admitted_connection != connection_id or
                     generation != self._tx_generation):
                 return
+            self.operations.written(command, generation, connection_id)
+            self.action_feedback.written(command, generation, connection_id)
             request = self._position_request
             if request and command == ("#GETJPOS" if request["kind"] == "j" else "#GETLPOS"):
                 if request.get("source") == "gamepad":
@@ -590,6 +631,7 @@ class RobotController(QObject, RobotBusiness):
             self.cartesian.invalidate_acceleration(command)
             self.cartesian.command_written(command, generation, connection_id)
             self.gamepad.command_written(command, generation, connection_id)
+            self._emit_state()
 
     @Slot(str, int)
     def _on_transport_failure(self, message, connection_id):
@@ -645,6 +687,8 @@ class RobotController(QObject, RobotBusiness):
                 self._wire_admitted.put_nowait((generation, command, self._connection_id))
             except queue.Full:
                 return False
+            self.operations.admitted(command, generation, self._connection_id)
+            self.action_feedback.admitted(command, generation, self._connection_id)
         return allowed
 
     @staticmethod
@@ -662,21 +706,31 @@ class RobotController(QObject, RobotBusiness):
 
     def send_cmd(self, command, sequence=False, source="ui"):
         """Only command dispatch path; STOP invalidates every pending generation."""
-        if not self.is_connected or self.serial_port is None:
-            self.log("未连接串口", "WARN")
-            return False
         command = str(command).strip()
+        feedback_spec = configuration_action(command) if source == "ui" else None
+        feedback_id = None
+
+        def reject(message, tag="WARN", phase="blocked"):
+            self.log(message, tag)
+            if feedback_spec is not None:
+                self.notify_action(feedback_spec["scope"], feedback_spec["operation"],
+                                   feedback_spec["target"], phase, message,
+                                   "请根据提示调整后重试。", task_id=feedback_id)
+
+        if not self.is_connected or self.serial_port is None:
+            reject("未连接串口", "WARN")
+            return False
         if not command or any(char in command for char in ("\r", "\n", "\x00")):
-            self.log("一次只能发送一条非空 ASCII 指令", "WARN")
+            reject("一次只能发送一条非空 ASCII 指令", "WARN")
             return False
         if not command.isascii() or len(command.encode()) > 256:
-            self.log("指令须为 ASCII 且长度不能超过 256 字节", "WARN")
+            reject("指令须为 ASCII 且长度不能超过 256 字节", "WARN")
             return False
         if source not in ("ui", "gamepad", "telemetry", "cartesian"):
-            self.log("未知指令来源", "WARN")
+            reject("未知指令来源", "WARN")
             return False
         if self.rgb_save.active and command not in RGBSaveSession.SAFETY_COMMANDS:
-            self.log("RGB 保存事务尚未结束；后台查询已暂停，可断开连接或发送 STOP / DISABLE", "WARN")
+            reject("RGB 保存事务尚未结束；后台查询已暂停，可断开连接或发送 STOP / DISABLE", "WARN")
             return False
         shared_joint_poll = (source == "telemetry" and
                              self._is_joint_telemetry_request(self._tx_generation, command))
@@ -684,75 +738,75 @@ class RobotController(QObject, RobotBusiness):
                 not capabilities.diagnostic(command) and command not in ("!STOP", "!DISABLE")):
             # Hand position remains independent during gamepad ownership.
             if not (source == "gamepad" and command.startswith("!HAND_POS ")):
-                self.log("诊断或模式恢复处理中，请等待完成或 STOP", "WARN")
+                reject("诊断或模式恢复处理中，请等待完成或 STOP", "WARN")
                 return False
         if self._is_position_command(command) and (source == "gamepad" or
                 (self._control_owner == "gamepad" and not
                  (source == "telemetry" and self._is_joint_telemetry_request(self._tx_generation, command)))):
-            self.log("手柄控制中仅使用共享关节轮询更新实际模型，请勿手动同步编辑目标", "WARN")
+            reject("手柄控制中仅使用共享关节轮询更新实际模型，请勿手动同步编辑目标", "WARN")
             return False
         if source == "gamepad" and not self.gamepad.claimed and command not in ("!STOP", "!DISABLE"):
-            self.log("手柄尚未接管，指令未发送", "WARN")
+            reject("手柄尚未接管，指令未发送", "WARN")
             return False
         if self._control_owner == "gamepad" and source == "ui" and command not in ("!STOP", "!DISABLE"):
             verb = command.split()[0]
             readonly = capabilities.diagnostic(command) or verb in {"#GET_PID", "#GETJACC", "#GETI", "#STACK"}
             if not readonly:
-                self.log("手柄控制中，请先释放控制；STOP / DISABLE 始终可用", "WARN")
+                reject("手柄控制中，请先释放控制；STOP / DISABLE 始终可用", "WARN")
                 return False
         if not self.supports(command):
-            self.log(f"当前 UART4 固件不支持 {command.split()[0]}；请使用 USB", "WARN")
+            reject(f"当前 UART4 固件不支持 {command.split()[0]}；请使用 USB", "WARN")
             return False
         if (self._parameter_request is not None and command not in ("!STOP", "!DISABLE") and
                 not capabilities.diagnostic(command)):
-            self.log("堵转/校准参数读写中，请等待完整回执；可发送 STOP 或 DISABLE", "WARN")
+            reject("堵转/校准参数读写中，请等待完整回执；可发送 STOP 或 DISABLE", "WARN")
             return False
         if (self.connection_type == "UART4" and self._motor_state_known and not self._motor_enabled and
                 command in ("#GETJPOS", "#GETLPOS", "#GETRAILPOS", "#STACK")):
-            self.log("当前 UART4 固件失能时不处理位置/栈查询；实际显示暂停，请使用 USB 查询", "WARN")
+            reject("当前 UART4 固件失能时不处理位置/栈查询；实际显示暂停，请使用 USB 查询", "WARN")
             return False
         try:
             self._validate_command(command)
             self._validate_rgb_extension_command(command)
         except ValueError as error:
-            self.log(str(error), "WARN")
+            reject(str(error), "WARN", phase="invalid")
             return False
         if self._seq_active and not sequence and (command.startswith((">", "&", "@", "#CMDMODE")) or
                                                   command in ("!HOME", "!RESET")):
-            self.log("顺序发送中，请等待完成或先 STOP", "WARN")
+            reject("顺序发送中，请等待完成或先 STOP", "WARN")
             return False
         diagnostic = capabilities.diagnostic(command)
         if self._calibration_busy and not diagnostic and command not in ("!STOP", "!DISABLE"):
-            self.log("校准及保存中，只接受 STOP、DISABLE 和保护快照查询", "WARN")
+            reject("校准及保存中，只接受 STOP、DISABLE 和保护快照查询", "WARN")
             return False
         if command.startswith('#CMDMODE'):
             if command not in ('#CMDMODE 1', '#CMDMODE 2', '#CMDMODE 3', '#CMDMODE 4', '#CMDMODE 7'):
-                self.log('普通模式指令须为 #CMDMODE 1～4；模式 7 仅用于独立诊断', 'WARN')
+                reject('普通模式指令须为 #CMDMODE 1～4；模式 7 仅用于独立诊断', 'WARN')
                 return False
             mode = int(command[-1])
             if mode == 7 or self.current_cmdmode == 7:
                 return self.cartesian.select_mode(mode)
             if mode not in (1, 2, 3, 4):
-                self.log('普通运动仅支持模式 1～4；模式 7 仅用于独立诊断', 'WARN')
+                reject('普通运动仅支持模式 1～4；模式 7 仅用于独立诊断', 'WARN')
                 return False
         if self._stop_locked and not diagnostic and command not in ("!STOP", "!START", "!DISABLE"):
-            self.log("保护锁定中，请 START 或 DISABLE；STOP 可中断保护动作", "WARN")
+            reject("保护锁定中，请 START 或 DISABLE；STOP 可中断保护动作", "WARN")
             return False
         if command.startswith("#ENC_CAL"):
             if re.fullmatch(r"#ENC_CAL[ \t]+[1-8]", command) is None:
-                self.log("磁编码器校准只支持单个节点 1～8", "WARN")
+                reject("磁编码器校准只支持单个节点 1～8", "WARN")
                 return False
             if self._seq_active or self._acc_sync_waiting or not self._motor_state_known or self._motor_enabled:
-                self.log("请结束任务并失能，等待 Disabled ok 后校准磁编码器", "WARN")
+                reject("请结束任务并失能，等待 Disabled ok 后校准磁编码器", "WARN")
                 return False
         if RGBSaveSession.is_save(command) or command.startswith(("#STALL_SAVE", "#CAL_SAVE")):
             if (not self._motor_state_known or self._motor_enabled or self._seq_active or
                     self._acc_sync_waiting):
-                self.log("写入 EEPROM 需要结束任务并等待 Disabled ok", "WARN")
+                reject("写入 EEPROM 需要结束任务并等待 Disabled ok", "WARN")
                 return False
         if RGBSaveSession.is_save(command):
             if self._parameter_request is not None or self._acc_sync_waiting or self.cartesian.busy:
-                self.log("请等待现有参数 / 诊断任务完成后保存 RGB", "WARN")
+                reject("请等待现有参数 / 诊断任务完成后保存 RGB", "WARN")
                 return False
             return self.rgb_save.begin(command)
         if command == "!CALIBRATION":
@@ -765,7 +819,7 @@ class RobotController(QObject, RobotBusiness):
         if command in ("!STOP", "!DISABLE"):
             wait_for_flash = not self.rgb_save.ready_to_write(self._tx_generation, command)
             if wait_for_flash:
-                self.log("RGB 正在写入 Flash；已记录停止 / 失能请求，设备确认后优先发送。", "WARN")
+                reject("RGB 正在写入 Flash；已记录停止 / 失能请求，设备确认后优先发送。", "WARN")
             if source != "gamepad":
                 self.gamepad.external_stop(command)
             self._cancel_motion_for_stop()
@@ -779,18 +833,23 @@ class RobotController(QObject, RobotBusiness):
         if self._reject_plain_motion_in_stream_mode(command):
             return False
         if command.startswith(("~S", "!STREAM_")):
-            self.log("透传会话与恒定曲线仅由独立诊断入口发送", "WARN")
+            reject("透传会话与恒定曲线仅由独立诊断入口发送", "WARN")
             return False
+        if feedback_spec is not None:
+            feedback_id = self.action_feedback.requested(command, self._tx_generation, self._connection_id)
         parameter_spec = self._parameter_spec(command)
         if parameter_spec is not None:
+            parameter_spec["feedback_id"] = feedback_id
             self._begin_parameter_request(parameter_spec)
         try:
             self._tx_queue.put((self._tx_generation, command))
         except Exception as error:
             if parameter_spec is not None:
                 self._finish_parameter_request(False, "指令入队失败")
-            self.log(f"指令入队失败：{error}", "ERROR")
+            self.action_feedback.finish(feedback_id, False, "指令入队失败")
+            reject(f"指令入队失败：{error}", "ERROR")
             return False
+        self.operations.requested(command, self._tx_generation, self._connection_id, source)
         self._track_system_pose_command(command)
         if command in ("!HOME", "!RESET"):
             kind = command[1:]
@@ -1012,6 +1071,7 @@ class RobotController(QObject, RobotBusiness):
         self._position_request = None
         self._position_token += 1
         self._finish_parameter_request(False, "参数任务已被停止或断连取消")
+        self.action_feedback.invalidate(self._tx_generation, self._connection_id)
         if hasattr(self, "gamepad"):
             self.gamepad.controller_cancelled()
 
@@ -1103,6 +1163,14 @@ class RobotController(QObject, RobotBusiness):
         return values
 
     def _process_rx_line(self, line, received_at=None):
+        observed_generation = self._tx_generation
+        observed_at = self.cartesian.clock()
+        receipt_at = (received_at if received_at is not None and math.isfinite(received_at) and
+                      received_at <= observed_at else observed_at)
+        self.operations.receive(line, observed_generation, self._connection_id,
+                                feedback_sequence=self._actual_feedback_sequence,
+                                feedback_after=receipt_at)
+        self.action_feedback.receive(line, observed_generation, self._connection_id)
         self.rgb_save.activity(line)
         self._handle_parameter_task_reply(line)
         # A seven-value pose is unambiguously joint+rail in firmware_new.
@@ -1149,6 +1217,7 @@ class RobotController(QObject, RobotBusiness):
             accepted = self.cartesian.update_feedback(nums, stamp)
             self.actual_pose = list(nums)
             self._actual_received_at = stamp
+            self._actual_feedback_sequence += 1
             self.last_actual_at = time.time()-age
             self.actual_pose_changed.emit(list(nums))
             request = self._position_request
@@ -1180,6 +1249,8 @@ class RobotController(QObject, RobotBusiness):
                     self.log("实际笛卡尔位姿已同步到编辑目标")
         before_id = self._seq_motion_id
         super()._process_rx_line(line)
+        if line == "Start pending":
+            self.operations.carry_start_generation(observed_generation, self._tx_generation)
         self.cartesian.handle_line(line)
         self.gamepad.handle_line(line)
         self._handle_system_pose_receipt(line)
@@ -1259,6 +1330,8 @@ class RobotController(QObject, RobotBusiness):
             self.log(f"{request['kind']}_{request['operation']} 完整回执已确认")
         else:
             self.log(detail, "WARN")
+        self.action_feedback.finish(request.get("feedback_id"), success, detail,
+                                    uncertain=("超时" in detail or "取消" in detail))
 
     def _handle_parameter_task_reply(self, line):
         request = self._parameter_request

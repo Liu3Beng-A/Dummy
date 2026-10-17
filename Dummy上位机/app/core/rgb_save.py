@@ -18,6 +18,7 @@ class RGBSaveSession:
         self.message = ""
         self.command = None
         self.admitted_at = None
+        self.feedback_task = None
 
     @property
     def active(self):
@@ -37,6 +38,7 @@ class RGBSaveSession:
             self.timer = None
             self.stage, self.message, self.command = "idle", "", None
             self.admitted_at = None
+            self.feedback_task = None
 
     def _notify(self):
         self.c._emit_rgb()
@@ -55,6 +57,8 @@ class RGBSaveSession:
             self.stage = "preparing"
             self.message = "等待已有回读结束，随后保存 RGB；后台查询已暂停。"
             self.result = None
+            self.feedback_task = self.c.notify_action(
+                "rgb", "保存RGB配置", "RGB", "pending", self.message)
             self._schedule()
         self.c.log(self.message)
         self._notify()
@@ -112,10 +116,30 @@ class RGBSaveSession:
                 self._finish(False, "RGB 保存尚未发送，已取消。")
 
     def _finish(self, success, message):
+        task_id = self.feedback_task
+        admitted = self.admitted_at is not None
         self.reset()
         self.message = message
         self.c.log(message, "INFO" if success else "WARN")
+        if task_id is not None:
+            phase = "success" if success else "error" if admitted else "cancelled"
+            self.c.notify_action("rgb", "保存RGB配置", "RGB", phase, message,
+                                 "" if success else "请检查设备状态后重新保存。",
+                                 "device_confirmed" if success else "device_rejected" if admitted else "local",
+                                 task_id=task_id)
         self._notify()
+
+    def feedback_disconnected(self):
+        """A lost connection is not evidence that an admitted flash write failed."""
+        with self.lock:
+            if self.feedback_task is not None:
+                self.c.notify_action("rgb", "保存RGB配置", "RGB",
+                                     "uncertain" if self.admitted_at is not None else "cancelled",
+                                     "连接已断开，RGB 保存结果未确认。" if self.admitted_at is not None else
+                                     "连接已断开，RGB 保存尚未发送。",
+                                     "重新连接并核实设备配置后再操作。", "unconfirmed",
+                                     task_id=self.feedback_task)
+                self.feedback_task = None
 
     def _tick(self, token):
         with self.lock:
@@ -123,6 +147,7 @@ class RGBSaveSession:
                 return
             self.timer = None
             if not self.c.is_connected or self.connection != self.c._connection_id:
+                self.feedback_disconnected()
                 self.reset()
                 return
             now = time.monotonic()
@@ -146,6 +171,8 @@ class RGBSaveSession:
                     self.stage = "waiting"
                     self.started_at = now
                     self.message = "正在保存 RGB，等待设备确认；后台查询已暂停。"
+                    self.c.notify_action("rgb", "保存RGB配置", "RGB", "pending",
+                                         self.message, task_id=self.feedback_task)
                     c._tx_queue.put((self.generation, self.command))
                     self._notify()
                 elif now - self.started_at >= self.PREPARE_SECONDS:
@@ -159,6 +186,9 @@ class RGBSaveSession:
                 self.stage = "uncertain"
                 self.message = "6 秒内未确认 RGB 保存结果；查询保持暂停，请断开重连核实。不会自动重发保存。"
                 self.c.log(self.message, "WARN")
+                self.c.notify_action("rgb", "保存RGB配置", "RGB", "uncertain",
+                                     "RGB 保存结果未确认。", "请断开重连并核实配置；查询保持暂停，不会自动重发。",
+                                     "unconfirmed", task_id=self.feedback_task)
                 self._notify()
             # Uncertain saves remain fenced; a late explicit receipt can resolve them.
             self._schedule()

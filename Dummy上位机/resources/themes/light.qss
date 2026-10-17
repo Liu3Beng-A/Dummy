@@ -8,6 +8,24 @@ QMessageBox QPushButton:hover, QInputDialog QPushButton:hover { background: #e7f
 QMessageBox QPushButton:default, QInputDialog QPushButton:default { color: white; background: #286caa; border-color: #286caa; font-weight: 600; }
 QMessageBox QTextEdit, QInputDialog QTextEdit, QInputDialog QPlainTextEdit { color: #223248; background: #ffffff; border: 1px solid #b9cbdc; font-size: 15px; }
 QFrame#TopBar { background: #ffffff; border-bottom: 1px solid #dce4ed; }
+QFrame#TopBar QLabel#StatusPill { padding: 0; }
+QFrame#OperationStatusPanel { background: #edf4fa; border-bottom: 1px solid #ccdae7; }
+QFrame#OperationStatusPanel[tone='warning'] { background: #fff5e4; border-color: #e7d1a5; }
+QFrame#OperationStatusPanel[tone='error'] { background: #fff0ef; border-color: #e8bbb8; }
+QLabel#OperationStatusTitle { color: #244d70; background: transparent; }
+QLabel#OperationStatusTitle[tone='success'] { color: #147359; }
+QLabel#OperationStatusTitle[tone='warning'] { color: #815108; }
+QLabel#OperationStatusTitle[tone='error'] { color: #a82d31; }
+QLabel#OperationStatusReason, QLabel#OperationStatusNextStep { background: transparent; color: #334e68; font-size: 13px; }
+QLabel#OperationStatusElapsed { background: transparent; color: #536b81; font-size: 13px; }
+QToolButton#OperationStatusDetailsButton { background: transparent; color: #315c7c; border: none; padding: 1px 5px; }
+QToolButton#OperationStatusDetailsButton:hover { background: #dbeaf5; }
+QWidget#OperationStatusConditions, QScrollArea#OperationStatusDetails { background: transparent; border: none; }
+QFrame#OperationStatusOverlay { background: #ffffff; border: 1px solid #a9bfd2; border-radius: 7px; }
+QLabel#OperationStatusOverlayTitle { color: #244d70; background: transparent; font-weight: 600; }
+QLabel#OperationStatusAction { background: transparent; color: #285c4b; font-size: 13px; }
+QLabel#OperationStatusAction[status='blocked'] { color: #933d34; }
+QLabel#OperationStatusAction[status='attention'] { color: #80550f; }
 QFrame#Sidebar { background: #142337; border: none; }
 QLabel#Brand { color: #ffffff; font-size: 20px; font-weight: 700; }
 QLabel#BrandSub { color: #a8bdd1; font-size: 13px; letter-spacing: 1px; }
@@ -103,3 +121,21 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 QSplitter::handle { background: #e0e7ef; }
 QStatusBar { background: white; color: #718298; border-top: 1px solid #e0e7ef; }
 QToolTip { color: #ffffff; background: #263d55; border: none; padding: 6px; }
+QWidget#OperationStatusFeedbackSlot { background: transparent; }
+QFrame#ActionFeedbackNotice { background: #dcecf8; border: none; border-radius: 5px; }
+QFrame#ActionFeedbackNotice[tone='success'] { background: #daf0e5; }
+QFrame#ActionFeedbackNotice[tone='warning'] { background: #fff0cf; }
+QFrame#ActionFeedbackNotice[tone='error'] { background: #fbe1e3; }
+QLabel#ActionFeedbackMessage, QLabel#ActionFeedbackNextStep { background: transparent; color: #244f74; font-size: 13px; padding: 0; }
+QLabel#ActionFeedbackMessage { font-weight: 600; }
+QLabel#ActionFeedbackMessage[tone='success'], QLabel#ActionFeedbackNextStep[tone='success'] { color: #165e45; }
+QLabel#ActionFeedbackMessage[tone='warning'], QLabel#ActionFeedbackNextStep[tone='warning'] { color: #774b08; }
+QLabel#ActionFeedbackMessage[tone='error'], QLabel#ActionFeedbackNextStep[tone='error'] { color: #9a2834; }
+QLabel#ActionLastResult { background: transparent; color: #315f84; font-size: 13px; padding: 0; }
+QLabel#ActionLastResult[tone='success'] { color: #146449; }
+QLabel#ActionLastResult[tone='warning'] { color: #88550a; }
+QLabel#ActionLastResult[tone='error'] { color: #a52e3a; }
+QLineEdit[feedbackInvalid='true'], QSpinBox[feedbackInvalid='true'], QDoubleSpinBox[feedbackInvalid='true'] { border-color: #c0862e; background: #fff5df; }
+QFrame#OperationStatusPanel[compact='true'] { border: none; border-radius: 7px; }
+QWidget#MotionSystemToolbar[compact='true'] QPushButton, QWidget#MotionModeToolbar[compact='true'] QPushButton { padding: 4px 6px; min-height: 22px; }
+QWidget#MotionModeToolbar[compact='true'] QComboBox { padding: 4px 20px 4px 6px; min-height: 22px; }
