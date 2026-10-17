@@ -187,6 +187,8 @@ class ActionFeedback:
         spec, tokens = record["spec"], record["command"].split()
         if not spec["external"] or spec["family"] not in ("STALL", "CAL") or len(tokens) < 2:
             return
+        if re.fullmatch(r"[0-8]", tokens[1]) is None:
+            return  # Observation cannot make a formerly admitted console string crash RX.
         family, operation = tokens[0][1:].split("_")
         if line == f"ok {family}_{operation} pending":
             record["parameter_accepted"] = True

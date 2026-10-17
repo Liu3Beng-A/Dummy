@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.ui.adapters import FieldAdapter, TableAdapter
+from app.ui.parameter_edits import ParameterEditsUi, ParameterFieldAdapter
+from app.ui.pid_help import PID_HELP
 from app.core.dialogs import install_dialog_appearance
 from app.core.operation_guidance import operation_actions
 from app.ui.operation_panel import OperationStatusPanel, _ElidedLabel
@@ -89,6 +91,8 @@ class MainWindow(QMainWindow):
         self._closed = False
         self._host_close_pending = self._host_close_allowed = False
         self._building = True
+        self.parameter_edit_ui = ParameterEditsUi(controller, self)
+        self.parameter_bindings = {}
         self._gamepad_reader_active = False
         self._gamepad_settings_dialog = None
         self._gamepad_state = {}
@@ -123,6 +127,8 @@ class MainWindow(QMainWindow):
         self._rgb_dirty_paths = set()
         self._rgb_loading_editor = False
         self._rgb_device = None
+        self._rgb_last_complete_config = None
+        self._rgb_last_complete_connection = None
         self._rgb_follow_seeded = False
         self._rgb_save_resume_until = None
         self._rgb_simulator = RgbSimulator()
@@ -155,6 +161,7 @@ class MainWindow(QMainWindow):
         controller._update_write_btn_state()
         controller._refresh_protection_node("STALL")
         controller._refresh_protection_node("CAL")
+        self.parameter_edit_ui.refresh()
         controller.log_message.connect(self._append_log)
         controller.state_changed.connect(self._update_state)
         controller.actual_pose_changed.connect(self._actual_pose)
@@ -331,6 +338,23 @@ class MainWindow(QMainWindow):
     def _call(self, method, *args):
         return getattr(self.controller, method)(*args)
 
+    def _parameter_editor(self, family, node, key, widget, default, *, field=None,
+                          view="", minimum=-math.inf, maximum=math.inf,
+                          integer=False, queryable=True, applicable=None):
+        binding = self.parameter_edit_ui.register(
+            family, node, key, widget, default, minimum=minimum, maximum=maximum,
+            integer=integer, queryable=queryable, applicable=applicable)
+        self.parameter_bindings[(family, key, view)] = binding
+        if field is not None:
+            self.fields[field] = ParameterFieldAdapter(binding)
+        return binding
+
+    def _motor_parameter_node_changed(self):
+        if not self._building:
+            self.controller.select_parameter_node(self.fields["param_node"].get())
+            self.controller._update_write_btn_state()
+            self.parameter_edit_ui.refresh()
+
     @staticmethod
     def _combo(items, index=0):
         combo = QComboBox()
@@ -381,11 +405,13 @@ class MainWindow(QMainWindow):
         self.mode_status = _TopbarModeLabel()
         self.mode_status.setText("模式 —")
         self.mode_status.setMargin(10)
+        self.mode_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.mode_status.setObjectName("StatusPill")
         row.addWidget(self.mode_status)
         self.motor_status = _ElidedLabel()
         self.motor_status.setText("电机状态未知")
         self.motor_status.setMargin(10)
+        self.motor_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.motor_status.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.motor_status.setObjectName("StatusPill")
         # Keep the controller's detailed calibration/protection status separate
@@ -1443,7 +1469,7 @@ class MainWindow(QMainWindow):
         node = self._combo(range(9), 1)
         node.setMaximumWidth(100)
         self._bind("param_node", node, int)
-        node.currentIndexChanged.connect(lambda *_: self.controller._update_write_btn_state() if not self._building else None)
+        node.currentIndexChanged.connect(lambda *_: self._motor_parameter_node_changed())
         row.addWidget(node)
         row.addWidget(hint("0 = ALL · 1–6 关节 · 7 地轨 · 8 夹爪"), 1)
         row.addWidget(button("读取全部参数", self._query_all_parameters))
@@ -1451,16 +1477,52 @@ class MainWindow(QMainWindow):
         self.motor_feedback_result = self._feedback_result_label("motor", box)
         layout.addWidget(node_group)
         pid_group, box = self._group("PID · 保存直接写 EEPROM")
+        self.pid_group = pid_group
+        self.pid_parameter_labels = {}
+        self.pid_parameter_descriptions = {}
         row = QHBoxLayout()
         for key in ("kp", "kv", "ki", "kd"):
-            row.addWidget(QLabel(key.upper()))
+            cell = QWidget()
+            column = QVBoxLayout(cell)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(2)
+            description = PID_HELP[key.upper()]
+            title = _ElidedLabel()
+            title.setFixedHeight(20)
+            title.setText(description["title"])
+            title.setToolTip(description["tooltip"])
+            self.pid_parameter_labels[key.upper()] = title
+            column.addWidget(title)
             spin = number(0, 0, 4294967295, 0)
-            spin.setMinimumWidth(125)
-            self._bind(f"ent_set_pid_{key}", spin)
-            row.addWidget(spin)
+            spin.setToolTip(description["tooltip"])
+            spin.setMinimumWidth(110)
+            binding = self._parameter_editor("motor", lambda: self.fields["param_node"].get(),
+                                             key.upper(), spin, 0, field=f"ent_set_pid_{key}",
+                                             minimum=0, maximum=4294967295, integer=True)
+            column.addWidget(spin)
+            column.addWidget(binding.readback_label)
+            column.addWidget(binding.status_label)
+            explanation = QLabel(description["inline"])
+            explanation.setObjectName("PidParameterHelp")
+            explanation.setTextFormat(Qt.TextFormat.PlainText)
+            explanation.setWordWrap(True)
+            explanation.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            explanation.setContentsMargins(0, 6, 0, 0)
+            explanation.setMinimumWidth(0)
+            explanation.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            self.pid_parameter_descriptions[key.upper()] = explanation
+            column.addWidget(explanation)
+            row.addWidget(cell, 1)
         box.addLayout(row)
         row = QHBoxLayout()
         row.addStretch()
+        self.motor_pid_restore = button("还原 PID 编辑", lambda: self.controller.parameter_edits.restore(
+            "motor", self.fields["param_node"].get(), ("KP", "KV", "KI", "KD")))
+        self.motor_pid_restore.setToolTip("仅采用当前节点最近回读，不发送指令。未回读字段保持原样。")
+        self.parameter_edit_ui.register_group(self.motor_pid_restore, "motor",
+                                               lambda: self.fields["param_node"].get(),
+                                               ("KP", "KV", "KI", "KD"))
+        row.addWidget(self.motor_pid_restore)
         row.addWidget(button("读取 PID", self.controller._qry_pid))
         pid_save = button("保存 PID", self.controller._set_pid, "primary")
         row.addWidget(pid_save)
@@ -1475,7 +1537,9 @@ class MainWindow(QMainWindow):
             row = QHBoxLayout()
             spin = number(value, low, high, 3, .1)
             spin.setSuffix(f" {unit}")
-            self._bind(field, spin)
+            binding = self._parameter_editor("motor", lambda: self.fields["param_node"].get(),
+                                             "ACC" if field == "ent_set_acc" else "I", spin, value,
+                                             field=field, minimum=low, maximum=high)
             row.addWidget(spin)
             row.addWidget(hint("应用：运行时 RAM；保存：写 EEPROM，掉电保持。"), 1)
             row.addWidget(button("读取", lambda name=query: self._call(name)))
@@ -1484,7 +1548,10 @@ class MainWindow(QMainWindow):
             writes.extend((apply_btn, save_btn))
             row.addWidget(apply_btn)
             row.addWidget(save_btn)
+            row.addWidget(binding.restore_button)
             box.addLayout(row)
+            box.addWidget(binding.readback_label)
+            box.addWidget(binding.status_label)
             layout.addWidget(group)
         sync = button("同步八节点加速度至主控", self.controller._sync_acc, "primary")
         self._bind("btn_acc_sync", sync)
@@ -1529,6 +1596,11 @@ class MainWindow(QMainWindow):
             toolbar.addWidget(button("读取配置", lambda value=kind: self.controller._query_protection(value)))
             toolbar.addWidget(button("运行快照", lambda value=kind: self._query_snapshot(value, False)))
             toolbar.addWidget(button("上次快照", lambda value=kind: self._query_snapshot(value, True)))
+            restore_group = button("还原本页编辑", lambda value=kind: self.controller.parameter_edits.restore(
+                value, self.fields["_protection_nodes"][value].get()))
+            toolbar.addWidget(restore_group)
+            self.parameter_edit_ui.register_group(restore_group, kind, lambda mode=kind: nodes[mode].get(),
+                                                   (descriptor[0] for descriptor in descriptors))
             toolbar.addStretch()
             save = button("保存整组 EEPROM", lambda value=kind: self.controller._save_protection(value), "primary")
             saves[kind] = FieldAdapter(save)
@@ -1541,9 +1613,9 @@ class MainWindow(QMainWindow):
             form = QWidget()
             grid = QGridLayout(form)
             grid.setContentsMargins(4, 4, 4, 4)
-            grid.setHorizontalSpacing(16)
+            grid.setHorizontalSpacing(8)
             grid.setVerticalSpacing(8)
-            for col, text in enumerate(("参数", "单位", "编辑值", "应用", "允许范围")):
+            for col, text in enumerate(("参数", "单位", "编辑值", "最近回读", "编辑状态", "应用", "还原", "允许范围")):
                 grid.addWidget(hint(text, "muted"), 0, col)
             entries[kind], rows[kind] = {}, {}
             for index, (key, label, unit, value, low, high) in enumerate(descriptors, 1):
@@ -1555,16 +1627,32 @@ class MainWindow(QMainWindow):
                 # line input retains values and precision from device replies.
                 edit = QLineEdit(f"{value:g}")
                 edit.setObjectName(f"{kind}_{key}")
-                edit.setMaximumWidth(150)
-                entries[kind][key] = FieldAdapter(edit)
+                edit.setMinimumWidth(75)
+                edit.setMaximumWidth(130)
+                binding = self._parameter_editor(
+                    kind, lambda mode=kind: nodes[mode].get(), key, edit, f"{value:g}",
+                    minimum=(math.nextafter(0., 1.) if low == 0 and key not in ("STARTUP_MS", "ENABLE") else low),
+                    maximum=math.inf if high is None else high,
+                    integer=key.endswith("_MS") or key == "ENABLE",
+                    applicable=lambda mode=kind, parameter=key: not (mode == "STALL" and
+                        (nodes[mode].get() == 8 or (parameter == "BACK_DEG" and nodes[mode].get() == 7) or
+                         (parameter == "BACK_MM" and nodes[mode].get() not in (0, 7)))))
+                entries[kind][key] = ParameterFieldAdapter(binding)
                 grid.addWidget(edit, index, 2)
+                binding.readback_label.setMaximumWidth(120)
+                binding.status_label.setMaximumWidth(130)
+                grid.addWidget(binding.readback_label, index, 3)
+                grid.addWidget(binding.status_label, index, 4)
                 apply = button("应用", lambda mode=kind, parameter=key: self.controller._set_protection(mode, parameter))
                 rows[kind][key] = FieldAdapter(apply)
-                grid.addWidget(apply, index, 3)
+                grid.addWidget(apply, index, 5)
+                grid.addWidget(binding.restore_button, index, 6)
                 maximum = f"{high:g}" if high is not None else "节点约束"
-                grid.addWidget(hint(f"{low:g} ～ {maximum}", "muted"), index, 4)
+                grid.addWidget(hint(f"{low:g} ～ {maximum}", "muted"), index, 7)
             grid.setColumnStretch(0, 2)
             grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(3, 1)
+            grid.setColumnStretch(4, 1)
             grid.setRowStretch(len(descriptors) + 1, 1)
             area.setWidget(form)
             box.addWidget(area, 1)
@@ -1612,6 +1700,15 @@ class MainWindow(QMainWindow):
 
         self.hand_advanced, box = self._group("USB 高级配置 · 写电机 EEPROM")
         box.addWidget(hint("配置会写入电机持久参数。UART4 不支持；需要已确认失能再执行。夹爪独立 PID 接口采用有符号整数，上限 2147483647；电机参数页 PID 支持完整 uint32。", "warning"))
+        read_row = QHBoxLayout()
+        read_row.addWidget(button("读取夹爪 PID", lambda: self.controller.send_cmd("#GET_PID 8")))
+        read_row.addWidget(button("读取夹爪加速度", lambda: self.controller.send_cmd("#GETJACC 8")))
+        restore_hand = button("还原可查询项编辑", lambda: self.controller.parameter_edits.restore(
+            "motor", 8, ("KP", "KV", "KI", "KD", "ACC")))
+        read_row.addWidget(restore_hand)
+        self.parameter_edit_ui.register_group(restore_hand, "motor", 8, ("KP", "KV", "KI", "KD", "ACC"))
+        read_row.addStretch()
+        box.addLayout(read_row)
         grid = QGridLayout()
         self.hand_advanced_fields = {}
         for index, (key, title, value, low, high, decimals) in enumerate((
@@ -1624,17 +1721,31 @@ class MainWindow(QMainWindow):
         )):
             edit = number(value, low, high, decimals)
             self.hand_advanced_fields[key] = edit
+            binding = self._parameter_editor("motor", 8, key, edit, value, view="hand",
+                                             minimum=low, maximum=high, integer=decimals == 0,
+                                             queryable=key != "VEL")
+            cell = QWidget()
+            column = QVBoxLayout(cell)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(2)
+            column.addWidget(edit)
+            column.addWidget(binding.readback_label)
+            column.addWidget(binding.status_label)
             grid.addWidget(QLabel(title), index // 2, (index % 2) * 3)
-            grid.addWidget(edit, index // 2, (index % 2) * 3 + 1)
+            grid.addWidget(cell, index // 2, (index % 2) * 3 + 1)
             grid.addWidget(button("保存", lambda item=key: self._hand_config(item)), index // 2, (index % 2) * 3 + 2)
         box.addLayout(grid)
         row = QHBoxLayout()
         self.hand_onboot = QCheckBox("上电自动使能夹爪")
+        onboot_binding = self._parameter_editor("motor", 8, "ONBOOT", self.hand_onboot, "0", view="hand",
+                                                minimum=0, maximum=1, integer=True, queryable=False)
         row.addWidget(self.hand_onboot)
         row.addWidget(button("保存上电行为", lambda: self._hand_config("ONBOOT")))
         row.addStretch()
         row.addWidget(button("擦除夹爪配置", lambda: self._hand_config("ERASE")))
         box.addLayout(row)
+        box.addWidget(onboot_binding.status_label)
+        box.addWidget(hint("速度、上电行为暂无查询接口；加速度 / PID 最近回读不代表 EEPROM 保存完成。", "muted"))
         layout.addWidget(self.hand_advanced)
         self.gripper_feedback_result = self._feedback_result_label("gripper", layout)
         layout.addStretch()
@@ -1658,6 +1769,16 @@ class MainWindow(QMainWindow):
         self._bind("_rgb_status_var", self.rgb_detail_label)
         layout.addWidget(self.rgb_status)
         self.rgb_save_status = self._feedback_result_label("rgb", layout)
+        edit_row = QHBoxLayout()
+        self.rgb_edit_status = _ElidedLabel()
+        self.rgb_edit_status.setObjectName("ParameterEditStatus")
+        self.rgb_edit_status.setFixedHeight(22)
+        edit_row.addWidget(self.rgb_edit_status, 1)
+        self.rgb_restore_edits = button("还原本地编辑", self._restore_rgb_edits)
+        self.rgb_restore_edits.setFixedHeight(28)
+        self.rgb_restore_edits.setEnabled(False)
+        edit_row.addWidget(self.rgb_restore_edits)
+        layout.addLayout(edit_row)
         row = QHBoxLayout()
         for text, command in (("渐开", "!RGB_ON"), ("渐关", "!RGB_OFF"),
                               ("启用自动联动", "!RGB_AUTO 1"), ("关闭自动联动", "!RGB_AUTO 0"),
@@ -1951,6 +2072,52 @@ class MainWindow(QMainWindow):
         if target[path[-1]] != value:
             self._rgb_dirty_paths.add(path)
             target[path[-1]] = value
+        baseline = self._rgb_last_complete_config
+        if (baseline is not None and self._rgb_device and self._rgb_device.get("connected") and
+                self._rgb_last_complete_connection == self._rgb_device.get("connection_id")):
+            for key in path:
+                baseline = baseline[key]
+            if baseline == value:
+                self._rgb_dirty_paths.discard(path)
+        self._refresh_rgb_edit_status()
+
+    def _refresh_rgb_edit_status(self):
+        if not hasattr(self, "rgb_edit_status"):
+            return
+        has_baseline = self._rgb_last_complete_config is not None
+        fresh = bool(has_baseline and self._rgb_device and self._rgb_device.get("connected") and
+                     self._rgb_last_complete_connection == self._rgb_device.get("connection_id"))
+        if self._rgb_dirty_paths:
+            text = f"本地编辑：{len(self._rgb_dirty_paths)} 项与最近完整回读不同 · 尚未应用"
+        elif not has_baseline:
+            text = "本地默认 · 尚无完整 RGB 配置回读"
+        else:
+            text = "本地编辑与最近完整回读一致"
+        if has_baseline and not fresh:
+            text += " · 回读已过期"
+        self.rgb_edit_status.setText(text)
+        self.rgb_restore_edits.setEnabled(has_baseline)
+        self.rgb_restore_edits.setToolTip("仅采用最近完整配置回读还原本地编辑，不发送指令。" +
+                                         ("该回读已过期。" if has_baseline and not fresh else ""))
+
+    def _restore_rgb_edits(self):
+        if self._rgb_last_complete_config is None:
+            return
+        self._rgb_draft = copy.deepcopy(self._rgb_last_complete_config)
+        self._rgb_dirty_paths.clear()
+        previous = self._rgb_loading_editor
+        self._rgb_loading_editor = True
+        try:
+            self.fields["_rgb_bright"].set(self._rgb_draft["brightness"])
+            for adapter, key in zip(self.fields["_rgb_fades"],
+                                    ("fade_on_ms", "fade_off_ms", "brightness_ms", "transition_ms")):
+                adapter.set(self._rgb_draft[key])
+            for name in ("_rgb_color_idx", "_rgb_auto_idx", "_rgb_effect_mode", "_rgb_state", "_rgb_motion_idx"):
+                self._rgb_load_local_editor(name)
+        finally:
+            self._rgb_loading_editor = previous
+        self._refresh_rgb_edit_status()
+        self._render_rgb_preview()
 
     def _rgb_edit_changed(self, name):
         if self._building or self._rgb_loading_editor or getattr(self.controller, "_rgb_applying_readback", False):
@@ -2047,6 +2214,9 @@ class MainWindow(QMainWindow):
         if not snapshot["connected"]:
             self._rgb_save_resume_until = None
         if snapshot["complete"]:
+            if snapshot["connected"]:
+                self._rgb_last_complete_config = copy.deepcopy(snapshot["config"])
+                self._rgb_last_complete_connection = snapshot["connection_id"]
             incoming = copy.deepcopy(snapshot["config"])
             for path in tuple(self._rgb_dirty_paths):
                 old, target = self._rgb_draft, incoming
@@ -2106,6 +2276,7 @@ class MainWindow(QMainWindow):
         else:
             motion_support = "等待主控 RGB 能力回读；确认支持后可应用，当前可本地预览。"
         self.rgb_motion_support.setText(motion_support)
+        self._refresh_rgb_edit_status()
         self._render_rgb_preview()
         self._sync_rgb_preview_activity()
 
@@ -3104,6 +3275,7 @@ class MainWindow(QMainWindow):
     def _refresh_protection(self, kind):
         if not self._building:
             self.controller._refresh_protection_node(kind)
+            self.parameter_edit_ui.refresh()
 
     def _query_snapshot(self, kind, last):
         (self.controller._query_stall_status if kind == "STALL" else self.controller._query_cal_status)(last)
@@ -3128,8 +3300,15 @@ class MainWindow(QMainWindow):
         elif key == "ONBOOT":
             command = f"!HAND_ONBOOT {int(self.hand_onboot.isChecked())}"
         else:
-            value = self.hand_advanced_fields[key].value()
-            formatted = str(int(value)) if key in ("KP", "KV", "KI", "KD") else f"{value:g}"
+            binding = self.parameter_bindings[("motor", key, "hand")]
+            raw = binding.snapshot()["draft"]
+            value = binding.numeric(raw)
+            if value is None:
+                self.controller.notify_action("gripper", "应用夹爪配置", key, "invalid",
+                                              "夹爪参数未发送：输入未完成或超出此接口允许范围。",
+                                              "请修正输入；最近回读原值可在参数下方查看。")
+                return
+            formatted = str(int(value)) if key in ("KP", "KV", "KI", "KD") else str(value)
             command = f"!HAND_{key} {formatted}"
         self.controller.send_cmd(command)
 
@@ -3531,6 +3710,7 @@ class MainWindow(QMainWindow):
         if not self._closed:
             self._suspend_gamepad("关闭窗口，手柄输入已停止")
             self._closed = True
+            self.parameter_edit_ui.closed = True
             self.action_feedback_notice.clear_event()
             self.rgb_feedback_notice.clear_event()
             self._operation_timer.stop()

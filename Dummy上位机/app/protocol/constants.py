@@ -33,6 +33,10 @@ RAIL_RANGE = (-250, 250)
 
 RAIL_DEFAULT = 0
 
+# Local unqueried PID defaults for the rail only. A returned motor value or an
+# existing draft always takes precedence; selecting a node never sends these.
+RAIL_PID_DEFAULTS = {"KP": 150, "KV": 180, "KI": 25, "KD": 50}
+
 STALL_PARAMETERS = (
     ("ENABLE", "普通堵转检测开关", "0=关闭 / 1=开启", 1, 0, 1),
     ("CURRENT_A", "电流命令阈值", "A", 1.0, 0.1, None),

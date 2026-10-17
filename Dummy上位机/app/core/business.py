@@ -382,25 +382,20 @@ class RobotBusiness:
             self.log("磁编码器校准 CAN 帧已提交；协议没有完成回执，请观察电机校准及重启结果", "INFO")
         self._handle_protection_parameter_status(line)
 
-        # 电机参数查询回包解析：节点匹配且非 0 时，把数值回填到右侧 Entry（仅 UI 辅助，不影响主日志）
-        m = re.match(r'ok PID \[(\d+)\] kp=(-?\d+) kv=(-?\d+) ki=(-?\d+) kd=(-?\d+)', line)
+        # Preserve the source node now. A delayed callback must never reinterpret
+        # a J1 reply as the node selected after the reply arrived.
+        m = re.fullmatch(r'ok PID \[([1-8])\] kp=(-?\d+) kv=(-?\d+) ki=(-?\d+) kd=(-?\d+)(?:\s+.*)?', line)
         if m:
             n = int(m.group(1))
-            if n != 0 and n == self.param_node.get():
-                kp, kv, ki, kd = m.group(2), m.group(3), m.group(4), m.group(5)
-                self.root.after(0, self._fill_pid_entries, kp, kv, ki, kd)
-        m = re.match(r'ok ACC \[(\d+)\] = ([\d.]+) r/s\^2', line)
+            self._fill_pid_entries(*m.groups()[1:], node=n)
+        m = re.fullmatch(r'ok ACC \[([1-8])\] = ([^\s]+) r/s\^2(?:\s+.*)?', line)
         if m:
             n = int(m.group(1))
-            if n != 0 and n == self.param_node.get():
-                v = m.group(2)
-                self.root.after(0, self._fill_acc_entry, v)
-        m = re.match(r'ok I_LIMIT \[(\d+)\] = ([\d.]+) A', line)
+            self._fill_acc_entry(m.group(2), node=n)
+        m = re.fullmatch(r'ok I_LIMIT \[([1-8])\] = ([^\s]+) A(?:\s+.*)?', line)
         if m:
             n = int(m.group(1))
-            if n != 0 and n == self.param_node.get():
-                v = m.group(2)
-                self.root.after(0, self._fill_i_entry, v)
+            self._fill_i_entry(m.group(2), node=n)
         # ok GET_* ALL dispatched / ok SET ... / error SET ... 等行已走 RX 日志，无需额外处理
 
         # #GETJPOS / #GETLPOS 回包 → 同步滑块（"ok" + 6 个数）
@@ -563,52 +558,76 @@ class RobotBusiness:
             self._set_acc_sync_waiting(False)
             self.log(f"加速度同步失败：{line}", "ERROR")
 
-    def _fill_pid_entries(self, kp, kv, ki, kd):
+    def _fill_pid_entries(self, kp, kv, ki, kd, node=None):
         """PID 回包解析后回填 Entry（仅 UI 辅助，不影响主日志）"""
+        if node is not None and node != self.param_node.get():
+            return
         for ent, val in [(self.ent_set_pid_kp, kp), (self.ent_set_pid_kv, kv),
                          (self.ent_set_pid_ki, ki), (self.ent_set_pid_kd, kd)]:
             ent.delete(0, "end")
             ent.insert(0, val)
 
-    def _fill_acc_entry(self, val):
+    def _fill_acc_entry(self, val, node=None):
         """ACC 回包解析后回填 Entry"""
+        if node is not None and node != self.param_node.get():
+            return
         self.ent_set_acc.delete(0, "end")
         self.ent_set_acc.insert(0, val)
 
-    def _fill_i_entry(self, val):
+    def _fill_i_entry(self, val, node=None):
         """I_LIMIT 回包解析后回填 Entry"""
+        if node is not None and node != self.param_node.get():
+            return
         self.ent_set_i.delete(0, "end")
         self.ent_set_i.insert(0, val)
 
     def _update_write_btn_state(self):
         """节点=0 (ALL) 时禁用写入按钮，避免误写广播"""
+        if hasattr(self, "select_parameter_node"):
+            self.select_parameter_node(self.param_node.get())
         state = "disabled" if self.param_node.get() == 0 else "normal"
         for btn in self._write_buttons:
             btn.config(state=state)
+
+    @staticmethod
+    def _protection_default(kind, node, key, default):
+        if kind == "STALL" and key == "BACK_RPS" and node == 7:
+            return 0.5
+        if kind == "STALL" and key == "ERROR_R":
+            return 0.1 if node == 7 else 0.5 / 360 * (30 if node == 6 else 50)
+        if kind == "CAL" and node == 8:
+            return {"SEEK_RPS": 2, "RETURN_RPS": 2, "ACCEL": 5,
+                    "CURRENT_A": 1, "CONTACT_RATIO": 0.2, "MAX_TRAVEL_R": 6,
+                    "SEEK_TIMEOUT_MS": 30000, "RETURN_TIMEOUT_MS": 15000,
+                    "BACKOFF_R": 0.5, "REPEAT_TOL_R": 0.1, "POSITION_TOL_R": 0.01,
+                    "CONTACT_WINDOW_R": 5 / 100 * 100 / 360 * 16}.get(key, default)
+        return default
 
     def _refresh_protection_node(self, kind):
         node = self._protection_nodes[kind].get()
         descriptors = STALL_PARAMETERS if kind == "STALL" else CAL_PARAMETERS
         cached = self._protection_values[kind].get(node, {})
+        edits = getattr(self, "parameter_edits", None)
+        if edits is not None:
+            previous = self._selected_protection_nodes.get(kind)
+            if previous is not None:
+                self._capture_protection_drafts(kind, previous)
+            self._selected_protection_nodes[kind] = node
         for key, _label, _unit, default, _minimum, _maximum in descriptors:
             applicable = not (kind == "STALL" and (node == 8 or
                              (key == "BACK_DEG" and node == 7) or
                              (key == "BACK_MM" and node not in (0, 7))))
             self._protection_rows[kind][key].config(state="normal" if applicable else "disabled")
             entry = self._protection_entries[kind][key]
-            if kind == "STALL" and key == "BACK_RPS" and node == 7:
-                default = 0.5
-            elif kind == "STALL" and key == "ERROR_R":
-                default = 0.1 if node == 7 else 0.5 / 360 * (30 if node == 6 else 50)
-            elif kind == "CAL" and node == 8:
-                default = {"SEEK_RPS": 2, "RETURN_RPS": 2, "ACCEL": 5,
-                           "CURRENT_A": 1, "CONTACT_RATIO": 0.2, "MAX_TRAVEL_R": 6,
-                           "SEEK_TIMEOUT_MS": 30000, "RETURN_TIMEOUT_MS": 15000,
-                           "BACKOFF_R": 0.5, "REPEAT_TOL_R": 0.1, "POSITION_TOL_R": 0.01,
-                           "CONTACT_WINDOW_R": 5 / 100 * 100 / 360 * 16}.get(key, default)
+            default = self._protection_default(kind, node, key, default)
             value = cached.get(key, f"{default:g}")
+            if edits is not None:
+                edits.ensure(kind, node, key, f"{default:g}")
+                value = edits.snapshot(kind, node, key)["draft"]
             entry.delete(0, "end")
             entry.insert(0, value)
+            if edits is not None:
+                self._legacy_parameter_rendered[(kind, int(node), key)] = str(value)
         self._protection_save_buttons[kind].config(state="disabled" if kind == "STALL" and node == 8 else "normal")
 
     def _query_protection(self, kind):

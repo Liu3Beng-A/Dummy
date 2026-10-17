@@ -45,8 +45,7 @@ class _ElidedLabel(QLabel):
         painter.setFont(self.font())
         painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
         rect = self.contentsRect().adjusted(self.margin(), 0, -self.margin(), 0)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeading,
-                         self.displayedText())
+        painter.drawText(rect, self.alignment(), self.displayedText())
 
 
 class OperationStatusPanel(QFrame):

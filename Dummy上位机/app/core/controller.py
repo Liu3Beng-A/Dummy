@@ -14,6 +14,7 @@ from app.core.scheduler import QtScheduler
 from app.core.rgb_save import RGBSaveSession
 from app.core.operation_tracker import OperationTracker
 from app.core.action_feedback import ActionFeedback, configuration_action
+from app.core.parameter_edits import ParameterEdits
 from app.core.gamepad_session import GamepadSession
 from app.core.cartesian_session import CartesianSession
 from app.core.cartesian_backend import configured_tool, point_tool, world_target, native_command, tcp_command
@@ -41,6 +42,7 @@ class RobotController(QObject, RobotBusiness):
     fields_changed = Signal()
     ports_changed = Signal(list)
     feedback_event = Signal(dict)  # Explicit user action feedback; never telemetry.
+    parameter_edits_changed = Signal()
 
     def __init__(self, parent=None, serial_factory=None, scheduler=None):
         super().__init__(parent)
@@ -57,6 +59,8 @@ class RobotController(QObject, RobotBusiness):
         self._control_owner = "ui"
         self.operations = OperationTracker()
         self.action_feedback = ActionFeedback(self.feedback_event.emit, clock=lambda: time.monotonic())
+        self.parameter_edits = ParameterEdits(self.parameter_edits_changed.emit)
+        self.feedback_event.connect(self.parameter_edits.update_feedback)
         self._wire_admitted = queue.Queue(maxsize=256)
         self.is_connected = False
         self.port_name = ""
@@ -107,6 +111,11 @@ class RobotController(QObject, RobotBusiness):
         self.cmd_history_idx = [0]
         self.last_hand_pos_send_time = self.last_movej_send_time = self.last_movel_send_time = 0
         self._default_fields()
+        self._selected_parameter_node = int(self.param_node.get())
+        self._selected_protection_nodes = {}
+        self._legacy_parameter_rendered = {}
+        self._motor_parameter_defaults = {key: str(field.get()) for key, field in self._motor_parameter_fields().items()}
+        self._parameter_bound_defaults = set()
         self._poll_enabled = True
         self._poll_hz = 5
         self._poll_timer = QTimer(self)
@@ -170,6 +179,11 @@ class RobotController(QObject, RobotBusiness):
             if not hasattr(self, name):
                 raise ValueError(f"未知界面字段：{name}")
             setattr(self, name, adapter)
+        for key, name in {"KP": "ent_set_pid_kp", "KV": "ent_set_pid_kv", "KI": "ent_set_pid_ki",
+                          "KD": "ent_set_pid_kd", "ACC": "ent_set_acc", "I": "ent_set_i"}.items():
+            if name in fields and key not in self._parameter_bound_defaults:
+                self._motor_parameter_defaults[key] = str(fields[name].get())
+                self._parameter_bound_defaults.add(key)
         self._publish()
 
     def log(self, message, tag="INFO"):
@@ -515,6 +529,7 @@ class RobotController(QObject, RobotBusiness):
         self._connection_id += 1
         self.operations.reset(self._connection_id)
         self.action_feedback.new_connection()
+        self.parameter_edits.set_connection(True, self._connection_id)
         self._reset_system_pose_tracking()
         self.connection_type = connection_type.upper()
         self.serial_port = port_object
@@ -568,6 +583,7 @@ class RobotController(QObject, RobotBusiness):
         self.rgb_save.feedback_disconnected()
         self.cartesian.native_tcp = False
         self._connection_id += 1  # Ignore callbacks from a previous connection.
+        self.parameter_edits.set_connection(False, self._connection_id)
         self.operations.reset(self._connection_id)
         self.is_connected = False
         self.gamepad.disconnected()
@@ -709,6 +725,12 @@ class RobotController(QObject, RobotBusiness):
         command = str(command).strip()
         feedback_spec = configuration_action(command) if source == "ui" else None
         feedback_id = None
+        if feedback_spec is not None:
+            if feedback_spec["scope"] in ("motor", "gripper"):
+                self._capture_motor_drafts()
+            elif feedback_spec["scope"] in ("protection", "calibration"):
+                kind = "STALL" if feedback_spec["scope"] == "protection" else "CAL"
+                self._capture_protection_drafts(kind, int(self._protection_nodes[kind].get()))
 
         def reject(message, tag="WARN", phase="blocked"):
             self.log(message, tag)
@@ -849,6 +871,7 @@ class RobotController(QObject, RobotBusiness):
             self.action_feedback.finish(feedback_id, False, "指令入队失败")
             reject(f"指令入队失败：{error}", "ERROR")
             return False
+        self.parameter_edits.record_sent(command, feedback_id, self._connection_id)
         self.operations.requested(command, self._tx_generation, self._connection_id, source)
         self._track_system_pose_command(command)
         if command in ("!HOME", "!RESET"):
@@ -1127,7 +1150,60 @@ class RobotController(QObject, RobotBusiness):
     def _parse_numbers(payload):
         return finite_numbers(payload)
 
-    def _fill_pid_entries(self, kp, kv, ki, kd):
+    def _motor_parameter_fields(self):
+        return dict(KP=self.ent_set_pid_kp, KV=self.ent_set_pid_kv,
+                    KI=self.ent_set_pid_ki, KD=self.ent_set_pid_kd,
+                    ACC=self.ent_set_acc, I=self.ent_set_i)
+
+    def _capture_motor_drafts(self, node=None):
+        """Keep the non-Qt ValueField client compatible; Qt adapters call edit."""
+        node = self._selected_parameter_node if node is None else int(node)
+        for key, field in self._motor_parameter_fields().items():
+            if not isinstance(field, ValueField):
+                continue
+            self.parameter_edits.ensure("motor", node, key, self._motor_parameter_defaults[key])
+            value = str(field.get())
+            address = ("motor", node, key)
+            observed = self._legacy_parameter_rendered.get(address, self._motor_parameter_defaults[key])
+            if value != observed and value != self.parameter_edits.snapshot("motor", node, key)["draft"]:
+                self.parameter_edits.edit("motor", node, key, value)
+            self._legacy_parameter_rendered[address] = value
+
+    def _render_motor_drafts(self):
+        node = int(self.param_node.get())
+        for key, field in self._motor_parameter_fields().items():
+            self.parameter_edits.ensure("motor", node, key, self._motor_parameter_defaults[key])
+            draft = self.parameter_edits.snapshot("motor", node, key)["draft"]
+            field.set(draft)
+            if isinstance(field, ValueField):
+                self._legacy_parameter_rendered[("motor", node, key)] = draft
+
+    def select_parameter_node(self, node):
+        node = int(node)
+        if node not in range(9):
+            return False
+        if node != self._selected_parameter_node:
+            self._capture_motor_drafts(self._selected_parameter_node)
+            self._selected_parameter_node = node
+        if int(self.param_node.get()) != node:
+            self.param_node.set(node)
+        self._render_motor_drafts()
+        self.parameter_edits_changed.emit()
+        return True
+
+    def _receive_motor_parameters(self, node, values):
+        node = int(node)
+        if node not in range(1, 9):
+            return
+        if int(self.param_node.get()) != self._selected_parameter_node:
+            self.select_parameter_node(int(self.param_node.get()))
+        self._capture_motor_drafts()
+        for key, value in values.items():
+            self.parameter_edits.ensure("motor", node, key, self._motor_parameter_defaults.get(key, value))
+            self.parameter_edits.receive("motor", node, key, value)
+        self._render_motor_drafts()
+
+    def _fill_pid_entries(self, kp, kv, ki, kd, node=None):
         """Decode firmware's signed %ld presentation of uint32 PID caches.
 
         Older #GET_PID handlers print int32_t caches, whereas newer handlers
@@ -1143,7 +1219,16 @@ class RobotController(QObject, RobotBusiness):
             self.log("PID 回包超出 int32/uint32 范围，保留当前编辑值", "WARN")
             return
         normalized = [str(value & 0xFFFFFFFF) for value in values]
-        super()._fill_pid_entries(*normalized)
+        self._receive_motor_parameters(int(self.param_node.get()) if node is None else node,
+                                       dict(zip(("KP", "KV", "KI", "KD"), normalized)))
+
+    def _fill_acc_entry(self, value, node=None):
+        if finite_numbers(str(value), 1) is not None:
+            self._receive_motor_parameters(int(self.param_node.get()) if node is None else node, {"ACC": str(value)})
+
+    def _fill_i_entry(self, value, node=None):
+        if finite_numbers(str(value), 1) is not None:
+            self._receive_motor_parameters(int(self.param_node.get()) if node is None else node, {"I": str(value)})
 
     def _current_joint_values(self):
         values = super()._current_joint_values()
@@ -1406,17 +1491,43 @@ class RobotController(QObject, RobotBusiness):
         if not match:
             return
         kind, node, key, value = match[1], int(match[2]), match[3], match[4]
-        if finite_numbers(value, 1) is None:
+        if (finite_numbers(value, 1) is None or node not in range(1, 9) or
+                (kind == "STALL" and node == 8) or (kind == "CAL" and node not in (7, 8))):
             return
         if kind == "STALL" and key == "BACK_DISTANCE_R" and 1 <= node <= 7:
             motor_r = float(value)
             key = "BACK_MM" if node == 7 else "BACK_DEG"
             value = f"{motor_r * 5 if node == 7 else motor_r * 360 / (30 if node == 6 else 50):.6g}"
         self._protection_values[kind].setdefault(node, {})[key] = value
+        selected = int(self._protection_nodes[kind].get())
+        if selected == node:
+            self._capture_protection_drafts(kind, node)
+        descriptor = next((row for row in (STALL_PARAMETERS if kind == "STALL" else CAL_PARAMETERS)
+                           if row[0] == key), None)
+        default = self._protection_default(kind, node, key, descriptor[3]) if descriptor else value
+        self.parameter_edits.ensure(kind, node, key, f"{default:g}" if isinstance(default, (int, float)) else default)
+        self.parameter_edits.receive(kind, node, key, value)
         if self._protection_nodes[kind].get() == node and key in self._protection_entries[kind]:
             entry = self._protection_entries[kind][key]
             entry.delete(0, "end")
-            entry.insert(0, value)
+            draft = self.parameter_edits.snapshot(kind, node, key)["draft"]
+            entry.insert(0, draft)
+            self._legacy_parameter_rendered[(kind, node, key)] = draft
+
+    def _capture_protection_drafts(self, kind, node):
+        descriptors = STALL_PARAMETERS if kind == "STALL" else CAL_PARAMETERS
+        for key, _label, _unit, default, _minimum, _maximum in descriptors:
+            entry = self._protection_entries[kind][key]
+            if not isinstance(entry, ValueField):
+                continue
+            default = self._protection_default(kind, node, key, default)
+            self.parameter_edits.ensure(kind, node, key, f"{default:g}")
+            value = str(entry.get())
+            address = (kind, int(node), key)
+            observed = self._legacy_parameter_rendered.get(address, f"{default:g}")
+            if value != observed and value != self.parameter_edits.snapshot(kind, node, key)["draft"]:
+                self.parameter_edits.edit(kind, node, key, value)
+            self._legacy_parameter_rendered[address] = value
 
     def set_polling(self, enabled, hz=5):
         hz = float(hz)

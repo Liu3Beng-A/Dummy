@@ -116,6 +116,11 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 QSplitter::handle { background: #31445b; }
 QStatusBar { background: #1b2a3e; color: #8ba6bf; border-top: 1px solid #314359; }
 QToolTip { color: white; background: #2d4b66; border: none; padding: 6px; }
+QLabel#ParameterReadback { color: #9cb2c7; font-size: 12px; padding: 0; }
+QLabel#ParameterEditStatus { color: #dfbc72; font-size: 12px; padding: 0; }
+QPushButton#ParameterRestore { padding: 3px 6px; font-size: 12px; }
+QLineEdit[parameterDirty='true'], QDoubleSpinBox[parameterDirty='true'] { border-color: #bd934b; }
+QLineEdit[parameterRangeError='true'], QDoubleSpinBox[parameterRangeError='true'] { border-color: #db776d; }
 QWidget#OperationStatusFeedbackSlot { background: transparent; }
 QFrame#ActionFeedbackNotice { background: #203e58; border: none; border-radius: 5px; }
 QFrame#ActionFeedbackNotice[tone='success'] { background: #17473d; }
@@ -134,3 +139,4 @@ QLineEdit[feedbackInvalid='true'], QSpinBox[feedbackInvalid='true'], QDoubleSpin
 QFrame#OperationStatusPanel[compact='true'] { border: none; border-radius: 7px; }
 QWidget#MotionSystemToolbar[compact='true'] QPushButton, QWidget#MotionModeToolbar[compact='true'] QPushButton { padding: 4px 6px; min-height: 22px; }
 QWidget#MotionModeToolbar[compact='true'] QComboBox { padding: 4px 20px 4px 6px; min-height: 22px; }
+QLabel#PidParameterHelp { color: #adbed0; font-size: 13px; background: transparent; padding: 0; }
