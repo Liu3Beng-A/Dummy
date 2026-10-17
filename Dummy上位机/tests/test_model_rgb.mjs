@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
+import * as THREE from '../resources/viewer/vendor/three/three.module.js';
 
 // This production module has no Three/DOM dependencies. Loading it by a data
 // URL also works when the Python application's directory has no package.json.
 const source = await readFile(new URL('../resources/viewer/model_rgb.js', import.meta.url), 'utf8');
-const { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, dimLightWeight, DIFFUSER_STYLE, normalizeRgbFrame, patchDiffuserShader, sameRgbFrame,
+const { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, dimLightWeight, DIFFUSER_SAMPLES, DIFFUSER_STYLE, normalizeRgbFrame, patchDiffuserShader, sameRgbFrame,
   writeDiffuserTexture } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const frame = color => Array.from({ length: 24 }, () => color.slice());
 const kernel = createDiffuserKernel();
@@ -177,7 +178,7 @@ test('independent automatic modes share the existing rotation contrast curve and
   for (const mode of [13, 14, 15, 16, ...Array.from({ length: 13 }, (_, i) => i), null]) {
     assert(context.setRgbFrame(supplied, true, mode));
     assert.equal(context.rgbEffectMode, mode);
-    assert.equal(context.diffuserTexture.offset.x, mode === 15 ? .25 : 0);
+    assert.equal(context.diffuserTexture.offset.x, 0, 'Mode selection must not add an installation-angle compensation');
     assert.equal(context.rgbSpinCurve.value, mode === 8 || (mode >= 13 && mode <= 16) ? 1 : 0);
   }
   assert(context.setRgbFrame(supplied, true, 16));
@@ -194,7 +195,7 @@ test('independent automatic modes share the existing rotation contrast curve and
   }
 });
 
-test('two-peak registration rotates source zero counterclockwise and survives deferred texture creation', async () => {
+test('global registration survives deferred texture creation and mode changes without a two-peak offset', async () => {
   const viewer = await readFile(new URL('../resources/viewer/viewer.js', import.meta.url), 'utf8');
   const supplied = frame([0, 0, 0]);
   supplied[0] = [80, 160, 240]; // Asymmetric probe: two equal peaks would hide the rotation sign.
@@ -212,28 +213,80 @@ test('two-peak registration rotates source zero counterclockwise and survives de
       DataUtils: { toHalfFloat: value => value },
     },
   });
+  vm.runInContext(viewer.slice(viewer.indexOf('const DIFFUSER_CENTER'), viewer.indexOf('let rgbFrame')), context);
   vm.runInContext(viewer.slice(viewer.indexOf('function prepareDiffuser('), viewer.indexOf('function animateRgb(')), context);
   assert(context.setRgbFrame(supplied, true, 15));
   context.prepareDiffuser({ traverse() {} });
-  assert.equal(context.diffuserTexture.offset.x, .25);
+  assert.equal(context.diffuserTexture.offset.x, 0);
   const uv = createAngularUv([-.04, 0, 0, -.04, .001, 0, -.04, -.001, .001],
-    [0, 0, 0], [0, 1, 0], [1, 0, 0]);
+    [0, 0, 0], [-1, 0, 0], [0, 1, 0]);
   // -X is 90 degrees counterclockwise from the old +Y source-zero position.
   assert.equal((uv[0] + context.diffuserTexture.offset.x) % 1, 0);
   const originalTarget = context.rgbFrame;
   const originalDisplay = context.displayedRgbFrame;
   for (const mode of [13, 15, 14, 15, 16, 8, 0, null]) {
     assert(context.setRgbFrame(supplied, true, mode));
-    assert.equal(context.diffuserTexture.offset.x, mode === 15 ? .25 : 0);
+    assert.equal(context.diffuserTexture.offset.x, 0);
     assert.equal(context.rgbFrame, originalTarget);
     assert.equal(context.displayedRgbFrame, originalDisplay);
     assert.equal(context.rgbFrameUpdates, 0);
   }
   assert(context.setRgbFrame(supplied, true, 15));
   assert.equal(context.setRgbFrame(supplied, true, 17), false);
-  assert.equal(context.diffuserTexture.offset.x, .25);
+  assert.equal(context.diffuserTexture.offset.x, 0);
   assert.equal(context.rgbEffectMode, 15);
   assert.deepEqual(supplied[0], [80, 160, 240]);
+});
+
+test('production diffuser geometry and real Three texture map every mode to the same front-back axis', async () => {
+  const viewer = await readFile(new URL('../resources/viewer/viewer.js', import.meta.url), 'utf8');
+  const supplied = frame([0, 0, 0]);
+  supplied[0] = [0, 128, 128];
+  const context = vm.createContext({
+    THREE, Float32Array, Uint16Array, normalizeRgbFrame, sameRgbFrame, createAngularUv,
+    DIFFUSER_SAMPLES, DIFFUSER_STYLE, diffuserKernel: kernel, writeDiffuserTexture, patchDiffuserShader,
+    disposed: false, rgbEffectMode: null, rgbSpinCurve: { value: 0 },
+    rgbCoverReflection: { value: DIFFUSER_STYLE.coverReflection },
+    diffuserTexture: null, diffuserPixels: null, diffuserMeshes: [], isDiffuserMesh: () => true,
+    displayedRgbFrame: supplied.map(color => color.slice()), rgbFrame: supplied,
+    document: { hidden: false }, rgbLightOn: true, rgbLightOnUpdates: 0, rgbFrameUpdates: 0,
+  });
+  vm.runInContext(viewer.slice(viewer.indexOf('const DIFFUSER_CENTER'), viewer.indexOf('let rgbFrame')), context);
+  vm.runInContext(viewer.slice(viewer.indexOf('function prepareDiffuser('), viewer.indexOf('function animateRgb(')), context);
+  const centerZ = .18996717780828476;
+  const directions = [[.04, 0, centerZ], [0, .04, centerZ], [-.04, 0, centerZ], [0, -.04, centerZ]];
+  const positions = directions.flatMap(point => [...point, ...point, ...point]);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  const material = new THREE.MeshPhongMaterial();
+  const mesh = new THREE.Mesh(geometry, material);
+  context.prepareDiffuser({ traverse: callback => callback(mesh) });
+  const map = material.emissiveMap;
+  assert(map.isDataTexture);
+  const shader = { uniforms: {}, fragmentShader: THREE.ShaderLib.phong.fragmentShader };
+  material.onBeforeCompile(shader);
+  assert(shader.fragmentShader.includes('#include <emissivemap_fragment>'));
+  for (const mode of [15, 16, 0, 3, 8, 13, 14, null, 15]) {
+    assert(context.setRgbFrame(supplied, true, mode));
+    map.updateMatrix();
+    const uv = mesh.geometry.getAttribute('uv');
+    const indices = directions.map((_, index) => {
+      const sampled = new THREE.Vector2(uv.getX(index * 3), uv.getY(index * 3)).applyMatrix3(map.matrix);
+      return Math.round(((sampled.x % 1 + 1) % 1) * 24) % 24;
+    });
+    assert.deepEqual(indices, [12, 6, 0, 18], 'Front +X must emit LED12; rear -X must emit LED0 in every mode');
+    assert.equal(map.offset.x, 0);
+  }
+  const oldUv = createAngularUv(positions, [0, 0, centerZ], [0, 1, 0], [1, 0, 0]);
+  const newUv = mesh.geometry.getAttribute('uv');
+  for (let vertex = 0; vertex < newUv.count; vertex++) {
+    const previousTwoPeak = ((oldUv[vertex * 2] + .25) % 1 + 1) % 1;
+    assert.equal((newUv.getX(vertex) % 1 + 1) % 1, previousTwoPeak, 'Two-peak placement must retain its former total 90-degree correction');
+  }
+  material.dispose();
+  geometry.dispose();
+  mesh.geometry.dispose();
+  map.dispose();
 });
 
 test('opal shader adds independent light after ACES and softens highlights without changing opacity/output conversion', async () => {
@@ -744,7 +797,7 @@ test('registered production STL has finite seam-safe UVs throughout the diffuser
       positions[face * 9 + component] = bytes.readFloatLE(84 + face * 50 + 12 + component * 4);
     }
   }
-  const uv = createAngularUv(positions, [0, 0, 0.18996717780828476], [0, 1, 0], [1, 0, 0]);
+  const uv = createAngularUv(positions, [0, 0, 0.18996717780828476], [-1, 0, 0], [0, 1, 0]);
   assert(uv.every(Number.isFinite));
   for (let face = 0; face < faces; face++) {
     const angles = [uv[face * 6], uv[face * 6 + 2], uv[face * 6 + 4]];

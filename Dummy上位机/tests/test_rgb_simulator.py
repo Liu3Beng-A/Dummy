@@ -234,7 +234,6 @@ class SceneSelectionTests(unittest.TestCase):
         self.config["effects"][7] = (0, 255, 255, 0, 0, 0, 30000, 1, 12, 20, 20)
         for state, mode, color in (("CALIBRATION", 13, (255, 180, 0)),
                                    ("STOP", 7, (10, 7, 0)),
-                                   ("STARTING", 4, (0, 153, 153)),
                                    ("FAULT", 7, (10, 0, 0))):
             with self.subTest(state=state):
                 self.assertEqual(self.simulator.frame(self.config, state, 0,
@@ -243,6 +242,109 @@ class SceneSelectionTests(unittest.TestCase):
                 self.assertEqual(self.simulator.source, state)
         self.assertEqual(self.simulator.frame(self.config, "FAULT", 144,
                                              source="MANUAL")[0], (255, 0, 0))
+
+    def test_starting_keeps_disabled_animation_phase_for_any_reported_source(self):
+        config = self.config
+        for source in (None, "DISABLED", "MANUAL", "READY_SEQ", "STARTING", "OFF"):
+            with self.subTest(source=source):
+                reference, starting = RgbSimulator(), RgbSimulator()
+                for sim in (reference, starting):
+                    sim.frame(config, "DISABLED", 0, source="DISABLED")
+                    sim.frame(config, "DISABLED", 1100, source="DISABLED")
+                for now in (1150, 1200, 1500, 1900, 2500):
+                    self.assertEqual(starting.frame(config, "STARTING", now, source=source),
+                                     reference.frame(config, "DISABLED", now, source="DISABLED"))
+                    self.assertEqual(starting.source, "DISABLED")
+                    self.assertEqual(starting._scene_at, 0)
+
+    def test_starting_preserves_in_progress_blend_and_resolved_scene(self):
+        config = manual_config(0)
+        config["transition_ms"] = 400
+        reference, starting = RgbSimulator(), RgbSimulator()
+        for sim in (reference, starting):
+            sim.frame(config, "DISABLED", 0, source="MANUAL")
+        config["manual_mode"] = 3
+        for sim in (reference, starting):
+            sim.frame(config, "DISABLED", 100, source="MANUAL")
+            sim.frame(config, "DISABLED", 200, source="MANUAL")
+        held_config = deepcopy(config)
+        held_config["manual_mode"] = 1
+        held_config["effects"][3] = (0, 255, 255, 0, 0, 0, 250, 1, 12, 20, 20)
+        for now in (250, 300, 500, 900):
+            self.assertEqual(starting.frame(held_config, "STARTING", now, source="MANUAL"),
+                             reference.frame(config, "DISABLED", now, source="MANUAL"))
+            self.assertEqual((starting._scene_at, starting._blend_at, starting._blend_ms),
+                             (100, 100, 400))
+            self.assertEqual(starting._scene, reference._scene)
+            self.assertEqual(starting.source, "MANUAL")
+
+    def test_starting_first_snapshot_falls_back_without_cyan_flash(self):
+        for automatic in (False, True):
+            for source in (None, "STARTING", "OFF"):
+                with self.subTest(automatic=automatic, source=source):
+                    config = manual_config(1)
+                    config["automatic"] = automatic
+                    starting, reference = RgbSimulator(), RgbSimulator()
+                    expected_source = "DISABLED" if automatic else "MANUAL"
+                    self.assertEqual(starting.frame(config, "STARTING", 2000, source=source),
+                                     reference.frame(config, "DISABLED", 2000,
+                                                     source=expected_source))
+                    self.assertEqual(starting.source, expected_source)
+
+    def test_starting_first_snapshot_can_reconstruct_reported_previous_scene(self):
+        for source in ("BOOT", "DISABLED", "READY_SEQ", "MANUAL", "STOP"):
+            with self.subTest(source=source):
+                config = manual_config(1)
+                config["automatic"] = True
+                starting, reference = RgbSimulator(), RgbSimulator()
+                self.assertEqual(starting.frame(config, "STARTING", 100, source=source),
+                                 reference.frame(config, "DISABLED", 100, source=source))
+                self.assertEqual(starting.source, source)
+
+    def test_starting_exit_uses_normal_configured_transition(self):
+        config = manual_config(0)
+        config["transition_ms"] = 300
+        sim = RgbSimulator()
+        sim.frame(config, "DISABLED", 0, source="MANUAL")
+        previous = sim.frame(config, "STARTING", 100, source="MANUAL")
+        config["manual_mode"] = 1
+        self.assertEqual(sim.frame(config, "READY_SEQ", 200, source="MANUAL"), previous)
+        self.assertEqual(sim.frame(config, "READY_SEQ", 350, source="MANUAL")[0], (0, 128, 128))
+        self.assertEqual(sim.frame(config, "READY_SEQ", 500, source="MANUAL")[0], (0, 255, 0))
+
+    def test_stop_and_fault_interrupt_starting_immediately(self):
+        config = manual_config(0)
+        config["transition_ms"] = 5000
+        for state, expected in (("STOP", (10, 7, 0)), ("FAULT", (10, 0, 0))):
+            with self.subTest(state=state):
+                sim = RgbSimulator()
+                sim.frame(config, "DISABLED", 0, source="MANUAL")
+                sim.frame(config, "STARTING", 100, source="MANUAL")
+                self.assertEqual(sim.frame(config, state, 200, source="MANUAL")[0], expected)
+                self.assertEqual(sim.source, state)
+
+    def test_starting_keeps_brightness_ramp_and_power_switch_live(self):
+        config = manual_config(1)
+        config.update(fade_off_ms=400, brightness_ms=400)
+        sim = RgbSimulator()
+        sim.frame(config, "DISABLED", 0, source="MANUAL")
+        config["brightness"] = 50
+        self.assertEqual(sim.frame(config, "STARTING", 100, source="MANUAL")[0], (0, 255, 0))
+        sim.frame(config, "STARTING", 300, source="MANUAL")
+        self.assertEqual(sim.current_brightness, 75)
+        config["enabled"] = False
+        sim.frame(config, "STARTING", 300, source="OFF")
+        self.assertEqual(sim.frame(config, "STARTING", 700, source="OFF"), [(0, 0, 0)] * LED_COUNT)
+        self.assertEqual(sim.source, "OFF")
+
+    def test_starting_preserves_phase_across_unsigned_tick_wrap(self):
+        config = manual_config(3)
+        reference, starting = RgbSimulator(), RgbSimulator()
+        for sim in (reference, starting):
+            sim.frame(config, "DISABLED", 0xFFFFFF00, source="MANUAL")
+        for now in (0xFFFFFF10, 0xFFFFFFF0, 30, 500):
+            self.assertEqual(starting.frame(config, "STARTING", now, source="STARTING"),
+                             reference.frame(config, "DISABLED", now, source="MANUAL"))
 
     def test_stop_heartbeat_matches_fixed_fault_timing_with_binding_color(self):
         self.config["effects"][7] = (0, 255, 255, 0, 0, 0, 30000, 1, 12, 20, 20)

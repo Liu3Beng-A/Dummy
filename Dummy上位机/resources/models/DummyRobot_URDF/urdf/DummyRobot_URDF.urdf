@@ -44,6 +44,28 @@
       </geometry>
     </collision>
   </link>
+  <link name="base_rail_control">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://DummyRobot_URDF/meshes/base_rail_control.stl" />
+      </geometry>
+      <material name="base_rail_control_black">
+        <color rgba="0.035 0.035 0.035 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://DummyRobot_URDF/meshes/base_rail_control.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="base_rail_control_fixed" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="base_rail" />
+    <child link="base_rail_control" />
+  </joint>
   <link
     name="base_link">
     <inertial>
@@ -428,7 +450,7 @@
       <material
         name="">
         <color
-          rgba="0.10 0.10 0.10 1" />
+          rgba="0.309803921568627 0.309803921568627 0.309803921568627 1" />
       </material>
     </visual>
     <collision>
@@ -486,7 +508,7 @@
       <material
         name="">
         <color
-          rgba="0.10 0.10 0.10 1" />
+          rgba="0.309803921568627 0.309803921568627 0.309803921568627 1" />
       </material>
     </visual>
     <collision>
@@ -544,7 +566,7 @@
       <material
         name="">
         <color
-          rgba="0.10 0.10 0.10 1" />
+          rgba="0.309803921568627 0.309803921568627 0.309803921568627 1" />
       </material>
     </visual>
     <collision>

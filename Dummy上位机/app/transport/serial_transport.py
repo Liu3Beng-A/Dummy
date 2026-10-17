@@ -27,6 +27,7 @@ class SerialTransport(QObject):
         self.last_activity_at = 0.0
         self.line_observer = None
         self.written_observer = None
+        self.write_ready = None
         self.telemetry_validator = None
         self.wire_log = WireLog()
         self._telemetry_lock = threading.Lock()
@@ -97,6 +98,11 @@ class SerialTransport(QObject):
             generation, command = item
             try:
                 self.write_in_progress = True
+                # Flash cannot service USB OUT. Keep a requested safety command
+                # at the head, without holding the write lock or blocking RX/UI.
+                while self.write_ready is not None and not self.write_ready(generation, command):
+                    if self._stop.wait(.01):
+                        break
                 with self._write_lock:
                     if self._stop.is_set() or not self.allowed(generation, command):
                         continue

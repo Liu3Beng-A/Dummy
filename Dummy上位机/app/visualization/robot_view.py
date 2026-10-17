@@ -11,7 +11,7 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from .asset_server import AssetServer
-from .mapping import REST_POSE, cartesian_marker, firmware_to_urdf, normalize_pose
+from .mapping import REST_POSE, cartesian_marker, firmware_to_urdf, normalize_pose, target_pose_matches
 
 
 class _Bridge(QObject):
@@ -60,7 +60,7 @@ class RobotView(QWidget):
         self._state = {
             "mode": "preview", "theme": "light", "stale": True,
             "actualOnly": False, "feedbackPaused": False,
-            "rgbPreview": False, "targetEnabled": True,
+            "rgbPreview": False, "targetEnabled": True, "targetMatched": False,
             "actualKnown": False, "actualGripperKnown": False,
             "highlight": None, "camera": "isometric", "cameraSeq": 0,
             "grid": True, "axes": True, "visibilitySeq": 0,
@@ -136,7 +136,7 @@ class RobotView(QWidget):
         self._sync()
         self._emit_rgb_frame()
         self.ready.emit()
-        self.status_changed.emit("本地 URDF 与 11 个网格加载完成")
+        self.status_changed.emit("本地 URDF 与 12 个网格加载完成")
 
     def _show_error(self, message):
         if self._closed:
@@ -149,6 +149,11 @@ class RobotView(QWidget):
     def _sync(self):
         if self._closed:
             return
+        fresh = (self._state["actualKnown"] and not self._state["stale"]
+                 and not self._state["feedbackPaused"])
+        self._state["targetMatched"] = bool(fresh and target_pose_matches(
+            self._target_pose, self._actual_pose, was_matched=self._state["targetMatched"],
+            target_gripper=self._target_gripper, actual_gripper=self._actual_gripper))
         self._state["target"] = firmware_to_urdf(self._target_pose, self._target_gripper, preview=True)
         actual_only = self._state["actualOnly"]
         if actual_only:
@@ -172,6 +177,8 @@ class RobotView(QWidget):
         pose = normalize_pose(joints, preview=True)
         # Validate before storing or transmitting to the viewer.
         firmware_to_urdf(pose, gripper_pct, preview=True)
+        if pose != self._target_pose or float(gripper_pct) != self._target_gripper:
+            self._state["targetMatched"] = False
         self._target_pose = pose
         self._target_gripper = float(gripper_pct)
         self._sync()
@@ -229,6 +236,8 @@ class RobotView(QWidget):
         preview must not manufacture a new robot joint pose or send commands.
         """
         firmware_to_urdf(self._target_pose, gripper_pct, preview=True)
+        if float(gripper_pct) != self._target_gripper:
+            self._state["targetMatched"] = False
         self._target_gripper = float(gripper_pct)
         self._sync()
 
@@ -266,7 +275,7 @@ class RobotView(QWidget):
         self._sync()
 
     def set_target_visible(self, visible):
-        """Show/hide only the joint-target ghost; feedback and MoveL markers keep their rules."""
+        """Master ghost preference; matching fresh feedback hides it automatically."""
         if self._closed:
             return
         visible = bool(visible)

@@ -1,5 +1,6 @@
 """Independent automatic RGB banks, atomic protocol writes and legacy compatibility."""
 from copy import deepcopy
+import math
 import queue
 import unittest
 
@@ -172,9 +173,10 @@ class MotionEquationTests(unittest.TestCase):
                 for width in (1, 3, 12):
                     config["motion"][1] = (1400, reverse, width)
                     scene = _select_scene(_config(config), "RUN_INT", None)
+                    full_cycle = 2800 if kind == 3 else 1400
                     for elapsed in range(0, 1400, 31):
                         frame = _render(scene, elapsed)
-                        repeated = _render(scene, elapsed + 1400)
+                        repeated = _render(scene, elapsed + full_cycle)
                         self.assertEqual(frame, repeated)
                         self.assertTrue(all(0 <= channel <= limit for led in frame for channel, limit in zip(led, (80, 160, 240))))
                     if reverse == 0 and width == 3:
@@ -191,10 +193,73 @@ class MotionEquationTests(unittest.TestCase):
         self.assertAlmostEqual(frame[6][0], 255 * .04)
         config["states"]["RUN_SEQ"] = (16, 1, 255, 0, 0)
         scene = _select_scene(_config(config), "RUN_SEQ", None)
-        self.assertEqual(_render(scene, 0), ((255 * .04, 0., 0.),) * 24)
-        at_half = _render(scene, 490)
+        start = _render(scene, 0)
+        self.assertAlmostEqual(start[12][0], 255 * .9)
+        self.assertAlmostEqual(start[0][0], 255 * .04)
+        at_half = _render(scene, 700)
         self.assertGreater(at_half[6][0], at_half[0][0])
         self.assertAlmostEqual(at_half[6][0], at_half[18][0])
+
+    def test_convergence_reverses_continuously_with_fixed_width_and_peak(self):
+        config = default_config()
+        for slot, state in enumerate(MOTION_STATES):
+            config["states"][state] = (16, 1, 80, 160, 240)
+            for period in (250, 800, 1400, 30000):
+                for reverse in (0, 1):
+                    for width in (1, 3, 12):
+                        config["motion"][slot] = (period, reverse, width)
+                        scene = _select_scene(_config(config), state, None)
+                        for tick in (0, 1, period // 7, period // 3, period * 2 // 3, period - 1):
+                            first = _render(scene, tick)
+                            second = _render(scene, tick + period)
+                            third = _render(scene, tick + 2 * period)
+                            self.assertEqual(first, third)
+                            for led in range(24):
+                                for channel in range(3):
+                                    self.assertAlmostEqual(second[led][channel], first[(led + 12) % 24][channel], places=10)
+                        # Both sides of a turn are the same position. The head
+                        # remains lit and there is no endpoint width bloom.
+                        for boundary in (period, 2 * period):
+                            before, endpoint, after = (_render(scene, boundary + offset) for offset in (-1, 0, 1))
+                            self.assertAlmostEqual(max(led[2] for led in endpoint), 240 * .9)
+                            endpoint_led = (12 if reverse else 0) if boundary == period else (0 if reverse else 12)
+                            width_turns = .055 * width / 3.0
+                            for led in range(24):
+                                distance = min((led - endpoint_led) % 24, (endpoint_led - led) % 24) / 24
+                                gaussian = math.exp(-.5 * (distance / width_turns) ** 2)
+                                expected = 240 * (.04 + .86 * (2 * gaussian - gaussian * gaussian))
+                                self.assertAlmostEqual(endpoint[led][2], expected, places=10)
+                                self.assertAlmostEqual(before[led][2], after[led][2], places=10)
+                                self.assertLess(abs(before[led][2] - endpoint[led][2]) / 240, .001)
+        # Under the model's common 90-degree registration LED12 is front, LED0 rear.
+        config["motion"][0] = (1400, 0, 3)
+        scene = _select_scene(_config(config), "RUN_SEQ", None)
+        outbound = _render(scene, 140)
+        returning = _render(scene, 1540)
+        self.assertGreater(outbound[12][2], outbound[0][2])
+        self.assertGreater(returning[0][2], returning[12][2])
+
+    def test_convergence_800ms_head_has_no_relight_jump_at_20ms_updates(self):
+        config = default_config()
+        config["states"]["RUN_SEQ"] = (16, 1, 255, 0, 0)
+        for reverse in (0, 1):
+            config["motion"][0] = (800, reverse, 3)
+            scene = _select_scene(_config(config), "RUN_SEQ", None)
+            peaks = [max(led[0] for led in _render(scene, tick)) / 255
+                     for tick in range(0, 1601, 20)]
+            # About five percentage points for phase-aligned 20ms frames;
+            # also bound every integer-ms start phase, including jitter.
+            self.assertLess(max(b - a for a, b in zip(peaks, peaks[1:])), .051)
+            all_phases = [max(led[0] for led in _render(scene, tick)) / 255
+                          for tick in range(1620)]
+            self.assertLess(max(all_phases[tick + 20] - all_phases[tick]
+                                for tick in range(1600)), .059)
+            self.assertLessEqual(max(peaks), .9 + 1e-12)
+            for boundary in (0, 800, 1600):
+                self.assertAlmostEqual(peaks[boundary // 20], .9)
+            # Before/after both turns stay at a stable head rather than
+            # falling to the background and starting another fade-in.
+            self.assertGreater(min(peaks[index] for index in (1, 39, 41, 79)), .899)
 
     def test_invalid_automatic_modes_cannot_reach_manual_or_other_states(self):
         config = default_config()

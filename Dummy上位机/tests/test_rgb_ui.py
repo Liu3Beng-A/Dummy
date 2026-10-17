@@ -399,6 +399,110 @@ class RGBPreviewUiTests(unittest.TestCase):
         APPLICATION.processEvents()
         self.assertTrue(w._rgb_render_timer.isActive())
 
+    def test_save_stages_disable_duplicate_save_and_keep_feedback_separate_from_rgb_summary(self):
+        self.receive_config()
+        w = self.window
+        clicked = []
+        w.rgb_save_button.clicked.connect(lambda: clicked.append(True))
+        snapshot = self.controller.rgb_snapshot()
+        for stage, caption, message in (
+            ("preparing", "等待回读…", "正在确认设备状态，等待回读"),
+            ("waiting", "保存中…", "RGB 保存中，查询已暂停"),
+            ("settling", "保存中…", "已收到保存回执，等待尾包"),
+            ("uncertain", "结果未确认", "6 秒未确认，查询已暂停，请断开重连核实"),
+        ):
+            snapshot = copy.deepcopy(snapshot)
+            snapshot.update(save_busy=True, save_stage=stage, save_message=message)
+            w._rgb_device_changed(snapshot)
+            self.assertFalse(w.rgb_save_button.isEnabled())
+            self.assertEqual(w.rgb_save_button.text(), caption)
+            self.assertTrue(w.rgb_save_status.isVisible())
+            self.assertEqual(w.rgb_save_status.text(), message)
+            snapshot["runtime"]["bright"] += 1
+            w._rgb_device_changed(snapshot)
+            self.assertEqual(w.rgb_save_status.text(), message)
+            w.rgb_save_button.click()
+        self.assertEqual(clicked, [])
+        snapshot = copy.deepcopy(snapshot)
+        snapshot.update(save_busy=False, save_stage="idle", save_message="RGB 保存成功")
+        w._rgb_device_changed(snapshot)
+        self.assertTrue(w.rgb_save_button.isEnabled())
+        self.assertEqual(w.rgb_save_button.text(), "保存全部 RGB 配置")
+        self.assertEqual(w.rgb_save_status.text(), "RGB 保存成功")
+        snapshot["runtime"]["bright"] += 1
+        w._rgb_device_changed(snapshot)
+        self.assertEqual(w.rgb_save_status.text(), "RGB 保存成功")
+        self.assertFalse(any(command.startswith("!RGB_SAVE") for command in self.commands()))
+
+    def test_save_button_starts_one_controller_transaction_and_updates_immediately(self):
+        self.receive_config()
+        w = self.window
+        self.controller._motor_state_known = True
+        self.controller._motor_enabled = False
+        with patch.object(self.controller.rgb_save, "begin", wraps=self.controller.rgb_save.begin) as begin:
+            w.rgb_save_button.click()
+            w.rgb_save_button.click()
+            begin.assert_called_once_with("!RGB_SAVE")
+        self.assertTrue(self.controller.rgb_snapshot()["save_busy"])
+        self.assertTrue(self.controller.state()["rgb_save_busy"])
+        self.assertEqual(w.rgb_save_button.text(), "等待回读…")
+        self.assertFalse(w.rgb_save_button.isEnabled())
+        self.assertIn("后台查询已暂停", w.rgb_save_status.text())
+
+    def test_save_uncertainty_preserves_last_model_lamp_until_disconnect(self):
+        self.receive_config()
+        w = self.window
+        last = (w.viewer.rgb_frame, w.viewer.rgb_light_on, w.viewer.rgb_effect_mode)
+        self.assertIs(last[1], True)
+        snapshot = self.controller.rgb_snapshot()
+        received = snapshot["received_at"]
+        snapshot.update(save_busy=True, save_stage="uncertain", save_message="")
+        with patch("app.ui.main_window.time.monotonic", return_value=received + 20):
+            w._rgb_device_changed(snapshot)
+            w._render_rgb_preview()
+        self.assertEqual((w.viewer.rgb_frame, w.viewer.rgb_light_on, w.viewer.rgb_effect_mode), last)
+        self.assertTrue(w._rgb_follow_seeded)
+        self.assertIn("保留上次模型灯光", w.rgb_preview_status.text())
+        self.assertIn("6 秒", w.rgb_save_status.text())
+        self.assertIn("断开重连", w.rgb_save_status.text())
+        self.assertIn("迟到回执", w.rgb_save_status.text())
+        disconnected = copy.deepcopy(snapshot)
+        disconnected.update(connected=False, save_busy=False, save_stage="idle", save_message="连接断开，保存结果未确认")
+        w._rgb_device_changed(disconnected)
+        self.assertIs(w.viewer.rgb_light_on, False)
+        self.assertFalse(any(channel for color in w.viewer.rgb_frame for channel in color))
+        self.assertIn("未连接", w.rgb_preview_title.text())
+        self.assertIsNone(w._rgb_save_resume_until)
+
+    def test_save_resume_grace_is_bounded_and_fresh_status_restores_normal_follow(self):
+        self.receive_config()
+        w = self.window
+        snapshot = self.controller.rgb_snapshot()
+        received = snapshot["received_at"]
+        last = (w.viewer.rgb_frame, w.viewer.rgb_light_on, w.viewer.rgb_effect_mode)
+        snapshot.update(save_busy=True, save_stage="waiting", save_message="保存中")
+        with patch("app.ui.main_window.time.monotonic", return_value=received + 10):
+            w._rgb_device_changed(snapshot)
+            finished = copy.deepcopy(snapshot)
+            finished.update(save_busy=False, save_stage="idle", save_message="RGB 保存成功")
+            w._rgb_device_changed(finished)
+        with patch("app.ui.main_window.time.monotonic", return_value=received + 10.5):
+            w._render_rgb_preview()
+        self.assertEqual((w.viewer.rgb_frame, w.viewer.rgb_light_on, w.viewer.rgb_effect_mode), last)
+        self.assertIn("等待恢复查询", w.rgb_preview_status.text())
+        with patch("app.ui.main_window.time.monotonic", return_value=received + 11.1):
+            w._render_rgb_preview()
+        self.assertIn("状态已过期", w.rgb_preview_title.text())
+        self.assertIs(w.viewer.rgb_light_on, False)
+        finished["received_at"] = received + 11.2
+        with patch("app.ui.main_window.time.monotonic", return_value=received + 11.2):
+            w._rgb_device_changed(finished)
+        self.assertIs(w.viewer.rgb_light_on, True)
+        self.assertTrue(w._rgb_follow_seeded)
+        self.assertIn("设备配置跟随", w.rgb_preview_status.text())
+        self.assertEqual(w.rgb_save_status.text(), "RGB 保存成功")
+        self.assertIsNone(w._rgb_save_resume_until)
+
 
 if __name__ == "__main__":
     unittest.main()

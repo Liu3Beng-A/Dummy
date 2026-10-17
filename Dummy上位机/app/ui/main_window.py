@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         self._rgb_loading_editor = False
         self._rgb_device = None
         self._rgb_follow_seeded = False
+        self._rgb_save_resume_until = None
         self._rgb_simulator = RgbSimulator()
         self._rgb_render_timer = QTimer(self)
         self._rgb_render_timer.setInterval(33)
@@ -359,7 +360,7 @@ class MainWindow(QMainWindow):
         self.viewer_target_button.setObjectName("ViewerToggle")
         self.viewer_target_button.setCheckable(True)
         self.viewer_target_button.setChecked(self.store.settings.get("show_target_ghost", True))
-        self.viewer_target_button.setToolTip("仅控制目标模型虚体的显示；不改变实际姿态、运动目标或发送指令。")
+        self.viewer_target_button.setToolTip("目标虚体总开关；有效回读与目标一致时自动隐藏，有差异时显示。仅影响模型显示，不改变目标或发送指令。")
         self.viewer_target_button.toggled.connect(self._target_visibility_changed)
         display_row.addWidget(self.viewer_target_button)
         display_row.addStretch()
@@ -1287,6 +1288,9 @@ class MainWindow(QMainWindow):
         self.rgb_detail_label.hide()
         self._bind("_rgb_status_var", self.rgb_detail_label)
         layout.addWidget(self.rgb_status)
+        self.rgb_save_status = hint("", "warning")
+        self.rgb_save_status.hide()
+        layout.addWidget(self.rgb_save_status)
         row = QHBoxLayout()
         for text, command in (("渐开", "!RGB_ON"), ("渐关", "!RGB_OFF"),
                               ("启用自动联动", "!RGB_AUTO 1"), ("关闭自动联动", "!RGB_AUTO 0"),
@@ -1449,7 +1453,7 @@ class MainWindow(QMainWindow):
         source.currentIndexChanged.connect(lambda index: color.setEnabled(index == 1))
         color.setEnabled(False)
         content.addWidget(button("应用当前状态绑定", self.controller._rgb_apply_state, "primary"))
-        content.addWidget(hint("独立颜色仅在该颜色来源被选中时使用；AUTO 来源引用自动颜色。13～16 号独立动效仅用于 SEQ / INT / TRJ 运动及校准；参数在自动颜色页设置。报警不可改色，STOP / 校准期间只允许查询。"))
+        content.addWidget(hint("独立颜色仅在该颜色来源被选中时使用；AUTO 来源引用自动颜色。13～16 号独立动效仅用于 SEQ / INT / TRJ 运动及校准；参数在自动颜色页设置。使能确认期间保持原灯效，成功后切换；使能确认状态的旧绑定仅保留兼容。报警不可改色，STOP / 校准期间只允许查询。"))
         box.addWidget(group)
         box.addStretch()
         self.rgb_preview_panel = QFrame()
@@ -1519,7 +1523,8 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(hint("未保存的配置掉电丢失；保存需要已确认失能。"), 1)
         row.addWidget(button("恢复默认（临时）", lambda: self.controller.send_cmd("!RGB_RESET")))
-        row.addWidget(button("保存全部 RGB 配置", self.controller._rgb_save, "primary"))
+        self.rgb_save_button = button("保存全部 RGB 配置", self.controller._rgb_save, "primary")
+        row.addWidget(self.rgb_save_button)
         layout.addLayout(row)
         self._rgb_preview_selection_changed()
 
@@ -1667,6 +1672,13 @@ class MainWindow(QMainWindow):
         if previous is None or previous["connection_id"] != snapshot["connection_id"]:
             self._rgb_simulator.reset()
             self._rgb_follow_seeded = False
+            self._rgb_save_resume_until = None
+        elif previous.get("save_busy", False) and not snapshot.get("save_busy", False) and snapshot["connected"]:
+            # The save acknowledgment may arrive without its final status tail.
+            # Hold the last lamp frame briefly while the first query resumes.
+            self._rgb_save_resume_until = time.monotonic() + 1.0
+        if not snapshot["connected"]:
+            self._rgb_save_resume_until = None
         if snapshot["complete"]:
             incoming = copy.deepcopy(snapshot["config"])
             for path in tuple(self._rgb_dirty_paths):
@@ -1701,6 +1713,19 @@ class MainWindow(QMainWindow):
             summary = "已连接 · 等待 RGB 配置与状态回读"
         self.rgb_status.setText(summary)
         self.rgb_status.setToolTip(str(self.fields["_rgb_status_var"].get()))
+        save_busy = snapshot.get("save_busy", False)
+        save_stage = snapshot.get("save_stage", "idle")
+        save_button_text = {"preparing": "等待回读…", "uncertain": "结果未确认"}.get(save_stage, "保存中…")
+        self.rgb_save_button.setText(save_button_text if save_busy else "保存全部 RGB 配置")
+        self.rgb_save_button.setEnabled(not save_busy)
+        save_message = snapshot.get("save_message", "")
+        if save_busy and not save_message:
+            save_message = ("6 秒内未确认 RGB 保存结果，查询已暂停；请断开重连后核实，迟到回执仍可确认结果。"
+                            if save_stage == "uncertain" else
+                            "正在确认设备状态，等待回读；请勿重复保存。" if save_stage == "preparing" else
+                            "RGB 保存中，查询已暂停；请等待保存结果。")
+        self.rgb_save_status.setText(save_message)
+        self.rgb_save_status.setVisible(bool(save_message))
         supported = snapshot.get("motion_supported", False)
         self.rgb_motion_apply.setEnabled(not snapshot["connected"] or supported)
         if not snapshot["connected"]:
@@ -1751,15 +1776,25 @@ class MainWindow(QMainWindow):
             status = "本地模拟 · 编辑不发送"
         else:
             snapshot = self._rgb_device or self.controller.rgb_snapshot()
+            if snapshot["connected"] and snapshot.get("save_busy", False):
+                # Device polling pauses during the exclusive save transaction.
+                # Keep the last displayed frame/power instead of aging it to off.
+                self.rgb_preview_status.setText("RGB 保存事务 · 查询暂停，保留上次模型灯光")
+                return
             runtime = snapshot["runtime"]
             age = time.monotonic() - snapshot["received_at"] if snapshot["received_at"] is not None else None
             unavailable = (not snapshot["connected"] or not snapshot["complete"] or not runtime)
             if unavailable or age is None or age > 3:
+                if (snapshot["connected"] and self._rgb_save_resume_until is not None
+                        and time.monotonic() < self._rgb_save_resume_until):
+                    self.rgb_preview_status.setText("RGB 保存结束 · 等待恢复查询，保留上次模型灯光")
+                    return
                 self._rgb_follow_seeded = False
                 title = "未连接" if not snapshot["connected"] else "等待回读" if unavailable else "状态已过期"
                 self._set_rgb_preview_frame([(0, 0, 0)] * 24, title, "", light_on=False)
                 self.rgb_preview_status.setText("连接并查询全部配置后显示" if unavailable else "等待下一次状态回读")
                 return
+            self._rgb_save_resume_until = None
             if not self._rgb_follow_seeded:
                 self._rgb_simulator.reset(initial_brightness=runtime["current"])
                 self._rgb_follow_seeded = True

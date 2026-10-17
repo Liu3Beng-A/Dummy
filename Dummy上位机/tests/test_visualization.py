@@ -63,10 +63,15 @@ class OfflineResourceTests(unittest.TestCase):
     def test_meshes_and_urdf_joint_names(self):
         base = ROOT / 'resources/models/DummyRobot_URDF'
         urdf = ET.parse(base / 'urdf/DummyRobot_URDF.urdf').getroot()
-        joints = {joint.attrib['name'] for joint in urdf.findall('joint')}
+        joints = {joint.attrib['name'] for joint in urdf.findall('joint') if joint.get('type') != 'fixed'}
         self.assertEqual(joints, {'rail', *(f'Joint{i}' for i in range(1, 7)), 'Hand_R', 'Hand_L'})
+        fixed = urdf.find("joint[@name='base_rail_control_fixed']")
+        self.assertEqual(fixed.get('type'), 'fixed')
+        self.assertEqual(fixed.find('parent').get('link'), 'base_rail')
+        self.assertEqual(fixed.find('child').get('link'), 'base_rail_control')
+        self.assertEqual(fixed.find('origin').attrib, {'xyz': '0 0 0', 'rpy': '0 0 0'})
         meshes = urdf.findall('link/visual/geometry/mesh')
-        self.assertEqual(len(meshes), 11)
+        self.assertEqual(len(meshes), 12)
         triangles = 0
         for mesh in meshes:
             prefix = 'package://DummyRobot_URDF/'
@@ -76,7 +81,7 @@ class OfflineResourceTests(unittest.TestCase):
             count = struct.unpack_from('<I', data, 80)[0]
             self.assertEqual(len(data), 84 + count * 50, path.name)
             triangles += count
-        # The split base/diffuser export adds ten interface facets; retain detail.
+        # Splitting the rail/controller preserves the existing combined facets.
         self.assertEqual(triangles, 1934324)
 
     def test_diffuser_is_in_base_coordinates_and_requested_colors_are_applied(self):
@@ -85,10 +90,10 @@ class OfflineResourceTests(unittest.TestCase):
         urdf = ET.parse(base / 'urdf/DummyRobot_URDF.urdf').getroot()
         links = {link.get('name'): link for link in urdf.findall('link')}
         color = lambda name: tuple(float(value) for value in links[name].find('visual/material/color').get('rgba').split())
-        for name in ('base_link', 'Link1', 'Link2', 'Link3', 'Link4', 'Link5'):
+        for name in ('base_link', 'base_rail_control', 'Link1', 'Link2', 'Link3', 'Link4', 'Link5'):
             self.assertEqual(color(name), (.035, .035, .035, 1.))
         for name in ('Link6', 'Hand_R', 'Hand_L'):
-            self.assertEqual(color(name), (.10, .10, .10, 1.))
+            self.assertEqual(color(name), color('base_rail'))
         diffuser = links['base_link'].find("visual[@name='rgb_diffuser']")
         self.assertIsNotNone(diffuser)
         self.assertEqual(tuple(map(float, diffuser.find('material/color').get('rgba').split())), (.85, .85, .85, 1.))

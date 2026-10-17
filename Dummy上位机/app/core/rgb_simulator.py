@@ -27,7 +27,7 @@ STATE_NAMES = (
     "RUN_SEQ", "RUN_INT", "RUN_TRJ", "RUN_TUN", "CALIBRATION", "STOP",
     "STARTING", "FAULT",
 )
-_PROTECTED_STATES = frozenset(("FAULT", "STOP", "CALIBRATION", "STARTING"))
+_PROTECTED_STATES = frozenset(("FAULT", "STOP", "CALIBRATION"))
 _TICK_MASK = 0xFFFFFFFF
 _SPIN_FRONT_LEDS = 1.5
 _SPIN_TAIL_EXTRA_LEDS = 2.0
@@ -218,6 +218,13 @@ def _gain(brightness: float) -> float:
 
 
 def _select_scene(c: _Config, state: str, source: str | None) -> _Scene:
+    # Stateless fallback when following starts mid-enable. STARTING has no
+    # visual override now; a usable reported source can reconstruct its prior
+    # scene, otherwise use the ordinary disabled/manual selection.
+    if state == "STARTING":
+        state = "DISABLED"
+        if source == "STARTING":
+            source = None
     # A reported source selects the accepted scene; protection always takes priority.
     if state in _PROTECTED_STATES:
         selected = state
@@ -293,6 +300,13 @@ def _render(scene: _Scene, elapsed: int) -> tuple[tuple[float, float, float], ..
         amplitude = 1.0 if elapsed % (e.on + e.off) < e.on else 0.0
     if scene.mode == 6:
         mix = 0.5 - 0.5 * math.cos(2 * math.pi * p)
+    # Each period is one leg. Ease only its position so the same fixed-width
+    # heads stop and reverse at the endpoints without fading or relighting.
+    converge_center, converge_width = 0.0, 1.0
+    if scene.mode == 16:
+        eased = _smooth(p)
+        converge_center = .5 * (eased if (elapsed // e.period) % 2 else 1 - eased)
+        converge_width = .055 * e.tail / 3.0
     output = []
     for i in range(LED_COUNT):
         color, level = scene.solid, amplitude
@@ -320,13 +334,10 @@ def _render(scene: _Scene, elapsed: int) -> tuple[tuple[float, float, float], ..
                 wave = math.sin(2 * math.pi * valley / (e.period * LED_COUNT))
                 level = .04 + .86 * wave ** (4 / (scale * scale))
             else:
-                center = .5 * (1 - _smooth(p / .7))
-                fade = _smooth((p - .7) / .3)
-                width = (.055 + .1 * fade) * scale
-                da, db = abs(x - center) % 1, abs(x + center) % 1
+                da, db = abs(x - converge_center) % 1, abs(x + converge_center) % 1
                 da, db = min(da, 1 - da), min(db, 1 - db)
-                a, b = math.exp(-.5 * (da / width) ** 2), math.exp(-.5 * (db / width) ** 2)
-                level = .04 + .86 * _smooth(p / .09) * (1 - fade) * (a + b - a * b)
+                a, b = math.exp(-.5 * (da / converge_width) ** 2), math.exp(-.5 * (db / converge_width) ** 2)
+                level = .04 + .86 * (a + b - a * b)
         output.append(tuple(channel * level * scene.scale for channel in color))
     return tuple(output)
 
@@ -353,7 +364,9 @@ class RgbSimulator:
     Call frame repeatedly with an editable complete config and a physical state
     name (or 0..13 index). A reported source BOOT/MANUAL/state name suppresses
     inferred local BOOT and chooses that scene, except for physical protection
-    states. OFF also suppresses BOOT, but never cuts short an ongoing fade-out:
+    states. STARTING keeps the existing scene, phase and in-progress transition;
+    a first snapshot can reconstruct a reported scene but not its original phase.
+    OFF also suppresses BOOT, but never cuts short an ongoing fade-out:
     config.enabled/brightness still determine brightness. With source=None,
     local DISABLED startup shows BOOT for the first two seconds like firmware.
 
@@ -414,7 +427,8 @@ class RgbSimulator:
             self._boot_pending = False
         visible = ("BOOT" if source is None and self._boot_pending and c.automatic and
                    physical == "DISABLED" else physical)
-        next_scene = _select_scene(c, visible, source)
+        next_scene = (self._scene if physical == "STARTING" and self._scene is not None
+                      else _select_scene(c, visible, source))
         if self._scene != next_scene:
             self._from_frame = self._frame
             self._scene_at = self._blend_at = now

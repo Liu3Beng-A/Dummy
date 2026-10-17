@@ -16,6 +16,11 @@ JOINT_LIMITS = ((-175.0, 175.0), (-75.0, 90.0), (0.0, 180.0),
 REST_POSE = (0.0, -75.0, 180.0, 0.0, 0.0, 0.0, 0.0)
 MODEL_Z_OFFSET_M = 0.0200
 JOINT_NAMES = tuple(f"Joint{i}" for i in range(1, 7)) + ("rail",)
+# Display tolerances only; these never certify motion completion on the device.
+TARGET_MATCH_JOINT_DEG = 0.1
+TARGET_MATCH_RAIL_MM = 0.1
+TARGET_MATCH_GRIPPER_PERCENT = 1.0
+TARGET_MATCH_RELEASE_FACTOR = 2.0
 
 
 def finite_values(values: Sequence[float], count: int) -> list[float]:
@@ -34,6 +39,26 @@ def normalize_pose(pose: Sequence[float], *, preview: bool) -> list[float]:
                 for value, (low, high) in zip(values, JOINT_LIMITS)]
     # Actual telemetry must not be silently clipped to rounded URDF limits.
     return values
+
+
+def target_pose_matches(target: Sequence[float], actual: Sequence[float], *,
+                        was_matched: bool = False, target_gripper: float | None = None,
+                        actual_gripper: float | None = None) -> bool:
+    """Compare raw firmware positions for display, with a small hysteresis.
+
+    Unknown gripper feedback is excluded instead of treating a drawn/commanded
+    opening as telemetry. Joint angles are not wrapped or clamped here.
+    """
+    wanted, feedback = finite_values(target, 7), finite_values(actual, 7)
+    factor = TARGET_MATCH_RELEASE_FACTOR if was_matched else 1.0
+    limits = [TARGET_MATCH_JOINT_DEG] * 6 + [TARGET_MATCH_RAIL_MM]
+    if any(abs(a - b) > limit * factor + 1e-9
+           for a, b, limit in zip(wanted, feedback, limits)):
+        return False
+    if target_gripper is not None and actual_gripper is not None:
+        wanted_grip, feedback_grip = finite_values([target_gripper, actual_gripper], 2)
+        return abs(wanted_grip - feedback_grip) <= TARGET_MATCH_GRIPPER_PERCENT * factor + 1e-9
+    return True
 
 
 def firmware_to_urdf(pose: Sequence[float], gripper_pct: float = 100.0,

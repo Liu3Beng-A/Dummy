@@ -515,6 +515,7 @@ class RobotController(QObject, RobotBusiness):
         # own feedback independently from the actual model.
         self._transport.line_observer = self.cartesian.diagnostics.receive
         self._transport.written_observer = self.cartesian.diagnostics.written
+        self._transport.write_ready = self.rgb_save.ready_to_write
         self._transport.start()
         self.log(f"已连接 {port} @ {BAUDRATE} ({self.connection_type})")
         self.send_cmd("#RGB_GET")
@@ -762,11 +763,19 @@ class RobotController(QObject, RobotBusiness):
             self._calibration_busy = True
             self.lbl_motor_state.config(text="校准入口检查中")
         if command in ("!STOP", "!DISABLE"):
+            wait_for_flash = not self.rgb_save.ready_to_write(self._tx_generation, command)
+            if wait_for_flash:
+                self.log("RGB 正在写入 Flash；已记录停止 / 失能请求，设备确认后优先发送。", "WARN")
             if source != "gamepad":
                 self.gamepad.external_stop(command)
             self._cancel_motion_for_stop()
             self._stop_locked = True
-            self._handle_stop_status("Stopping ok" if command == "!STOP" else "Disable pending")
+            if wait_for_flash:
+                action = "STOP" if command == "!STOP" else "失能"
+                self._stop_confirmed = False
+                self.lbl_motor_state.config(text=f"● {action} 请求待发送 / 等待 RGB 保存结果")
+            else:
+                self._handle_stop_status("Stopping ok" if command == "!STOP" else "Disable pending")
         if self._reject_plain_motion_in_stream_mode(command):
             return False
         if command.startswith(("~S", "!STREAM_")):

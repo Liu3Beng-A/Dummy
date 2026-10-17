@@ -32,7 +32,7 @@ def main():
     application.setOrganizationName("DummyRobot")
     application.setApplicationName("Dummy Robot 上位机")
     application.setApplicationVersion("0.3.0")
-    application.setWindowIcon(QIcon(str(resource_path("icons", "dummy.svg"))))
+    application.setWindowIcon(QIcon(str(resource_path("icons", "dummy.ico"))))
     store = AppStore(args.data_dir)
     if args.theme:
         store.update_settings(theme=args.theme)

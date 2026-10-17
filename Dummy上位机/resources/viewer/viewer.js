@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/three/OrbitControls.js';
 import URDFLoader from './vendor/urdf-loader/URDFLoader.js';
+import { jointTargetVisible, TargetVisibilityFade } from './target_visibility.js';
 import { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, DIFFUSER_SAMPLES, DIFFUSER_STYLE,
   normalizeRgbFrame, patchDiffuserShader, sameRgbFrame, writeDiffuserTexture } from './model_rgb.js';
 
@@ -57,14 +58,18 @@ let previousCameraSeq = -1;
 let previousVisibilitySeq = -1;
 let disposed = false;
 const meshMaterials = new Map();
+const ghostMaterials = new Set();
+const targetFade = new TargetVisibilityFade();
+let appliedTargetOpacity = -1;
 const diffuserMeshes = [];
 const diffuserKernel = createDiffuserKernel();
 // The split STL is registered to the existing base_link coordinate frame (m).
-// Source zero points along +Y; increasing angles turn toward +X. This is the
-// 2D ring's simulated clockwise order, not a claim about physical LED wiring.
+// Register every effect 90 degrees counterclockwise from the original +Y zero
+// when viewed from +Z. Source zero is -X; increasing indices turn toward +Y.
+// The former mode-15-only texture offset is included here, never added again.
 const DIFFUSER_CENTER = [0, 0, 0.18996717780828476];
-const DIFFUSER_U = [0, 1, 0];
-const DIFFUSER_V = [1, 0, 0];
+const DIFFUSER_U = [-1, 0, 0];
+const DIFFUSER_V = [0, 1, 0];
 let rgbFrame = Array.from({ length: 24 }, () => [0, 0, 0]);
 let rgbFrameUpdates = 0;
 let displayedRgbFrame = null;
@@ -135,8 +140,7 @@ function setCamera(name) {
     top: [0.001, -0.001, 1.7], isometric: [1.02, -1.2, 0.9],
   };
   cameraName = name;
-  const jointPreview = currentState?.mode === 'preview'
-    && currentState?.actualOnly !== true && currentState?.targetEnabled !== false && !currentState?.marker;
+  const jointPreview = jointTargetVisible(currentState);
   const reference = isLocalRgbPreview(currentState) ? actual
     : jointPreview ? target : currentState?.actualKnown ? actual : null;
   const center = new THREE.Vector3(0, 0, 0.28);
@@ -215,9 +219,6 @@ function prepareDiffuser(robot) {
   diffuserTexture.minFilter = THREE.LinearFilter;
   diffuserTexture.magFilter = THREE.LinearFilter;
   diffuserTexture.generateMipmaps = false;
-  // +U sampling moves the displayed pattern counterclockwise from +Y toward -X.
-  // Apply the mode-15 registration even when its frame arrived before the STL.
-  diffuserTexture.offset.x = rgbEffectMode === 15 ? 0.25 : 0;
   robot.traverse(object => {
     if (!object.isMesh || !isDiffuserMesh(object)) return;
     // The ghost keeps the original geometry and its own cloned translucent material.
@@ -274,7 +275,6 @@ function setRgbFrame(frame, lightOn = undefined, effectMode = null) {
   if (!normalized || (lightOn !== undefined && typeof lightOn !== 'boolean')) return false;
   if (effectMode !== null && (!Number.isInteger(effectMode) || effectMode < 0 || effectMode > 16)) return false;
   rgbEffectMode = effectMode;
-  if (diffuserTexture) diffuserTexture.offset.x = effectMode === 15 ? 0.25 : 0;
   rgbSpinCurve.value = effectMode === 8 || (effectMode >= 13 && effectMode <= 16) ? 1 : 0;
   const first = displayedRgbFrame === null;
   // Legacy arrays preserve the last known power state. Their first frame
@@ -323,7 +323,11 @@ function styleRobot(robot, ghost, highlight) {
       const base = meshMaterials.get(material);
       if (base?.color) material.color.copy(base.color);
       if (base?.emissive) material.emissive.copy(base.emissive);
-      material.opacity = ghost ? (selected ? 0.22 : 0.12) : 1;
+      if (ghost) {
+        material.userData.targetBaseOpacity = selected ? 0.22 : 0.12;
+        ghostMaterials.add(material);
+      }
+      material.opacity = ghost ? material.userData.targetBaseOpacity * targetFade.value : 1;
       material.transparent = ghost;
       material.depthWrite = !ghost;
       if (ghost && material.color) material.color.setHex(0xe8edf3);
@@ -337,8 +341,41 @@ function styleRobot(robot, ghost, highlight) {
   });
 }
 
+function updateGripperLabel(state, jointPreview) {
+  const text = isLocalRgbPreview(state) ? '夹爪：本地目标示意（无实际回读）'
+    : state.actualKnown && state.actualGripperKnown
+    ? jointPreview ? '夹爪：实体回读 · 虚体目标' : '夹爪：实际回读'
+    : state.actualOnly === true ? state.commandedGripper != null
+      ? `夹爪：已发送目标 ${state.commandedGripper}%（无实际回读）`
+      : '夹爪：固定示意（无实际回读）'
+    : '夹爪：目标开度（无实际回读）';
+  const label = document.getElementById('gripper-status');
+  if (label.textContent !== text) label.textContent = text;
+}
+
+function animateTarget(nowMs) {
+  const opacity = targetFade.sample(nowMs);
+  if (target) target.visible = opacity > 0;
+  if (opacity !== appliedTargetOpacity) {
+    ghostMaterials.forEach(material => {
+      material.opacity = material.userData.targetBaseOpacity * opacity;
+    });
+    appliedTargetOpacity = opacity;
+  }
+  const label = document.getElementById('ghost-label');
+  label.hidden = opacity <= 0;
+  label.style.opacity = String(opacity);
+  if (currentState) {
+    updateGripperLabel(currentState, opacity > 0);
+    const localRgbPreview = isLocalRgbPreview(currentState);
+    document.querySelector('.legend').hidden = !currentState.actualKnown && opacity <= 0
+      && !marker.visible && !localRgbPreview;
+  }
+}
+
 function setState(state) {
   currentState = state;
+  targetFade.setState(state, performance.now());
   const dark = state.theme === 'dark';
   document.body.classList.toggle('dark', dark);
   scene.background.setHex(dark ? 0x141e2c : 0xedf2f8);
@@ -347,7 +384,6 @@ function setState(state) {
   const localRgbPreview = isLocalRgbPreview(state);
   const preview = !actualOnly && state.mode === 'preview';
   const markerVisible = !actualOnly && Boolean(state.marker);
-  const jointPreview = preview && state.targetEnabled !== false && !markerVisible && !localRgbPreview;
   document.getElementById('mode').textContent = localRgbPreview ? '灯效预览 · 本地示意'
     : actualOnly ? feedbackPaused
     ? '最近实际姿态 · 回读已暂停' : '实际关节 · 串口回读'
@@ -362,15 +398,6 @@ function setState(state) {
   solidLabel.querySelector('span').textContent = localRgbPreview ? '灯效预览 · 本地示意'
     : feedbackPaused || state.stale
     ? '最近回读 · 实体' : '实际回读 · 实体';
-  document.getElementById('ghost-label').hidden = !jointPreview;
-  document.getElementById('gripper-status').textContent = localRgbPreview
-    ? '夹爪：本地目标示意（无实际回读）'
-    : state.actualKnown && state.actualGripperKnown
-    ? jointPreview ? '夹爪：实体回读 · 虚体目标' : '夹爪：实际回读'
-    : actualOnly ? state.commandedGripper != null
-      ? `夹爪：已发送目标 ${state.commandedGripper}%（无实际回读）`
-      : '夹爪：固定示意（无实际回读）'
-    : '夹爪：目标开度（无实际回读）';
   if (target && actual) {
     target.setJointValues(state.target || {});
     updateActualState(state);
@@ -378,7 +405,7 @@ function setState(state) {
     // feedback state; the first real readback still seeds actual without damping
     // from this locally posed model. No IK/TCP marker is derived from the pose.
     if (localRgbPreview) actual.setJointValues(state.target || {});
-    target.visible = jointPreview;
+    target.visible = targetFade.value > 0;
     actual.visible = Boolean(state.actualKnown) || localRgbPreview;
     styleRobot(target, true, state.highlight);
     styleRobot(actual, false, actualOnly || preview || localRgbPreview ? null : state.highlight);
@@ -390,8 +417,7 @@ function setState(state) {
     marker.rotation.set(...state.marker.orientation, 'ZYX');
   }
   document.getElementById('marker-label').hidden = !markerVisible;
-  document.querySelector('.legend').hidden = !state.actualKnown && !jointPreview
-    && !markerVisible && !localRgbPreview;
+  animateTarget(performance.now());
   if (previousCameraSeq !== state.cameraSeq) {
     previousCameraSeq = state.cameraSeq;
     setCamera(state.camera);
@@ -412,6 +438,7 @@ window.robotViewer = {
     renderedMeshes: actual ? countMeshes(actual) : 0,
     gridVisible: grid.visible, axesVisible: axes.visible,
     targetVisible: Boolean(target?.visible), actualVisible: Boolean(actual?.visible),
+    targetOpacity: targetFade.value,
     rgbPreviewVisible: Boolean(actual?.visible && isLocalRgbPreview(currentState)),
     markerVisible: marker.visible,
     actualJointValues: actual ? Object.fromEntries(Object.entries(actual.joints)
@@ -481,8 +508,8 @@ manager.onError = url => {
 };
 manager.onLoad = () => {
   if (disposed || failedAsset || !sourceRobot) return;
-  if (countMeshes(sourceRobot) !== 11) {
-    window.reportRobotError('模型网格不完整，预期 11 个可视网格。');
+  if (countMeshes(sourceRobot) !== 12) {
+    window.reportRobotError('模型网格不完整，预期 12 个可视网格。');
     return;
   }
   actual = sourceRobot;
@@ -498,6 +525,7 @@ manager.onLoad = () => {
   styleRobot(target, true, null);
   scene.add(actual, target);
   actual.visible = false;
+  target.visible = false;
   target.setJointValues({ Joint2: -75 * Math.PI / 180, Joint3: Math.PI });
   document.getElementById('error').hidden = true;
   window.robotViewer.loaded = true;
@@ -538,6 +566,7 @@ function animate(time = performance.now()) {
   previousFrameTime = time;
   animateActual(dt);
   animateRgb(dt);
+  animateTarget(performance.now());
   controls.update();
   // An obscured/tabbed view can skip expensive GL drawing while preserving state.
   if (!document.hidden) renderer.render(scene, camera);
@@ -558,6 +587,7 @@ window.addEventListener('pagehide', () => {
   diffuserTexture = null;
   diffuserPixels = null;
   meshMaterials.clear();
+  ghostMaterials.clear();
   diffuserMeshes.length = 0;
   renderer.dispose();
 });

@@ -822,6 +822,7 @@ class RobotBusiness:
         while True:
             try:
                 self._tx_queue.get_nowait()
+                self._tx_queue.task_done()
             except queue.Empty:
                 break
 
