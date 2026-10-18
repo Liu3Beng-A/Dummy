@@ -19,6 +19,31 @@ def same_number(first, second):
         return str(first) == str(second)
 
 
+def parameter_tone(state, *, valid=True):
+    """Presentation only: a request receipt is not a verified readback."""
+    if not valid:
+        return "error"
+    sent = state.get("sent")
+    matches_sent = (sent is not None and sent.get("fresh", False) and
+                    same_number(state.get("draft"), sent.get("value")))
+    if state.get("dirty") and not matches_sent:
+        return "warning"
+    if state.get("readback") is not None and state.get("fresh") and not state.get("dirty"):
+        return "success"
+    if matches_sent:
+        return "error" if sent.get("phase") in ("error", "blocked", "invalid") else "warning"
+    return "muted"
+
+
+def set_parameter_tone(widget, tone):
+    """Repolish a presentation property without changing text or dimensions."""
+    if widget.property("parameterTone") != tone:
+        widget.setProperty("parameterTone", tone)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+
 class ParameterFieldAdapter(FieldAdapter):
     """Read drafts, including uncommitted spin text, through the old API."""
     def __init__(self, binding):
@@ -211,6 +236,10 @@ class ParameterBinding(QObject):
         else:
             status = "与最近回读一致"
         self.status_label.setText(status)
+        tone = parameter_tone(state, valid=numeric is not None)
+        set_parameter_tone(self.status_label, tone)
+        set_parameter_tone(self.readback_label, "success" if tone == "success" else "muted")
+        set_parameter_tone(self.widget, tone)
         detail = f"本地编辑：{text}\n{self.readback_label.text()}\n{status}"
         if sent:
             detail += (f"\n最近请求值：{sent.get('value', '')}" +

@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QLabel, QMessageBox
 
 from tests.test_ui import APPLICATION, FakeView
 from tests.test_gamepad_ui import FakeReader
@@ -317,6 +317,30 @@ class ParameterEditsUiTests(unittest.TestCase):
             self.assertFalse(binding.snapshot()["queryable"])
             self.assertFalse(binding.restore_button.isEnabled())
             self.assertIsNone(binding.snapshot()["readback"])
+
+    def test_node_captions_reserve_layout_space_beside_their_selectors(self):
+        for theme in ("light", "dark"):
+            self.w.apply_theme(theme)
+            for width, height in ((1120, 690), (1440, 900)):
+                self.w.resize(width, height)
+                for kind in ("motor", "STALL", "CAL"):
+                    self.w.motor_tabs.setCurrentIndex(0 if kind == "motor" else 1)
+                    if kind != "motor":
+                        self.w.protection_tabs.setCurrentIndex(0 if kind == "STALL" else 1)
+                    self.settle()
+                    selector = (self.w.fields["param_node"].widget if kind == "motor" else
+                                self.w.fields["_protection_nodes"][kind].widget)
+                    text = "参数节点" if kind == "motor" else "节点"
+                    captions = [label for label in selector.parentWidget().findChildren(QLabel)
+                                if label.property("parameterCaption") and label.text() == text]
+                    self.assertEqual(len(captions), 1)
+                    caption = captions[0]
+                    right = caption.mapTo(self.w, QPoint(caption.width(), 0)).x()
+                    left = selector.mapTo(self.w, QPoint(0, 0)).x()
+                    self.assertLessEqual(right + 8, left, (theme, width, kind))
+                    self.assertEqual(caption.displayedText(), caption.text())
+                self.assertEqual((self.w.width(), self.w.height()), (width, height))
+        self.assertEqual(self.commands(), [])
 
     def test_fixed_labels_and_dirty_styles_do_not_change_page_header_geometry(self):
         self.w.resize(1120, 690)

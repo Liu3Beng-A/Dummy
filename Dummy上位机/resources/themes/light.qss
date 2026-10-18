@@ -145,3 +145,36 @@ QFrame#OperationStatusPanel[compact='true'] { border: none; border-radius: 7px; 
 QWidget#MotionSystemToolbar[compact='true'] QPushButton, QWidget#MotionModeToolbar[compact='true'] QPushButton { padding: 4px 6px; min-height: 22px; }
 QWidget#MotionModeToolbar[compact='true'] QComboBox { padding: 4px 20px 4px 6px; min-height: 22px; }
 QLabel#PidParameterHelp { color: #496078; font-size: 13px; background: transparent; padding: 0; }
+
+/* Parameter panels: hierarchy and status colors never change box geometry. */
+QWidget[parameterPanel='true'] QLabel[parameterCaption='true'] { color: #31465c; font-size: 14px; font-weight: 600; padding: 0; }
+QWidget[parameterPanel='true'] QWidget[parameterInput='true'], QWidget[parameterPanel='true'] QWidget[parameterInput='true'] QLineEdit { color: #182e45; font-size: 16px; font-weight: 500; }
+QWidget[parameterPanel='true'] QLabel#ParameterReadback, QWidget[parameterPanel='true'] QLabel#ParameterEditStatus, QWidget[parameterPanel='true'] QLabel[parameterStatus='true'] { color: #6d7d8d; font-size: 12px; font-weight: 400; background: transparent; padding: 0; }
+QWidget[parameterPanel='true'] QLabel#ParameterReadback[parameterTone='muted'], QWidget[parameterPanel='true'] QLabel#ParameterEditStatus[parameterTone='muted'], QWidget[parameterPanel='true'] QLabel[parameterStatus='true'][parameterTone='muted'] { color: #6d7d8d; }
+QWidget[parameterPanel='true'] QLabel#ParameterReadback[parameterTone='success'], QWidget[parameterPanel='true'] QLabel#ParameterEditStatus[parameterTone='success'], QWidget[parameterPanel='true'] QLabel[parameterStatus='true'][parameterTone='success'] { color: #36785c; }
+QWidget[parameterPanel='true'] QLabel#ParameterEditStatus[parameterTone='warning'], QWidget[parameterPanel='true'] QLabel[parameterStatus='true'][parameterTone='warning'] { color: #93691d; }
+QWidget[parameterPanel='true'] QLabel#ParameterEditStatus[parameterTone='error'], QWidget[parameterPanel='true'] QLabel[parameterStatus='true'][parameterTone='error'] { color: #b33b43; }
+QWidget[parameterPanel='true'] QLabel[parameterHelp='true'], QWidget[parameterPanel='true'] QLabel#PidParameterHelp { color: #52677d; font-size: 13px; font-weight: 400; background: transparent; padding: 0; }
+QWidget[parameterPanel='true'] QLineEdit[parameterTone='muted'], QWidget[parameterPanel='true'] QSpinBox[parameterTone='muted'], QWidget[parameterPanel='true'] QDoubleSpinBox[parameterTone='muted'] { border-color: #c9d5e1; }
+QWidget[parameterPanel='true'] QLineEdit[parameterTone='success'], QWidget[parameterPanel='true'] QSpinBox[parameterTone='success'], QWidget[parameterPanel='true'] QDoubleSpinBox[parameterTone='success'] { border-color: #9dbba9; }
+QWidget[parameterPanel='true'] QLineEdit[parameterTone='warning'], QWidget[parameterPanel='true'] QSpinBox[parameterTone='warning'], QWidget[parameterPanel='true'] QDoubleSpinBox[parameterTone='warning'] { border-color: #c69a4a; }
+QWidget[parameterPanel='true'] QLineEdit[parameterTone='error'], QWidget[parameterPanel='true'] QSpinBox[parameterTone='error'], QWidget[parameterPanel='true'] QDoubleSpinBox[parameterTone='error'] { border-color: #c65c62; background: #fff5f5; }
+QWidget[parameterPanel='true'] QLineEdit[parameterInput='true']:focus, QWidget[parameterPanel='true'] QSpinBox[parameterInput='true']:focus, QWidget[parameterPanel='true'] QDoubleSpinBox[parameterInput='true']:focus { border-color: #348cc5; }
+QWidget[parameterPanel='true'] QLineEdit[parameterTone='error']:focus, QWidget[parameterPanel='true'] QSpinBox[parameterTone='error']:focus, QWidget[parameterPanel='true'] QDoubleSpinBox[parameterTone='error']:focus { border-color: #b33b43; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction] { min-height: 34px; max-height: 34px; padding: 0 12px; border-width: 1px; border-radius: 5px; font-size: 14px; font-weight: 500; }
+QWidget[parameterPanel='true'] QPushButton#ParameterRestore[parameterAction] { min-height: 34px; max-height: 34px; padding: 0 12px; font-size: 14px; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='primary'] { color: #ffffff; background: #286caa; border-color: #286caa; font-weight: 600; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='primary']:hover { background: #1f609c; border-color: #1f609c; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='primary']:pressed { background: #194f82; border-color: #194f82; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='normal'] { color: #315675; background: #f5f9fd; border-color: #bdcfdf; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='normal']:hover { background: #e8f2fb; border-color: #88acce; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='normal']:pressed { background: #dcebf7; border-color: #78a2c6; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='quiet'] { color: #60758a; background: transparent; border-color: #d5dfe9; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='quiet']:hover { color: #315675; background: #f0f5fa; border-color: #b6c9d9; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='quiet']:pressed { background: #e5edf5; border-color: #a6bdcf; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='danger']:hover { background: #be3339; border-color: #be3339; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='danger']:pressed { background: #a62b31; border-color: #a62b31; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction]:focus { border-color: #337fb7; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='primary']:focus { border-color: #174b78; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction='danger']:focus { border-color: #8f2027; }
+QWidget[parameterPanel='true'] QPushButton[parameterAction]:disabled { color: #9aa9b8; background: #eef2f6; border-color: #dce4ec; }

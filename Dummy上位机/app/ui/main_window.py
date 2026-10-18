@@ -17,14 +17,14 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDockWidget, QFileDialog, QFormLayout,
-    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLayout, QLineEdit,
+    QDoubleSpinBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLayout, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget, QStyle, QStyleOptionButton, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from app.ui.adapters import FieldAdapter, TableAdapter
-from app.ui.parameter_edits import ParameterEditsUi, ParameterFieldAdapter
+from app.ui.parameter_edits import ParameterEditsUi, ParameterFieldAdapter, set_parameter_tone
 from app.ui.pid_help import PID_HELP
 from app.core.dialogs import install_dialog_appearance
 from app.core.operation_guidance import operation_actions
@@ -341,6 +341,9 @@ class MainWindow(QMainWindow):
     def _parameter_editor(self, family, node, key, widget, default, *, field=None,
                           view="", minimum=-math.inf, maximum=math.inf,
                           integer=False, queryable=True, applicable=None):
+        widget.setProperty("parameterInput", True)
+        if isinstance(widget, (QLineEdit, QSpinBox, QDoubleSpinBox)):
+            widget.setFixedHeight(36)
         binding = self.parameter_edit_ui.register(
             family, node, key, widget, default, minimum=minimum, maximum=maximum,
             integer=integer, queryable=queryable, applicable=applicable)
@@ -647,6 +650,39 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(group)
         layout.setSpacing(9)
         return group, layout
+
+    @staticmethod
+    def _parameter_group(title):
+        group, layout = MainWindow._group(title)
+        group.setProperty("parameterPanel", True)
+        layout.setContentsMargins(12, 8, 12, 10)
+        layout.setSpacing(8)
+        return group, layout
+
+    @staticmethod
+    def _parameter_button(text, callback=None, action="normal"):
+        control = button(text, callback, action if action in ("primary", "danger") else None)
+        control.setProperty("parameterAction", action)
+        control.setFixedHeight(36)
+        return control
+
+    @staticmethod
+    def _parameter_caption(text, *, width=None):
+        label = _ElidedLabel()
+        label.setText(text)
+        label.setToolTip(text)
+        label.setProperty("parameterCaption", True)
+        label.setFixedHeight(20)
+        if width is not None:
+            label.setFixedWidth(width)
+            label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return label
+
+    @staticmethod
+    def _parameter_help(text, role="muted"):
+        label = hint(text, role)
+        label.setProperty("parameterHelp", True)
+        return label
 
     def _build_motion_page(self):
         system_toolbar = QWidget()
@@ -1463,33 +1499,36 @@ class MainWindow(QMainWindow):
     def _build_motor_page(self):
         layout = self._page("电机参数", "本页参数查询、写入与电机维护仅支持 USB。节点 0 为 ALL 查询；运行时应用与 EEPROM 保存明确区分。", tabs=self.motor_tabs)
         self.motor_page_content = layout.parentWidget()
-        node_group, box = self._group("目标节点")
+        self.motor_page_content.setProperty("parameterPanel", True)
+        node_group, box = self._parameter_group("目标节点")
         row = QHBoxLayout()
-        row.addWidget(QLabel("参数节点"))
+        row.setSpacing(8)
+        row.addWidget(self._parameter_caption("参数节点", width=64))
         node = self._combo(range(9), 1)
         node.setMaximumWidth(100)
+        node.setFixedHeight(36)
+        node.setProperty("parameterInput", True)
         self._bind("param_node", node, int)
         node.currentIndexChanged.connect(lambda *_: self._motor_parameter_node_changed())
         row.addWidget(node)
-        row.addWidget(hint("0 = ALL · 1–6 关节 · 7 地轨 · 8 夹爪"), 1)
-        row.addWidget(button("读取全部参数", self._query_all_parameters))
+        row.addWidget(self._parameter_help("0 = ALL · 1–6 关节 · 7 地轨 · 8 夹爪"), 1)
+        row.addWidget(self._parameter_button("读取全部参数", self._query_all_parameters))
         box.addLayout(row)
         self.motor_feedback_result = self._feedback_result_label("motor", box)
         layout.addWidget(node_group)
-        pid_group, box = self._group("PID · 保存直接写 EEPROM")
+        pid_group, box = self._parameter_group("PID · 保存直接写 EEPROM")
         self.pid_group = pid_group
         self.pid_parameter_labels = {}
         self.pid_parameter_descriptions = {}
         row = QHBoxLayout()
+        row.setSpacing(12)
         for key in ("kp", "kv", "ki", "kd"):
             cell = QWidget()
             column = QVBoxLayout(cell)
             column.setContentsMargins(0, 0, 0, 0)
-            column.setSpacing(2)
+            column.setSpacing(4)
             description = PID_HELP[key.upper()]
-            title = _ElidedLabel()
-            title.setFixedHeight(20)
-            title.setText(description["title"])
+            title = self._parameter_caption(description["title"])
             title.setToolTip(description["tooltip"])
             self.pid_parameter_labels[key.upper()] = title
             column.addWidget(title)
@@ -1515,16 +1554,17 @@ class MainWindow(QMainWindow):
             row.addWidget(cell, 1)
         box.addLayout(row)
         row = QHBoxLayout()
+        row.setSpacing(8)
         row.addStretch()
-        self.motor_pid_restore = button("还原 PID 编辑", lambda: self.controller.parameter_edits.restore(
-            "motor", self.fields["param_node"].get(), ("KP", "KV", "KI", "KD")))
+        self.motor_pid_restore = self._parameter_button("还原 PID 编辑", lambda: self.controller.parameter_edits.restore(
+            "motor", self.fields["param_node"].get(), ("KP", "KV", "KI", "KD")), "quiet")
         self.motor_pid_restore.setToolTip("仅采用当前节点最近回读，不发送指令。未回读字段保持原样。")
         self.parameter_edit_ui.register_group(self.motor_pid_restore, "motor",
                                                lambda: self.fields["param_node"].get(),
                                                ("KP", "KV", "KI", "KD"))
         row.addWidget(self.motor_pid_restore)
-        row.addWidget(button("读取 PID", self.controller._qry_pid))
-        pid_save = button("保存 PID", self.controller._set_pid, "primary")
+        row.addWidget(self._parameter_button("读取 PID", self.controller._qry_pid))
+        pid_save = self._parameter_button("保存 PID", self.controller._set_pid, "primary")
         row.addWidget(pid_save)
         box.addLayout(row)
         layout.addWidget(pid_group)
@@ -1533,42 +1573,50 @@ class MainWindow(QMainWindow):
             ("加速度", "ent_set_acc", 150, "r/s²", 0, 5000, "_qry_acc", "_set_acc", "_save_acc"),
             ("最大电流", "ent_set_i", 1.5, "A", .001, 3, "_qry_i", "_set_i", "_save_i"),
         ):
-            group, box = self._group(title)
+            group, box = self._parameter_group(title)
             row = QHBoxLayout()
+            row.setSpacing(8)
             spin = number(value, low, high, 3, .1)
             spin.setSuffix(f" {unit}")
+            spin.setFixedWidth(180)
             binding = self._parameter_editor("motor", lambda: self.fields["param_node"].get(),
                                              "ACC" if field == "ent_set_acc" else "I", spin, value,
                                              field=field, minimum=low, maximum=high)
             row.addWidget(spin)
-            row.addWidget(hint("应用：运行时 RAM；保存：写 EEPROM，掉电保持。"), 1)
-            row.addWidget(button("读取", lambda name=query: self._call(name)))
-            apply_btn = button("应用", lambda name=apply: self._call(name))
-            save_btn = button("保存", lambda name=save: self._call(name), "primary")
+            row.addWidget(self._parameter_help("应用：运行时 RAM；保存：写 EEPROM，掉电保持。"), 1)
+            binding.restore_button.setProperty("parameterAction", "quiet")
+            binding.restore_button.setFixedHeight(36)
+            row.addWidget(binding.restore_button)
+            row.addWidget(self._parameter_button("读取", lambda name=query: self._call(name)))
+            apply_btn = self._parameter_button("应用", lambda name=apply: self._call(name))
+            save_btn = self._parameter_button("保存", lambda name=save: self._call(name), "primary")
             writes.extend((apply_btn, save_btn))
             row.addWidget(apply_btn)
             row.addWidget(save_btn)
-            row.addWidget(binding.restore_button)
             box.addLayout(row)
             box.addWidget(binding.readback_label)
             box.addWidget(binding.status_label)
             layout.addWidget(group)
-        sync = button("同步八节点加速度至主控", self.controller._sync_acc, "primary")
+        sync = self._parameter_button("同步八节点加速度至主控", self.controller._sync_acc)
         self._bind("btn_acc_sync", sync)
         layout.addWidget(sync)
         layout.addWidget(hint("建议在失能状态下同步；收到 SYNC_ACC finish 后才表示八节点回读齐全。", "warning"))
-        maintenance, box = self._group("电机维护")
-        encoder = button("校准所选节点磁编码器", self.controller._cmd_encoder_calibration)
+        maintenance, box = self._parameter_group("电机维护")
+        encoder = self._parameter_button("校准所选节点磁编码器", self.controller._cmd_encoder_calibration)
         writes.append(encoder)
         box.addWidget(encoder)
-        box.addWidget(hint("失能确认后才可执行。电机会主动正反转采样，成功后自动重启。"))
+        box.addWidget(self._parameter_help("失能确认后才可执行。电机会主动正反转采样，成功后自动重启。"))
         row = QHBoxLayout()
-        row.addWidget(QLabel("重启节点"))
+        row.setSpacing(8)
+        row.addWidget(self._parameter_caption("重启节点", width=64))
         reboot_node = self._combo(range(9))
+        reboot_node.setFixedHeight(36)
+        reboot_node.setMaximumWidth(100)
+        reboot_node.setProperty("parameterInput", True)
         self._bind("cb_node", reboot_node)
         row.addWidget(reboot_node)
-        row.addWidget(hint("0 = 全部八个电机"), 1)
-        row.addWidget(button("电机重启", self.controller._cmd_reboot))
+        row.addWidget(self._parameter_help("0 = 全部八个电机"), 1)
+        row.addWidget(self._parameter_button("电机重启", self.controller._cmd_reboot))
         box.addLayout(row)
         layout.addWidget(maintenance)
         self.fields["_write_buttons"] = [FieldAdapter(item) for item in writes]
@@ -1584,45 +1632,62 @@ class MainWindow(QMainWindow):
             ("CAL", "限位校准 · J7 / J8", CAL_PARAMETERS, (7, 8), 7),
         ):
             page = QWidget()
+            page.setProperty("parameterPanel", True)
             box = QVBoxLayout(page)
             box.setContentsMargins(12, 12, 12, 12)
+            box.setSpacing(8)
             node = self._combo(choices)
             node.setCurrentText(str(default))
+            node.setFixedHeight(36)
+            node.setMaximumWidth(76)
+            node.setProperty("parameterInput", True)
             nodes[kind] = FieldAdapter(node, int)
             node.currentIndexChanged.connect(lambda _, value=kind: self._refresh_protection(value))
             toolbar = QHBoxLayout()
-            toolbar.addWidget(QLabel("节点"))
+            toolbar.setSpacing(8)
+            toolbar.addWidget(self._parameter_caption("节点", width=36))
             toolbar.addWidget(node)
-            toolbar.addWidget(button("读取配置", lambda value=kind: self.controller._query_protection(value)))
-            toolbar.addWidget(button("运行快照", lambda value=kind: self._query_snapshot(value, False)))
-            toolbar.addWidget(button("上次快照", lambda value=kind: self._query_snapshot(value, True)))
-            restore_group = button("还原本页编辑", lambda value=kind: self.controller.parameter_edits.restore(
-                value, self.fields["_protection_nodes"][value].get()))
+            toolbar.addWidget(self._parameter_button("读取配置", lambda value=kind: self.controller._query_protection(value)))
+            toolbar.addWidget(self._parameter_button("运行快照", lambda value=kind: self._query_snapshot(value, False)))
+            toolbar.addWidget(self._parameter_button("上次快照", lambda value=kind: self._query_snapshot(value, True)))
+            restore_group = self._parameter_button("还原本页编辑", lambda value=kind: self.controller.parameter_edits.restore(
+                value, self.fields["_protection_nodes"][value].get()), "quiet")
             toolbar.addWidget(restore_group)
             self.parameter_edit_ui.register_group(restore_group, kind, lambda mode=kind: nodes[mode].get(),
                                                    (descriptor[0] for descriptor in descriptors))
             toolbar.addStretch()
-            save = button("保存整组 EEPROM", lambda value=kind: self.controller._save_protection(value), "primary")
+            save = self._parameter_button("保存整组 EEPROM", lambda value=kind: self.controller._save_protection(value), "primary")
             saves[kind] = FieldAdapter(save)
             toolbar.addWidget(save)
             box.addLayout(toolbar)
             self._feedback_result_label("calibration" if kind == "CAL" else "protection", box)
-            box.addWidget(hint("J8 接触仅用于校准，不参与普通堵转保护。" if kind == "CAL" else "J1–J6 回退使用角度；J7 回退使用毫米。ALL 展开 J1–J7。"))
+            box.addWidget(self._parameter_help("J8 接触仅用于校准，不参与普通堵转保护。" if kind == "CAL" else "J1–J6 回退使用角度；J7 回退使用毫米。ALL 展开 J1–J7。"))
             area = QScrollArea()
             area.setWidgetResizable(True)
             form = QWidget()
+            form.setProperty("parameterPanel", True)
             grid = QGridLayout(form)
             grid.setContentsMargins(4, 4, 4, 4)
             grid.setHorizontalSpacing(8)
             grid.setVerticalSpacing(8)
-            for col, text in enumerate(("参数", "单位", "编辑值", "最近回读", "编辑状态", "应用", "还原", "允许范围")):
-                grid.addWidget(hint(text, "muted"), 0, col)
+            for col, text in enumerate(("参数", "单位", "编辑值", "最近回读 / 编辑状态", "应用", "还原", "允许范围")):
+                grid.addWidget(self._parameter_caption(text), 0, col)
             entries[kind], rows[kind] = {}, {}
             for index, (key, label, unit, value, low, high) in enumerate(descriptors, 1):
-                text = QLabel(f"{label}\n{key}")
-                text.setToolTip(key)
-                grid.addWidget(text, index, 0)
-                grid.addWidget(hint(unit, "muted"), index, 1)
+                caption = QWidget()
+                column = QVBoxLayout(caption)
+                column.setContentsMargins(0, 0, 0, 0)
+                column.setSpacing(4)
+                column.addWidget(self._parameter_caption(label))
+                key_label = _ElidedLabel()
+                key_label.setText(key)
+                key_label.setProperty("parameterHelp", True)
+                key_label.setFixedHeight(20)
+                key_label.setToolTip(key)
+                column.addWidget(key_label)
+                caption.setToolTip(f"{label}\n{key}")
+                grid.addWidget(caption, index, 0)
+                grid.addWidget(self._parameter_help(unit), index, 1)
                 # Range checking remains in the original business method. A
                 # line input retains values and precision from device replies.
                 edit = QLineEdit(f"{value:g}")
@@ -1639,20 +1704,25 @@ class MainWindow(QMainWindow):
                          (parameter == "BACK_MM" and nodes[mode].get() not in (0, 7)))))
                 entries[kind][key] = ParameterFieldAdapter(binding)
                 grid.addWidget(edit, index, 2)
-                binding.readback_label.setMaximumWidth(120)
-                binding.status_label.setMaximumWidth(130)
-                grid.addWidget(binding.readback_label, index, 3)
-                grid.addWidget(binding.status_label, index, 4)
-                apply = button("应用", lambda mode=kind, parameter=key: self.controller._set_protection(mode, parameter))
+                feedback = QWidget()
+                feedback.setMinimumWidth(160)
+                feedback_column = QVBoxLayout(feedback)
+                feedback_column.setContentsMargins(0, 0, 0, 0)
+                feedback_column.setSpacing(4)
+                feedback_column.addWidget(binding.readback_label)
+                feedback_column.addWidget(binding.status_label)
+                grid.addWidget(feedback, index, 3)
+                apply = self._parameter_button("应用", lambda mode=kind, parameter=key: self.controller._set_protection(mode, parameter))
                 rows[kind][key] = FieldAdapter(apply)
-                grid.addWidget(apply, index, 5)
-                grid.addWidget(binding.restore_button, index, 6)
+                grid.addWidget(apply, index, 4)
+                binding.restore_button.setProperty("parameterAction", "quiet")
+                binding.restore_button.setFixedHeight(36)
+                grid.addWidget(binding.restore_button, index, 5)
                 maximum = f"{high:g}" if high is not None else "节点约束"
-                grid.addWidget(hint(f"{low:g} ～ {maximum}", "muted"), index, 7)
+                grid.addWidget(self._parameter_help(f"{low:g} ～ {maximum}"), index, 6)
             grid.setColumnStretch(0, 2)
             grid.setColumnStretch(1, 1)
-            grid.setColumnStretch(3, 1)
-            grid.setColumnStretch(4, 1)
+            grid.setColumnStretch(3, 2)
             grid.setRowStretch(len(descriptors) + 1, 1)
             area.setWidget(form)
             box.addWidget(area, 1)
@@ -1666,22 +1736,27 @@ class MainWindow(QMainWindow):
 
     def _build_gripper_page(self):
         layout = self._page("夹爪设置", "基础控制支持 USB 与 UART4；夹爪独立于七轴运动到位判定。三维开度目前为目标值。")
-        group, box = self._group("运行时电流 · 0.05～2.5 A")
+        group, box = self._parameter_group("运行时电流 · 0.05～2.5 A")
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.hand_current_spin = number(1., .05, 2.5, 2, .05)
         self.hand_current_spin.setSuffix(" A")
+        self.hand_current_spin.setProperty("parameterInput", True)
+        self.hand_current_spin.setFixedHeight(36)
         self._bind("hand_current", self.hand_current_spin)
         self.hand_current_spin.valueChanged.connect(lambda value: self._hand_current_changed("dedicated", value))
         row.addWidget(self.hand_current_spin)
-        row.addWidget(button("设置电流", self.controller._cmd_hand_set_i))
-        row.addWidget(button("张开 · 电流模式", lambda: self._send_hand_direction(True), "success"))
-        row.addWidget(button("闭合 · 电流模式", lambda: self._send_hand_direction(False)))
+        row.addWidget(self._parameter_button("设置电流", self.controller._cmd_hand_set_i))
+        row.addWidget(self._parameter_button("张开 · 电流模式", lambda: self._send_hand_direction(True)))
+        row.addWidget(self._parameter_button("闭合 · 电流模式", lambda: self._send_hand_direction(False)))
         row.addStretch()
         box.addLayout(row)
-        box.addWidget(hint("电流开合持续到接触或后续指令；仅修改运行时电流，不保存 EEPROM。"))
+        box.addWidget(self._parameter_help("电流开合持续到接触或后续指令；仅修改运行时电流，不保存 EEPROM。"))
         layout.addWidget(group)
-        group, box = self._group("目标开度 · 0 闭合 / 100 张开")
+        group, box = self._parameter_group("目标开度 · 0 闭合 / 100 张开")
         self.hand_row = AxisRow("开度", (0, 100), 100, "%")
+        self.hand_row.spin.setProperty("parameterInput", True)
+        self.hand_row.spin.setFixedHeight(36)
         self.hand_row.spin.setDecimals(0)
         self.hand_row.readback.hide()
         self.hand_row.changed.connect(lambda value: self._hand_position_changed("dedicated", value))
@@ -1689,27 +1764,33 @@ class MainWindow(QMainWindow):
         self._bind("lbl_hand_pos", QLabel("100"))
         box.addWidget(self.hand_row)
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.hand_drag_checkbox = QCheckBox("拖动发送")
         self._bind("hand_pos_drag_enable", self.hand_drag_checkbox)
         self.hand_drag_checkbox.toggled.connect(lambda enabled: self._hand_drag_changed("dedicated", enabled))
         row.addWidget(self.hand_drag_checkbox)
         row.addStretch()
-        row.addWidget(button("设置夹爪位置", self._send_hand_position, "primary"))
+        row.addWidget(self._parameter_button("设置夹爪位置", self._send_hand_position))
         box.addLayout(row)
         layout.addWidget(group)
 
-        self.hand_advanced, box = self._group("USB 高级配置 · 写电机 EEPROM")
+        self.hand_advanced, box = self._parameter_group("USB 高级配置 · 写电机 EEPROM")
         box.addWidget(hint("配置会写入电机持久参数。UART4 不支持；需要已确认失能再执行。夹爪独立 PID 接口采用有符号整数，上限 2147483647；电机参数页 PID 支持完整 uint32。", "warning"))
         read_row = QHBoxLayout()
-        read_row.addWidget(button("读取夹爪 PID", lambda: self.controller.send_cmd("#GET_PID 8")))
-        read_row.addWidget(button("读取夹爪加速度", lambda: self.controller.send_cmd("#GETJACC 8")))
-        restore_hand = button("还原可查询项编辑", lambda: self.controller.parameter_edits.restore(
-            "motor", 8, ("KP", "KV", "KI", "KD", "ACC")))
+        read_row.setSpacing(8)
+        restore_hand = self._parameter_button("还原可查询项编辑", lambda: self.controller.parameter_edits.restore(
+            "motor", 8, ("KP", "KV", "KI", "KD", "ACC")), "quiet")
         read_row.addWidget(restore_hand)
+        read_row.addWidget(self._parameter_button("读取夹爪 PID", lambda: self.controller.send_cmd("#GET_PID 8")))
+        read_row.addWidget(self._parameter_button("读取夹爪加速度", lambda: self.controller.send_cmd("#GETJACC 8")))
         self.parameter_edit_ui.register_group(restore_hand, "motor", 8, ("KP", "KV", "KI", "KD", "ACC"))
         read_row.addStretch()
         box.addLayout(read_row)
         grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(12)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
         self.hand_advanced_fields = {}
         for index, (key, title, value, low, high, decimals) in enumerate((
             ("VEL", "速度上限 r/s", 30., .001, 30., 3),
@@ -1727,25 +1808,29 @@ class MainWindow(QMainWindow):
             cell = QWidget()
             column = QVBoxLayout(cell)
             column.setContentsMargins(0, 0, 0, 0)
-            column.setSpacing(2)
-            column.addWidget(edit)
+            column.setSpacing(4)
+            column.addWidget(self._parameter_caption(PID_HELP[key]["title"] if key in PID_HELP else title))
+            input_row = QHBoxLayout()
+            input_row.setSpacing(8)
+            input_row.addWidget(edit, 1)
+            input_row.addWidget(self._parameter_button("保存", lambda item=key: self._hand_config(item), "primary"))
+            column.addLayout(input_row)
             column.addWidget(binding.readback_label)
             column.addWidget(binding.status_label)
-            grid.addWidget(QLabel(title), index // 2, (index % 2) * 3)
-            grid.addWidget(cell, index // 2, (index % 2) * 3 + 1)
-            grid.addWidget(button("保存", lambda item=key: self._hand_config(item)), index // 2, (index % 2) * 3 + 2)
+            grid.addWidget(cell, index // 2, index % 2)
         box.addLayout(grid)
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.hand_onboot = QCheckBox("上电自动使能夹爪")
         onboot_binding = self._parameter_editor("motor", 8, "ONBOOT", self.hand_onboot, "0", view="hand",
                                                 minimum=0, maximum=1, integer=True, queryable=False)
         row.addWidget(self.hand_onboot)
-        row.addWidget(button("保存上电行为", lambda: self._hand_config("ONBOOT")))
+        row.addWidget(self._parameter_button("保存上电行为", lambda: self._hand_config("ONBOOT"), "primary"))
         row.addStretch()
-        row.addWidget(button("擦除夹爪配置", lambda: self._hand_config("ERASE")))
+        row.addWidget(self._parameter_button("擦除夹爪配置", lambda: self._hand_config("ERASE"), "danger"))
         box.addLayout(row)
         box.addWidget(onboot_binding.status_label)
-        box.addWidget(hint("速度、上电行为暂无查询接口；加速度 / PID 最近回读不代表 EEPROM 保存完成。", "muted"))
+        box.addWidget(self._parameter_help("速度、上电行为暂无查询接口；加速度 / PID 最近回读不代表 EEPROM 保存完成。"))
         layout.addWidget(self.hand_advanced)
         self.gripper_feedback_result = self._feedback_result_label("gripper", layout)
         layout.addStretch()
@@ -1756,6 +1841,7 @@ class MainWindow(QMainWindow):
         self.rgb_page = self.rgb_launch_page
         self.pages.addWidget(self.rgb_launch_page)
         self.rgb_window = RgbSettingsWindow(self)
+        self.rgb_window.setProperty("parameterPanel", True)
         self.rgb_window.visibility_changed.connect(lambda *_: self._sync_rgb_preview_activity())
         self.rgb_window.editor_closed.connect(self._rgb_window_closed)
         layout = self.rgb_window.content_layout
@@ -1772,6 +1858,7 @@ class MainWindow(QMainWindow):
         edit_row = QHBoxLayout()
         self.rgb_edit_status = _ElidedLabel()
         self.rgb_edit_status.setObjectName("ParameterEditStatus")
+        self.rgb_edit_status.setProperty("parameterStatus", True)
         self.rgb_edit_status.setFixedHeight(22)
         edit_row.addWidget(self.rgb_edit_status, 1)
         self.rgb_restore_edits = button("还原本地编辑", self._restore_rgb_edits)
@@ -2089,13 +2176,17 @@ class MainWindow(QMainWindow):
                      self._rgb_last_complete_connection == self._rgb_device.get("connection_id"))
         if self._rgb_dirty_paths:
             text = f"本地编辑：{len(self._rgb_dirty_paths)} 项与最近完整回读不同 · 尚未应用"
+            tone = "warning"
         elif not has_baseline:
             text = "本地默认 · 尚无完整 RGB 配置回读"
+            tone = "muted"
         else:
             text = "本地编辑与最近完整回读一致"
+            tone = "success" if fresh else "muted"
         if has_baseline and not fresh:
             text += " · 回读已过期"
         self.rgb_edit_status.setText(text)
+        set_parameter_tone(self.rgb_edit_status, tone)
         self.rgb_restore_edits.setEnabled(has_baseline)
         self.rgb_restore_edits.setToolTip("仅采用最近完整配置回读还原本地编辑，不发送指令。" +
                                          ("该回读已过期。" if has_baseline and not fresh else ""))
