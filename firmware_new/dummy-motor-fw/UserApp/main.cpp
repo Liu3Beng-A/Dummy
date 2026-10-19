@@ -66,8 +66,8 @@ void Main()
             .velocityLimit = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS, // r/s
             .velocityAcc = 30 * Motor::MOTOR_ONE_CIRCLE_SUBDIVIDE_STEPS,   // r/s^2
             .calibrationCurrent = 2000,
-            // User-selected J7 defaults (2026-10-08); valid EEPROM settings take precedence.
-            .dce_kp = 350, .dce_kv = 320, .dce_ki = 25, .dce_kd = 50,
+            // User-selected J7 defaults (2026-10-17); valid EEPROM settings take precedence.
+            .dce_kp = 150, .dce_kv = 180, .dce_ki = 25, .dce_kd = 50,
             .motor_temperature = 0.0,
             .enableMotorOnBoot = false,
             .enableStallProtect = true,    // 57 地轨默认开启堵转保护（覆盖 outer 块的 false）
