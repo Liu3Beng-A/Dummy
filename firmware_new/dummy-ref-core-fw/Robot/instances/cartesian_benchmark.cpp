@@ -111,7 +111,9 @@ Sample Compute::Measure(const Config& c,const Hooks& h){
         }
         if(!success)++out.failed;
         ++out.work;
-        if(!checkpoint())break;
+        const bool proceed=checkpoint();
+        if(h.workBoundary)h.workBoundary(h.context,out.work,out.cycles);
+        if(!proceed)break;
     }
     return out;
 }

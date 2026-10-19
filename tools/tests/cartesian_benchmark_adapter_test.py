@@ -6,6 +6,7 @@ Each invocation freezes inputs and retains generated extraction/build/run logs.
 """
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -21,9 +22,14 @@ INST = Path("firmware_new/dummy-ref-core-fw/Robot/instances")
 KIN = Path("firmware_new/dummy-ref-core-fw/Robot/algorithms/kinematic")
 INPUTS = [INST / p for p in ("cartesian_benchmark.h", "cartesian_benchmark.cpp",
           "native_cartesian_robot.cpp", "dummy_robot.cpp", "motion_values.h",
-          "motion_values.cpp", "cartesian_planner.h", "cartesian_planner.cpp")]
+          "motion_values.cpp", "cartesian_planner.h", "cartesian_planner.cpp",
+          "bench_profile.h", "bench_profile.cpp")]
+INPUTS += [INST / "cartesian_endurance.h", INST / "cartesian_endurance.cpp"]
+INPUTS += [INST / "cartesian_cycle_producer.h", INST / "cartesian_cycle_diagnostic.h",
+           INST / "cartesian_cycle_diagnostic.cpp"]
 INPUTS += [KIN / "6dof_kinematic.h", KIN / "6dof_kinematic.cpp",
            Path("firmware_new/stream_protocol.h"),
+           Path("firmware_new/dummy-ref-core-fw/Bsp/communication/ascii_processor.hpp"),
            Path("firmware_new/dummy-ref-core-fw/UserApp/main.cpp"),
            Path("tools/tests/fixtures/arm_math_native_shim.h"),
            Path("tools/tests/cartesian_benchmark_adapter_test.cpp"),
@@ -51,7 +57,9 @@ def build(out: Path, snap: Path, mode: str) -> tuple[Path, list[str]]:
     exe = dest / ("adapter_test.exe" if os.name == "nt" else "adapter_test")
     sources = [snap / "tools/tests/cartesian_benchmark_adapter_test.cpp",
                snap / INST / "cartesian_benchmark.cpp", snap / INST / "motion_values.cpp",
-               snap / INST / "cartesian_planner.cpp", snap / KIN / "6dof_kinematic.cpp"]
+               snap / INST / "cartesian_planner.cpp", snap / INST / "bench_profile.cpp", snap / INST / "cartesian_endurance.cpp",
+               snap / INST / "cartesian_cycle_diagnostic.cpp",
+               snap / KIN / "6dof_kinematic.cpp"]
     includes = [out, dest, snap / INST, snap / KIN]
     if os.name == "nt":
         where = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
@@ -85,16 +93,26 @@ def build(out: Path, snap: Path, mode: str) -> tuple[Path, list[str]]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-root", type=Path, default=ROOT,
+                        help="Read inputs from an existing frozen checkout/snapshot; never changes that input tree")
+    args = parser.parse_args()
+    # absolute() avoids Windows GetFinalPathNameByHandle permission requirements
+    # on read-only snapshots; each required file is opened and hashed below.
+    source_root = args.source_root.absolute()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     out = ROOT / "firmware_artifacts" / ("cartesian-benchmark-adapter-" + stamp)
     snap = out / "source"
     snap.mkdir(parents=True)
-    before = {p.as_posix(): sha(ROOT / p) for p in INPUTS}
+    before = {p.as_posix(): sha(source_root / p) for p in INPUTS}
     for p in INPUTS:
         (snap / p).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / p, snap / p)
+        shutil.copyfile(source_root / p, snap / p)
     native = (snap / INST / "native_cartesian_robot.cpp").read_text(encoding="utf-8-sig")
     robot = (snap / INST / "dummy_robot.cpp").read_text(encoding="utf-8-sig")
+    respond = (snap / "firmware_new/dummy-ref-core-fw/Bsp/communication/ascii_processor.hpp").read_text(encoding="utf-8-sig")
+    if "char response[64]" not in respond or "sizeof(response) - 2" not in respond:
+        raise RuntimeError("Respond payload contract changed; update the host wire limit from production")
     start = native.index("enum class BenchPhase")
     end = native.index('    if(Equal(cmd,n,"#KIN_CONFIG")){', start)
     # Prefix is genuine production code; the only synthetic tail closes the
@@ -105,6 +123,18 @@ def main() -> int:
     fragment += function(robot, "bool DummyRobot::RequestStart()") + "\n"
     fragment += function(robot, "bool DummyRobot::HandleProtectionCommand(") + "\n"
     (out / "adapter_fragment.inc").write_text(fragment, encoding="utf-8")
+    cancellation_contract = {}
+    for signature, source in (
+        ("void DummyRobot::RequestSoftStop(", "SOFT_STOP"),
+        ("void DummyRobot::RequestDisable(", "DISABLE"),
+        ("void DummyRobot::CancelMotion(", "MOTION"),
+    ):
+        body = function(robot, signature)
+        marker = "CartesianBenchmarkCancel(CartesianBenchmarkCancelSource::" + source + ")"
+        first_statement = body[body.index("{") + 1:].lstrip()
+        cancellation_contract[signature] = first_statement.startswith(marker + ";")
+    if not all(cancellation_contract.values()):
+        raise RuntimeError("Real stop/disable/cancel entry must notify diagnostics before nested motion cancellation")
     # This compilation has no motor/CAN/Flash API declarations. Adding such a
     # dependency to the extracted diagnostic must fail compilation.
     contract = {
@@ -115,6 +145,25 @@ def main() -> int:
         "command_task_calls_poll": "CartesianBenchmarkPoll()" in (snap / "firmware_new/dummy-ref-core-fw/UserApp/main.cpp").read_text(encoding="utf-8-sig"),
         "no_hardware": True,
         "fake_timing_is_not_f405_timing": True,
+        "real_profile_backend_compiled": True,
+        "real_oled_backend_compiled": True,
+        "oled_session_lifecycle_and_legacy_protocol_exercised": True,
+        "profile_metadata_v2_retains_record_shapes": True,
+        "oled_metadata_version": 3,
+        "profile_metadata_version": 2,
+        "profile_task_count": 7,
+        "independent_oled_lanes": 2,
+        "oled_metadata_line_count": 18,
+        "oled_modes_exercised": ["normal", "skip-render", "rate-10hz", "split-normal", "split-low"],
+        "oled_rate_admission_and_all_terminal_restoration_exercised": True,
+        "respond_production_buffer_bytes": 64,
+        "respond_max_payload_bytes": 61,
+        "respond_limit_asserted_on_every_extracted_response": True,
+        "hal_and_rtos_timebases_are_distinct_fakes": True,
+        "real_cancellation_entry_notifications": cancellation_contract,
+        "full_cycle_backend_compiled": True,
+        "full_cycle_uses_existing_result_union": True,
+        "full_cycle_no_actuator_api_declared": True,
     }
     if not contract["command_task_calls_poll"]:
         raise RuntimeError("Command-task integration missing")
@@ -129,12 +178,12 @@ def main() -> int:
             if run.returncode:
                 raise RuntimeError(f"Adapter tests failed: {exe.parent / 'run.log'}")
     finally:
-        after = {p.as_posix(): sha(ROOT / p) for p in INPUTS}
+        after = {p.as_posix(): sha(source_root / p) for p in INPUTS}
         identity = {"before": before, "after": after, "unchanged": before == after}
         (out / "source_identity.json").write_text(json.dumps(identity, indent=2), encoding="utf-8")
         (out / "results.json").write_text(json.dumps({"contract": contract, "runs": results,
             "python": sys.version, "platform": platform.platform(),
-            "command": sys.argv, "utc": stamp}, indent=2), encoding="utf-8")
+            "command": sys.argv, "utc": stamp, "source_root": str(source_root)}, indent=2), encoding="utf-8")
         files = {p.relative_to(out).as_posix(): sha(p) for p in out.rglob("*") if p.is_file()}
         (out / "evidence_manifest.json").write_text(json.dumps(files, indent=2), encoding="utf-8")
     if before != after:

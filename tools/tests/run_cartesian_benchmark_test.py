@@ -91,17 +91,23 @@ def run(out: Path, mode: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--math", choices=("precise", "cmsis512", "both"), default="both")
+    parser.add_argument("--source-root", type=Path, default=REPO,
+                        help="Read inputs from an existing frozen checkout/snapshot; never changes that input tree")
     args = parser.parse_args()
+    # absolute() avoids Windows GetFinalPathNameByHandle permission requirements
+    # on read-only snapshots; each required file is opened and hashed below.
+    source_root = args.source_root.absolute()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     out = REPO / "firmware_artifacts" / ("cartesian-benchmark-host-" + stamp)
     out.mkdir(parents=True)
-    before = {p.as_posix(): digest(REPO / p) for p in INPUTS}
+    before = {p.as_posix(): digest(source_root / p) for p in INPUTS}
     for p in INPUTS:
         dest = out / "source" / p
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(REPO / p, dest)
+        shutil.copyfile(source_root / p, dest)
     (out / "environment.json").write_text(json.dumps({"utc": stamp, "platform": platform.platform(),
         "python": sys.version, "python_executable": sys.executable, "argv": sys.argv,
+        "source_root": str(source_root),
         "mcu_timing": False, "clock": "synthetic deterministic hooks, not performance measurement"}, indent=2), encoding="utf-8")
     reports, failure = [], None
     try:
@@ -110,7 +116,7 @@ def main() -> int:
     except Exception as error:
         failure = repr(error)
         (out / "failure.txt").write_text(failure + "\n", encoding="utf-8")
-    after = {p.as_posix(): digest(REPO / p) for p in INPUTS}
+    after = {p.as_posix(): digest(source_root / p) for p in INPUTS}
     identity = {"before": before, "after": after, "source_unchanged": before == after}
     (out / "source_identity.json").write_text(json.dumps(identity, indent=2), encoding="utf-8")
     summary = {"passed": failure is None and before == after, "reports": reports, "failure": failure,

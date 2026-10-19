@@ -797,6 +797,7 @@ void DummyRobot::ResetStopDiagnostics()
 
 void DummyRobot::RequestSoftStop()
 {
+    CartesianBenchmarkCancel(CartesianBenchmarkCancelSource::SOFT_STOP);
     CoreStreamCancel();
     const bool cancelCalibration = IsCalibrationBusy();
     if (protection) protection->Cancel(false);
@@ -852,6 +853,7 @@ bool DummyRobot::RequestStart()
 
 void DummyRobot::RequestDisable()
 {
+    CartesianBenchmarkCancel(CartesianBenchmarkCancelSource::DISABLE);
     CoreStreamCancel();
     if (protection) protection->Cancel(true);
     taskENTER_CRITICAL();
@@ -1530,6 +1532,7 @@ void DummyRobot::FailMotionDispatch(uint32_t epoch, uint32_t generation, const c
 
 void DummyRobot::CancelMotion()
 {
+    CartesianBenchmarkCancel(CartesianBenchmarkCancelSource::MOTION);
     taskENTER_CRITICAL();
     if (motionActive) { motionPhase = MOTION_CANCELLED; motionCompletedAt = HAL_GetTick(); }
     motionActive = motionDispatchPending = false;

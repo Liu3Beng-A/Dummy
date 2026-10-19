@@ -167,6 +167,11 @@ standard names. */
 #define configCHECK_FOR_STACK_OVERFLOW 2
 /* Float printf/scanf keep Bigint freelists in the calling task's _reent. */
 #define configUSE_NEWLIB_REENTRANT 1
+/* One flag read outside a diagnostic window. Residency includes IRQ time. */
+#include "../../Robot/instances/bench_profile.h"
+#define traceTASK_SWITCHED_IN() do { \
+    if (benchProfileWindowActive) BenchProfileSwitchedIn((void*)pxCurrentTCB); \
+} while (0)
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
 /* USER CODE END Defines */
 

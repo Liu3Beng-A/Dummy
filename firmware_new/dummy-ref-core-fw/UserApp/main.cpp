@@ -1,5 +1,6 @@
 #include "common_inc.h"
 #include "instances/cartesian_benchmark.h"
+#include "instances/bench_profile.h"
 
 
 // On-board Screen, can choose from hi2c2 or hi2c0(soft i2c)
@@ -96,81 +97,254 @@ void ThreadControlLoopUpdate(void* argument)
 
 
 osThreadId_t oledTaskHandle;
-void ThreadOledUpdate(void* argument)
-{
-    // §8.1 — 用 vTaskDelayUntil 钉住 50Hz（20ms 周期）。
-    // 不能用 osDelay(20)：相对延迟会被 200Hz 控制循环抢占拉长到 ≈40ms，
-    // 实测显示 OLED FPS 在 25~30 之间抖动。
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xPeriod = pdMS_TO_TICKS(20);   // 50Hz
+osThreadId_t oledDisplayTaskHandle;
+// The additional task uses SRAM, leaving the existing CCM task heap intact.
+alignas(8) static StackType_t oledDisplayTaskStack[2048 / sizeof(StackType_t)];
+static StaticTask_t oledDisplayTaskControlBlock;
+namespace {
+struct OledDisplayState {
+    float imuX=0,imuY=0,joints[6]{},rail=0,pose[6]{};
+    uint32_t jointFlags=0,commandMode=2,tick=0;
+    bool enabled=false;
+};
+OledDisplayState oledMailbox;
+OledDiagnostic::RuntimeSnapshot oledRuntime;
+volatile unsigned oledRequestedMode=0,oledActiveMode=0;
+bool oledDisplayBusy=false,oledMailboxPending=false,oledRestoreAllowed=true;
+uint32_t oledLastRenderMicros=0;
+bool oledSendMonitoring=false;
+uint32_t oledLastCompletedSendTick=0;
+constexpr uint32_t OledStartTimeout=1U,OledStopTimeout=2U,OledPriorityError=4U;
+constexpr TickType_t OledHandoffTimeout=pdMS_TO_TICKS(500);
 
-    uint32_t t = micros();
+BenchProfile::OledToken BeginOledFrame(TickType_t planned) {
+    if(!benchOledSessionActive)return {};
+    taskENTER_CRITICAL();
+    const auto token=BenchProfile::OledFrameBegin(DWT->CYCCNT,xTaskGetTickCount(),planned);
+    taskEXIT_CRITICAL();return token;
+}
+void SetOledStage(const BenchProfile::OledToken& token,unsigned stage) {
+    if(!token.generation)return;
+    taskENTER_CRITICAL();BenchProfile::OledStageAt(token,stage,DWT->CYCCNT);taskEXIT_CRITICAL();
+}
+void EndOledFrame(const BenchProfile::OledToken& token) {
+    if(!token.generation)return;
+    taskENTER_CRITICAL();BenchProfile::OledFrameEnd(token,DWT->CYCCNT);taskEXIT_CRITICAL();
+}
+bool SetOledDisplayPriority(osPriority_t priority) {
+    return oledDisplayTaskHandle && osThreadSetPriority(oledDisplayTaskHandle,priority)==osOK
+        && osThreadGetPriority(oledDisplayTaskHandle)==priority;
+}
+// Called only at a worker iteration boundary, after its previous send ended.
+bool CoordinateOledOwner() {
+    taskENTER_CRITICAL();
+    if(oledRequestedMode>=3U) {
+        if(oledActiveMode==0U)oledActiveMode=oledRequestedMode;
+    } else if(oledActiveMode>=3U && !oledDisplayBusy && oledRestoreAllowed) {
+        oledActiveMode=0;oledMailboxPending=false;oledRuntime.restored=1;
+    }
+    const bool split=oledActiveMode>=3U;
+    taskEXIT_CRITICAL();return split;
+}
+OledDisplayState CaptureOledDisplayState() {
+    OledDisplayState state;
+    taskENTER_CRITICAL();
+    state.imuX=mpu6050.data.ax;state.imuY=mpu6050.data.ay;
+    for(unsigned i=0;i<6;++i)state.joints[i]=dummy.currentJoints.a[i];
+    state.rail=dummy.currentRailPos;
+    state.pose[0]=dummy.currentPose6D.X;state.pose[1]=dummy.currentPose6D.Y;state.pose[2]=dummy.currentPose6D.Z;
+    state.pose[3]=dummy.currentPose6D.A;state.pose[4]=dummy.currentPose6D.B;state.pose[5]=dummy.currentPose6D.C;
+    state.jointFlags=dummy.jointsStateFlag;state.commandMode=unsigned(dummy.commandMode);state.enabled=dummy.IsEnabled();
+    state.tick=xTaskGetTickCount();
+    taskEXIT_CRITICAL();return state;
+}
+void PublishOledDisplayState(const OledDisplayState& state) {
+    taskENTER_CRITICAL();
+    const bool publish=oledActiveMode>=3U && oledRequestedMode==oledActiveMode;
+    if(publish) {
+        if(oledMailboxPending)++oledRuntime.overwritten;
+        oledMailbox=state;oledMailboxPending=true;
+    }
+    taskEXIT_CRITICAL();
+    if(publish)xTaskNotifyGive(TaskHandle_t(oledDisplayTaskHandle));
+}
+void ObserveOledSend(bool completed) {
+    taskENTER_CRITICAL();
+    if(oledSendMonitoring) {
+        const uint32_t now=xTaskGetTickCount();
+        const uint32_t gap=now-oledLastCompletedSendTick;
+        if(gap>oledRuntime.maxSendGapTicks)oledRuntime.maxSendGapTicks=gap;
+        if(completed)oledLastCompletedSendTick=now;
+    }
+    taskEXIT_CRITICAL();
+}
+void RenderOledDisplayState(const OledDisplayState& state,const BenchProfile::OledToken& oledFrame) {
+    uint32_t& t=oledLastRenderMicros;
     char buf[16];
-    const char cmdModeNames[7][4] = {"SEQ", "INT", "TRJ", "TUN", "---", "---", "STR"};
+    const char cmdModeNames[7][4]={"SEQ","INT","TRJ","TUN","---","---","STR"};
+    SetOledStage(oledFrame,BenchProfile::OLED_DRAW);
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_5x8_tr);
+    oled.setCursor(0, 10);
+    oled.printf("IMU:%.3f/%.3f", state.imuX, state.imuY);
+    oled.setCursor(85, 10);
+    oled.printf("| FPS:%lu", 1000000 / (micros() - t));
+    t = micros();
 
-    for (;;)
+    oled.drawBox(0, 15, 128, 3);
+    oled.setCursor(0, 30);
+    oled.printf(">%3d|%3d|%3d|%3d|%3d|%3d|",
+                (int) roundf(state.joints[0]), (int) roundf(state.joints[1]),
+                (int) roundf(state.joints[2]), (int) roundf(state.joints[3]),
+                (int) roundf(state.joints[4]), (int) roundf(state.joints[5]));
+    oled.setCursor(17, 40);
+    oled.printf("rail:%.2fmm", state.rail);
+
+    // [FIX] 模式 + 运动状态上移到中部（10x20），紧跟 rail
+    oled.setFont(u8g2_font_10x20_tr);
+    oled.setCursor(0, 58);
+    if (state.enabled)
     {
-        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+        for (int i = 1; i <= 7; i++)
+            buf[i - 1] = (state.jointFlags & (1 << i) ? '*' : '_');
+        buf[7] = 0;
+        oled.printf("%s: %s", cmdModeNames[state.commandMode - 1], buf);
+    } else
+    {
+        oled.printf("%s: %s", cmdModeNames[state.commandMode - 1], "=======");
+    }
 
-        mpu6050.Update(true);
+    // [FIX] XYZ/ABC 下移到屏幕底部：标签在框左外侧，6 个值在框内右侧（6x10 + 白框）
+    oled.drawBox(40, 60, 128, 20);
+    oled.setFont(u8g2_font_6x10_tr);
+    oled.setDrawColor(0);
+    oled.setCursor(42, 70);
+    oled.printf("%4d|%4d|%4d", (int) roundf(state.pose[0]),
+                (int) roundf(state.pose[1]), (int) roundf(state.pose[2]));
+    oled.setCursor(42, 79);
+    oled.printf("%4d|%4d|%4d", (int) roundf(state.pose[3]),
+                (int) roundf(state.pose[4]), (int) roundf(state.pose[5]));
+    oled.setDrawColor(1);
+    oled.setCursor(0, 70);
+    oled.printf("[XYZ]:");
+    oled.setCursor(0, 79);
+    oled.printf("[ABC]:");
 
-        // [v2026-10-03] 查询端补齐：周期 poll 4 帧合并完成的 PID 节点
-        //   #GET_PID 0 ALL 模式 32 帧回包由 OledTask 分行打印；< 50µs 开销
-        dummy.PollPidPrint();
-        dummy.PollStopPrint();
-        dummy.commandHandler.PollCancelled();
-        dummy.PollProtectionPrint();
-        dummy.PollMotorAccelerationSync();
-        CoreStreamPrint();
-
-        oled.clearBuffer();
-        oled.setFont(u8g2_font_5x8_tr);
-        oled.setCursor(0, 10);
-        oled.printf("IMU:%.3f/%.3f", mpu6050.data.ax, mpu6050.data.ay);
-        oled.setCursor(85, 10);
-        oled.printf("| FPS:%lu", 1000000 / (micros() - t));
-        t = micros();
-
-        oled.drawBox(0, 15, 128, 3);
-        oled.setCursor(0, 30);
-        oled.printf(">%3d|%3d|%3d|%3d|%3d|%3d|",
-                    (int) roundf(dummy.currentJoints.a[0]), (int) roundf(dummy.currentJoints.a[1]),
-                    (int) roundf(dummy.currentJoints.a[2]), (int) roundf(dummy.currentJoints.a[3]),
-                    (int) roundf(dummy.currentJoints.a[4]), (int) roundf(dummy.currentJoints.a[5]));
-        oled.setCursor(17, 40);
-        oled.printf("rail:%.2fmm", dummy.currentRailPos);
-
-        // [FIX] 模式 + 运动状态上移到中部（10x20），紧跟 rail
-        oled.setFont(u8g2_font_10x20_tr);
-        oled.setCursor(0, 58);
-        if (dummy.IsEnabled())
-        {
-            for (int i = 1; i <= 7; i++)
-                buf[i - 1] = (dummy.jointsStateFlag & (1 << i) ? '*' : '_');
-            buf[7] = 0;
-            oled.printf("%s: %s", cmdModeNames[dummy.commandMode - 1], buf);
-        } else
-        {
-            oled.printf("%s: %s", cmdModeNames[dummy.commandMode - 1], "=======");
+    SetOledStage(oledFrame,BenchProfile::OLED_SEND);
+    oled.sendBuffer();
+    ObserveOledSend(true);
+}
+}
+namespace OledDiagnostic {
+bool Busy() {
+    // FreeRTOS permits this short nested critical section at guarded callers.
+    taskENTER_CRITICAL();
+    const bool busy=oledRequestedMode!=0U || oledActiveMode!=0U || oledDisplayBusy || !oledRuntime.restored;
+    taskEXIT_CRITICAL();return busy;
+}
+bool Stop() {
+    ObserveOledSend(false);
+    taskENTER_CRITICAL();oledRequestedMode=0;oledMailboxPending=false;oledRestoreAllowed=false;
+    oledRuntime.restored=0;oledSendMonitoring=false;taskEXIT_CRITICAL();
+    const bool priorityOk=SetOledDisplayPriority(osPriorityNormal);
+    taskENTER_CRITICAL();
+    oledRestoreAllowed=priorityOk;
+    if(!priorityOk)oledRuntime.flags|=OledPriorityError;
+    taskEXIT_CRITICAL();
+    if(!priorityOk)return false;
+    const TickType_t began=xTaskGetTickCount();
+    do {
+        taskENTER_CRITICAL();
+        const bool stopped=oledActiveMode==0U&&!oledDisplayBusy;
+        if(stopped)oledRuntime.restored=1;
+        taskEXIT_CRITICAL();
+        if(stopped)return true;
+        osDelay(1);
+    } while(TickType_t(xTaskGetTickCount()-began)<OledHandoffTimeout);
+    taskENTER_CRITICAL();oledRuntime.flags|=OledStopTimeout;taskEXIT_CRITICAL();return false;
+}
+bool Start(unsigned mode) {
+    if(mode>4U || Busy())return false;
+    taskENTER_CRITICAL();oledRuntime=RuntimeSnapshot{};oledRuntime.priority=unsigned(osPriorityNormal);
+    oledMailboxPending=false;oledRequestedMode=0;oledRestoreAllowed=true;
+    oledLastCompletedSendTick=xTaskGetTickCount();oledSendMonitoring=true;taskEXIT_CRITICAL();
+    if(!oledTaskHandle||!oledDisplayTaskHandle) {
+        taskENTER_CRITICAL();oledRuntime.flags|=OledPriorityError;taskEXIT_CRITICAL();return false;
+    }
+    if(mode<3U)return true;
+    const auto priority=mode==4U?osPriorityBelowNormal:osPriorityNormal;
+    const bool priorityOk=SetOledDisplayPriority(priority);
+    taskENTER_CRITICAL();
+    oledRuntime.restored=0;oledRestoreAllowed=false;
+    if(priorityOk){oledRuntime.priority=unsigned(priority);oledRequestedMode=mode;}
+    else oledRuntime.flags|=OledPriorityError;
+    taskEXIT_CRITICAL();
+    if(!priorityOk){Stop();return false;}
+    const TickType_t began=xTaskGetTickCount();
+    do {
+        taskENTER_CRITICAL();const bool started=oledActiveMode==mode&&oledRequestedMode==mode;taskEXIT_CRITICAL();
+        if(started)return true;
+        osDelay(1);
+    } while(TickType_t(xTaskGetTickCount()-began)<OledHandoffTimeout);
+    taskENTER_CRITICAL();oledRuntime.flags|=OledStartTimeout;taskEXIT_CRITICAL();Stop();return false;
+}
+RuntimeSnapshot Snapshot() {
+    RuntimeSnapshot result;
+    taskENTER_CRITICAL();result=oledRuntime;taskEXIT_CRITICAL();
+    result.displayStackFree=oledDisplayTaskHandle?osThreadGetStackSpace(oledDisplayTaskHandle):0;
+    return result;
+}
+}
+void OledWorkerIteration(TickType_t planned) {
+    ObserveOledSend(false);
+    const bool split=CoordinateOledOwner();
+    const auto oledFrame=BeginOledFrame(planned);
+    mpu6050.Update(true);
+    SetOledStage(oledFrame,BenchProfile::OLED_SERVICE);
+    dummy.PollPidPrint();
+    dummy.PollStopPrint();
+    dummy.commandHandler.PollCancelled();
+    dummy.PollProtectionPrint();
+    dummy.PollMotorAccelerationSync();
+    CoreStreamPrint();
+    const auto state=CaptureOledDisplayState();
+    if(split)PublishOledDisplayState(state);
+    else if(!oledFrame.skip)RenderOledDisplayState(state,oledFrame);
+    EndOledFrame(oledFrame);
+}
+void OledDisplayIteration() {
+    OledDisplayState state;BenchProfile::OledToken token;
+    taskENTER_CRITICAL();
+    const bool ready=oledActiveMode>=3U && oledRequestedMode==oledActiveMode && oledMailboxPending && !oledDisplayBusy;
+    if(ready) {
+        state=oledMailbox;oledMailboxPending=false;oledDisplayBusy=true;
+        const TickType_t now=xTaskGetTickCount();
+        token=BenchProfile::OledDisplayFrameBegin(DWT->CYCCNT,now,state.tick);
+        if(token.generation&&!token.skip) {
+            const uint32_t age=now-state.tick;
+            if(age>oledRuntime.maxSnapshotAgeTicks)oledRuntime.maxSnapshotAgeTicks=age;
         }
-
-        // [FIX] XYZ/ABC 下移到屏幕底部：标签在框左外侧，6 个值在框内右侧（6x10 + 白框）
-        oled.drawBox(40, 60, 128, 20);
-        oled.setFont(u8g2_font_6x10_tr);
-        oled.setDrawColor(0);
-        oled.setCursor(42, 70);
-        oled.printf("%4d|%4d|%4d", (int) roundf(dummy.currentPose6D.X),
-                    (int) roundf(dummy.currentPose6D.Y), (int) roundf(dummy.currentPose6D.Z));
-        oled.setCursor(42, 79);
-        oled.printf("%4d|%4d|%4d", (int) roundf(dummy.currentPose6D.A),
-                    (int) roundf(dummy.currentPose6D.B), (int) roundf(dummy.currentPose6D.C));
-        oled.setDrawColor(1);
-        oled.setCursor(0, 70);
-        oled.printf("[XYZ]:");
-        oled.setCursor(0, 79);
-        oled.printf("[ABC]:");
-
-        oled.sendBuffer();
+    }
+    taskEXIT_CRITICAL();
+    if(!ready)return;
+    if(token.generation&&!token.skip)RenderOledDisplayState(state,token);
+    EndOledFrame(token);
+    taskENTER_CRITICAL();oledDisplayBusy=false;taskEXIT_CRITICAL();
+}
+void ThreadOledUpdate(void* argument) {
+    TickType_t wake=xTaskGetTickCount();
+    oledLastRenderMicros=micros();
+    for(;;) {
+        // The legacy worker/IMU/services retain their 20ms opportunities.
+        vTaskDelayUntil(&wake,pdMS_TO_TICKS(20));
+        OledWorkerIteration(wake);
+    }
+}
+void ThreadOledDisplay(void* argument) {
+    for(;;) {
+        // Clear all pending notifications; the mailbox contains only latest.
+        ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
+        OledDisplayIteration();
     }
 }
 
@@ -253,6 +427,17 @@ void Main(void)
     ControlLoopUpdateHandle = osThreadNew(ThreadControlLoopUpdate, nullptr,
                                           &ControlLoopUpdateTask_attributes);
     configASSERT(ControlLoopUpdateHandle != nullptr);
+
+    const osThreadAttr_t oledDisplayTask_attributes = {
+        .name = "OledDisplayTask",
+        .cb_mem = &oledDisplayTaskControlBlock,
+        .cb_size = sizeof(oledDisplayTaskControlBlock),
+        .stack_mem = oledDisplayTaskStack,
+        .stack_size = sizeof(oledDisplayTaskStack),
+        .priority = (osPriority_t) osPriorityNormal,
+    };
+    oledDisplayTaskHandle = osThreadNew(ThreadOledDisplay, nullptr, &oledDisplayTask_attributes);
+    configASSERT(oledDisplayTaskHandle != nullptr);
 
     const osThreadAttr_t oledTask_attributes = {
         .name = "OledTask",

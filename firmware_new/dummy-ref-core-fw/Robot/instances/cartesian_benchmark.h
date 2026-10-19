@@ -23,6 +23,10 @@ struct Hooks {
     uint32_t (*ticks)(void*); // Independent millisecond timebase, for sanity only.
     uint8_t (*checkpoint)(void*); // COMPLETE=continue; CANCELLED/ABORTED=stop.
     uint32_t clockHz;
+    // Optional diagnostic observation, after the post-work checkpoint. Does
+    // not run for work that never started; cumulative cycles retain the same
+    // kernel timing origin. The callback must not block or send motor data.
+    void (*workBoundary)(void*, unsigned completed, uint32_t cumulativeCycles) = nullptr;
 };
 bool Valid(const Config& config);
 class Compute {
@@ -43,6 +47,9 @@ private:
 // runs only in the normal-priority command task; requests never send motor data.
 bool CartesianBenchmarkActive();
 void CartesianBenchmarkPoll();
+enum class CartesianBenchmarkCancelSource : uint8_t { NONE, USB, SOFT_STOP, DISABLE, MOTION };
+// Notification only: never sends STOP, CAN or motor data. First cause wins.
+void CartesianBenchmarkCancel(CartesianBenchmarkCancelSource source);
 // Serializes calibration entry with diagnostic reservation, without holding a
 // critical section over calibration dispatch/printing.
 bool CartesianBenchmarkEnterCalibration();
