@@ -36,10 +36,11 @@ class AxisPollingContractTests(unittest.TestCase):
         self.port = PollTracePort()
         self.c = RobotController(serial_factory=lambda *a, **kw: self.port)
         self.port.controller = self.c
-        self.results, self.gui_queries, self.worker_queries = [], [], []
+        self.results, self.gui_queries, self.worker_queries, self.telemetry_queries = [], [], [], []
         self.c.cartesian.stream.axis_test_changed.connect(self.results.append)
         original_send = self.c.send_cmd
         original_worker_send = self.c.cartesian.stream._send
+        original_telemetry_allowed = self.c._can_write_telemetry
         def send(command, *args, **kwargs):
             if command == '#GETJPOS' and kwargs.get('source') == 'telemetry':
                 self.gui_queries.append(dict(stamp=time.perf_counter(), active=self.c.cartesian.active,
@@ -49,9 +50,16 @@ class AxisPollingContractTests(unittest.TestCase):
             if command == '#GETJPOS':
                 self.worker_queries.append(dict(stamp=time.perf_counter(), kind=self.c.cartesian.kind))
             return original_worker_send(command)
+        def telemetry_allowed(generation):
+            allowed = original_telemetry_allowed(generation)
+            if allowed:
+                self.telemetry_queries.append(dict(stamp=time.perf_counter(), active=self.c.cartesian.active,
+                                                   kind=self.c.cartesian.kind))
+            return allowed
         self.guards = [patch('app.core.controller.serial.Serial', side_effect=AssertionError('hardware forbidden')),
                        patch('dummy_motion.ik.IKSolver.solve_pose', side_effect=AssertionError('IK forbidden')),
                        patch.object(self.c,'send_cmd',side_effect=send),
+                       patch.object(self.c,'_can_write_telemetry',side_effect=telemetry_allowed),
                        patch.object(self.c.cartesian.stream,'_send',side_effect=worker_send)]
         for guard in self.guards:
             guard.start()
@@ -73,8 +81,8 @@ class AxisPollingContractTests(unittest.TestCase):
         self.wait(lambda:self.c._mode_request is None)
         self.assertTrue(self.c.send_cmd('!START'))
         self.wait(lambda:self.c._motor_enabled and self.c._mode_request is None)
-        # Retire an already-issued GUI request before counting this test's
-        # ownership interval. Do not attribute an older readonly TX to it.
+        # Stop only the GUI configuration heartbeat, then drain its old manual
+        # ledger. Transport polling is independent and remains enabled.
         self.c._poll_timer.stop()
         self.wait(lambda:self.c._position_request is None and self.c._tx_queue.empty())
 
@@ -85,6 +93,7 @@ class AxisPollingContractTests(unittest.TestCase):
     def assert_one_sampler_during_axis(self):
         extra = [query for query in self.gui_queries if query['active'] and query['kind']=='axis_test']
         self.assertEqual(extra, [])
+        self.assertFalse(any(query['active'] and query['kind']=='axis_test' for query in self.telemetry_queries))
         actual = [entry for entry in self.port.actual_writes()
                   if entry['command']=='#GETJPOS' and entry['active'] and entry['kind']=='axis_test']
         worker = [entry for entry in self.worker_queries if entry['kind']=='axis_test']
@@ -98,7 +107,8 @@ class AxisPollingContractTests(unittest.TestCase):
         marker = time.perf_counter()
         self.wait(lambda:any(entry['stamp']>marker and entry['command']=='#GETJPOS' and not entry['active']
                              for entry in self.port.actual_writes()),1.)
-        self.assertTrue(any(query['stamp']>marker and not query['active'] for query in self.gui_queries))
+        self.assertTrue(any(query['stamp']>marker and not query['active'] for query in self.telemetry_queries))
+        self.assertEqual(self.gui_queries, [])  # GUI no longer dispatches automatic queries.
 
     def test_completed_hold_has_worker_feedback_and_no_duplicate_gui_poll(self):
         self.ready();self.start_hold()
@@ -158,7 +168,8 @@ class AxisPollingContractTests(unittest.TestCase):
         self.wait(lambda:sum(entry['stamp']>marker and entry['command']=='#GETJPOS'
                             for entry in self.port.actual_writes())>=3,1.)
         self.assertFalse(self.worker_queries)
-        self.assertGreaterEqual(sum(query['stamp']>marker for query in self.gui_queries),3)
+        self.assertGreaterEqual(sum(query['stamp']>marker for query in self.telemetry_queries),3)
+        self.assertEqual(self.gui_queries, [])
 
 
 if __name__ == '__main__':

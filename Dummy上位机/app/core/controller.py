@@ -558,6 +558,10 @@ class RobotController(QObject, RobotBusiness):
         self._transport = SerialTransport(port_object, self._tx_queue, self._can_write,
                                           self._connection_id, self)
         getattr(self._transport, "line_received_at", self._transport.line_received).connect(self._on_transport_line, Qt.ConnectionType.QueuedConnection)
+        if hasattr(self._transport, "configure_joint_polling"):
+            self._transport.telemetry_received.connect(self._on_telemetry_line, Qt.ConnectionType.QueuedConnection)
+            self._transport.telemetry_timed_out.connect(self._on_telemetry_timeout, Qt.ConnectionType.QueuedConnection)
+            self._transport.telemetry_allowed = self._can_write_telemetry
         self._transport.command_written.connect(self._on_written, Qt.ConnectionType.QueuedConnection)
         self._transport.failed.connect(self._on_transport_failure, Qt.ConnectionType.QueuedConnection)
         self._transport.wire_log.sink = getattr(self, 'wire_log_sink', None)
@@ -623,6 +627,37 @@ class RobotController(QObject, RobotBusiness):
     def _on_transport_line(self, line, connection_id, received_at=None):
         if connection_id == self._connection_id and self.is_connected:
             self._process_rx_line(line, received_at)
+
+    @Slot(str, int, float)
+    def _on_telemetry_line(self, line, connection_id, received_at):
+        if connection_id == self._connection_id and self.is_connected:
+            self._process_rx_line(line, received_at, telemetry=True)
+
+    @Slot(int)
+    def _on_telemetry_timeout(self, connection_id):
+        if connection_id == self._connection_id and self.is_connected and not self._position_polling_paused():
+            now = time.monotonic()
+            if now - self._last_position_warning > 5:
+                self.log("位置回读超时，三维实际姿态数据已过期", "WARN")
+                self._last_position_warning = now
+            self._emit_state()
+
+    def _can_write_telemetry(self, generation):
+        """Worker-only admission for the single fixed read-only poll command.
+
+        No Qt fields, control-command admission records or motion dispatch are
+        touched here. Recheck the same polling pauses at the actual writer.
+        """
+        return bool(self.is_connected and self.serial_port is not None and
+                    generation == self._tx_generation and self._position_request is None and
+                    not self._position_polling_paused() and self.supports("#GETJPOS") and
+                    self.rgb_save.allows_write(generation, "#GETJPOS"))
+
+    def performance_snapshot(self):
+        metrics = (self._transport.performance_snapshot() if self._transport is not None and
+                   hasattr(self._transport, "performance_snapshot") else {})
+        return {**metrics, "connected": self.is_connected, "requested_hz": self._poll_hz,
+                "paused": self._position_polling_paused()}
 
     @Slot(str, int)
     def _on_written(self, command, connection_id):
@@ -1247,7 +1282,7 @@ class RobotController(QObject, RobotBusiness):
             values.append(int(text))
         return values
 
-    def _process_rx_line(self, line, received_at=None):
+    def _process_rx_line(self, line, received_at=None, *, telemetry=False):
         observed_generation = self._tx_generation
         observed_at = self.cartesian.clock()
         receipt_at = (received_at if received_at is not None and math.isfinite(received_at) and
@@ -1291,7 +1326,7 @@ class RobotController(QObject, RobotBusiness):
                 # Invalid or old data cannot refresh either display or edits.
                 self.log(line, "RX")
                 request = self._position_request
-                if request and request["kind"] == "j":
+                if not telemetry and request and request["kind"] == "j":
                     self._position_request = None
                     self._pending_sync = None
                 self._emit_state()
@@ -1304,9 +1339,11 @@ class RobotController(QObject, RobotBusiness):
             self._actual_received_at = stamp
             self._actual_feedback_sequence += 1
             self.last_actual_at = time.time()-age
+            if self._transport is not None and hasattr(self._transport, "metrics"):
+                self._transport.metrics.delivered(stamp)
             self.actual_pose_changed.emit(list(nums))
             request = self._position_request
-            if request and request["kind"] == "j":
+            if not telemetry and request and request["kind"] == "j":
                 self._position_request = None
                 self._pending_sync = None
                 if request["sync"] and request["generation"] == self._tx_generation:
@@ -1534,6 +1571,8 @@ class RobotController(QObject, RobotBusiness):
         if not math.isfinite(hz) or not 1 <= hz <= 50:
             raise ValueError("位置回读频率应为 1～50 Hz")
         self._poll_enabled, self._poll_hz = bool(enabled), hz
+        if self._transport is not None and hasattr(self._transport, "configure_joint_polling"):
+            self._transport.configure_joint_polling(self._poll_enabled, hz, self._tx_generation)
         if self.is_connected and self._poll_enabled:
             self._poll_timer.start(math.ceil(1000 / hz))
         else:
@@ -1546,6 +1585,11 @@ class RobotController(QObject, RobotBusiness):
                 (self.connection_type == "UART4" and self._motor_state_known and not self._motor_enabled))
 
     def _poll_position(self):
+        if self._transport is not None and hasattr(self._transport, "configure_joint_polling"):
+            # Configuration heartbeat only. The writer schedules and retires
+            # real background queries without waiting for this GUI callback.
+            self._transport.configure_joint_polling(self._poll_enabled, self._poll_hz, self._tx_generation)
+            return
         if self._position_polling_paused() or self._position_request is not None:
             return
         self._request_position("j", False, source="telemetry")
@@ -1579,6 +1623,13 @@ class RobotController(QObject, RobotBusiness):
                    "source": source, "written_at": None}
         self._position_request = request
         self._pending_sync = kind
+        if (kind == "j" and source == "ui" and not self._position_polling_paused() and
+                self._transport is not None and hasattr(self._transport, "adopt_joint_poll")):
+            stamp = self._transport.adopt_joint_poll()
+            if stamp is not None:
+                request["written_at"] = stamp
+                self.root.after(1200, self._position_timeout, token)
+                return True
         if not self.send_cmd(command, source=source):
             if self._position_request is request:
                 self._position_request = self._pending_sync = None

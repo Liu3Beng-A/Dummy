@@ -210,6 +210,7 @@ class MainWindow(QMainWindow):
         self._operation_timer.setInterval(250)
         self._operation_timer.timeout.connect(self._refresh_operation_status)
         self._operation_timer.timeout.connect(self.motion_power_adapter.refresh)
+        self._operation_timer.timeout.connect(self._refresh_viewer_performance)
         self._operation_timer.start()
         QApplication.instance().installEventFilter(self)
         for error in store.load_errors:
@@ -2686,6 +2687,10 @@ class MainWindow(QMainWindow):
         gripper_text = self._gripper_display_hint()
         self.actual_status.setText(f"实际七轴已更新 · {datetime.now():%H:%M:%S} · {gripper_text}")
         self._sync_feedback_display()
+
+    def _refresh_viewer_performance(self):
+        if not self._closed and self.viewer.isVisible():
+            self.viewer.set_performance_metrics(self.controller.performance_snapshot())
 
     def _fields_updated(self):
         self._preview_changed()
