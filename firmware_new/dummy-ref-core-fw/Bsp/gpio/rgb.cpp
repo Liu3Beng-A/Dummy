@@ -290,7 +290,10 @@ RGB::Status RGB::GetStatus(State state) const {
     if (state == STATE_COUNT) state = State(status.state);
     if (state >= STATE_COUNT) state = FAULT;
     const State visible = bootPending && config.automatic && state == DISABLED ? BOOT : state;
-    const Scene selected = SelectScene(config, visible);
+    // STARTING is a real robot state, but has no separate visible cue. Report
+    // the retained scene even if a status query precedes the next RGB tick.
+    const Scene selected = state==STARTING && sceneValid ? scene :
+        SelectScene(config, visible==STARTING ? DISABLED : visible);
     result.state = state; result.mode = selected.mode;
     result.source = !config.enabled || !config.brightness ? STATE_COUNT+1 : selected.source;
     result.dirty = !savedValid || std::memcmp(&config, &savedConfig, sizeof(Config));
@@ -346,14 +349,16 @@ void RGB::Render(const Scene& s, uint32_t elapsed, float output[LED_COUNT][3]) {
     }
     if (s.mode==CYBER_BREATH) mix = 0.5f-0.5f*cosf(2*PI_F*p);
     const float widthScale=float(s.effect.tail)/3.0f;
-    float arcLength=0, center=0, fade=0, convergeWidth=1;
+    float arcLength=0, center=0, convergeWidth=1;
     if (s.mode==MOTION_ARC) {
         arcLength=(0.18f+0.34f*(0.5f-0.5f*cosf(2*PI_F*p)))*widthScale;
         if (arcLength>0.95f) arcLength=0.95f;
     } else if (s.mode==MOTION_CONVERGE) {
-        center=p<=0.7f ? 0.5f*(1-Smooth(p/0.7f)) : 0;
-        fade=Smooth((p-0.7f)/0.3f);
-        convergeWidth=(0.055f+0.1f*fade)*widthScale;
+        // One configured period is one leg; turn around without extinguishing
+        // or widening the two heads. Valid scenes have periodMs >= 250.
+        const float eased=Smooth(p);
+        center=0.5f*(((elapsed/s.effect.periodMs)&1U) ? eased : 1-eased);
+        convergeWidth=0.055f*widthScale;
     }
     for (unsigned i=0; i<LED_COUNT; ++i) {
         float color[3] = {float(s.solid.r), float(s.solid.g), float(s.solid.b)}, level = amplitude;
@@ -411,11 +416,12 @@ void RGB::Render(const Scene& s, uint32_t elapsed, float output[LED_COUNT][3]) {
             const float wave=sinf(2*PI_F*float(valley)/float(period*24));
             level=0.04f+0.86f*powf(wave, 4.0f/(widthScale*widthScale));
         } else if (s.mode==MOTION_CONVERGE) {
-            float a=float(i)/LED_COUNT-center, b=float(i)/LED_COUNT+center;
+            const float position=float(i)/LED_COUNT;
+            float a=position-center, b=position+center;
             a-=floorf(a+0.5f); b-=floorf(b+0.5f);
             a/=convergeWidth; b/=convergeWidth;
             a=expf(-0.5f*a*a); b=expf(-0.5f*b*b);
-            level=0.04f+0.86f*Smooth(p/0.09f)*(1-fade)*(a+b-a*b);
+            level=0.04f+0.86f*(a+b-a*b);
         }
         for (unsigned ch=0; ch<3; ++ch) output[i][ch]=color[ch]*level*s.scale;
     }
@@ -427,11 +433,18 @@ void RGB::Update(State state, uint32_t now) {
     if (state!=DISABLED) bootPending=false;
     const State visible=bootPending && c.automatic && state==DISABLED ? BOOT : state;
     taskEXIT_CRITICAL();
-    Scene next=SelectScene(c, visible);
-    if (!sceneValid || !SameScene(scene, next)) {
-        std::memcpy(fromFrame, frame, sizeof(frame)); scene=next; sceneAt=blendAt=now;
-        blendMs=!sceneValid || visible==FAULT || visible==STOP ? 0 : c.transitionMs;
-        sceneValid=true;
+    // Keep the prior animation and any in-flight blend running through START.
+    // With no rendered scene yet, use the disabled/manual scene, never cyan.
+    if (state!=STARTING || !sceneValid) {
+        const Scene next=SelectScene(c, visible==STARTING ? DISABLED : visible);
+        if (!sceneValid || !SameScene(scene, next)) {
+            std::memcpy(fromFrame, frame, sizeof(frame));
+            taskENTER_CRITICAL(); // GetStatus may read the retained scene.
+            scene=next; sceneAt=blendAt=now;
+            blendMs=!sceneValid || visible==FAULT || visible==STOP ? 0 : c.transitionMs;
+            sceneValid=true;
+            taskEXIT_CRITICAL();
+        }
     }
     Render(scene, now-sceneAt, frame);
     float blend=blendMs ? Smooth(float(now-blendAt)/blendMs) : 1;

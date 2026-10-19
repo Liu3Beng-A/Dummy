@@ -764,6 +764,7 @@ class RobotSerialAssistantOld:
         ttk.Button(states, text="应用当前状态绑定", command=self._rgb_apply_state).pack(fill=tk.X, pady=6)
         ttk.Label(states, text="该状态RGB用于“该状态单独颜色”；AUTO来源与自动颜色页同步。\n"
                   "待机默认25%幅度，失能15%。绑定需自动联动，保护 / STOP等优先。\n"
+                  "使能确认期间保持原灯效，成功后切换；该状态旧绑定仅保留兼容。\n"
                   "报警不可改色；关灯全黑。STOP / 校准期间仅允许查询。",
                   foreground="#868e96", wraplength=480).pack(anchor="w", pady=4)
 

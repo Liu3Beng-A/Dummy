@@ -318,9 +318,10 @@ static void testIsolationAndFrames() {
     for (unsigned kind=0;kind<4;++kind) for (unsigned reverse=0;reverse<2;++reverse) for (unsigned width: {1u,3u,12u}) {
         c=RGB::Defaults(); c.bindings[RGB::RUN_SEQ].mode=uint8_t(13+kind); c.motion[0]={1400,uint8_t(reverse),uint8_t(width)};
         const auto s=RGB::SelectScene(c,RGB::RUN_SEQ);
-        float first[24][3],last[24][3]; renderer.Render(s,0,first); renderer.Render(s,1400,last);
-        check(std::memcmp(first,last,sizeof(first))==0,"all motion algorithms loop exactly at their period");
-        for (unsigned t=0;t<1400;t+=13) {
+        const unsigned cycle=kind==3 ? 2800 : 1400;
+        float first[24][3],last[24][3]; renderer.Render(s,0,first); renderer.Render(s,cycle,last);
+        check(std::memcmp(first,last,sizeof(first))==0,"motion algorithms loop exactly at their complete cycle");
+        for (unsigned t=0;t<cycle;t+=13) {
             float f[24][3]; renderer.Render(s,t,f);
             for (const auto& led:f) for (float v:led) check(std::isfinite(v) && v>=0 && v<=255,"all legal widths render finite bounded RGB");
             if (kind==2) for (unsigned i=0;i<12;++i) for (unsigned ch=0;ch<3;++ch)
@@ -331,16 +332,88 @@ static void testIsolationAndFrames() {
 static void testLegacyFrames() {
 #ifdef HAS_BASELINE
     RGB current; PriorRenderer prior;
-    for (unsigned mode=0;mode<13;++mode) for (unsigned reverse=0;reverse<2;++reverse)
-        for (unsigned width=1;width<=12;++width) for (unsigned period: {250u,1400u,30000u})
+    for (unsigned mode=0;mode<16;++mode) for (unsigned reverse=0;reverse<2;++reverse)
+        for (unsigned width=1;width<=12;++width) for (unsigned period: {250u,800u,1400u,30000u})
         for (float scale: {0.15f,0.25f,1.0f}) {
             RGB::Scene s{}; s.mode=uint8_t(mode); s.scale=scale; s.solid={255,91,37};
             s.effect={{255,91,37},{17,180,255},uint16_t(period),200,1000,uint8_t(reverse),uint8_t(width)};
             for (unsigned t: {0u,1u,period/3,period-1,period,period+1,0xFFFFFFFFu}) {
                 float a[24][3],b[24][3]; current.Render(s,t,a); prior.RenderPrior(s,t,b);
-                check(std::memcmp(a,b,sizeof(a))==0,"all legacy 0..12 frames remain bit-identical to baseline");
+                check(std::memcmp(a,b,sizeof(a))==0,"all unchanged 0..15 frames remain bit-identical to baseline");
             }
         }
+#endif
+}
+static float convergeAlignedPeakStep=0,convergeAnyPhasePeakStep=0,priorAlignedPeakStep=0;
+static float framePeak(const float (&frame)[24][3]) {
+    float peak=0; for (const auto& led:frame) peak=std::max(peak,led[0]/255.0f); return peak;
+}
+static void testConvergeContinuous() {
+    RGB current;
+    for (unsigned reverse=0;reverse<2;++reverse) for (unsigned width=1;width<=12;++width)
+    for (unsigned period: {250u,800u,1400u,30000u}) {
+        RGB::Scene s{}; s.mode=RGB::MOTION_CONVERGE; s.source=RGB::RUN_SEQ;
+        s.scale=1; s.solid={255,91,37};
+        s.effect={{255,91,37},{0,0,0},uint16_t(period),200,1000,uint8_t(reverse),uint8_t(width)};
+        for (unsigned elapsed=0;elapsed<period;elapsed+=std::max(1u,period/53)) {
+            float first[24][3],second[24][3],third[24][3],fourth[24][3];
+            current.Render(s,elapsed,first); current.Render(s,elapsed+period,second);
+            current.Render(s,elapsed+2*period,third); current.Render(s,elapsed+3*period,fourth);
+            check(std::memcmp(first,third,sizeof(first))==0,"third converge leg exactly restores first leg");
+            check(std::memcmp(second,fourth,sizeof(second))==0,"fourth converge leg exactly restores second leg");
+            for (unsigned led=0;led<24;++led) for (unsigned ch=0;ch<3;++ch) {
+                const float solid=ch==0 ? 255.0f : ch==1 ? 91.0f : 37.0f;
+                check(std::isfinite(first[led][ch]) && first[led][ch]>=solid*.04f-.001f &&
+                      first[led][ch]<=solid*.9f+.001f,"continuous converge retains bounded 4 percent background and 90 percent heads");
+            }
+        }
+        for (unsigned turn: {period,2*period}) {
+            float before[24][3],at[24][3],after[24][3];
+            current.Render(s,turn-1,before); current.Render(s,turn,at); current.Render(s,turn+1,after);
+            check(std::fabs(framePeak(at)-.9f)<.00001f,"turnaround retains peak brightness without a dark reset");
+            const unsigned peakLed=((turn/period+reverse)%2)==0 ? 12 : 0;
+            check(std::fabs(at[peakLed][0]/255.0f-.9f)<.00001f,"forward and reverse turn at opposite ends");
+            for (unsigned led=0;led<24;++led) for (unsigned ch=0;ch<3;++ch) {
+                check(std::fabs(before[led][ch]-after[led][ch])<.01f,"one millisecond sides of turnaround are symmetric");
+                check(std::fabs(before[led][ch]-at[led][ch])<.5f,"turnaround has no discontinuous single-frame flash");
+            }
+        }
+        for (unsigned offset: {period/8,period/3}) {
+            float before[24][3],after[24][3];
+            current.Render(s,period-offset,before); current.Render(s,period+offset,after);
+            for (unsigned led=0;led<24;++led) for (unsigned ch=0;ch<3;++ch)
+                check(std::fabs(before[led][ch]-after[led][ch])<.01f,"travel is time-symmetric around each smooth reversal");
+        }
+        // Independently check a late leg: neither the old widening nor fading remains.
+        const unsigned t=period*4/5;
+        float late[24][3]; current.Render(s,t,late);
+        float p=float(t%period)/period; if (reverse) p=1-p;
+        const float eased=p*p*(3-2*p),center=.5f*(1-eased),spread=.055f*float(width)/3;
+        for (unsigned led=0;led<24;++led) {
+            float a=float(led)/24-center,b=float(led)/24+center;
+            a-=std::floor(a+.5f); b-=std::floor(b+.5f); a/=spread; b/=spread;
+            a=std::exp(-.5f*a*a); b=std::exp(-.5f*b*b);
+            const float expected=.04f+.86f*(a+b-a*b);
+            check(std::fabs(late[led][0]/255-expected)<.00001f,"fixed configured width and bounded Gaussian union hold at late phase");
+        }
+    }
+    RGB::Scene s{}; s.mode=RGB::MOTION_CONVERGE; s.scale=1; s.solid={255,91,37};
+    s.effect={{255,91,37},{0,0,0},800,200,1000,0,3};
+    for (unsigned t=0;t<1600;++t) {
+        float a[24][3],b[24][3]; current.Render(s,t,a); current.Render(s,t+20,b);
+        const float step=framePeak(b)-framePeak(a);
+        convergeAnyPhasePeakStep=std::max(convergeAnyPhasePeakStep,step);
+        if (t%20==0) convergeAlignedPeakStep=std::max(convergeAlignedPeakStep,step);
+    }
+    check(convergeAlignedPeakStep<.051f,"800 ms width3 aligned 20 ms frame-peak positive step stays below 5.1 percentage points");
+    check(convergeAnyPhasePeakStep<.059f,"800 ms width3 any-phase 20 ms frame-peak positive step stays below 5.9 percentage points");
+#ifdef HAS_BASELINE
+    PriorRenderer prior;
+    for (unsigned t=0;t<1600;t+=20) {
+        float a[24][3],b[24][3]; prior.RenderPrior(s,t,a); prior.RenderPrior(s,t+20,b);
+        priorAlignedPeakStep=std::max(priorAlignedPeakStep,framePeak(b)-framePeak(a));
+    }
+    check(convergeAlignedPeakStep<priorAlignedPeakStep/5,"continuous convergence substantially reduces prior relight peak jumps");
 #endif
 }
 static void testProtocol() {
@@ -406,9 +479,9 @@ int main(int argc,char** argv) {
     if (argc==2 && !std::strcmp(argv[1],"--dump-motion")) return dumpMotionSamples();
     void* mapped=VirtualAlloc(reinterpret_cast<void*>(SECTOR),SECTOR_BYTES,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
     check(mapped==reinterpret_cast<void*>(SECTOR),"fixed-address simulated Flash allocated");
-    testDefaultsAndRestrictions(); testStorage(); testStorageFailures(); testIsolationAndFrames(); testLegacyFrames(); testProtocol();
-    std::printf("{\"checks\":%u,\"erases\":%u,\"config_bytes\":%zu,\"flash_record_bytes\":%zu,\"hardware\":false}\n",
-        checks,erases,sizeof(RGB::Config),sizeof(RGB::FlashRecord));
+    testDefaultsAndRestrictions(); testStorage(); testStorageFailures(); testIsolationAndFrames(); testLegacyFrames(); testConvergeContinuous(); testProtocol();
+    std::printf("{\"checks\":%u,\"erases\":%u,\"config_bytes\":%zu,\"flash_record_bytes\":%zu,\"hardware\":false,\"converge_800ms_width3_peak_steps\":{\"aligned20ms\":%.9f,\"any_phase20ms\":%.9f,\"prior_aligned20ms\":%.9f}}\n",
+        checks,erases,sizeof(RGB::Config),sizeof(RGB::FlashRecord),convergeAlignedPeakStep,convergeAnyPhasePeakStep,priorAlignedPeakStep);
     VirtualFree(mapped,0,MEM_RELEASE); return 0;
 }
 '''
@@ -423,12 +496,17 @@ def compare_host_motion(executable, repo, out):
     )
     cases, scenes = [], {}
     times_by_period = {}
-    for period in (250, 1400, 30000):
+    for period in (250, 800, 1400, 30000):
         times = set(range(0, period, max(1, period // 48)))
         times.update((0, 1, period - 1, period, period + 1, 0xFFFFFFFF))
         for fraction in (.09, .5, .7):
             at = int(round(period * fraction))
             times.update((at - 1, at, at + 1))
+        # Exercise both spatial directions and the following repeated pair;
+        # sample the original phase positions without changing per-leg timing.
+        phases = tuple(time for time in times if time < period)
+        times.update(leg*period+phase for leg in (1, 2, 3) for phase in phases)
+        times.update(turn+delta for turn in (period,2*period,3*period) for delta in (-20,-1,0,1,20))
         times_by_period[period] = sorted(times)
     for slot in range(4):
         for kind in range(4):
@@ -501,7 +579,7 @@ def compare_host_motion(executable, repo, out):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--baseline", type=Path, help="Optional earlier rgb.cpp: assert all legacy 0..12 frames remain bit-identical")
+    parser.add_argument("--baseline", type=Path, help="Optional earlier rgb.cpp: assert unchanged modes 0..15 remain bit-identical")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     core = repo / "firmware_new/dummy-ref-core-fw"
@@ -555,7 +633,7 @@ def main():
         "mode13_circle": {"cosf_max": 16},
         "mode14_arc": {"cosf": 1, "floorf": 24, "smooth": 48},
         "mode15_wave": {"sinf": 24, "powf": 24, "integer_valley_phase": True},
-        "mode16_converge": {"expf": 48, "floorf": 48, "smooth_max": 26},
+        "mode16_converge": {"expf": 48, "floorf": 48, "smooth": 1, "fixed_width": True, "cycle_period_multiplier": 2},
         "expensive_candidates": [15, 16],
         "timing_limit": "PC parity and call counts do not establish STM32F405 worst-case time or a 20 ms deadline",
         "motor_20khz_path_changed": False, "task_stack_changed": False,
