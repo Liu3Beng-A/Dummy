@@ -907,7 +907,7 @@ class RobotSerialAssistantOld:
             return False
         now = time.monotonic()
         request = {"command": command, "connection": self._kin_connection, "phase": "preparing",
-                   "written": False, "prepare_until": now + 3.0, "timer": None}
+                   "written": False, "prepare_until": now + 3.0, "timer": None, "pending_safety": None}
         self._rgb_save_request = request
         self._rgb_save_last_io = now
         self.log("RGB保存准备中：暂停新查询，等待已排队编辑及回读完成。", "INFO")
@@ -948,14 +948,25 @@ class RobotSerialAssistantOld:
             self.log("RGB保存结果未确认（等待6秒超时），未自动重发；查询继续暂停。"
                      "请等待迟到回执，或断开重连后查询；STOP / DISABLE仍可使用。", "WARN")
 
-    def _finish_rgb_save(self, message, level="INFO"):
+    def _finish_rgb_save(self, message, level="INFO", flush_safety=False):
         request = self._rgb_save_request
         if request is None:
             return
         if request["timer"] is not None:
             self.root.after_cancel(request["timer"])
+        safety = request["pending_safety"]
         self._rgb_save_request = None
         self.log(message, level)
+        if flush_safety:
+            if safety is not None:
+                generation, command, connection = safety
+                if (self.is_connected and generation == self._tx_generation and connection == self._kin_connection):
+                    # The sole writer sees this safety command before any newly
+                    # admitted poll; no wire attempt is made while Flash is busy.
+                    self.send_cmd(command)
+                else:
+                    self.log("保存期间的旧世代安全请求已取消。", "WARN")
+            self.log("RGB保存事务结束，恢复查询。")
 
     def _handle_rgb_save_status(self, line):
         request = self._rgb_save_request
@@ -963,9 +974,9 @@ class RobotSerialAssistantOld:
                 request["connection"] != self._kin_connection):
             return
         if line == "ok RGB saved":
-            self._finish_rgb_save("RGB保存已确认完成，恢复查询。")
-        elif re.fullmatch(r"error RGB save_[a-z_]+", line):
-            self._finish_rgb_save(f"RGB保存未成功：{line}；恢复查询，不自动重发。", "WARN")
+            self._finish_rgb_save("RGB保存已确认完成。", flush_safety=True)
+        elif re.fullmatch(r"error RGB [A-Za-z_][A-Za-z_0-9]*", line):
+            self._finish_rgb_save(f"RGB保存未成功：{line}；不自动重发。", "WARN", flush_safety=True)
 
     @staticmethod
     def _rgb_set_fields(variables, values):
@@ -1806,8 +1817,11 @@ class RobotSerialAssistantOld:
                     if self._calibration_busy and not diagnostic and cmd not in ("!CALIBRATION", "!STOP", "!DISABLE"):
                         continue
                     request = self._rgb_save_request
+                    if request is not None and request["written"] and cmd in ("!STOP", "!DISABLE"):
+                        request["pending_safety"] = (generation, cmd, self._kin_connection)
+                        continue
                     if request is not None and request["phase"] != "preparing" and cmd not in ("!STOP", "!DISABLE"):
-                        if cmd != request["command"] or request["written"]:
+                        if request["phase"] == "uncertain" or cmd != request["command"] or request["written"]:
                             continue
                     port_obj = self.serial_port
                     if port_obj is None or not port_obj.is_open:
@@ -2815,6 +2829,11 @@ class RobotSerialAssistantOld:
                 self._cancel_defaults_restore("用户中断")
                 self._cancel_motion_for_stop()
                 request = self._rgb_save_request
+                if request is not None and request["written"]:
+                    request["pending_safety"] = (self._tx_generation, cmd, self._kin_connection)
+                    self.log(f"{cmd} 待发送：RGB保存结果尚未确认，收到保存结束回执后优先发送。", "WARN")
+                    self.lbl_motor_state.config(text=f"● RGB保存中，{cmd[1:]}待发送", fg="#ffd43b")
+                    return True
                 if request is not None and not request["written"]:
                     self._finish_rgb_save("用户中断：RGB保存未发送。", "WARN")
                 self._stop_locked = True
@@ -3114,7 +3133,9 @@ class RobotSerialAssistantOld:
             return False
         self._pending_sync = kind
         self._sync_data = None
-        self.send_cmd(cmd)
+        if not self.send_cmd(cmd):
+            self._pending_sync = self._sync_data = None
+            return False
         return True
 
     def _check_sync_response(self):
