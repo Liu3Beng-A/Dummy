@@ -687,6 +687,9 @@ void ProtectionCoordinator::Poll() {
         } else Health();
         break;
     case START_QUERY: case START_VERIFY: case CAL_QUERY:
+        // START alone may use each 5 ms poll's remaining frame budget. Keep
+        // calibration on its original slots; Send still enforces epoch/txUsed.
+        if (job != CAL_QUERY) allowTransmit = true;
         if (failed) { Error("NO_VALID_ENCODER"); break; }
         if ((received & expected) == expected) {
             // PROBE_REPLY carries version, flags and real feedback atomically.
@@ -717,12 +720,17 @@ void ProtectionCoordinator::Poll() {
             }
         }
         if (now - phaseAt > 2000) { Error("START_QUERY_TIMEOUT"); break; }
-        if (now - lastSend >= 20) {
+        if (now - lastSend >= (job == CAL_QUERY ? 20U : 5U)) {
             if (cursor > 8) cursor = 1;
             if (Context(cursor, QUERY, queryProbe)) { ++cursor; lastSend = now; }
         }
         break;
-    case PROFILE: PollProfile(); break;
+    case PROFILE:
+        // A matching ACK backdates lastSend, so the next stage can start now.
+        // PollProfile retains its 20 ms retry interval while waiting for ACKs.
+        if (startAfterProfile) allowTransmit = true;
+        PollProfile();
+        break;
     case PROTECT_STOP:
         for (uint8_t n = 1; n <= 7; ++n) if (stalled & (1U << n)) {
             if (nodes[n].eventPhase == HOLD_FAILED) { Error(ReasonName(nodes[n].eventReason), n); return; }
