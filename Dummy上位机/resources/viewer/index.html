@@ -17,7 +17,6 @@
   <div id="canvas"></div>
   <div class="viewer-info">
     <div class="topline" role="status" aria-live="polite">
-      <div class="badge" id="mode">目标预览</div>
       <div class="badge muted" id="telemetry">尚无位置回读</div>
     </div>
     <div class="legend">
@@ -31,11 +30,19 @@
     <span>左键旋转 · 右键平移 · 滚轮缩放</span>
     <span id="gripper-status">夹爪：目标开度</span>
   </div>
+  <div class="model-status" id="model-status">正在加载本地 URDF…</div>
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <script>
     window.robotBridge = null;
     window.pendingRobotState = null;
     window.pendingRgbFrame = null;
+    window.pendingTelemetryMetrics = null;
+    window.pendingViewerPresentation = 'active';
+    window.receiveViewerPresentation = mode => {
+      if (!['active', 'background', 'hidden'].includes(mode)) return;
+      window.pendingViewerPresentation = mode;
+      window.robotViewer?.setPresentation(mode);
+    };
     window.receiveRobotRgbPayload = payload => {
       const legacy = Array.isArray(payload);
       if (!legacy && (payload === null || typeof payload !== 'object'
@@ -69,7 +76,19 @@
           try { payload = JSON.parse(json); } catch { return; }
           window.receiveRobotRgbPayload(payload);
         });
-        if (window.robotViewer?.loaded) window.robotBridge.viewerReady();
+        window.robotBridge.telemetry_changed.connect(json => {
+          try { window.pendingTelemetryMetrics = JSON.parse(json); } catch { /* Retain last valid stats. */ }
+        });
+        window.robotBridge.presentation_changed.connect(window.receiveViewerPresentation);
+        window.robotBridge.model_status_changed.connect(text => {
+          const label = document.getElementById('model-status');
+          label.textContent = text;
+          label.title = text;
+        });
+        if (window.robotViewer?.loaded) {
+          window.robotBridge.viewerReady();
+          window.robotViewer.reportDiagnostics?.();
+        }
         if (window.robotViewerError) window.robotBridge.viewerError(window.robotViewerError);
       });
     }

@@ -1,13 +1,15 @@
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/three/OrbitControls.js';
 import URDFLoader from './vendor/urdf-loader/URDFLoader.js';
+import { FramePerformance } from './performance.js';
+import { RenderSchedule } from './render_schedule.js';
 import { jointTargetVisible, TargetVisibilityFade } from './target_visibility.js';
 import { advanceRgbDisplayFrame, createAngularUv, createDiffuserKernel, DIFFUSER_SAMPLES, DIFFUSER_STYLE,
   normalizeRgbFrame, patchDiffuserShader, sameRgbFrame, writeDiffuserTexture } from './model_rgb.js';
 
 const root = document.getElementById('canvas');
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xedf2f8);
+scene.background = new THREE.Color(0xe9edf3);
 const camera = new THREE.PerspectiveCamera(38, 1, 0.005, 15);
 camera.up.set(0, 0, 1);
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -32,7 +34,7 @@ scene.add(key);
 const rim = new THREE.DirectionalLight(0xcbdfff, 1.5);
 rim.position.set(-2, 1, 2);
 scene.add(rim);
-const grid = new THREE.GridHelper(2, 20, 0xb7c4d5, 0xd9e2ed);
+const grid = new THREE.GridHelper(2, 20, 0xc4ccd8, 0xdce1e9);
 grid.rotation.x = Math.PI / 2;
 grid.position.z = -0.003;
 scene.add(grid);
@@ -80,13 +82,80 @@ const rgbSpinCurve = { value: 0 };
 const rgbCoverReflection = { value: DIFFUSER_STYLE.coverReflection };
 let diffuserTexture = null;
 let diffuserPixels = null;
-let cameraName = 'isometric';
 // Display-only damping. Keep currentState.actual as the unmodified feedback.
 const ACTUAL_SMOOTHING_SECONDS = 0.05;
 const FEEDBACK_JOINTS = new Set(['Joint1', 'Joint2', 'Joint3', 'Joint4', 'Joint5', 'Joint6', 'rail']);
 let displayedActual = null;
 let feedbackContinuous = false;
 let previousFrameTime = null;
+const framePerformance = new FramePerformance();
+let latestPerformance = { fps: null, frame_ms_p95: null, rendered_frames: 0 };
+let lastPerformanceReport = 0;
+let previousStyleSignature = null;
+let pendingState = null;
+let pendingRgb = null;
+let queuedStateSignature = null;
+let queuedRgbSignature = null;
+let requestedPresentation = window.pendingViewerPresentation || 'active';
+let contextAvailable = true;
+let resumeSnapshot = true;
+let appliedStateCount = 0;
+const drawSchedule = new RenderSchedule(animate);
+const gl = renderer.getContext();
+const rendererInfo = gl.getExtension('WEBGL_debug_renderer_info');
+const graphics = { vendor: rendererInfo ? gl.getParameter(rendererInfo.UNMASKED_VENDOR_WEBGL) : '',
+  renderer: rendererInfo ? gl.getParameter(rendererInfo.UNMASKED_RENDERER_WEBGL) : '',
+  contextLost: 0, contextRestored: 0 };
+
+function requestDraw() {
+  // Waking after a static interval must not look like a rendering stall to RGB.
+  if (drawSchedule.diagnostics().idle) previousFrameTime = null;
+  drawSchedule.request();
+}
+
+function queueState(state) {
+  const signature = JSON.stringify(state);
+  if (signature === queuedStateSignature) return;
+  queuedStateSignature = signature;
+  pendingState = state;
+  requestDraw();
+}
+
+function queueRgbFrame(frame, lightOn = undefined, effectMode = null) {
+  const normalized = normalizeRgbFrame(frame);
+  if (disposed || !normalized || (lightOn !== undefined && typeof lightOn !== 'boolean')
+      || (effectMode !== null && (!Number.isInteger(effectMode) || effectMode < 0 || effectMode > 16))) return false;
+  const signature = JSON.stringify([normalized, lightOn, effectMode]);
+  if (signature === queuedRgbSignature) return true;
+  queuedRgbSignature = signature;
+  pendingRgb = { frame: normalized, lightOn, effectMode };
+  requestDraw();
+  return true;
+}
+
+function syncPresentation() {
+  const mode = document.hidden || !contextAvailable ? 'hidden' : requestedPresentation;
+  if (mode !== drawSchedule.mode) {
+    resumeSnapshot = true;
+    previousFrameTime = null;
+    framePerformance.reset();
+    latestPerformance = { fps: null, frame_ms_p95: null, rendered_frames: 0 };
+  }
+  drawSchedule.setMode(mode);
+}
+
+function setPresentation(mode) {
+  if (!['active', 'background', 'hidden'].includes(mode)) return;
+  requestedPresentation = mode;
+  syncPresentation();
+}
+
+function reportDiagnostics(event = 'ready') {
+  window.robotBridge?.viewerDiagnostic?.(JSON.stringify({ event, ...graphics,
+    mode: drawSchedule.mode, devicePixelRatio: window.devicePixelRatio || 1 }));
+}
+
+controls.addEventListener('change', requestDraw);
 
 function updateActualState(state) {
   if (!state.actualKnown) {
@@ -109,12 +178,12 @@ function updateActualState(state) {
 }
 
 function animateActual(dt) {
-  if (!actual || !currentState?.actualKnown || !displayedActual) return;
+  if (!actual || !currentState?.actualKnown || !displayedActual) return false;
   const values = currentState.actual || {};
   if (!feedbackContinuous || document.hidden || dt > 0.25) {
     displayedActual = { ...values };
     actual.setJointValues(values);
-    return;
+    return false;
   }
   const updates = {};
   for (const name of FEEDBACK_JOINTS) {
@@ -128,6 +197,7 @@ function animateActual(dt) {
     displayedActual[name] = next;
   }
   actual.setJointValues(updates);
+  return Object.keys(updates).length > 0;
 }
 
 function isLocalRgbPreview(state) {
@@ -139,7 +209,6 @@ function setCamera(name) {
     front: [1.5, 0, 0.3], side: [0, -1.5, 0.3], right: [0, 1.5, 0.3],
     top: [0.001, -0.001, 1.7], isometric: [1.02, -1.2, 0.9],
   };
-  cameraName = name;
   const jointPreview = jointTargetVisible(currentState);
   const reference = isLocalRgbPreview(currentState) ? actual
     : jointPreview ? target : currentState?.actualKnown ? actual : null;
@@ -294,13 +363,14 @@ function setRgbFrame(frame, lightOn = undefined, effectMode = null) {
 }
 
 function animateRgb(dt) {
-  if (!displayedRgbFrame) return;
+  if (!displayedRgbFrame) return false;
   // Only an actual rendering pause snaps. A long interval between deduplicated
   // input messages is normal during a breathing trough and never resets damping.
   const snap = document.hidden || dt > 0.25;
   const changed = advanceRgbDisplayFrame(displayedRgbFrame, rgbFrame,
     snap ? 0.26 : dt, DIFFUSER_STYLE.smoothingSeconds);
   if (changed) updateDiffuserTexture();
+  return changed;
 }
 
 function styleRobot(robot, ghost, highlight) {
@@ -324,7 +394,10 @@ function styleRobot(robot, ghost, highlight) {
       if (base?.color) material.color.copy(base.color);
       if (base?.emissive) material.emissive.copy(base.emissive);
       if (ghost) {
-        material.userData.targetBaseOpacity = selected ? 0.22 : 0.12;
+        // Pale targets need more body against the light canvas. Keep the dark
+        // appearance and the existing visibility fade independent of this alpha.
+        material.userData.targetBaseOpacity = currentState?.theme === 'dark'
+          ? (selected ? 0.22 : 0.12) : (selected ? 0.46 : 0.32);
         ghostMaterials.add(material);
       }
       material.opacity = ghost ? material.userData.targetBaseOpacity * targetFade.value : 1;
@@ -355,6 +428,7 @@ function updateGripperLabel(state, jointPreview) {
 
 function animateTarget(nowMs) {
   const opacity = targetFade.sample(nowMs);
+  const changed = opacity !== appliedTargetOpacity;
   if (target) target.visible = opacity > 0;
   if (opacity !== appliedTargetOpacity) {
     ghostMaterials.forEach(material => {
@@ -371,23 +445,24 @@ function animateTarget(nowMs) {
     document.querySelector('.legend').hidden = !currentState.actualKnown && opacity <= 0
       && !marker.visible && !localRgbPreview;
   }
+  return changed || targetFade.value !== targetFade.to;
 }
 
 function setState(state) {
+  appliedStateCount++;
   currentState = state;
   targetFade.setState(state, performance.now());
   const dark = state.theme === 'dark';
   document.body.classList.toggle('dark', dark);
-  scene.background.setHex(dark ? 0x141e2c : 0xedf2f8);
+  scene.background.setHex(dark ? 0x1d232d : 0xe9edf3);
+  grid.material.transparent = true;
+  grid.material.opacity = dark ? 0.16 : 0.55;
+  grid.material.color.setHex(dark ? 0x435064 : 0xd5dce6);
   const actualOnly = state.actualOnly === true;
   const feedbackPaused = state.feedbackPaused === true;
   const localRgbPreview = isLocalRgbPreview(state);
   const preview = !actualOnly && state.mode === 'preview';
   const markerVisible = !actualOnly && Boolean(state.marker);
-  document.getElementById('mode').textContent = localRgbPreview ? '灯效预览 · 本地示意'
-    : actualOnly ? feedbackPaused
-    ? '最近实际姿态 · 回读已暂停' : '实际关节 · 串口回读'
-    : preview ? '目标预览 · 不发送运动' : '实际位置 · 串口回读';
   const telemetry = document.getElementById('telemetry');
   telemetry.textContent = !state.actualKnown ? '尚无位置回读'
     : feedbackPaused ? '保留最近姿态 · 非实时'
@@ -407,8 +482,12 @@ function setState(state) {
     if (localRgbPreview) actual.setJointValues(state.target || {});
     target.visible = targetFade.value > 0;
     actual.visible = Boolean(state.actualKnown) || localRgbPreview;
-    styleRobot(target, true, state.highlight);
-    styleRobot(actual, false, actualOnly || preview || localRgbPreview ? null : state.highlight);
+    const styleSignature = JSON.stringify([dark, state.highlight, actualOnly, preview, localRgbPreview]);
+    if (styleSignature !== previousStyleSignature) {
+      styleRobot(target, true, state.highlight);
+      styleRobot(actual, false, actualOnly || preview || localRgbPreview ? null : state.highlight);
+      previousStyleSignature = styleSignature;
+    }
   }
   marker.visible = markerVisible;
   if (markerVisible) {
@@ -430,7 +509,7 @@ function setState(state) {
 }
 
 window.robotViewer = {
-  loaded: false, setState, setCamera, setRgbFrame,
+  loaded: false, setState: queueState, setCamera, setRgbFrame: queueRgbFrame, setPresentation, reportDiagnostics,
   diagnostics: () => ({
     loaded: Boolean(actual && target), state: currentState,
     joints: actual ? Object.keys(actual.joints) : [],
@@ -439,11 +518,15 @@ window.robotViewer = {
     gridVisible: grid.visible, axesVisible: axes.visible,
     targetVisible: Boolean(target?.visible), actualVisible: Boolean(actual?.visible),
     targetOpacity: targetFade.value,
+    camera: { position: camera.position.toArray(), quaternion: camera.quaternion.toArray(),
+      target: controls.target.toArray(), aspect: camera.aspect },
     rgbPreviewVisible: Boolean(actual?.visible && isLocalRgbPreview(currentState)),
     markerVisible: marker.visible,
     actualJointValues: actual ? Object.fromEntries(Object.entries(actual.joints)
       .map(([name, joint]) => [name, joint.jointValue])) : {},
     rgb: diffuserDiagnostics(),
+    performance: { ...latestPerformance, telemetry: window.pendingTelemetryMetrics },
+    rendering: { ...drawSchedule.diagnostics(), appliedStateCount, graphics: { ...graphics } },
   }),
 };
 
@@ -536,6 +619,8 @@ manager.onLoad = () => {
     else setRgbFrame(pending.colors, pending.light_on, pending.effect_mode ?? null);
   }
   window.robotBridge?.viewerReady();
+  reportDiagnostics();
+  drawSchedule.request();
 };
 const loader = new URDFLoader(manager);
 loader.packages = { DummyRobot_URDF: new URL('../models/DummyRobot_URDF', location.href).href };
@@ -547,7 +632,21 @@ loader.load(new URL('../models/DummyRobot_URDF/urdf/DummyRobot_URDF.urdf', locat
 
 renderer.domElement.addEventListener('webglcontextlost', event => {
   event.preventDefault();
-  window.reportRobotError('显卡上下文丢失，请重新启动三维视图。');
+  graphics.contextLost++;
+  reportDiagnostics('context-lost');
+  contextAvailable = false;
+  syncPresentation();
+  window.reportRobotError('显卡上下文暂时丢失，正在等待恢复。');
+});
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  graphics.contextRestored++;
+  reportDiagnostics('context-restored');
+  contextAvailable = true;
+  document.getElementById('error').hidden = true;
+  window.robotViewerError = null;
+  window.robotBridge?.viewerRecovered?.();
+  syncPresentation();
+  drawSchedule.request();
 });
 const resize = new ResizeObserver(() => {
   const width = root.clientWidth;
@@ -556,24 +655,61 @@ const resize = new ResizeObserver(() => {
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
   renderer.setSize(width, height);
-  if (window.robotViewer?.loaded) setCamera(cameraName);
+  drawSchedule.request();
+  // Layout and DPI changes must preserve the user's orbit, pan and zoom.
+  // Initial framing and explicit reset requests are handled by cameraSeq.
 });
 resize.observe(root);
 function animate(time = performance.now()) {
-  if (disposed) return;
-  requestAnimationFrame(animate);
-  const dt = previousFrameTime == null ? 0 : Math.max(0, (time - previousFrameTime) / 1000);
+  if (disposed || !contextAvailable) return false;
+  if (resumeSnapshot) {
+    displayedActual = null;
+    feedbackContinuous = false;
+  }
+  if (pendingState) {
+    const state = pendingState;
+    pendingState = null;
+    setState(state);
+  } else if (resumeSnapshot && currentState) {
+    updateActualState(currentState);
+  }
+  if (pendingRgb) {
+    const { frame, lightOn, effectMode } = pendingRgb;
+    pendingRgb = null;
+    setRgbFrame(frame, lightOn, effectMode);
+  }
+  if (resumeSnapshot && displayedRgbFrame) {
+    displayedRgbFrame = rgbFrame.map(color => color.slice());
+    updateDiffuserTexture();
+  }
+  resumeSnapshot = false;
+  const dt = previousFrameTime == null ? 1 / 60 : Math.max(0, (time - previousFrameTime) / 1000);
   previousFrameTime = time;
-  animateActual(dt);
-  animateRgb(dt);
-  animateTarget(performance.now());
-  controls.update();
+  const actualChanged = animateActual(dt);
+  const rgbChanged = animateRgb(dt);
+  const targetChanged = animateTarget(performance.now());
+  const cameraChanged = controls.update();
   // An obscured/tabbed view can skip expensive GL drawing while preserving state.
-  if (!document.hidden) renderer.render(scene, camera);
+  if (!document.hidden) {
+    renderer.render(scene, camera);
+    const completed = performance.now();
+    framePerformance.record(completed);
+    if (completed - lastPerformanceReport >= 500) {
+      latestPerformance = framePerformance.snapshot(completed);
+      lastPerformanceReport = completed;
+      window.robotBridge?.viewerPerformance?.(JSON.stringify(latestPerformance));
+    }
+  }
+  return actualChanged || rgbChanged || targetChanged || cameraChanged;
 }
-animate();
+syncPresentation();
+drawSchedule.request();
+document.addEventListener('visibilitychange', () => {
+  syncPresentation();
+});
 window.addEventListener('pagehide', () => {
   disposed = true;
+  drawSchedule.dispose();
   resize.disconnect();
   controls.dispose();
   const geometries = new Set();

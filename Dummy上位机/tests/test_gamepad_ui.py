@@ -677,7 +677,12 @@ class GamepadUiTests(unittest.TestCase):
         self.claim()
         self.window.close()
         self.window._gamepad_close_timer.start(1)
-        QTest.qWait(80)
+        # Wait for the observable result: theme/layout work can keep the event
+        # loop busy longer than a fixed 80 ms in a complete offscreen suite.
+        for _ in range(40):
+            QTest.qWait(25)
+            if self.window._closed:
+                break
         APPLICATION.processEvents()
         self.assertTrue(self.window._closed)
         self.assertTrue(any("STOP 尚未确认" in text for _tag, text in self.window._logs))
@@ -699,8 +704,13 @@ class GamepadUiTests(unittest.TestCase):
                     point = widget.mapTo(controls, QPoint(0, 0))
                     return point.y(), point.y() + widget.height()
                 self.assertLessEqual(bounds(active)[1], bounds(grip)[0])
-                self.assertLessEqual(bounds(grip)[1], bounds(quick)[0])
-                self.assertLessEqual(bounds(quick)[1], controls.height())
+                self.assertLessEqual(bounds(grip)[1], controls.height())
+                # Quick points now belong to the scene column, independently
+                # of the gamepad/axis scroll and the fixed gripper controls.
+                scene = self.window.motion_layout.scene_column
+                self.assertTrue(scene.isAncestorOf(quick))
+                point = quick.mapTo(scene, QPoint(0, 0))
+                self.assertLessEqual(point.y() + quick.height(), scene.height())
                 if mode:
                     self.assertGreaterEqual(self.window.gamepad_panel.scroll.viewport().height(), 140)
                     self.assertTrue(all(control.isHidden() for control in self.window.quick_point_buttons))

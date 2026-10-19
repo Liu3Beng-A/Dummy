@@ -72,16 +72,21 @@ class OperationLayoutTests(unittest.TestCase):
             APPLICATION.processEvents()
 
     def central_rect(self, widget):
-        return QRect(widget.mapTo(self.w.centralWidget(), QPoint(0, 0)), widget.size())
+        origin = self.w.centralWidget().mapFromGlobal(widget.mapToGlobal(QPoint()))
+        return QRect(origin, widget.size())
 
     def assert_anchor(self):
         header, slot = self.w._page_header_slots[self.w.pages.currentWidget()]
         panel = self.w.operation_panel
         self.assertIs(panel.parentWidget(), self.w.centralWidget())
         self.assertTrue(panel.isVisible())
-        self.assertEqual(panel.height(), 80)
-        self.assertGreaterEqual(panel.width(), 395)
-        self.assertLessEqual(panel.width(), 545)
+        motion = self.w.pages.currentWidget() is self.w.motion_page
+        self.assertEqual(panel.height(), 48 if motion else 80)
+        self.assertGreaterEqual(panel.width(), 120 if motion else 395)
+        if motion:
+            self.assertEqual(header.height(), 48)
+        if not motion:
+            self.assertLessEqual(panel.width(), 545)
         self.assertEqual(panel.geometry(), self.central_rect(slot))
         self.assertTrue(self.central_rect(header).contains(panel.geometry()))
         self.assertEqual(panel.geometry().right(), self.central_rect(header).right())
@@ -94,13 +99,13 @@ class OperationLayoutTests(unittest.TestCase):
         expected_y = self.central_rect(top).bottom() + 1
         self.assertEqual(self.central_rect(self.w.pages).top(), expected_y)
         self.assertEqual(self.central_rect(sidebar).top(), expected_y)
-        # The only outer layout widgets are serial toolbar, then body layout.
-        self.assertEqual(self.w.centralWidget().layout().count(), 2)
+        # The unified header belongs to the menu widget; central keeps body only.
+        self.assertEqual(self.w.centralWidget().layout().count(), 1)
 
     def assert_header_controls_fit(self):
         header, slot = self.assert_anchor()
-        all_controls = [self.w._motion_header_title, *self.w.motion_system_buttons,
-                        self.w.mode_combo, self.w.mode_set_button, self.w.mode_query_button]
+        all_controls = [self.w._motion_header_title, self.w.motion_enable_button, self.w.motion_disable_button,
+                        *self.w.motion_system_buttons[2:4], self.w.motion_calibration_button]
         rectangles = [self.central_rect(control) for control in all_controls]
         for control, rect in zip(all_controls, rectangles):
             self.assertTrue(control.isVisible(), control.objectName())
@@ -198,6 +203,59 @@ class OperationLayoutTests(unittest.TestCase):
         self.assertEqual(self.w.navigation.currentRow(), 0)
         self.assert_anchor()
         self.assertEqual(len(self.w.findChildren(type(self.w.operation_panel))), 1)
+        self.assertTrue(self.c._tx_queue.empty())
+
+    def test_motion_status_is_shown_once_in_topbar_and_header_only_keeps_conditions(self):
+        panel = self.w.operation_panel
+        title = panel.title_label
+        for theme in ("dark", "light"):
+            self.w.apply_theme(theme)
+            for size in ((1120, 690), (1440, 900)):
+                self.w.resize(*size)
+                for index in (0, 2, 1, 3, 5, 0):
+                    with self.subTest(theme=theme, size=size, page=index):
+                        self.w.navigation.setCurrentRow(index)
+                        self.settle()
+                        self.assert_anchor()
+                        self.assertIs(panel.title_label, title)
+                        self.assertTrue(title.isVisible())
+                        motion = index == 0
+                        self.assertEqual(title.parentWidget() is self.w.caption_controls, motion)
+                        self.assertEqual(self.w.motor_status.isVisible(), not motion)
+                        self.assertEqual(panel.heading_widget.layout().indexOf(title) < 0, motion)
+                        self.assertEqual(panel.body_widget.isVisible(), not motion)
+                        self.assertEqual(panel.heading_widget.isVisible(), not motion)
+                        self.assertTrue(panel.details_button.isVisible())
+                        self.assertEqual(panel.details_button.iconSize().width(), 8)
+                        if motion:
+                            panel.set_status({
+                                "phase": "observed_reached", "title": "MoveJ #9 · 回读位置已到目标",
+                                "tone": "success", "reason": "回读已进入目标位置容差。",
+                                "next_step": "可以继续编辑或发送下一目标。",
+                            }, {})
+                            self.settle()
+                            self.assertEqual(title.text(), "MoveJ #9 · 回读位置已到目标")
+                            self.assertEqual(title.displayedText(), title.fullText())
+                            for label in (panel.reason_label, panel.next_step_label):
+                                self.assertFalse(label.isVisible())
+                            self.assertFalse(panel.elapsed_label.isVisible())
+        self.assertTrue(self.c._tx_queue.empty())
+
+    def test_header_only_keeps_conditions_after_theme_change_during_page_switch(self):
+        for theme in ("dark", "light", "dark"):
+            with self.subTest(theme=theme):
+                self.w.navigation.setCurrentRow(5)
+                self.settle()
+                # Apply the theme before the queued motion header fit executes.
+                self.w.navigation.setCurrentRow(0)
+                self.w.apply_theme(theme)
+                self.settle()
+                panel = self.w.operation_panel
+                self.assertIs(panel.title_label.parentWidget(), self.w.caption_controls)
+                self.assertFalse(self.w.motor_status.isVisible())
+                self.assertFalse(panel.body_widget.isVisible())
+                self.assertFalse(panel.heading_widget.isVisible())
+                self.assertTrue(panel.details_button.isVisible())
         self.assertTrue(self.c._tx_queue.empty())
 
     def test_details_overlay_stays_inside_workspace_and_stop_still_works_in_one_click(self):

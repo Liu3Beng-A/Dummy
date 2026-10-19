@@ -1,11 +1,11 @@
-:root { --bg:#edf2f8; --panel:rgba(255,255,255,.94); --fg:#273750; --muted:#596b85;
+:root { --bg:#e9edf3; --page-bg:#f2f4f8; --panel:rgba(255,255,255,.94); --fg:#273750; --muted:#596b85;
         --line:#d9e1ed; --blue:#2563eb; --button:#fff; --shadow:0 4px 16px #12243d0b; }
-body.dark { --bg:#141e2c; --panel:rgba(25,38,55,.95); --fg:#e6edf9; --muted:#a0b1c9;
+body.dark { --bg:#1d232d; --panel:rgba(25,38,55,.95); --fg:#e6edf9; --muted:#a0b1c9;
             --line:#34445d; --blue:#70a6ff; --button:#233249; --shadow:0 4px 16px #0003; }
 * { box-sizing:border-box; }
-html,body { width:100%;height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--fg);
+html,body { width:100%;height:100%;margin:0;overflow:hidden;background:var(--page-bg);color:var(--fg);
             font:14px/1.45 'Microsoft YaHei UI','Microsoft YaHei',sans-serif;user-select:none; }
-#canvas { position:absolute;inset:0; }
+#canvas { position:absolute;inset:0;border-radius:0 0 12px 12px;overflow:hidden; }
 #canvas canvas { display:block; width:100%;height:100%;outline:none; }
 .viewer-info { position:absolute;top:16px;right:16px;max-width:calc(100% - 32px);
                display:flex;flex-direction:column;align-items:flex-end;gap:12px;pointer-events:none; }
@@ -32,3 +32,21 @@ i.orange { background:#f59e0b; }
                         .badge { font-size:12px;padding:6px 8px; }
                         .legend { padding:8px;font-size:12px; }
                         .footer span:last-child { display:none; } }
+
+/* Workstation HUD: compact overlays keep the real model visible. */
+.viewer-info { left:12px;right:12px;top:12px;align-items:stretch;gap:10px; }
+.topline { flex-direction:row;justify-content:flex-end;align-items:flex-start;gap:8px; }
+.badge { font-size:12px;min-height:28px;padding:4px 8px;border-radius:5px;box-shadow:none; }
+.legend { align-self:flex-start;flex-direction:row;flex-wrap:wrap;gap:12px;padding:6px 8px;font-size:12px;border-radius:5px; }
+.footer { left:12px;right:12px;bottom:8px;font-size:12px;line-height:20px; }
+
+/* Keep the legend near the model's lower edge, as in the workstation design. */
+body.dark { --page-bg:#111419; --panel:rgba(25,28,35,.94); --fg:#e5e9ef; --muted:#9ca5b4;
+            --line:#30343e; --blue:#8099ff; }
+.viewer-info { bottom:28px; }
+.badge { color:var(--fg); font-weight:400; }
+.legend { position:absolute;left:0;bottom:0;background:transparent;border:none;padding:0;line-height:20px; }
+.footer > span:last-child { transform:translateY(-20px); }
+.model-status { position:absolute;left:12px;right:12px;bottom:8px;line-height:20px;
+                font-size:12px;color:var(--muted);text-align:right;white-space:nowrap;
+                overflow:hidden;text-overflow:ellipsis;pointer-events:none; }

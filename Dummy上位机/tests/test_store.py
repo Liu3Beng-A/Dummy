@@ -28,21 +28,24 @@ class StoreTests(unittest.TestCase):
         original = dict(self.store.settings)
         for old_backend in ("host", "stream", "unknown", None):
             with self.subTest(backend=old_backend):
-                data = dict(original, cartesian_backend=old_backend)
+                data = dict(original, cartesian_backend=old_backend, connection_type="UART4")
                 path = Path(self.directory.name) / "settings.json"
                 path.write_text(json.dumps(data), encoding="utf-8")
                 raw = path.read_bytes()
                 migrated = AppStore(self.directory.name)
                 try:
                     self.assertEqual(migrated.settings["cartesian_backend"], "firmware")
+                    self.assertEqual(migrated.settings["connection_type"], "USB")
                     self.assertEqual(migrated.points, self.store.points)
                     self.assertEqual((Path(self.directory.name) / "points.json").read_bytes(), before)
                     self.assertEqual(path.read_bytes(), raw)  # Loading is local and does not write.
                     for key in ("theme", "geometry", "window_state", "hide_rgb_logs", "show_grid", "gamepad_config"):
                         self.assertEqual(migrated.settings[key], original[key])
-                    migrated.update_settings(cartesian_backend="stream")
+                    migrated.update_settings(cartesian_backend="stream", connection_type="UART4")
                     self.assertEqual(migrated.settings["cartesian_backend"], "firmware")
+                    self.assertEqual(migrated.settings["connection_type"], "USB")
                     self.assertEqual(json.loads(path.read_text())["cartesian_backend"], "firmware")
+                    self.assertEqual(json.loads(path.read_text())["connection_type"], "USB")
                 finally:
                     migrated.close()
 

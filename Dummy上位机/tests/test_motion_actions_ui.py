@@ -339,7 +339,7 @@ class MotionActionUiTests(unittest.TestCase):
                 w.viewer_mode.setCurrentIndex(1)
                 self.assertIsNotNone(w.viewer.cartesian)
                 system_button = next(button for button in w.findChildren(QPushButton)
-                                     if button.text() == ("回零 HOME" if command == "HOME" else "休息 REST"))
+                                     if button.text() == ("回零" if command == "HOME" else "休息"))
                 QTest.mouseClick(system_button, Qt.MouseButton.LeftButton)
                 self.assertEqual(self.commands(), [f"!{command}"])
                 self.assertEqual([spin.value() for spin in w.joint_spins], target)
@@ -347,7 +347,11 @@ class MotionActionUiTests(unittest.TestCase):
                 self.assertEqual(w.viewer.target[0], target)
                 self.assertEqual(w.viewer_mode.currentIndex(), 0)
                 self.assertIsNone(w.viewer.cartesian)
-                self.assertIn("等待设备执行", w.statusBar().currentMessage())
+                # The shared status panel reports the admitted request. The
+                # legacy status bar can be overwritten by motor-state publish.
+                operation = c.state()["operation"]
+                self.assertEqual(operation["motion_kind"], command)
+                self.assertEqual(operation["phase"], "queued")
                 self.assertEqual(w.viewer.actual, viewer_actual_before)
                 self.assertEqual([row.readback.text() for row in w.joint_rows], readbacks_before)
                 c._process_rx_line(f"queued {command} id={receipt_id} mode=TRJ")

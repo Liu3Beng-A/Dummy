@@ -36,9 +36,9 @@ class ChineseColorDialog(QColorDialog):
             "muted": "#687f95", "selection": "#286caa", "edge": "#d4dfe9",
         },
         "dark": {
-            "window": "#142031", "text": "#e0ebf7", "input": "#0f1b2c",
-            "border": "#536d88", "button": "#263a51", "hover": "#304d69",
-            "muted": "#98aec5", "selection": "#297ab6", "edge": "#3b536a",
+            "window": "#111419", "text": "#e5e9ef", "input": "#15181f",
+            "border": "#4b5260", "button": "#22262e", "hover": "#2b303a",
+            "muted": "#9ca5b4", "selection": "#297ab6", "edge": "#30343e",
         },
     }
 

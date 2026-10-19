@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 from numbers import Integral
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QObject, QTimer, QUrl, Qt, Signal, Slot
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from .asset_server import AssetServer
 from .mapping import REST_POSE, cartesian_marker, firmware_to_urdf, normalize_pose, target_pose_matches
@@ -17,6 +19,9 @@ from .mapping import REST_POSE, cartesian_marker, firmware_to_urdf, normalize_po
 class _Bridge(QObject):
     state_changed = Signal(str)
     rgb_changed = Signal(str)
+    telemetry_changed = Signal(str)
+    presentation_changed = Signal(str)
+    model_status_changed = Signal(str)
     def __init__(self, view):
         super().__init__(view)
         self.view = view
@@ -33,10 +38,44 @@ class _Bridge(QObject):
     def viewerStatus(self, message):
         self.view.status_changed.emit(message)
 
+    @Slot(str)
+    def viewerDiagnostic(self, payload):
+        try:
+            event = json.loads(payload)
+        except (TypeError, ValueError):
+            return
+        if isinstance(event, dict) and not self.view._closed:
+            self.view.diagnostic_event.emit(event)
+
+    @Slot()
+    def viewerRecovered(self):
+        if self.view._closed:
+            return
+        self.view._message.hide()
+        self.view.status_changed.emit("三维显卡上下文已恢复")
+        self.view._sync_presentation(force=True)
+
+    @Slot(str)
+    def viewerPerformance(self, payload):
+        try:
+            data = json.loads(payload)
+            if not isinstance(data, dict):
+                return
+            for key in ("fps", "frame_ms_p95"):
+                value = data.get(key)
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                          or not math.isfinite(value) or value < 0):
+                    return
+        except (ValueError, TypeError):
+            return
+        self.view._render_performance = data
+        self.view._render_performance_at = time.perf_counter()
+
 
 class RobotView(QWidget):
     ready = Signal()
     status_changed = Signal(str)
+    diagnostic_event = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -46,6 +85,15 @@ class RobotView(QWidget):
         self._server = None
         self.web_view = None
         self._bridge = _Bridge(self)
+        self._telemetry_metrics = {"connected": False}
+        self._render_performance = {}
+        self._render_performance_at = None
+        self._presentation_mode = "active"
+        self._presentation_window = None
+        self._presentation_pending = False
+        self._scene_message = "正在加载本地 URDF…"
+        self.status_changed.connect(self._set_scene_message)
+        QApplication.instance().applicationStateChanged.connect(self._schedule_presentation)
         self._target_pose = list(REST_POSE)
         self._actual_pose = list(REST_POSE)
         self._target_gripper = 100.0
@@ -135,6 +183,8 @@ class RobotView(QWidget):
         self._message.hide()
         self._sync()
         self._emit_rgb_frame()
+        self._emit_telemetry_metrics()
+        self._sync_presentation(force=True)
         self.ready.emit()
         self.status_changed.emit("本地 URDF 与 12 个网格加载完成")
 
@@ -170,7 +220,7 @@ class RobotView(QWidget):
         self._state["actual"] = firmware_to_urdf(self._actual_pose, gripper)
         self._state["marker"] = (cartesian_marker(self._cartesian, self._target_pose[6] if self._cartesian_frame == "base" else 0.)
                                  if self._cartesian is not None and not actual_only else None)
-        if self._ready:
+        if self._ready and self._presentation_mode != "hidden":
             self._bridge.state_changed.emit(json.dumps(self._state, ensure_ascii=False, allow_nan=False))
 
     def set_target_pose(self, joints, gripper_pct=100.0):
@@ -210,7 +260,7 @@ class RobotView(QWidget):
             self._emit_rgb_frame()
 
     def _emit_rgb_frame(self):
-        if self._ready and not self._closed:
+        if self._ready and not self._closed and self._presentation_mode != "hidden":
             payload = self._rgb_frame
             if self._rgb_light_on is not None or self._rgb_effect_mode is not None:
                 payload = {"colors": self._rgb_frame}
@@ -219,6 +269,68 @@ class RobotView(QWidget):
                 if self._rgb_effect_mode is not None:
                     payload["effect_mode"] = self._rgb_effect_mode
             self._bridge.rgb_changed.emit(json.dumps(payload, allow_nan=False))
+
+    def set_performance_metrics(self, metrics):
+        """Independent low-rate HUD updates must not replay joint/material state."""
+        if not self._closed:
+            self._telemetry_metrics = dict(metrics)
+            self._emit_telemetry_metrics()
+
+    def _emit_telemetry_metrics(self):
+        if self._ready and not self._closed and self._presentation_mode != "hidden":
+            self._bridge.telemetry_changed.emit(json.dumps(self._telemetry_metrics, allow_nan=False))
+
+    def _set_scene_message(self, message):
+        self._scene_message = str(message)
+        if self._ready and not self._closed and self._presentation_mode != "hidden":
+            self._bridge.model_status_changed.emit(self._scene_message)
+
+    def _schedule_presentation(self, *_args):
+        if self._closed or self._presentation_pending:
+            return
+        self._presentation_pending = True
+        QTimer.singleShot(0, self, self._sync_presentation)
+
+    def _sync_presentation(self, *, force=False):
+        self._presentation_pending = False
+        if self._closed or self.web_view is None:
+            return
+        window = self.window()
+        if window is not self._presentation_window:
+            if self._presentation_window is not None:
+                self._presentation_window.removeEventFilter(self)
+            self._presentation_window = window
+            window.installEventFilter(self)
+        mode = ("hidden" if not self.isVisible() or window.isMinimized()
+                else "active" if QApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+                else "background")
+        if mode == self._presentation_mode and not force:
+            return
+        self._presentation_mode = mode
+        if self._ready:
+            # Seed the current snapshot before waking the browser. Hidden views
+            # retain data locally instead of queuing obsolete WebChannel frames.
+            if mode != "hidden":
+                self._sync()
+                self._emit_rgb_frame()
+                self._emit_telemetry_metrics()
+                self._bridge.model_status_changed.emit(self._scene_message)
+            self._bridge.presentation_changed.emit(mode)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_presentation()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._schedule_presentation()
+
+    def eventFilter(self, watched, event):
+        if watched is self._presentation_window and event.type() in (
+                QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.WindowStateChange,
+                QEvent.Type.WindowActivate, QEvent.Type.WindowDeactivate):
+            self._schedule_presentation()
+        return False
 
     def set_rgb_preview(self, enabled):
         """Allow an explicitly labelled local lamp model when no pose is known."""

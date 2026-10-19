@@ -4,9 +4,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QFrame
+from PySide6.QtTest import QTest
 
 from app.core.controller import RobotController
 from app.storage.store import AppStore
@@ -17,7 +18,7 @@ from tests.test_ui import APPLICATION, FakeView
 
 
 class TopBarLayoutTests(unittest.TestCase):
-    WIDTHS = (1120, 1440, 2502)
+    WIDTHS = (1120, 1279, 1280, 1439, 1440, 2502)
     THEMES = ("light", "dark")
 
     def setUp(self):
@@ -49,9 +50,14 @@ class TopBarLayoutTests(unittest.TestCase):
         self.scheduler.run_ready()
         self.window.show()
         self.topbar = self.window.findChild(QFrame, "TopBar")
-        self.controls = [item.widget() for index in range(self.topbar.layout().count())
-                         if (item := self.topbar.layout().itemAt(index)).widget() is not None]
         self.settle()
+        self.controls = [item.widget() for index in range(self.topbar.layout().count())
+                         if (item := self.topbar.layout().itemAt(index)).widget() is not None
+                         and item.widget().isVisible() and item.widget() is not self.window.caption_controls]
+        caption = self.window.caption_controls.layout()
+        self.controls += [item.widget() for index in range(caption.count())
+                          if (item := caption.itemAt(index)).widget() is not None
+                          and item.widget().isVisible()]
 
     def tearDown(self):
         self.window.close()
@@ -71,9 +77,8 @@ class TopBarLayoutTests(unittest.TestCase):
         for _ in range(6):
             APPLICATION.processEvents()
 
-    @staticmethod
-    def rect(widget):
-        return widget.geometry().getRect()
+    def rect(self, widget):
+        return QRect(widget.mapTo(self.window, QPoint()), widget.size()).getRect()
 
     def geometry(self):
         return {
@@ -88,12 +93,25 @@ class TopBarLayoutTests(unittest.TestCase):
 
     def assert_controls_fit_without_overlap(self):
         for index, control in enumerate(self.controls):
-            self.assertTrue(self.topbar.rect().contains(control.geometry()),
-                            (control.objectName(), control.geometry(), self.topbar.rect()))
+            rect = QRect(*self.rect(control))
+            self.assertTrue(self.window.rect().contains(rect),
+                            (control.objectName(), rect, self.window.rect()))
             for other in self.controls[index + 1:]:
-                self.assertFalse(control.geometry().intersects(other.geometry()),
+                self.assertFalse(rect.intersects(QRect(*self.rect(other))),
                                  (control.objectName(), control.geometry(),
                                   other.objectName(), other.geometry()))
+        w = self.window
+        self.assertEqual(w.sidebar.width(), 80)
+        self.assertEqual(w.title_bar.height(), 65)
+        self.assertLess(QRect(*self.rect(w.stop_button)).right(),
+                        QRect(*self.rect(w.title_bar.minimize_button)).left())
+        for control in (w.serial_caption, w.port_combo, w.port_refresh_button,
+                        w.connect_button, w.connection_status):
+            self.assertTrue(QRect(*self.rect(w.connection_controls)).contains(QRect(*self.rect(control))),
+                            (control.objectName(), self.rect(control), self.rect(w.connection_controls)))
+            self.assertEqual(self.rect(control)[1], self.rect(w.port_combo)[1])
+        self.assertEqual(w.connection_controls.height(), 34)
+        self.assertEqual(w.pages.contentsMargins().top(), 0)
 
     @staticmethod
     def state(connected=True, mode=2, motor=None, *, locked=False, calibrating=False,
@@ -121,7 +139,7 @@ class TopBarLayoutTests(unittest.TestCase):
             yield self.state(mode=7, motor=True, kind=kind, phase=phase)
 
     def test_all_topbar_slots_and_workspace_remain_fixed_for_every_status_length(self):
-        self.assertGreaterEqual(len(self.controls), 10)
+        self.assertEqual(len(self.controls), 5)  # brand, inline connection, state, source, STOP
         for theme in self.THEMES:
             self.window.apply_theme(theme)
             for width in self.WIDTHS:
@@ -143,6 +161,50 @@ class TopBarLayoutTests(unittest.TestCase):
                     self.assertFalse(self.controller.is_connected)
                     self.assertTrue(self.controller._tx_queue.empty())
 
+    def test_caption_controls_remain_clickable_and_status_bar_stays_hidden(self):
+        w, bar = self.window, self.window.title_bar
+        self.assertFalse(bar.title.isVisible())
+        self.assertEqual(bar.height(), 65)
+        self.assertIs(bar.toolbar, w.topbar)
+        self.assertIs(bar.status_widget, w.caption_controls)
+        w.statusBar().showMessage('被保留的内部状态')
+        self.settle()
+        self.assertFalse(w.statusBar().isVisible())
+        for width in (1120, 1440):
+            w.resize(width, 690)
+            self.settle()
+            self.assertEqual(w.sidebar.width(), 80)
+            self.assertEqual(w.shell_brand.mark.width(), 63)
+            ring = QRect(*self.rect(w.shell_brand.mark))
+            self.assertAlmostEqual(ring.x() + ring.width()/2, w.sidebar.width()/2, delta=.5)
+            self.assertAlmostEqual(ring.y() + ring.height()/2, bar.height()/2 + 4, delta=.5)
+            center = bar.height()/2
+            for control in (w.connection_controls, w.operation_panel.title_label,
+                            w.control_source_label, w.stop_button):
+                top = control.mapTo(w, QPoint()).y()
+                self.assertAlmostEqual(top + control.height()/2, center, delta=1)
+            for control in (bar.minimize_button, bar.maximize_button, bar.close_button):
+                self.assertEqual(control.height(), bar.height())
+                self.assertEqual(control.width(), 52)
+            self.assertFalse(QRect(*self.rect(w.stop_button)).intersects(bar.close_button.geometry()),
+                             (width, self.rect(w.stop_button), bar.close_button.geometry()))
+            self.assertLess(w.stop_button.mapTo(w, QPoint()).y(), w.centralWidget().y())
+            self.assertTrue(bar.contains_status_point(w.stop_button.mapTo(w, w.stop_button.rect().center())))
+            self.assertFalse(bar.contains_status_point(QPoint(200, 22)))
+            self.assert_controls_fit_without_overlap()
+            for control in (*w.sidebar_buttons, w.log_toggle):
+                self.assertFalse(control.text())
+                self.assertTrue(control.toolTip())
+                self.assertTrue(control.accessibleName())
+                self.assertEqual(control.iconSize().width(), 28)
+                self.assertAlmostEqual(control.mapTo(w, QPoint()).x() + control.width()/2,
+                                       w.sidebar.width()/2, delta=.5)
+                self.assertGreaterEqual(control.width(), control.iconSize().width() + 16)
+                self.assertGreaterEqual(control.height(), control.iconSize().height() + 16)
+        with patch.object(w, '_system_command') as dispatch:
+            QTest.mouseClick(w.stop_button, Qt.MouseButton.LeftButton)
+            dispatch.assert_called_once_with('!STOP')
+
     def test_long_mode_and_motor_text_keep_full_tooltip_and_accessibility_without_resizing(self):
         for theme in self.THEMES:
             self.window.apply_theme(theme)
@@ -161,10 +223,12 @@ class TopBarLayoutTests(unittest.TestCase):
                     long_text = "<b>完整设备状态</b>" + "非常长的状态说明" * 100
                     self.window.mode_status.setText(long_text)
                     self.window.motor_status.setText(long_text)
+                    self.window.operation_panel.title_label.setText(long_text)
                     self.window.connection_status.setText(long_text)
                     self.settle()
                     self.assertEqual(self.geometry(), before)
-                    for label in (self.window.mode_status, self.window.motor_status, self.window.connection_status):
+                    for label in (self.window.mode_status, self.window.motor_status,
+                                  self.window.operation_panel.title_label, self.window.connection_status):
                         self.assertEqual(label.text(), long_text)
                         self.assertEqual(label.textFormat(), Qt.TextFormat.PlainText)
                         self.assertIn(long_text, label.accessibleDescription())

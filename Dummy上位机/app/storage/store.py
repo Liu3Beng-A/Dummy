@@ -237,8 +237,8 @@ class AppStore:
         settings["cartesian_backend"] = "firmware"
         if settings["theme"] not in ("light", "dark"):
             settings["theme"] = "light"
-        if settings["connection_type"] not in ("USB", "UART4"):
-            settings["connection_type"] = "USB"
+        # The desktop UI connects only through the controller's USB interface.
+        settings["connection_type"] = "USB"
         if settings["viewer_mode"] not in ("preview", "actual"):
             settings["viewer_mode"] = "preview"
         for key, low, high, default in (("poll_hz", 1, 50, 5), ("log_limit", 500, 50000, 5000)):

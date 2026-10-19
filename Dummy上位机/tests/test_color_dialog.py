@@ -129,7 +129,7 @@ class ColorDialogTests(unittest.TestCase):
             controller.close()
 
     def test_parent_window_theme_sets_readable_dialog_background(self):
-        for theme, background in (("light", "#f2f5f9"), ("dark", "#142031")):
+        for theme, background in (("light", "#f2f5f9"), ("dark", "#111419")):
             with self.subTest(theme=theme):
                 parent = QWidget()
                 child = QWidget(parent)

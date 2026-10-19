@@ -3,7 +3,7 @@ from html import escape
 
 from PySide6.QtCore import QEvent, QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QHBoxLayout, QLabel,
+    QAbstractSpinBox, QCheckBox, QDoubleSpinBox, QHBoxLayout, QLabel,
     QPushButton, QSlider, QSpinBox, QStyle, QStyleOptionButton, QSizePolicy,
     QVBoxLayout, QWidget,
 )
@@ -47,6 +47,7 @@ class AxisRow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(7)
         title = QLabel(name)
+        self.title = title
         title.setFixedWidth(38)
         layout.addWidget(title)
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -67,6 +68,22 @@ class AxisRow(QWidget):
         layout.addWidget(self.spin)
         self.spin.valueChanged.connect(self._spin_changed)
         self.slider.valueChanged.connect(lambda value: self.spin.setValue(value / 100))
+
+    def set_motion_style(self):
+        """Opt-in geometry, leaving teaching/parameter instances unchanged."""
+        self.setProperty("motionAxis", True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = self.layout()
+        layout.setSpacing(8)
+        # The workstation separates measured values from the editable target.
+        # Other pages keep their original axis order.
+        layout.removeWidget(self.readback)
+        layout.insertWidget(1, self.readback)
+        self.title.setFixedWidth(30)
+        self.readback.setFixedWidth(59)
+        self.spin.setFixedSize(119, 30)
+        self.spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.setFixedHeight(32)
 
     def _spin_changed(self, value):
         self.slider.blockSignals(True)
@@ -123,10 +140,14 @@ class PointShortcutButton(QPushButton):
 
     def sizeHint(self):
         # Full point names must never contribute to the layout's minimum width.
-        return QSize(180, 50)
+        return QSize(180, 46 if self.property("motionPoint") else 50)
 
     def minimumSizeHint(self):
-        return QSize(64, 50)
+        return QSize(64, 46 if self.property("motionPoint") else 50)
+
+    def set_motion_style(self):
+        self.setProperty("motionPoint", True)
+        self.setFixedHeight(46)
 
     def _refresh_caption(self):
         if not hasattr(self, "_caption_lines"):

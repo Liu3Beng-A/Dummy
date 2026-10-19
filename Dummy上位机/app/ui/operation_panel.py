@@ -5,7 +5,7 @@ from math import isfinite
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt
 from PySide6.QtGui import QPainter, QPalette
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QLayout, QScrollArea, QSizePolicy,
+    QApplication, QBoxLayout, QFrame, QHBoxLayout, QLabel, QLayout, QScrollArea, QSizePolicy,
     QStackedLayout, QStyle, QStyleOption, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -51,8 +51,8 @@ class _ElidedLabel(QLabel):
 class OperationStatusPanel(QFrame):
     """Present snapshots without transport calls or changing command admission.
 
-    Summary slots always occupy 80 logical pixels. Conditions are a workspace
-    child overlay, never part of this layout or a new top-level window.
+    Motion headers occupy 48 logical pixels; other pages keep 80. Conditions
+    are a workspace child overlay, never part of the layout or a new window.
     """
 
     HEIGHT = 80
@@ -77,11 +77,13 @@ class OperationStatusPanel(QFrame):
         self._swallow_escape_release = False
         self._event_filter_installed = False
         self._compact = False
+        self._motion_strip = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(0)
 
         heading_widget = QWidget(self)
+        self.heading_widget = heading_widget
         heading_widget.setFixedHeight(24)
         heading = QHBoxLayout(heading_widget)
         heading.setContentsMargins(0, 0, 0, 0)
@@ -98,6 +100,7 @@ class OperationStatusPanel(QFrame):
         self.details_button.setObjectName("OperationStatusDetailsButton")
         self.details_button.setCheckable(True)
         self.details_button.setMaximumHeight(24)
+        self.details_button.setIconSize(QSize(8, 8))
         self.details_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         heading.addWidget(self.details_button)
         layout.addWidget(heading_widget)
@@ -194,10 +197,38 @@ class OperationStatusPanel(QFrame):
         self.set_compact(compact)
 
     def sizeHint(self):
-        return QSize(395 if self._compact else 320, self.HEIGHT)
+        return QSize(395 if self._compact else 320, 48 if self._motion_strip else self.HEIGHT)
 
     def minimumSizeHint(self):
-        return QSize(0, self.HEIGHT)
+        return QSize(0, 48 if self._motion_strip else self.HEIGHT)
+
+    def set_motion_strip(self, enabled):
+        """Change presentation only; the same evidence and notice widgets remain."""
+        enabled = bool(enabled)
+        if enabled == self._motion_strip:
+            return
+        self._motion_strip = enabled
+        self.setFixedHeight(48 if enabled else self.HEIGHT)
+        self.layout().setContentsMargins(0 if enabled else 10, 2 if enabled else 6,
+                                        0 if enabled else 10, 2 if enabled else 6)
+        self.layout().setDirection(QBoxLayout.Direction.LeftToRight if enabled
+                                   else QBoxLayout.Direction.TopToBottom)
+        self.layout().setSpacing(8 if enabled else 0)
+        self.heading_widget.setMinimumWidth(180 if enabled else 0)
+        self.heading_widget.setMaximumWidth(200 if enabled else 16777215)
+        self.title_label.setMinimumWidth(90 if enabled else 0)
+        self.elapsed_label.setMinimumWidth(80 if enabled else 0)
+        self.elapsed_label.setMaximumWidth(80 if enabled else 16777215)
+        if enabled:
+            self.heading_widget.layout().removeWidget(self.details_button)
+            self.layout().addWidget(self.details_button)
+        else:
+            self.layout().removeWidget(self.details_button)
+            self.heading_widget.layout().addWidget(self.details_button)
+        self.layout().setStretch(0, 0)
+        self.layout().setStretch(1, 1 if enabled else 0)
+        self._property(self, "motionStrip", enabled)
+        self.updateGeometry()
 
     def set_feedback_widget(self, widget):
         """Mount a passive notice without coupling operation and action state."""

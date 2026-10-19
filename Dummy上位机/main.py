@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
@@ -85,6 +86,7 @@ def main():
     for viewer in window.findChildren(RobotView):
         viewer.ready.connect(viewer_ready)
         viewer.status_changed.connect(lambda message: store.log("VIEWER", message))
+        viewer.diagnostic_event.connect(lambda event: store.log("RENDER", json.dumps(event, ensure_ascii=False)))
     window.show()
     if args.smoke_test:
         def timed_out():

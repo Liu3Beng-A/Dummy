@@ -5,7 +5,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QPushButton
 
@@ -124,15 +124,15 @@ class OperationUiTests(unittest.TestCase):
         self.disable()
         panel = self.w.operation_panel
         self.assertEqual(panel.title_label.text(), "已失能")
-        self.assertTrue(panel.reason_label.isVisible())
-        self.assertTrue(panel.next_step_label.isVisible())
+        self.assertFalse(panel.reason_label.isVisible())
+        self.assertFalse(panel.next_step_label.isVisible())
         self.assertFalse(panel.elapsed_label.isVisible())
-        self.assertEqual(panel.height(), 80)
+        self.assertEqual(panel.height(), 48)
         for page in (1, 2, 3, 5, 0):
             self.w.navigation.setCurrentRow(page)
             APPLICATION.processEvents()
             self.assertTrue(panel.isVisible(), page)
-            self.assertEqual(panel.height(), 80)
+            self.assertEqual(panel.height(), 48 if page == 0 else 80)
             self.assertIs(panel.parentWidget(), self.w.centralWidget())
             self.assertFalse(self.w.pages.isAncestorOf(panel))
         self.assertTrue(self.c._tx_queue.empty())
@@ -146,9 +146,9 @@ class OperationUiTests(unittest.TestCase):
         panel = self.w.operation_panel
         self.assertEqual(panel.title_label.text(), "使能确认中")
         self.assertEqual(self.w.motor_status.text(), "使能确认中")
-        self.assertTrue(panel.reason_label.isVisible())
-        self.assertTrue(panel.next_step_label.isVisible())
-        self.assertTrue(panel.elapsed_label.isVisible())
+        self.assertFalse(panel.reason_label.isVisible())
+        self.assertFalse(panel.next_step_label.isVisible())
+        self.assertFalse(panel.elapsed_label.isVisible())
         self.assertFalse(self.c.state()["stop_confirmed"])
         self.w.stop_button.click()
         self.admit_next("!STOP")
@@ -276,14 +276,15 @@ class OperationUiTests(unittest.TestCase):
                             panel.details_button.setChecked(expanded)
                             APPLICATION.processEvents()
                             self.assertEqual((self.w.width(), self.w.height()), (width, height))
-                            self.assertEqual(panel.height(), 80)
+                            self.assertEqual(panel.height(), 48)
                             self.assertEqual(self.stable_geometry(), baseline)
-                            for label in (panel.title_label, panel.reason_label, panel.next_step_label):
-                                self.assertTrue(label.isVisible())
-                                self.assertGreater(label.width(), 0)
-                                self.assertGreater(label.height(), 0)
-                                self.assertLessEqual(label.geometry().right(), panel.width())
-                                self.assertLessEqual(label.geometry().bottom(), panel.height())
+                            self.assertTrue(panel.title_label.isVisible())
+                            self.assertTrue(self.w.topbar.rect().contains(QRect(
+                                panel.title_label.mapTo(self.w.topbar, QPoint()), panel.title_label.size())))
+                            for label in (panel.reason_label, panel.next_step_label, panel.elapsed_label):
+                                self.assertFalse(label.isVisible())
+                            self.assertTrue(panel.details_button.isVisible())
+                            self.assertFalse(self.w.motor_status.isVisible())
                             self.assertLessEqual(panel.details_button.geometry().right(), panel.width())
                             self.assertEqual(panel.details_overlay.isVisible(), expanded)
                             if expanded:
@@ -410,7 +411,7 @@ class OperationUiTests(unittest.TestCase):
         self.assertNotEqual(scroll.verticalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         buttons = [self.w.movej_send_button, self.w.movej_read_button,
                    *self.w.motion_gripper_group.findChildren(QPushButton)]
-        self.assertGreaterEqual(len(buttons), 6)
+        self.assertGreaterEqual(len(buttons), 5)
         for theme in ("light", "dark"):
             self.w.apply_theme(theme)
             for height in (760, 690):

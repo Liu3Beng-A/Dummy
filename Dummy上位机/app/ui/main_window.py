@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from app.ui.motion_page import build_motion_page
+from app.ui.shell_widgets import install_shell, fit_shell, theme_shell, update_shell, mount_motion_status
 from app.ui.adapters import FieldAdapter, TableAdapter
 from app.ui.parameter_edits import ParameterEditsUi, ParameterFieldAdapter, set_parameter_tone
 from app.ui.pid_help import PID_HELP
@@ -36,6 +38,7 @@ from app.ui.terminal_diagnostics import TerminalDiagnostics
 from app.gamepad.backend import GamepadReader
 from app.gamepad.config import default_config as default_gamepad_config, validate_config as validate_gamepad_config
 from app.ui.rgb_window import RgbSettingsWindow
+from app.ui.window_chrome import apply_window_theme, install_custom_titlebar
 from app.core.rgb_simulator import RgbSimulator, default_config
 from app.visualization.robot_view import RobotView
 from app.protocol.parser import finite_numbers
@@ -150,8 +153,11 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         self.setMinimumSize(1120, 690)
         self._create_shell()
+        self.title_bar = install_custom_titlebar(self)
+        install_shell(self)
         self._build_motion_page()
         self._build_teaching_page()
+        self.motion_layout.bind_points()
         self._build_motor_settings_page()
         self._build_gripper_page()
         self._build_rgb_page()
@@ -181,7 +187,6 @@ class MainWindow(QMainWindow):
         self._gamepad_state_changed(controller.gamepad.state())
         if hasattr(controller, "position_synced"):
             controller.position_synced.connect(self._position_synced)
-        self.connection_combo.currentIndexChanged.connect(lambda *_: self._update_state({}))
         self._restore_points()
         self._building = False
         self.apply_theme(store.settings.get("theme", "light"))
@@ -204,6 +209,7 @@ class MainWindow(QMainWindow):
         self._operation_timer = QTimer(self)
         self._operation_timer.setInterval(250)
         self._operation_timer.timeout.connect(self._refresh_operation_status)
+        self._operation_timer.timeout.connect(self.motion_power_adapter.refresh)
         self._operation_timer.start()
         QApplication.instance().installEventFilter(self)
         for error in store.load_errors:
@@ -391,11 +397,6 @@ class MainWindow(QMainWindow):
         row.addWidget(self.port_combo)
         self.port_refresh_button = button("刷新", self._refresh_ports)
         row.addWidget(self.port_refresh_button)
-        self.connection_combo = self._combo(("USB", "UART4"))
-        self.connection_combo.setCurrentText(self.store.settings.get("connection_type", "USB"))
-        self.connection_combo.setToolTip("USB 为主控 USB 虚拟串口；UART4 为 115200 串口，接口能力不同")
-        self.connection_combo.setMaximumWidth(86)
-        row.addWidget(self.connection_combo)
         self.connect_button = button("连接设备", self._toggle_connection, "success")
         row.addWidget(self.connect_button)
         self.connection_status = _ElidedLabel()
@@ -465,6 +466,8 @@ class MainWindow(QMainWindow):
         self.navigation.currentRowChanged.connect(self._navigation_changed)
         self.navigation.setCurrentRow(0)
         self.statusBar().showMessage("离线预览可用；连接设备后可读取实际位置。")
+        self.statusBar().setSizeGripEnabled(False)
+        self.statusBar().hide()
 
     def _schedule_topbar_fit(self):
         if self._closed or self._topbar_fit_pending:
@@ -473,43 +476,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._fit_topbar_slots)
 
     def _fit_topbar_slots(self):
-        """Reserve maximum caption widths; only window/font changes resize slots."""
         self._topbar_fit_pending = False
-        if self._closed:
-            return
-
-        def label_width(widget, texts):
-            widget.ensurePolished()
-            return max(widget.fontMetrics().horizontalAdvance(text) for text in texts) + 2 * widget.margin() + 2
-
-        def button_width(widget, texts):
-            widget.ensurePolished()
-            option = QStyleOptionButton()
-            option.initFrom(widget)
-            widths = []
-            for text in texts:
-                option.text = text
-                content = QSize(option.fontMetrics.horizontalAdvance(text), option.fontMetrics.height())
-                widths.append(widget.style().sizeFromContents(QStyle.ContentsType.CT_PushButton,
-                                                              option, content, widget).width())
-            return max(widths)
-
-        widths = {
-            self.serial_caption: self.serial_caption.fontMetrics().horizontalAdvance("串口"),
-            self.port_combo: 110,
-            self.port_refresh_button: button_width(self.port_refresh_button, ("刷新",)),
-            self.connection_combo: 86,
-            self.connect_button: button_width(self.connect_button, ("连接设备", "断开连接")),
-            self.connection_status: label_width(self.connection_status, ("● 已连接", "○ 未连接")),
-            self.motor_status: label_width(self.motor_status, _TOPBAR_MOTOR_TEXTS),
-            self.log_toggle: button_width(self.log_toggle, ("终端",)),
-            self.stop_button: button_width(self.stop_button, ("STOP",)),
-        }
-        for widget, width in widths.items():
-            widget.setFixedSize(width, 40)
-        self.mode_status.reserve_width(170)
-        self.mode_status.setFixedWidth(170)
-        self.topbar.layout().invalidate()
+        if not self._closed:
+            fit_shell(self)
 
     def _page(self, title, subtitle, scroll=True, actions=None, tabs=None):
         page = QWidget()
@@ -596,7 +565,12 @@ class MainWindow(QMainWindow):
         header, slot = anchors
         desired = (self.motion_controls_scroll.width() if hasattr(self, "motion_controls_scroll")
                    else 430)
-        width = max(395, min(545, desired, header.width() - 442))
+        motion = self.pages.currentWidget() is self.motion_page
+        self.operation_panel.set_motion_strip(motion)
+        self.operation_panel._property(self.operation_panel, "motionHeader", motion)
+        mount_motion_status(self, motion)
+        width = (120 if motion else
+                 max(395, min(545, desired, header.width() - 442)))
         if slot.width() != width:
             slot.setFixedWidth(width)
             header.layout().activate()
@@ -611,38 +585,8 @@ class MainWindow(QMainWindow):
         self._fit_motion_header()
 
     def _fit_motion_header(self):
-        if not hasattr(self, "_motion_header_left"):
-            return
-        compact = self._motion_header_left.width() < 1120
-        if compact == self._motion_header_compact:
-            return
-        self._motion_header_compact = compact
-        grid = self._motion_header_grid
-        system, modes = self._motion_header_actions
-        for widget in (self._motion_header_title, system, modes, self._motion_header_subtitle):
-            grid.removeWidget(widget)
-        for column in range(3):
-            grid.setColumnStretch(column, 0)
-        grid.addWidget(self._motion_header_title, 0, 0)
-        if compact:
-            grid.addWidget(modes, 0, 1)
-            grid.addWidget(system, 1, 0, 1, 2)
-            grid.setColumnStretch(1, 1)
-        else:
-            grid.addWidget(system, 0, 1)
-            grid.addWidget(modes, 0, 2)
-            grid.addWidget(self._motion_header_subtitle, 1, 0, 1, 3)
-            grid.setColumnStretch(2, 1)
-        self._motion_header_subtitle.setVisible(not compact)
-        for control, full, short in zip(self.motion_system_buttons, self._motion_system_labels,
-                                        ("启动", "失能", "回零", "休息", "置零校准")):
-            control.setText(short if compact else full)
-            control.setAccessibleName(full)
-        for toolbar in (system, modes):
-            toolbar.setProperty("compact", compact)
-            for control in toolbar.findChildren(QWidget):
-                control.style().unpolish(control)
-                control.style().polish(control)
+        if hasattr(self, "motion_layout"):
+            self.motion_layout.fit()
 
     @staticmethod
     def _group(title):
@@ -685,285 +629,7 @@ class MainWindow(QMainWindow):
         return label
 
     def _build_motion_page(self):
-        system_toolbar = QWidget()
-        system_toolbar.setObjectName("MotionSystemToolbar")
-        row = QHBoxLayout(system_toolbar)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        self.motion_system_buttons = []
-        for text, callback, role in (
-            ("启动 START", lambda: self._system_command("!START"), "success"),
-            ("失能 DISABLE", lambda: self._system_command("!DISABLE"), "secondary"),
-            ("回零 HOME", lambda: self._system_command("!HOME"), "primary"),
-            ("休息 REST", lambda: self._system_command("!RESET"), "slate"),
-            ("置零 / 校准", self._calibration_command, "calibration"),
-        ):
-            control = button(text, callback, role)
-            control.setToolTip(text)
-            row.addWidget(control)
-            self.motion_system_buttons.append(control)
-        self._motion_system_labels = [control.text() for control in self.motion_system_buttons]
-        mode_toolbar = QWidget()
-        mode_toolbar.setObjectName("MotionModeToolbar")
-        row = QHBoxLayout(mode_toolbar)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        self.motion_system_buttons[1].setProperty("operationOverlaySafety", True)
-        self.mode_combo = self._combo(("1 · SEQ 顺序", "2 · INT 打断", "3 · TRJ 连续", "4 · TUN 扫频"), 1)
-        self.mode_combo.setToolTip("TUN 使用固件内置扫频激励；切换前确认各轴运动空间")
-        row.addWidget(self.mode_combo)
-        self.mode_set_button = button("设置模式", lambda: self.controller._set_cmdmode((1, 2, 3, 4)[self.mode_combo.currentIndex()]))
-        row.addWidget(self.mode_set_button)
-        self.mode_query_button = button("查询", self.controller._query_command_mode)
-        row.addWidget(self.mode_query_button)
-        row.addStretch()
-        layout = self._page("运动控制", "编辑目标与设备实际位置分别管理；三维预览不会自动发送运动指令。",
-                            False, (system_toolbar, mode_toolbar))
-        self.motion_page = self.pages.widget(0)
-        layout.setContentsMargins(20, 14, 20, 14)
-        layout.setSpacing(8)
-
-        self.motion_splitter = QSplitter(Qt.Orientation.Horizontal)
-        scene = QFrame()
-        scene.setObjectName("Card")
-        scene_layout = QVBoxLayout(scene)
-        scene_layout.setContentsMargins(10, 10, 10, 8)
-        self.viewer_toolbar = QWidget()
-        self.viewer_toolbar.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self._viewer_toolbar_grid = QGridLayout(self.viewer_toolbar)
-        self._viewer_toolbar_grid.setContentsMargins(0, 0, 0, 0)
-        self._viewer_toolbar_grid.setSpacing(6)
-        self._viewer_toolbar_grid.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
-        self.viewer_camera_controls = QWidget()
-        camera_row = QHBoxLayout(self.viewer_camera_controls)
-        camera_row.setContentsMargins(0, 0, 0, 0)
-        camera_row.setSpacing(6)
-        self.viewer_display_controls = QWidget()
-        display_row = QHBoxLayout(self.viewer_display_controls)
-        display_row.setContentsMargins(0, 0, 0, 0)
-        display_row.setSpacing(6)
-        self._viewer_mode_preference = 1 if self.store.settings.get("viewer_mode") == "actual" else 0
-        self.viewer_mode = self._combo(("目标预览", "实际跟随"), self._viewer_mode_preference)
-        self.viewer_mode.currentIndexChanged.connect(self._view_mode_changed)
-        for title, view in (("等轴", "isometric"), ("正面", "front"), ("俯视", "top")):
-            camera_row.addWidget(button(title, lambda value=view: self.viewer.set_camera(value)))
-        camera_row.addWidget(button("复位视角", lambda: self.viewer.reset_camera()))
-        camera_row.addStretch()
-        self.viewer_grid_button = button("网格")
-        self.viewer_grid_button.setObjectName("ViewerToggle")
-        self.viewer_grid_button.setCheckable(True)
-        self.viewer_grid_button.setChecked(self.store.settings.get("show_grid", True))
-        self.viewer_grid_button.setToolTip("显示或隐藏三维地面网格")
-        self.viewer_grid_button.toggled.connect(self._grid_changed)
-        display_row.addWidget(self.viewer_grid_button)
-        self.viewer_axes_button = button("坐标轴")
-        self.viewer_axes_button.setObjectName("ViewerToggle")
-        self.viewer_axes_button.setCheckable(True)
-        self.viewer_axes_button.setChecked(self.store.settings.get("show_axes", True))
-        self.viewer_axes_button.setToolTip("显示或隐藏三维坐标轴")
-        self.viewer_axes_button.toggled.connect(self._axes_changed)
-        display_row.addWidget(self.viewer_axes_button)
-        self.viewer_target_button = button("目标虚体")
-        self.viewer_target_button.setObjectName("ViewerToggle")
-        self.viewer_target_button.setCheckable(True)
-        self.viewer_target_button.setChecked(self.store.settings.get("show_target_ghost", True))
-        self.viewer_target_button.setToolTip("目标虚体总开关；有效回读与目标一致时自动隐藏，有差异时显示。仅影响模型显示，不改变目标或发送指令。")
-        self.viewer_target_button.toggled.connect(self._target_visibility_changed)
-        display_row.addWidget(self.viewer_target_button)
-        display_row.addStretch()
-        display_row.addWidget(self.viewer_mode)
-        self._viewer_toolbar_wrapped = True
-        self._viewer_toolbar_grid.addWidget(self.viewer_camera_controls, 0, 0, 1, 2)
-        self._viewer_toolbar_grid.addWidget(self.viewer_display_controls, 1, 0, 1, 2)
-        self._viewer_toolbar_grid.setColumnStretch(0, 1)
-        self.viewer_toolbar.installEventFilter(self)
-        scene_layout.addWidget(self.viewer_toolbar)
-        self.viewer = RobotView()
-        self.viewer.setMinimumSize(320, 260)
-        self.viewer.ready.connect(self._viewer_ready)
-        self.viewer.status_changed.connect(lambda text: self.scene_status.setText(text))
-        scene_layout.addWidget(self.viewer, 1)
-        self.scene_status = QLabel("正在加载本地 URDF…")
-        self.scene_status.setProperty("role", "muted")
-        self.scene_status.setWordWrap(True)
-        self.scene_status.setAlignment(Qt.AlignmentFlag.AlignRight)
-        scene_layout.addWidget(self.scene_status)
-        self.actual_status = hint("实际位置未回读 · 夹爪显示目标开度", "muted")
-        self.actual_status.setAlignment(Qt.AlignmentFlag.AlignRight)
-        scene_layout.addWidget(self.actual_status)
-        self.motion_splitter.addWidget(scene)
-
-        self.motion_controls = QWidget()
-        self.motion_controls.setMinimumWidth(395)
-        self.motion_controls.setMaximumWidth(545)
-        controls_layout = QVBoxLayout(self.motion_controls)
-        controls_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(8)
-        input_row = QHBoxLayout()
-        input_row.addWidget(QLabel("输入方式"))
-        self.input_mode = self._combo(("界面", "手柄"))
-        self.input_mode.setObjectName("MotionInputMode")
-        self.input_mode_combo = self.input_mode
-        self.input_mode.setToolTip("切换输入方式不会自动使能或接管；手柄检查与接管需主动操作。")
-        self.input_mode.currentIndexChanged.connect(self._input_mode_changed)
-        input_row.addWidget(self.input_mode, 1)
-        controls_layout.addLayout(input_row)
-        self.motion_input_stack = QStackedWidget()
-        self.motion_input_stack.setObjectName("MotionInputStack")
-        self.motion_tabs = QTabWidget()
-        self.motion_tabs.setObjectName("MotionTabs")
-        self.motion_tabs.setDocumentMode(True)
-        self.motion_tabs.tabBar().setExpanding(True)
-        joint_tab = QWidget()
-        joint_tab.setObjectName("MotionTabPage")
-        joint_tab_layout = QVBoxLayout(joint_tab)
-        joint_tab_layout.setContentsMargins(10, 8, 10, 8)
-        joint_tab_layout.setSpacing(6)
-        joint_page = QWidget()
-        joint_layout = QVBoxLayout(joint_page)
-        joint_layout.setContentsMargins(2, 2, 2, 4)
-        joint_layout.setSpacing(8)
-        joint_layout.addWidget(hint("灰色值为实际回读，输入框为编辑目标。", "muted"))
-        self.joint_rows = []
-        for index, (limits, value) in enumerate(zip(list(JOINT_RANGES) + [(-250, 250)], list(JOINT_DEFAULTS) + [0])):
-            axis = AxisRow(f"J{index+1}" if index < 6 else "地轨", limits, value, "°" if index < 6 else "mm")
-            axis.changed.connect(lambda _, kind="j": self._target_edited(kind))
-            axis.spin.setObjectName(f"TargetJ{index+1}")
-            axis.spin.focusInEvent = self._focus_event(axis.spin.focusInEvent, index + 1)
-            self.joint_rows.append(axis)
-            joint_layout.addWidget(axis)
-        self.joint_spins = [axis.spin for axis in self.joint_rows]
-        self.fields["ent_joints"] = [FieldAdapter(axis.spin) for axis in self.joint_rows[:6]]
-        self.fields["scl_joints"] = [FieldAdapter(axis.spin) for axis in self.joint_rows[:6]]
-        self.fields["lbl_joints"] = [FieldAdapter(QLabel()) for _ in range(6)]
-        self._bind("ent_j7", self.joint_rows[6].spin)
-        self._bind("scl_j7", self.joint_rows[6].spin)
-        self._bind("lbl_j7", QLabel())
-        joint_scroll = QScrollArea()
-        joint_scroll.setObjectName("MoveJAxisScroll")
-        joint_scroll.setWidgetResizable(True)
-        joint_scroll.setMinimumHeight(50)
-        joint_scroll.setSizeAdjustPolicy(QScrollArea.SizeAdjustPolicy.AdjustToContents)
-        joint_scroll.setWidget(joint_page)
-        joint_tab_layout.addWidget(joint_scroll, 1)
-        speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel("速度档位"))
-        self.j_speed = number(DEFAULT_SPEED, 1, 100, 0)
-        self._bind("ent_j_speed", self.j_speed)
-        speed_row.addWidget(self.j_speed)
-        self.j_drag = QCheckBox("拖动发送")
-        self.j_drag.toggled.connect(lambda enabled: self._drag_toggled("j", enabled))
-        self._bind("movej_drag_enable", self.j_drag)
-        speed_row.addWidget(self.j_drag)
-        self.j_speed.setToolTip("速度 100 = 30 r/s；地轨与六轴同步到达")
-        joint_tab_layout.addLayout(speed_row)
-        actions = QHBoxLayout()
-        self.movej_send_button = button("发送 MoveJ", lambda: self._send_motion("j"), "primary")
-        self.movej_send_button.setObjectName("SendMoveJ")
-        actions.addWidget(self.movej_send_button, 1)
-        self.movej_read_button = button("读取 → 同步输入", lambda: self._read_motion("j"))
-        self.movej_read_button.setToolTip("读取设备实际关节与地轨位置，然后同步至编辑目标；不会发送运动")
-        actions.addWidget(self.movej_read_button, 1)
-        joint_tab_layout.addLayout(actions)
-        joint_tab_layout.addStretch()
-        self.motion_tabs.addTab(joint_tab, "MoveJ · 关节 / 地轨")
-
-        pose_tab = QWidget()
-        pose_tab.setObjectName("MotionTabPage")
-        pose_tab_layout = QVBoxLayout(pose_tab)
-        pose_tab_layout.setContentsMargins(10, 8, 10, 8)
-        pose_tab_layout.setSpacing(6)
-        self.cartesian_frame = QComboBox()
-        self.cartesian_frame.setObjectName("CartesianFrame")
-        self.cartesian_frame.addItem("基座 / 法兰（兼容已有点位）", "base")
-        self.cartesian_frame.addItem("世界 / TCP（名义夹爪中心）", "world")
-        self._cartesian_frame_value = "base"
-        self.cartesian_frame.currentIndexChanged.connect(lambda *_: self._cartesian_frame_changed())
-        self._point_tool_snapshot = None
-        pose_tab_layout.addWidget(self.cartesian_frame)
-        pose_page = QWidget()
-        pose_layout = QVBoxLayout(pose_page)
-        pose_layout.setContentsMargins(2, 2, 2, 4)
-        pose_layout.setSpacing(8)
-        self.pose_rows = []
-        for index, (name, limits, value) in enumerate(zip(("X", "Y", "Z", "A", "B", "C"), POSE_RANGES, POSE_DEFAULTS)):
-            axis = AxisRow(name, limits, value, "mm" if index < 3 else "°")
-            # The old entries accepted coordinates beyond slider ranges. Keep
-            # those ranges as convenience controls, never truncate a readback.
-            axis.spin.setRange(-10000 if index < 3 else -3600,
-                               10000 if index < 3 else 3600)
-            axis.changed.connect(lambda _: self._target_edited("l"))
-            axis.spin.setObjectName(f"TargetPose{name}")
-            self.pose_rows.append(axis)
-            pose_layout.addWidget(axis)
-        self.pose_spins = [axis.spin for axis in self.pose_rows]
-        self.fields["ent_pose"] = [FieldAdapter(axis.spin) for axis in self.pose_rows]
-        self.fields["scl_pose"] = [FieldAdapter(axis.spin) for axis in self.pose_rows]
-        self.fields["lbl_pose"] = [FieldAdapter(axis.readback) for axis in self.pose_rows]
-        pose_scroll = QScrollArea()
-        pose_scroll.setObjectName("MoveLAxisScroll")
-        pose_scroll.setWidgetResizable(True)
-        pose_scroll.setMinimumHeight(50)
-        pose_scroll.setSizeAdjustPolicy(QScrollArea.SizeAdjustPolicy.AdjustToContents)
-        pose_scroll.setWidget(pose_page)
-        pose_tab_layout.addWidget(pose_scroll, 1)
-        line = QHBoxLayout()
-        line.addWidget(QLabel("速度档位"))
-        self.l_speed = number(DEFAULT_SPEED, 1, 100, 0)
-        self._bind("ent_l_speed", self.l_speed)
-        line.addWidget(self.l_speed)
-        self.l_drag = QCheckBox("拖动发送")
-        self._bind("movel_drag_enable", self.l_drag)
-        self.l_drag.toggled.connect(lambda enabled: self._drag_toggled("l", enabled))
-        line.addWidget(self.l_drag)
-        self.l_speed.setToolTip("三维标记表示笛卡尔目标；完整关节姿态以设备回读为准")
-        pose_tab_layout.addLayout(line)
-        actions = QHBoxLayout()
-        self.movel_send_button = button("发送 MoveL", lambda: self._send_motion("l"), "primary")
-        self.movel_send_button.setObjectName("SendMoveL")
-        actions.addWidget(self.movel_send_button, 1)
-        self.movel_read_button = button("读取 → 同步输入", lambda: self._read_motion("l"))
-        self.movel_read_button.setToolTip("读取设备实际 XYZABC 位姿，然后同步至编辑目标；不会发送运动")
-        actions.addWidget(self.movel_read_button, 1)
-        pose_tab_layout.addLayout(actions)
-        pose_tab_layout.addStretch()
-        self.motion_tabs.addTab(pose_tab, "MoveL")
-        self.motion_tabs.currentChanged.connect(self._motion_tab_changed)
-        self._motion_axis_scrolls = (joint_scroll, pose_scroll)
-        self.motion_input_stack.addWidget(self.motion_tabs)
-        self.gamepad_panel = GamepadPanel(self._gamepad_config)
-        for action in ("stop", "disable"):
-            self.gamepad_panel.action_buttons[action].setProperty("operationOverlaySafety", True)
-        self.gamepad_panel.scroll.setMinimumHeight(140 + 2 * self.gamepad_panel.scroll.frameWidth())
-        self.gamepad_panel.action_requested.connect(self._gamepad_action)
-        self.gamepad_panel.config_requested.connect(self._open_gamepad_settings)
-        self.gamepad_panel.tuning_requested.connect(self._gamepad_apply_tuning)
-        self.gamepad_panel.gripper_base_requested.connect(self._gamepad_gripper_base)
-        self.motion_input_stack.addWidget(self.gamepad_panel)
-        controls_layout.addWidget(self.motion_input_stack, 1)
-        self._build_motion_gripper(controls_layout)
-        self._build_quick_points(controls_layout)
-        controls_layout.addStretch()
-        self.motion_controls.installEventFilter(self)
-        # Expanded status explanations must not squeeze command buttons below
-        # their text height on a small display. Keep the column readable and
-        # scroll it when the available height is smaller than its minimum.
-        self.motion_controls_scroll = QScrollArea()
-        self.motion_controls_scroll.setObjectName("MotionControlsScroll")
-        self.motion_controls_scroll.setWidgetResizable(True)
-        self.motion_controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.motion_controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.motion_controls_scroll.setMinimumWidth(395)
-        self.motion_controls_scroll.setMaximumWidth(545)
-        self.motion_controls_scroll.setWidget(self.motion_controls)
-        self.motion_controls_scroll.installEventFilter(self)
-        self.motion_splitter.addWidget(self.motion_controls_scroll)
-        self.motion_splitter.setStretchFactor(0, 3)
-        self.motion_splitter.setStretchFactor(1, 1)
-        self.motion_splitter.setSizes((760, 430))
-        layout.addWidget(self.motion_splitter, 1)
-        self._schedule_header_fit()
+        build_motion_page(self, RobotView)
 
     def _schedule_motion_fit(self):
         if self._closed or getattr(self, "_motion_fit_pending", False):
@@ -976,6 +642,7 @@ class MainWindow(QMainWindow):
         self._motion_fit_pending = False
         if self._closed:
             return
+        self.motion_layout.fit()
         for area in self._motion_axis_scrolls:
             content_layout = area.widget().layout()
             content_layout.invalidate()
@@ -985,11 +652,24 @@ class MainWindow(QMainWindow):
             area.setMaximumHeight(height + 2 * area.frameWidth())
         page_layout = self.motion_tabs.currentWidget().layout()
         page_layout.invalidate()
-        # QScrollArea caches its initial size hint before the theme is applied.
-        # Replace that height with the current content height for the active tab.
         area = self._motion_axis_scrolls[self.motion_tabs.currentIndex()]
-        natural_height = (page_layout.sizeHint().height() - area.sizeHint().height()
-                          + area.maximumHeight())
+        # Do not subtract QScrollArea's cached pre-theme size hint: its value
+        # depends on first-show order. Sum the actual bounded content instead.
+        margins = page_layout.contentsMargins()
+        natural_height = margins.top() + margins.bottom()
+        for index in range(page_layout.count()):
+            item = page_layout.itemAt(index)
+            widget = item.widget()
+            if widget is area:
+                natural_height += area.maximumHeight()
+            elif widget is not None:
+                natural_height += min(widget.maximumHeight(), max(
+                    widget.minimumHeight(), widget.sizeHint().height()))
+            elif item.layout() is not None:
+                nested = item.layout()
+                nested.invalidate()
+                natural_height += max(nested.sizeHint().height(), nested.minimumSize().height())
+        natural_height += page_layout.spacing() * max(0, page_layout.count() - 1)
         self.motion_tabs.setMaximumHeight(natural_height
                                           + self.motion_tabs.tabBar().sizeHint().height() + 4)
         self.motion_input_stack.setMaximumHeight(self.motion_tabs.maximumHeight()
@@ -1133,7 +813,7 @@ class MainWindow(QMainWindow):
         for index, control in enumerate(self.quick_point_buttons):
             control.setEnabled(not locked and index < len(self.points))
         if not locked:
-            self.motor_page_content.setEnabled(self.connection_combo.currentText() == "USB")
+            self.motor_page_content.setEnabled(not self.controller.is_connected or self.controller.connection_type == "USB")
         self.gamepad_settings_button.setEnabled(not locked)
         finite_only = bool(self.controller.cartesian.native_tcp)
         message = "当前固件支持单个笛卡尔目标；连续操控暂不可用。"
@@ -1735,7 +1415,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.snapshot_label)
 
     def _build_gripper_page(self):
-        layout = self._page("夹爪设置", "基础控制支持 USB 与 UART4；夹爪独立于七轴运动到位判定。三维开度目前为目标值。")
+        layout = self._page("夹爪设置", "基础控制通过 USB 连接；夹爪独立于七轴运动到位判定。三维开度目前为目标值。")
         group, box = self._parameter_group("运行时电流 · 0.05～2.5 A")
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -1775,7 +1455,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(group)
 
         self.hand_advanced, box = self._parameter_group("USB 高级配置 · 写电机 EEPROM")
-        box.addWidget(hint("配置会写入电机持久参数。UART4 不支持；需要已确认失能再执行。夹爪独立 PID 接口采用有符号整数，上限 2147483647；电机参数页 PID 支持完整 uint32。", "warning"))
+        box.addWidget(hint("配置会写入电机持久参数，需要已确认失能再执行。夹爪独立 PID 接口采用有符号整数，上限 2147483647；电机参数页 PID 支持完整 uint32。", "warning"))
         read_row = QHBoxLayout()
         read_row.setSpacing(8)
         restore_hand = self._parameter_button("还原可查询项编辑", lambda: self.controller.parameter_edits.restore(
@@ -2378,8 +2058,8 @@ class MainWindow(QMainWindow):
         rgb_active = (not self._closed and self.rgb_window.isVisible()
                       and not self.rgb_window.isMinimized())
         self.viewer.set_rgb_preview(rgb_active)
-        motion_active = visible and self.pages.currentWidget() is self.motion_page
-        active = rgb_active or motion_active
+        # The header diffuser remains visible on every main-window page.
+        active = rgb_active or visible
         if active:
             if not self._rgb_render_timer.isActive():
                 self._rgb_render_timer.start()
@@ -2392,11 +2072,15 @@ class MainWindow(QMainWindow):
         self.rgb_preview_brightness.setText(subtitle)
         self.rgb_preview_title.setToolTip(title + (f"\n{subtitle}" if subtitle else ""))
         self.viewer.set_rgb_frame(frame, light_on=light_on, effect_mode=effect_mode)
+        self.shell_brand.mark.set_rgb_frame(frame, light_on=light_on, effect_mode=effect_mode)
+        source = "本地编辑预览" if self.rgb_preview_source.currentIndex() == 0 else "设备配置跟随"
+        self.shell_brand.mark.setToolTip(f"灯环 · {source}\n{title}" + (f" · {subtitle}" if subtitle else ""))
 
     def _render_rgb_preview(self):
         if self._building or not hasattr(self, "rgb_window") or self._closed:
             return
         now = int(time.monotonic() * 1000)
+        self.shell_brand.mark.advance_rgb_frame(now / 1000.)
         if self.rgb_preview_source.currentIndex() == 0:
             config = copy.deepcopy(self._rgb_draft)
             state = self.rgb_preview_state.currentData()
@@ -2515,7 +2199,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(group)
         group, box = self._group("协议能力")
         box.addWidget(hint("当前操作页面覆盖串口助手 old 的功能以及 USB 夹爪高级配置。SEQ、INT、TRJ、TUN 为现有可确认模式；TRQ、SRV 待固件接口确认后扩展。"))
-        box.addWidget(hint("UART4 使用 115200 波特率，部分电机设置及夹爪高级配置只支持 USB。操作失败会保留设备回包用于诊断。"))
+        box.addWidget(hint("固定使用主控 USB 虚拟串口，波特率 115200。操作失败会保留设备回包用于诊断。"))
         layout.addWidget(group)
         layout.addStretch()
 
@@ -2847,12 +2531,12 @@ class MainWindow(QMainWindow):
         if self.controller.is_connected:
             self.controller.disconnect_port()
         else:
-            port, connection = self.port_combo.currentText().strip(), self.connection_combo.currentText()
-            self.store.update_settings(port=port, connection_type=connection)
-            self.controller.connect_port(port, connection)
+            port = self.port_combo.currentText().strip()
+            self.store.update_settings(port=port, connection_type="USB")
+            self.controller.connect_port(port, "USB")
 
     def _refresh_ports(self):
-        return self.controller.refresh_ports(self.connection_combo.currentText())
+        return self.controller.refresh_ports("USB")
 
     @staticmethod
     def _pill(widget, healthy=False, busy=False):
@@ -2878,10 +2562,10 @@ class MainWindow(QMainWindow):
         self.connect_button.setText("断开连接" if connected else "连接设备")
         self.connection_status.setText("● 已连接" if connected else "○ 未连接")
         self._pill(self.connection_status, connected)
-        self.connection_combo.setEnabled(not connected)
         self.port_combo.setEnabled(not connected)
         mode = state.get("cmdmode", getattr(self.controller, "current_cmdmode", None))
         self.mode_status.setText(_TOPBAR_MODE_TEXTS.get(mode, _TOPBAR_MODE_TEXTS[None]))
+        self.motion_layout.update_mode(mode, connected)
         selector_mode = mode if connected else self.controller.cartesian.preferred_mode
         if selector_mode in (1, 2, 3, 4):
             with QSignalBlocker(self.mode_combo):
@@ -2903,7 +2587,7 @@ class MainWindow(QMainWindow):
         self._pill(self.motor_status, motor is True and not locked and not calibrating, locked or calibrating)
         active = state.get("sequence_active", getattr(self.controller, "_seq_active", False))
         self.sequence_status.setText(f"顺序任务 {state.get('sequence_index', 0) + 1} / {state.get('sequence_count', len(self.points))}" if active else "未运行顺序任务")
-        connection = state.get("connection_type", self.connection_combo.currentText()) if connected else self.connection_combo.currentText()
+        connection = state.get("connection_type", self.controller.connection_type) if connected else "USB"
         self.hand_advanced.setEnabled(connection == "USB")
         self.motor_page_content.setEnabled(connection == "USB")
         if "actual_pose" in state and state["actual_pose"] is None:
@@ -2927,6 +2611,7 @@ class MainWindow(QMainWindow):
         self._sync_rgb_preview_activity()
         self._apply_gamepad_conflicts()
         self._refresh_operation_status(state)
+        update_shell(self)
         if self._gamepad_close_pending and not self._gamepad_locked():
             self._finish_gamepad_close()
 
@@ -3203,6 +2888,8 @@ class MainWindow(QMainWindow):
         return self.controller._cmd_calibration()
 
     def _navigation_changed(self, index):
+        for panel in getattr(self, "_shell_panels", ()):
+            panel.hide()
         self._cancel_drag()
         self._teaching_sync = None
         if index == 4:
@@ -3324,10 +3011,22 @@ class MainWindow(QMainWindow):
         self._viewer_toolbar_fit_pending = False
         if self._closed:
             return
+        compact = (self.width() < 1280 or self.height() < 780
+                   or self.viewer_toolbar.contentsRect().width() < 400)
+        height = 34 if compact else 38
+        self.viewer_reset_button.setFixedSize(36 if compact else 40, height)
+        for control, width in zip((self.viewer_grid_button, self.viewer_axes_button, self.viewer_target_button),
+                                  (74, 84, 100) if compact else (90, 102, 118)):
+            control.setFixedSize(width, height)
+        margins = self._viewer_toolbar_grid.contentsMargins()
+        available = self.viewer_toolbar.contentsRect().width() - margins.left() - margins.right()
         required = (self.viewer_camera_controls.minimumSizeHint().width()
                     + self.viewer_display_controls.minimumSizeHint().width()
                     + self._viewer_toolbar_grid.horizontalSpacing())
-        wrapped = required > self.viewer_toolbar.contentsRect().width()
+        wrapped = required > available
+        toolbar_height = (height * (2 if wrapped else 1) + margins.top() + margins.bottom() + 2
+                          + (self._viewer_toolbar_grid.verticalSpacing() if wrapped else 0))
+        self.viewer_toolbar.setFixedHeight(toolbar_height)
         if wrapped == self._viewer_toolbar_wrapped:
             return
         self._viewer_toolbar_wrapped = wrapped
@@ -3373,7 +3072,7 @@ class MainWindow(QMainWindow):
         self.log_dock.show()
 
     def _hand_config(self, key):
-        if self.connection_combo.currentText() != "USB":
+        if self.controller.connection_type != "USB":
             self.controller.log("夹爪高级配置仅支持 USB", "WARN")
             self.controller.notify_action("gripper", "save", key, "blocked",
                                           "夹爪配置未发送：高级配置仅支持 USB。", "切换为 USB 连接后重试。")
@@ -3700,11 +3399,15 @@ class MainWindow(QMainWindow):
         path = resource_path(f"themes/{theme}.qss")
         stylesheet = Path(path).read_text(encoding="utf-8")
         stylesheet = stylesheet.replace("{{ICONS}}", resource_path("icons").as_posix())
-        QApplication.instance().setStyleSheet(stylesheet)
+        application = QApplication.instance()
+        if application.styleSheet() != stylesheet:
+            application.setStyleSheet(stylesheet)
         self._schedule_topbar_fit()
         self._schedule_motion_fit()
         self._schedule_viewer_toolbar_fit()
         self.viewer.set_theme(theme)
+        theme_shell(self, theme)
+        apply_window_theme(theme)
 
     def _theme_setting(self, index):
         if self._building:

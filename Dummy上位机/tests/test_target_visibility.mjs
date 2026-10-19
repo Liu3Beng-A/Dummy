@@ -165,7 +165,7 @@ async function realViewerStylingContext() {
   const ghostMaterials = new Set();
   const targetFade = new TargetVisibilityFade();
   const context = vm.createContext({ THREE, meshMaterials, ghostMaterials, targetFade, target,
-    appliedTargetOpacity: -1, currentState: preview({ actualGripperKnown: true }), marker: { visible: false },
+    appliedTargetOpacity: -1, currentState: preview({ actualGripperKnown: true, theme: 'dark' }), marker: { visible: false },
     isLocalRgbPreview: () => false,
     document: { getElementById: name => name === 'ghost-label' ? labels.ghost
       : name === 'gripper-status' ? labels.gripper : null,
@@ -245,6 +245,26 @@ test('real viewer styling and RAF updates preserve base-opacity times fade and s
   context.animateTarget(2750);
   assert.equal(labels.legend.hidden, true);
   assert.equal(labels.ghost.hidden, true);
+});
+
+test('light theme strengthens targets while a theme change preserves the running visibility fade', async () => {
+  const { context, target, targetFade, addMesh } = await realViewerStylingContext();
+  const normal = addMesh(target, 'Link2', { array: true });
+  const selected = addMesh(target, 'Link1');
+  targetFade.setState(preview(), 0);
+  targetFade.sample(250);
+  context.currentState.theme = 'light';
+  context.styleRobot(target, true, 'Joint1');
+  for (const material of normal.materials) close(material.opacity, .32 * .5);
+  close(selected.materials[0].opacity, .46 * .5);
+  close(targetFade.value, .5);
+  context.currentState.theme = 'dark';
+  context.styleRobot(target, true, 'Joint1');
+  for (const material of normal.materials) close(material.opacity, .12 * .5);
+  close(selected.materials[0].opacity, .22 * .5);
+  context.animateTarget(500);
+  close(normal.materials[0].opacity, .12);
+  close(selected.materials[0].opacity, .22);
 });
 
 test('real viewer fading touches ghost materials while actual and its diffuser remain unchanged', async () => {

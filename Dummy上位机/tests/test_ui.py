@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, Signal, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Signal, Qt
 QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 from PySide6.QtTest import QTest
@@ -71,6 +71,9 @@ class FakeView(QWidget):
     def set_feedback_paused(self, value):
         self.feedback_paused = bool(value)
 
+    def set_performance_metrics(self, value):
+        self.performance_metrics = dict(value)
+
     def set_target_visible(self, value):
         self.target_visible = bool(value)
 
@@ -125,6 +128,7 @@ class UiIntegrationTests(unittest.TestCase):
     def tearDown(self):
         self.window.close()
         self.window.deleteLater()
+        APPLICATION.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         APPLICATION.processEvents()
         self.viewer_patch.stop()
         self.directory.cleanup()
@@ -148,30 +152,34 @@ class UiIntegrationTests(unittest.TestCase):
             except queue.Empty:
                 return commands
 
-    def test_port_refresh_uses_current_ui_interface_and_preserves_connected_selection(self):
+    def test_port_refresh_uses_usb_and_preserves_connected_selection(self):
         from types import SimpleNamespace
         ports = [SimpleNamespace(device="COM5", vid=None, pid=None),
                  SimpleNamespace(device="COM37", vid=0x1209, pid=0x0D32)]
         w, c = self.window, self.controller
         with patch("app.core.controller.serial.tools.list_ports.comports", return_value=ports):
             w.port_combo.setEditText("COM5")
-            w.connection_combo.setCurrentText("USB")
             w._refresh_ports()
             self.assertEqual(w.port_combo.currentText(), "COM37")
             w.port_combo.setEditText("COM99")
-            w.connection_combo.setCurrentText("UART4")
             w._refresh_ports()
-            self.assertEqual(w.port_combo.currentText(), "COM99")
+            self.assertEqual(w.port_combo.currentText(), "COM37")
             c.is_connected, c.port_name = True, "COM99"
-            w.connection_combo.setCurrentText("USB")
             w._refresh_ports()
             self.assertEqual(w.port_combo.currentText(), "COM99")
             c.is_connected = False
+        with patch.object(c, "connect_port") as connect:
+            w.port_combo.setEditText("COM99")
+            w._toggle_connection()
+            connect.assert_called_once_with("COM99", "USB")
+            self.assertEqual(self.store.settings["connection_type"], "USB")
         self.assertEqual(self.commands(), [])
 
     def test_launch_is_offline_and_pages_have_all_parameter_fields(self):
         self.assertFalse(self.controller.is_connected)
         self.assertIsNone(self.controller.serial_port)
+        self.assertFalse(hasattr(self.window, "connection_combo"))
+        self.assertEqual(self.store.settings["connection_type"], "USB")
         self.assertEqual(self.window.pages.count(), 6)
         self.assertEqual([self.window.navigation.item(index).text() for index in range(6)],
                          ["运动控制", "点位示教", "电机设置", "夹爪设置", "RGB 灯效", "软件设置"])

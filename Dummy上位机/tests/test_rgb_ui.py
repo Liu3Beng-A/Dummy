@@ -193,6 +193,24 @@ class RGBPreviewUiTests(unittest.TestCase):
         self.assertEqual(w.rgb_preview_source.currentIndex(), 0)
         self.assertEqual(self.commands(), [])
 
+    def test_header_and_model_share_every_frame_mode_and_source_without_dispatch(self):
+        w = self.window
+        mark = w.shell_brand.mark
+        for mode in range(17):
+            frame = [[(source*11+mode)%256, mode*13, 255-mode*7] for source in range(24)]
+            w._set_rgb_preview_frame(frame, "帧同步检查", "离线", light_on=True, effect_mode=mode)
+            self.assertEqual(mark.rgb_frame, w.viewer.rgb_frame)
+            self.assertEqual(mark.rgb_light_on, w.viewer.rgb_light_on)
+            self.assertEqual(mark.rgb_effect_mode, w.viewer.rgb_effect_mode)
+        for source in (0, 1):
+            w.rgb_preview_source.setCurrentIndex(source)
+            w._render_rgb_preview()
+            self.assertEqual(mark.rgb_frame, w.viewer.rgb_frame)
+            self.assertEqual(mark.rgb_light_on, w.viewer.rgb_light_on)
+            self.assertEqual(mark.rgb_effect_mode, w.viewer.rgb_effect_mode)
+        self.assertIn("未连接", mark.toolTip())
+        self.assertEqual(self.commands(), [])
+
     def test_zero_breath_frames_keep_power_on_and_fade_out_keeps_cover_active(self):
         w = self.window
         w.rgb_preview_source.setCurrentIndex(0)
@@ -204,6 +222,7 @@ class RGBPreviewUiTests(unittest.TestCase):
             w._render_rgb_preview()
             self.assertEqual(w.viewer.rgb_frame, tuple(zero))
             self.assertIs(w.viewer.rgb_light_on, True)
+            self.assertIs(w.shell_brand.mark.rgb_light_on, True)
             # Turning the switch off must preserve an already running fade-out.
             w._rgb_simulator.reset(initial_brightness=30)
             w.rgb_preview_on.setChecked(False)
@@ -212,6 +231,7 @@ class RGBPreviewUiTests(unittest.TestCase):
             w._rgb_simulator.reset(initial_brightness=0)
             w._render_rgb_preview()
             self.assertIs(w.viewer.rgb_light_on, False)
+            self.assertIs(w.shell_brand.mark.rgb_light_on, False)
         self.assertEqual(self.commands(), [])
 
     def test_local_edit_and_state_preview_never_send_commands(self):
@@ -288,7 +308,7 @@ class RGBPreviewUiTests(unittest.TestCase):
         self.assertEqual(w._rgb_draft["colors"][0][0], 222)
         self.assertTrue(all(cmd in ("#RGB_STATUS", "#RGB_GET") for cmd in self.commands()))
 
-    def test_page_hidden_and_main_closed_stop_animation_and_monitoring(self):
+    def test_header_keeps_monitoring_on_other_pages_and_hidden_windows_stop(self):
         self.receive_config()
         w = self.window
         w.rgb_preview_source.setCurrentIndex(1)
@@ -304,10 +324,9 @@ class RGBPreviewUiTests(unittest.TestCase):
         w.rgb_window.close()
         APPLICATION.processEvents()
         self.assertFalse(w.rgb_window.isVisible())
-        self.assertFalse(w._rgb_render_timer.isActive())
-        self.commands()
-        self.controller._poll_rgb()
-        self.assertEqual(self.commands(), [])
+        self.assertTrue(w._rgb_render_timer.isActive())
+        self.assertTrue(self.controller._rgb_monitoring)
+        self.assertEqual(w.shell_brand.mark.rgb_frame, w.viewer.rgb_frame)
         w.navigation.setCurrentRow(4)
         self.assertEqual(w.pages.currentIndex(), 0)
         self.assertTrue(w.rgb_window.isVisible())
@@ -339,6 +358,8 @@ class RGBPreviewUiTests(unittest.TestCase):
         self.assertIn("状态已过期", w.rgb_preview_title.text())
         self.assertFalse(w._rgb_follow_seeded)
         self.assertIs(w.viewer.rgb_light_on, False)
+        self.assertEqual(w.shell_brand.mark.rgb_frame, w.viewer.rgb_frame)
+        self.assertIs(w.shell_brand.mark.rgb_light_on, False)
         self.assertIsNone(w.viewer.rgb_effect_mode)
         for line in READBACK[:5]:
             self.controller._process_rx_line(line)
@@ -385,7 +406,7 @@ class RGBPreviewUiTests(unittest.TestCase):
         self.assertEqual(w.viewer.rgb_effect_mode, w._rgb_simulator.mode)
         self.assertTrue(all(cmd in ("#RGB_STATUS", "#RGB_GET") for cmd in self.commands()))
 
-    def test_minimized_rgb_window_only_stops_animation_when_model_is_not_visible(self):
+    def test_animation_stops_only_when_both_header_and_rgb_window_are_not_visible(self):
         w = self.window
         w.fields["_rgb_color_vars"][0].widget.setValue(77)
         w.rgb_window.showMinimized()
@@ -393,6 +414,9 @@ class RGBPreviewUiTests(unittest.TestCase):
         self.assertEqual(w.rgb_preview_source.currentIndex(), 0)
         self.assertTrue(w._rgb_render_timer.isActive())
         w.navigation.setCurrentRow(1)
+        APPLICATION.processEvents()
+        self.assertTrue(w._rgb_render_timer.isActive(), 'The header is still visible')
+        w.showMinimized()
         APPLICATION.processEvents()
         self.assertFalse(w._rgb_render_timer.isActive())
         w.rgb_window.showNormal()
@@ -461,6 +485,8 @@ class RGBPreviewUiTests(unittest.TestCase):
             w._rgb_device_changed(snapshot)
             w._render_rgb_preview()
         self.assertEqual((w.viewer.rgb_frame, w.viewer.rgb_light_on, w.viewer.rgb_effect_mode), last)
+        mark = w.shell_brand.mark
+        self.assertEqual((mark.rgb_frame, mark.rgb_light_on, mark.rgb_effect_mode), last)
         self.assertTrue(w._rgb_follow_seeded)
         self.assertIn("保留上次模型灯光", w.rgb_preview_status.text())
         self.assertIn("6 秒", w.rgb_save_status.text())
